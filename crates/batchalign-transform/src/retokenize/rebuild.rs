@@ -43,10 +43,12 @@ use talkbank_model::model::{BracketedItem, Mor, UtteranceContent, Word};
 use crate::extract::ExtractedWord;
 
 use super::{
-    WordTokenMapping, handle_ending_punct_skip, is_tag_marker_text, resolve_token_text,
-    try_parse_token_as_bracketed_item, try_parse_token_as_utterance_content,
-    try_parse_token_as_word,
+    WordTokenMapping, resolve_token_text, try_parse_token_as_bracketed_item,
+    try_parse_token_as_utterance_content,
 };
+
+mod scoped;
+use scoped::{rebuild_annotated_word, rebuild_replaced_word};
 
 /// Mutable state threaded through the retokenize AST walk.
 pub(super) struct RetokenizeContext<'a> {
@@ -109,30 +111,13 @@ pub(super) fn rebuild_content(
                     new_content.push(UtteranceContent::Word(word));
                 }
             }
-            UtteranceContent::AnnotatedWord(mut annotated) => {
-                if !excluded_from_mor(&annotated.scoped_annotations)
-                    && should_retokenize(&annotated.inner)
-                {
-                    handle_annotated_word_retokenize(&mut annotated.inner, ctx);
-                }
-                new_content.push(UtteranceContent::AnnotatedWord(annotated));
+            UtteranceContent::AnnotatedWord(annotated) => {
+                new_content.push(rebuild_annotated_word(*annotated, ctx).into_utterance_content());
             }
-            UtteranceContent::ReplacedWord(mut replaced) => {
-                if excluded_from_mor(replaced.scoped_annotations.as_slice()) {
-                    new_content.push(UtteranceContent::ReplacedWord(replaced));
-                } else if replaced.replacement.words.is_empty() {
-                    if should_retokenize(&replaced.word) {
-                        handle_annotated_word_retokenize(&mut replaced.word, ctx);
-                    }
-                    new_content.push(UtteranceContent::ReplacedWord(replaced));
-                } else {
-                    for word in &mut replaced.replacement.words {
-                        if should_retokenize(word) {
-                            handle_annotated_word_retokenize(word, ctx);
-                        }
-                    }
-                    new_content.push(UtteranceContent::ReplacedWord(replaced));
-                }
+            UtteranceContent::ReplacedWord(replaced) => {
+                new_content.push(UtteranceContent::ReplacedWord(Box::new(
+                    rebuild_replaced_word(*replaced, ctx),
+                )));
             }
             UtteranceContent::Group(mut group) => {
                 let old_bracketed = group.content.content.take();
@@ -299,53 +284,6 @@ fn handle_word_retokenize(
     }
 }
 
-fn handle_annotated_word_retokenize(word: &mut Word, ctx: &mut RetokenizeContext<'_>) {
-    let orig_idx = ctx.word_counter;
-    ctx.word_counter += 1;
-
-    let token_indices = match ctx.mapping.get_nonempty(orig_idx) {
-        Some(indices) => indices.to_vec(),
-        None => {
-            ctx.diagnostics.push(format!(
-                "word {orig_idx} has no character-level match in Stanza tokens; keeping original"
-            ));
-            if ctx.mor_cursor < ctx.mors.len() {
-                ctx.mor_cursor += 1;
-            }
-            return;
-        }
-    };
-
-    if token_indices.is_empty() {
-        if ctx.mor_cursor < ctx.mors.len() {
-            ctx.mor_cursor += 1;
-        }
-        return;
-    }
-
-    if token_indices
-        .iter()
-        .all(|ti| ctx.emitted_tokens.contains(ti))
-    {
-        return;
-    }
-
-    let ti = token_indices[0];
-    let token_text = resolve_token_text(&ctx.stanza_tokens[ti], orig_idx, ctx.original_words);
-    if word.cleaned_text() != token_text
-        && !is_tag_marker_text(&token_text)
-        && !handle_ending_punct_skip(&token_text, ctx.expected_terminator, &mut ctx.diagnostics)
-        && let Some(parsed) = try_parse_token_as_word(ctx.parser, &token_text, &mut ctx.diagnostics)
-    {
-        *word = parsed;
-    }
-
-    for &ti in &token_indices {
-        ctx.emitted_tokens.insert(ti);
-    }
-    ctx.mor_cursor += token_indices.len();
-}
-
 fn rebuild_bracketed_content(
     old_items: Vec<BracketedItem>,
     ctx: &mut RetokenizeContext<'_>,
@@ -360,29 +298,13 @@ fn rebuild_bracketed_content(
                     new_items.push(BracketedItem::Word(word));
                 }
             }
-            BracketedItem::AnnotatedWord(mut annotated) => {
-                if !excluded_from_mor(&annotated.scoped_annotations)
-                    && should_retokenize(&annotated.inner)
-                {
-                    handle_annotated_word_retokenize(&mut annotated.inner, ctx);
-                }
-                new_items.push(BracketedItem::AnnotatedWord(annotated));
+            BracketedItem::AnnotatedWord(annotated) => {
+                new_items.push(rebuild_annotated_word(*annotated, ctx).into_bracketed_item());
             }
-            BracketedItem::ReplacedWord(mut replaced) => {
-                if excluded_from_mor(replaced.scoped_annotations.as_slice()) {
-                    // Nothing to count; fall through to the shared push below.
-                } else if replaced.replacement.words.is_empty() {
-                    if should_retokenize(&replaced.word) {
-                        handle_annotated_word_retokenize(&mut replaced.word, ctx);
-                    }
-                } else {
-                    for word in &mut replaced.replacement.words {
-                        if should_retokenize(word) {
-                            handle_annotated_word_retokenize(word, ctx);
-                        }
-                    }
-                }
-                new_items.push(BracketedItem::ReplacedWord(replaced));
+            BracketedItem::ReplacedWord(replaced) => {
+                new_items.push(BracketedItem::ReplacedWord(Box::new(
+                    rebuild_replaced_word(*replaced, ctx),
+                )));
             }
             BracketedItem::Group(mut group) => {
                 let old_bracketed = BracketedItems::new(group.content.content.take());

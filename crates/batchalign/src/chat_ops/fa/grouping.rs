@@ -9,6 +9,7 @@ use batchalign_transform::decisions::{
 
 use super::coordinates::{Clamped, FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
+use super::presence::RecordingPresence;
 use super::speech_rate::SpeechRate;
 use super::split::{AnchoredSplit, NonEmptyWords, OverBudgetWindow, Pieces};
 use super::utr::AnchorIndex;
@@ -438,6 +439,13 @@ pub fn group_utterances(
             _ => None,
         });
     for (utt_idx, (line_idx, utt)) in utterances.enumerate() {
+        match RecordingPresence::of(utt) {
+            RecordingPresence::InRecording => {}
+            // Not speech in this recording: no window and no request.
+            // Completion reports it untimed with its cause; the estimates
+            // above gave it no share of any gap.
+            RecordingPresence::NotInRecording(_) => continue,
+        }
         let span = match &utt.main.content.bullet {
             Some(b) => TimeSpan::new(b.timing.start_ms, b.timing.end_ms),
             None => match estimates[utt_idx] {
@@ -470,6 +478,17 @@ pub fn group_utterances(
                 .collect(),
         ) else {
             continue;
+        };
+        // Original/UTR-admitted bullets remain authoritative. Only an untimed
+        // source can use a complete candidate envelope or a producer-bound
+        // partial-order corridor. Neither selects uncertain words or grants
+        // timing authority. This request still needs containment/budget admission.
+        let span = if utt.main.content.bullet.is_none() {
+            anchors
+                .search_window(utterance, words.as_slice(), span, recording)
+                .unwrap_or(span)
+        } else {
+            span
         };
         let window = match GroupWindow::admit(span, budget, recording) {
             Ok(window) => window,
@@ -705,15 +724,22 @@ impl PendingGroup {
 ///
 /// Returns `(timed, untimed)`: the number of utterances that have a
 /// timing bullet and the number that lack one. Non-utterance lines
-/// (headers, comments) are not counted.
+/// (headers, comments) are not counted, and neither is an utterance not in
+/// the recording ([`RecordingPresence::NotInRecording`]): it needs no
+/// timing, so it is not untimed work for recovery to do.
 pub fn count_utterance_timing(chat_file: &ChatFile) -> (usize, usize) {
     let (mut timed, mut untimed) = (0, 0);
     for line in &chat_file.lines {
         if let Line::Utterance(utt) = line {
-            if utt.main.content.bullet.is_some() {
-                timed += 1;
-            } else {
-                untimed += 1;
+            match RecordingPresence::of(utt) {
+                RecordingPresence::NotInRecording(_) => {}
+                RecordingPresence::InRecording => {
+                    if utt.main.content.bullet.is_some() {
+                        timed += 1;
+                    } else {
+                        untimed += 1;
+                    }
+                }
             }
         }
     }
@@ -739,19 +765,26 @@ pub fn estimate_untimed_boundaries(chat_file: &ChatFile, recording: &Recording) 
     let total_audio_ms = recording.duration().get();
     let mut windows_clamped = 0usize;
 
-    // Collect word counts and existing timing for each utterance.
+    // Collect word counts and existing timing for each utterance. One not in
+    // the recording has no words to place and is no anchor: it takes no share
+    // of a gap and bounds none, whatever timing it carries.
     let mut info: Vec<(usize, Option<TimeSpan>)> = Vec::new();
     for line in &chat_file.lines {
         if let Line::Utterance(utt) = line {
-            let mut words = Vec::new();
-            collect_fa_words(&utt.main.content.content, &mut words);
-            let span = utt
-                .main
-                .content
-                .bullet
-                .as_ref()
-                .map(|b| TimeSpan::new(b.timing.start_ms, b.timing.end_ms));
-            info.push((words.len(), span));
+            info.push(match RecordingPresence::of(utt) {
+                RecordingPresence::NotInRecording(_) => (0, None),
+                RecordingPresence::InRecording => {
+                    let mut words = Vec::new();
+                    collect_fa_words(&utt.main.content.content, &mut words);
+                    let span = utt
+                        .main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .map(|b| TimeSpan::new(b.timing.start_ms, b.timing.end_ms));
+                    (words.len(), span)
+                }
+            });
         }
     }
 

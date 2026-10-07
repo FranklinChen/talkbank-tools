@@ -1,7 +1,7 @@
 # Incremental Processing
 
 **Status:** Current
-**Last updated:** 2026-05-19 20:10 EDT
+**Last updated:** 2026-10-03 21:37 EDT
 
 Incremental processing allows batchalign to reprocess only the utterances that
 changed after a user edits a CHAT file, preserving cached dependent tiers
@@ -30,11 +30,11 @@ a precise per-utterance change classification.
 ```text
 Before CHAT (with %mor/%gra/%wor/bullets)
    │
-   ├── parse_lenient() → ChatFile₁
+   ├── complete retained-source admission → admitted prior
    │
 After CHAT (user-edited)
    │
-   ├── parse_lenient() → ChatFile₂
+   ├── source-bound command-plan admission → admitted working document
    │
    ▼
 diff_chat(before, after) → Vec<UtteranceDelta>
@@ -49,7 +49,7 @@ diff_chat(before, after) → Vec<UtteranceDelta>
 
 ### Layer 1: Diff Engine (`crates/batchalign-transform/src/diff/`)
 
-The diff engine lives in `talkbank-transform` and has no server
+The diff engine lives in `batchalign-transform` and has no server
 dependencies. It operates purely on `ChatFile` ASTs.
 
 **Algorithm:**
@@ -76,24 +76,38 @@ bullet timing to distinguish `Unchanged`, `TimingOnly`, and `SpeakerChanged`.
 
 ### Layer 2: Selective Orchestrators (`batchalign`)
 
-Each orchestrator has an `_incremental` variant that accepts both `before_text`
-and `after_text`, runs the diff, and selectively reprocesses.
+Each incremental orchestrator receives an admitted prior and command-admitted
+working input, runs the typed diff, and selectively reprocesses. A prior's
+dependent tiers have no replacement exemption: they may be copied into output.
 
 #### Morphosyntax (`process_morphosyntax_incremental`)
 
 ```text
-1. Parse before and after
+1. Admit complete prior and command-planned working input
 2. diff_chat(before, after) → deltas
 3. For Unchanged/SpeakerChanged/TimingOnly:
-     copy_dependent_tiers(%mor, %gra) from before → after
-4. For WordsChanged/Inserted:
-     collect payloads, check cache, infer, inject
-5. Serialize
+     bind a complete prior %mor/%gra pair to compatible morphology inputs,
+     then copy the pair; otherwise leave analysis owed
+4. Collect all remaining analyzable utterances:
+     changed/inserted content and unchanged content lacking complete analysis
+5. Infer, inject, and admit complete checked output before serialization
 ```
 
-Only the utterances that need NLP reprocessing are sent to the Stanza worker.
-Cache hits are still checked for changed utterances (the new content might
-match a previous cache entry).
+Only utterances with outstanding analysis are sent to the Stanza worker.
+Unchanged words are not sufficient to reuse an absent or partial analysis.
+Nor does word equality establish equivalent analysis inputs: the canonical
+`MorphologyInput` producer is shared with fresh payload collection. Reuse
+requires matching resolved utterance language, typed terminator, ordered word
+texts and roles (including special forms and resolved own/span code-switches),
+and transcriber POS hints and isolation evidence used by grammatical rewrites.
+Changing a language declaration, precode, form marker, question terminator or meaningful
+pause can therefore require inference without changing the cleaned words.
+The transfer permission borrows the exact destination and is consumed when
+installing the pair; it cannot be redirected after compatibility admission.
+Speaker-only and timing-only changes retain their compatible fast paths.
+Text NLP is not cached; complete admitted prior tiers provide the incremental
+fast path. A partial prior pair is not copied, since an isolated `%mor` would
+cause the canonical collector to consider the utterance already analyzed.
 
 #### Forced Alignment (`process_fa_incremental`)
 
@@ -102,7 +116,7 @@ incremental path now preserves stable utterance-level timing before it decides
 which groups need worker or cache work:
 
 ```text
-1. Parse before and after
+1. Admit complete prior and adaptive word-timing working input before UTR
 2. diff_chat(before, after) → deltas
 3. For Unchanged / SpeakerChanged / TimingOnly utterances:
      copy %wor from before → after
@@ -129,15 +143,17 @@ the file contains edits elsewhere.
 
 ### Layer 3: Dispatch Integration (`runner/dispatch/`)
 
-The dispatch layer reads optional `before_paths` from the job and routes to
-incremental variants when a "before" file is available:
+The dispatch layer reads optional `before_paths` from the job. Active alignment
+admits a declared prior once before media preparation or UTR, retains it across
+retries, and refuses missing or invalid declared input rather than silently
+falling back. A declared no-op does not consume an unused optional prior.
 
-```rust,ignore
-let fa_result = if let Some(ref bt) = before_text {
-    process_fa_incremental(bt, &chat_text, &audio, services, fa_params, progress).await
-} else {
-    process_fa(&chat_text, &audio, services, fa_params, progress).await
-};
+```text
+source parse → source-bound working disposition
+active disposition + optional admitted prior → attempt
+attempt + prior → process_fa_incremental
+attempt without prior → run_fa_from_ast
+processed structure → complete construction admission → output
 ```
 
 For morphosyntax, the batched dispatch similarly checks `before_texts`:

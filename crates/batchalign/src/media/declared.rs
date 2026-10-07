@@ -45,6 +45,36 @@ pub enum DeclaredMedia {
 }
 
 impl DeclaredMedia {
+    /// Inspect the already-produced header structure, without a second parse.
+    /// This classifies a declaration, not the presence of an actual recording.
+    pub fn from_document(file: &crate::chat_ops::ChatFile) -> Self {
+        use talkbank_model::model::Header;
+        file.lines
+            .iter()
+            .take_while(|line| line.is_header())
+            .filter_map(|line| line.as_header())
+            .find_map(|header| match header {
+                Header::Media(media) => Some(Self::from_media(media)),
+                _ => None,
+            })
+            .unwrap_or(Self::Undeclared)
+    }
+
+    fn from_media(media: &talkbank_model::model::MediaHeader) -> Self {
+        use talkbank_model::model::header::{MediaStatus, MediaType};
+        match (&media.media_type, media.status.as_ref()) {
+            (MediaType::Missing, _) => Self::Absent {
+                as_written: MediaType::Missing.as_str().to_owned(),
+            },
+            (_, Some(MediaStatus::Missing)) => Self::Absent {
+                as_written: MediaStatus::Missing.as_str().to_owned(),
+            },
+            (_, Some(MediaStatus::Unlinked | MediaStatus::Notrans))
+            | (_, Some(MediaStatus::Unsupported(_)))
+            | (_, None) => Self::Expected,
+        }
+    }
+
     /// Reads the declaration from a transcript's text.
     ///
     /// Only the HEADER BLOCK is parsed: headers precede the first `*` speaker
@@ -55,7 +85,7 @@ impl DeclaredMedia {
     /// chatter's decision rather than becoming a split on a comma here.
     pub fn read(chat_text: &str) -> Self {
         use talkbank_model::errors::NullErrorSink;
-        use talkbank_model::model::header::{Header, MediaStatus, MediaType};
+        use talkbank_model::model::header::Header;
 
         // `crate::chat_parser()` rather than a private construction: it is what
         // the other 22 parse sites in this crate use, and it goes through the
@@ -93,17 +123,7 @@ impl DeclaredMedia {
             // Matched exhaustively rather than with a catch-all, so a status
             // added to chatter has to be classified here instead of defaulting
             // to "expected".
-            return match (&media.media_type, media.status.as_ref()) {
-                (MediaType::Missing, _) => Self::Absent {
-                    as_written: MediaType::Missing.as_str().to_owned(),
-                },
-                (_, Some(MediaStatus::Missing)) => Self::Absent {
-                    as_written: MediaStatus::Missing.as_str().to_owned(),
-                },
-                (_, Some(MediaStatus::Unlinked | MediaStatus::Notrans))
-                | (_, Some(MediaStatus::Unsupported(_)))
-                | (_, None) => Self::Expected,
-            };
+            return Self::from_media(&media);
         }
         Self::Undeclared
     }
@@ -124,6 +144,40 @@ mod declared_media_tests {
             DeclaredMedia::read(&transcript("@Media:\tfoo, audio")),
             DeclaredMedia::Expected
         );
+    }
+
+    #[test]
+    fn produced_header_structure_uses_the_same_declaration_policy() {
+        for (payload, expected) in [
+            ("audio, unlinked", DeclaredMedia::Expected),
+            ("video, notrans", DeclaredMedia::Expected),
+            (
+                "audio, missing",
+                DeclaredMedia::Absent {
+                    as_written: "missing".into(),
+                },
+            ),
+            (
+                "missing",
+                DeclaredMedia::Absent {
+                    as_written: "missing".into(),
+                },
+            ),
+        ] {
+            let source = format!(
+                "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, {payload}\n*CHI:\thello .\n@End\n"
+            );
+            let admitted = crate::pipeline::text_infer::admit_retained_text(
+                &crate::chat_parser(),
+                &source,
+                talkbank_model::model::TranscriptName::Anonymous,
+            )
+            .expect("the declaration fixture is completely valid");
+            assert_eq!(DeclaredMedia::from_document(admitted.document()), expected);
+            assert_eq!(DeclaredMedia::read(&source), expected);
+        }
     }
 
     #[test]

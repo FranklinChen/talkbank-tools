@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::AnalysisUnavailable;
 use super::identity::AdmittedMorphosyntaxResponse;
 use crate::api::LanguageCode3;
 use crate::chat_ops::morphosyntax_ops::{MorphosyntaxBatchItem, MwtDict};
@@ -21,6 +22,32 @@ use tracing::{info, warn};
 struct LanguageBatchGroup {
     lang: LanguageCode3,
     indices: Vec<usize>,
+}
+
+/// Owns the exact grouped payload view whose effective languages the runtime
+/// admitted. All groups are checked before any worker can be dispatched.
+struct DispatchPlan<'a, T> {
+    pool: &'a WorkerPool,
+    items: &'a [T],
+    groups: Vec<LanguageBatchGroup>,
+}
+
+impl<'a, T: AsRef<MorphosyntaxBatchItem>> DispatchPlan<'a, T> {
+    fn admit(
+        pool: &'a WorkerPool,
+        items: &'a [T],
+        fallback_lang: &LanguageCode3,
+    ) -> Result<Self, ServerError> {
+        let groups = language_groups_for_items(items, fallback_lang)?;
+        for group in &groups {
+            AnalysisUnavailable::admit_effective(&group.lang, pool.stanza_registry())?;
+        }
+        Ok(Self {
+            pool,
+            items,
+            groups,
+        })
+    }
 }
 
 fn language_groups_for_items<T: AsRef<MorphosyntaxBatchItem>>(
@@ -74,148 +101,100 @@ pub(crate) async fn infer_batch<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     progress: Option<&BackendProgressPort>,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
-    let item_results: Vec<_> =
-        infer_batch_per_item(pool, items, lang, mwt, retokenize, progress, cancellation)
-            .await?
-            .into_iter()
-            // Each per-item message is the engine's own report about that
-            // item, which is exactly what `EngineReported` names. Morphotag's
-            // failure type is `EngineItemFailure`, whose command-specific
-            // variant is uninhabited: it has no outcome of the kind
-            // translate's empty result is, and cannot be given one.
-            .map(|item| item.map_err(crate::text_batch::EngineItemFailure::EngineReported))
-            .collect();
-    crate::text_batch::unwrap_per_item_results("morphotag", item_results)
-        .map_err(|err| ServerError::Validation(err.to_string()))
-}
-
-/// Same as [`infer_batch`] but returns one ``Result<UdResponse,
-/// String>`` per input item instead of collapsing per-item engine
-/// failures into a single typed error.
-///
-/// Used by call sites that need per-file (or per-item) attribution of
-/// engine failures, for example the cross-file batch driver, which
-/// marks only the file that contributed a failing item as failed
-/// while letting the other files in the batch continue.
-pub(crate) async fn infer_batch_per_item<T: AsRef<MorphosyntaxBatchItem> + Sync>(
-    pool: &WorkerPool,
-    items: &[T],
-    lang: &LanguageCode3,
-    mwt: &MwtDict,
-    retokenize: bool,
-    progress: Option<&BackendProgressPort>,
-    cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let groups = language_groups_for_items(items, lang)?;
-    let (dispatchable, fallback) =
-        partition_groups_by_stanza_support(groups, pool.stanza_registry());
-
-    let needs_grouping = dispatchable.len() > 1
-        || dispatchable.first().map(|g| &g.lang) != Some(lang)
-        || !fallback.is_empty();
-
-    if !needs_grouping {
-        // Single homogeneous supported group matching the caller's
-        // fallback lang: the simple fast path.
-        return infer_batch_homogeneous(pool, items, lang, mwt, retokenize, progress, cancellation)
-            .await;
-    }
-
-    info!(
-        items = items.len(),
-        dispatched_groups = dispatchable.len(),
-        unsupported_groups = fallback.len(),
-        "Dispatching mixed-language morphosyntax batch by per-item language; \
-         items in unsupported languages get empty responses (BA2-equivalent L2|xxx fallback)"
-    );
-
-    let mut merged: Vec<Option<Result<AdmittedMorphosyntaxResponse, String>>> =
-        vec![None; items.len()];
-
-    // Fill items in unsupported-language groups with INTENTIONAL empty
-    // ``Ok(UdResponse)`` values (not Err). Downstream ``inject_results``
-    // skips items whose response has no sentences, leaving the
-    // existing ``L2|xxx`` placeholder in ``%mor``, matching the
-    // pre-BA3 fallback semantics for code-switches into languages
-    // Stanza cannot analyze. This is a feature, not a failure.
-    for (group_lang, indices) in fallback {
-        info!(
-            lang = %group_lang,
-            items = indices.len(),
-            "Stanza does not support this language; emitting L2|xxx fallback for these items"
-        );
-        for idx in indices {
-            merged[idx] = Some(Ok(
-                AdmittedMorphosyntaxResponse::unsupported_language_placeholder(),
-            ));
-        }
-    }
-
-    for group in dispatchable {
-        let group_items: Vec<&T> = group.indices.iter().map(|&idx| &items[idx]).collect();
-        let responses = infer_batch_homogeneous(
-            pool,
-            &group_items,
-            &group.lang,
-            mwt,
-            retokenize,
-            progress,
-            cancellation,
-        )
+    let item_results = DispatchPlan::admit(pool, items, lang)?
+        .infer(mwt, retokenize, progress, cancellation)
         .await?;
-        for (original_idx, response) in group.indices.into_iter().zip(responses) {
-            merged[original_idx] = Some(response);
-        }
-    }
-
-    merged
-        .into_iter()
-        .map(|response| {
-            response.ok_or_else(|| {
-                ServerError::Validation(
-                    "morphotag mixed-language dispatch returned incomplete results".into(),
-                )
-            })
-        })
-        .collect()
+    admit_worker_responses(item_results)
 }
 
-/// Split language groups into ones that should be dispatched to a
-/// Stanza worker and ones that should fall back to `L2|xxx` because
-/// Stanza lacks core morphosyntax processors for the language.
-///
-/// Returns `(dispatchable, fallback)` where:
-///   - `dispatchable` is groups whose lang the registry supports;
-///     these get sent to workers as before.
-///   - `fallback` is `(lang, indices)` pairs for unsupported groups;
-///     callers fill the corresponding response slots with empty
-///     `UdResponse { sentences: vec![] }` so downstream injection
-///     skips them and leaves the `L2|xxx` placeholder intact.
-///
-/// This lets a transcript declare unsupported secondary languages
-/// (e.g. `@Languages: cym, eng, nep`) without crashing the worker
-/// during bootstrap. Only utterances that actually code-switch into
-/// the unsupported language fall back to `L2|xxx`; the rest are
-/// dispatched normally.
-fn partition_groups_by_stanza_support(
-    groups: Vec<LanguageBatchGroup>,
-    registry: Option<&crate::stanza_registry::StanzaRegistry>,
-) -> (Vec<LanguageBatchGroup>, Vec<(LanguageCode3, Vec<usize>)>) {
-    let mut dispatchable = Vec::new();
-    let mut fallback = Vec::new();
-    for group in groups {
-        let supported = registry.is_some_and(|r| r.supports_morphosyntax(group.lang.as_ref()));
-        if supported {
-            dispatchable.push(group);
-        } else {
-            fallback.push((group.lang, group.indices));
+/// Retain the full per-item failure inventory while refusing completion.
+/// These errors describe model output, never the submitted CHAT's validity.
+fn admit_worker_responses(
+    item_results: Vec<Result<AdmittedMorphosyntaxResponse, String>>,
+) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
+    let item_results: Vec<_> = item_results
+        .into_iter()
+        // Per-item messages retain the worker's failure or native rejection
+        // of its output. Morphotag has no command-specific empty-result
+        // outcome of the kind translate carries.
+        .map(|item| item.map_err(crate::text_batch::EngineItemFailure::EngineReported))
+        .collect();
+    crate::text_batch::unwrap_per_item_results("morphotag", item_results).map_err(|err| {
+        ServerError::OutputAdmission {
+            command: crate::api::ReleasedCommand::Morphotag,
+            details: crate::error::OutputAdmissionRefusal::unestablished(err.to_string()),
         }
+    })
+}
+
+impl<T: AsRef<MorphosyntaxBatchItem> + Sync> DispatchPlan<'_, T> {
+    /// Dispatch is reachable only on an admitted plan, not a raw payload slice.
+    async fn infer(
+        self,
+        mwt: &MwtDict,
+        retokenize: bool,
+        progress: Option<&BackendProgressPort>,
+        cancellation: Cancellation<'_>,
+    ) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
+        let Self {
+            pool,
+            items,
+            groups,
+        } = self;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let [group] = groups.as_slice() {
+            return infer_batch_homogeneous(
+                pool,
+                items,
+                &group.lang,
+                mwt,
+                retokenize,
+                progress,
+                cancellation,
+            )
+            .await;
+        }
+
+        info!(
+            items = items.len(),
+            dispatched_groups = groups.len(),
+            "Dispatching admitted morphosyntax batch by effective utterance language"
+        );
+
+        let mut merged: Vec<Option<Result<AdmittedMorphosyntaxResponse, String>>> =
+            vec![None; items.len()];
+
+        for group in groups {
+            let group_items: Vec<&T> = group.indices.iter().map(|&idx| &items[idx]).collect();
+            let responses = infer_batch_homogeneous(
+                pool,
+                &group_items,
+                &group.lang,
+                mwt,
+                retokenize,
+                progress,
+                cancellation,
+            )
+            .await?;
+            for (original_idx, response) in group.indices.into_iter().zip(responses) {
+                merged[original_idx] = Some(response);
+            }
+        }
+
+        merged
+            .into_iter()
+            .map(|response| {
+                response.ok_or_else(|| ServerError::OutputAdmission {
+                    command: crate::api::ReleasedCommand::Morphotag,
+                    details: crate::error::OutputAdmissionRefusal::unestablished(
+                        "mixed-language dispatch returned incomplete results",
+                    ),
+                })
+            })
+            .collect()
     }
-    (dispatchable, fallback)
 }
 
 async fn infer_batch_homogeneous<T: AsRef<MorphosyntaxBatchItem> + Sync>(
@@ -424,15 +403,22 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
         cancellation,
     )
     .await?;
-    let result = parse_morphosyntax_result_v2(response).map_err(|error| {
-        ServerError::Validation(format!("invalid morphosyntax V2 result: {error}"))
-    })?;
+    let result =
+        parse_morphosyntax_result_v2(response).map_err(|error| ServerError::OutputAdmission {
+            command: crate::api::ReleasedCommand::Morphotag,
+            details: crate::error::OutputAdmissionRefusal::unestablished(format!(
+                "invalid morphosyntax V2 result: {error}"
+            )),
+        })?;
     if result.items.len() != items.len() {
-        return Err(ServerError::Validation(format!(
-            "morphosyntax V2 returned {} items for {} requests",
-            result.items.len(),
-            items.len()
-        )));
+        return Err(ServerError::OutputAdmission {
+            command: crate::api::ReleasedCommand::Morphotag,
+            details: crate::error::OutputAdmissionRefusal::unestablished(format!(
+                "morphosyntax V2 returned {} items for {} requests",
+                result.items.len(),
+                items.len(),
+            )),
+        });
     }
 
     // Each item is one of three outcomes, and each outcome carries exactly
@@ -457,9 +443,10 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
             } => (raw_sentences, model, repairs),
         };
         match parse_raw_stanza_output(&raw_sentences) {
-            Ok(ud) => ud_responses.push(Ok(AdmittedMorphosyntaxResponse::from_worker(
-                ud, model, repairs,
-            ))),
+            Ok(ud) => ud_responses.push(
+                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs)
+                    .map_err(|error| format!("worker item {i}: {error}")),
+            ),
             Err(error) => {
                 // Log full diagnostics so the failure is debuggable
                 // without a replay, then surface as a per-item Err
@@ -541,6 +528,30 @@ mod tests {
     }
 
     #[test]
+    fn worker_response_failure_inventory_is_system_not_invalid_chat() {
+        let error = admit_worker_responses(vec![
+            Err("worker item 0: one payload received 2 sentences".into()),
+            Ok(AdmittedMorphosyntaxResponse::no_words()),
+            Err("worker item 2: malformed dependency result".into()),
+        ])
+        .expect_err("any failed item refuses completion");
+        assert!(matches!(error, ServerError::OutputAdmission { .. }));
+        assert_eq!(
+            crate::runner::util::classify_server_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+        let detail = error.to_string();
+        assert!(detail.contains("2 sentences"), "{detail}");
+        assert!(detail.contains("malformed dependency result"), "{detail}");
+        #[cfg(feature = "server")]
+        assert_eq!(
+            axum::response::IntoResponse::into_response(error).status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        );
+        assert!(admit_worker_responses(vec![Ok(AdmittedMorphosyntaxResponse::no_words())]).is_ok());
+    }
+
+    #[test]
     fn compute_chunk_count_below_minimum_returns_one() {
         assert_eq!(compute_chunk_count(0, 4), 1);
         assert_eq!(compute_chunk_count(1, 4), 1);
@@ -591,18 +602,7 @@ mod tests {
         assert_eq!(groups[1].indices, vec![1]);
     }
 
-    /// Regression test for the worker-bootstrap crash on unsupported
-    /// secondary languages (e.g. `@Languages: cym, eng, nep`
-    /// pre-fix, the morphotag pipeline tried to spawn a Stanza nep
-    /// worker for `[- nep]`-precoded utterances and crashed during
-    /// bootstrap with `UnsupportedLanguageError`, leaving the file's
-    /// processing as "failed to parse ready signal").
-    ///
-    /// The new partition function splits groups by Stanza support so
-    /// unsupported-language items can be filled with empty
-    /// `UdResponse`s downstream: semantically equivalent to BA2's
-    /// `L2|xxx` fallback for code-switches into unanalyzable
-    /// languages.
+    /// Registry double, not a model download or a timing-dependent test.
     fn registry_supporting(langs: &[&str]) -> crate::stanza_registry::StanzaRegistry {
         use crate::types::worker::StanzaLanguageProcessors;
         use std::collections::BTreeMap;
@@ -623,47 +623,64 @@ mod tests {
     }
 
     #[test]
-    fn partition_groups_by_stanza_support_routes_unsupported_to_fallback() {
-        let groups = vec![
-            LanguageBatchGroup {
-                lang: LanguageCode3::eng(),
-                indices: vec![0, 2],
-            },
-            LanguageBatchGroup {
-                lang: LanguageCode3::try_new("nep").unwrap(),
-                indices: vec![1],
-            },
-            LanguageBatchGroup {
-                lang: LanguageCode3::try_new("cym").unwrap(),
-                indices: vec![3, 4],
-            },
-        ];
+    fn dispatch_plan_binds_supported_groups_to_their_exact_payloads() {
+        let items = vec![batch_item("eng"), batch_item("cym"), batch_item("eng")];
         let registry = registry_supporting(&["eng", "cym"]);
-        let (dispatchable, fallback) = partition_groups_by_stanza_support(groups, Some(&registry));
+        let pool = WorkerPool::with_test_stanza_registry(registry);
+        let plan = DispatchPlan::admit(&pool, &items, &LanguageCode3::eng()).unwrap();
+        assert!(std::ptr::eq(plan.pool, &pool));
+        assert!(std::ptr::eq(plan.items, items.as_slice()));
         assert_eq!(
-            dispatchable
+            plan.groups
                 .iter()
                 .map(|g| g.lang.as_ref())
                 .collect::<Vec<_>>(),
             vec!["eng", "cym"]
         );
-        assert_eq!(fallback.len(), 1);
-        assert_eq!(fallback[0].0.as_ref(), "nep");
-        assert_eq!(fallback[0].1, vec![1]);
+        assert_eq!(plan.groups[0].indices, vec![0, 2]);
+        assert_eq!(plan.groups[1].indices, vec![1]);
     }
 
     #[test]
-    fn partition_groups_by_stanza_support_with_no_registry_routes_all_to_fallback() {
-        // No stanza registry → no support data → safe default is
-        // "treat everything as unsupported," producing L2|xxx for
-        // all items rather than crashing the worker.
-        let groups = vec![LanguageBatchGroup {
-            lang: LanguageCode3::eng(),
-            indices: vec![0],
-        }];
-        let (dispatchable, fallback) = partition_groups_by_stanza_support(groups, None);
-        assert!(dispatchable.is_empty());
-        assert_eq!(fallback.len(), 1);
-        assert_eq!(fallback[0].0, LanguageCode3::eng());
+    fn unsupported_effective_language_cannot_receive_a_dispatch_plan() {
+        let items = vec![batch_item("eng"), batch_item("que")];
+        let registry = registry_supporting(&["eng"]);
+        let pool = WorkerPool::with_test_stanza_registry(registry);
+        let Err(ServerError::AnalysisUnavailable(error)) =
+            DispatchPlan::admit(&pool, &items, &LanguageCode3::eng())
+        else {
+            panic!("a mixed plan must refuse before dispatching even its supported group");
+        };
+        assert_eq!(error.language().as_ref(), "que");
+        assert_eq!(
+            error.reason(),
+            super::super::AnalysisUnavailableReason::ProcessorsUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_registry_refuses_at_transport_before_any_worker() {
+        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
+        let items = vec![batch_item("eng")];
+        let error = infer_batch(
+            &pool,
+            &items,
+            &LanguageCode3::eng(),
+            &MwtDict::default(),
+            false,
+            None,
+            Cancellation::NotWired {
+                reason: "capability refusal test",
+            },
+        )
+        .await
+        .unwrap_err();
+        let ServerError::AnalysisUnavailable(error) = error else {
+            panic!("no registry must refuse instead of inventing an empty response");
+        };
+        assert_eq!(
+            error.reason(),
+            super::super::AnalysisUnavailableReason::RegistryUnavailable
+        );
     }
 }

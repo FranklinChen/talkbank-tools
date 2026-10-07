@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-30 23:26 EDT
+**Last updated:** 2026-10-04 07:49 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -344,13 +344,13 @@ The `Bootstrap` variant is the one this chapter is about.
 ### `FailureCategory` and the retry decision
 
 `FailureCategory` is the broader classification that the retry loop, the
-user-facing message router, and the persistence layer all consume. Thirteen
-variants:
+user-facing message router, and the persistence layer all consume. Its
+current variants are defined in `types/scheduling.rs`:
 
 ```text
-Validation, ParseError, InputMissing, EvidenceUnavailable, WorkerCrash, WorkerTimeout,
+Validation, ParseError, InputMissing, EvidenceUnavailable, AnalysisUnavailable, WorkerCrash, WorkerTimeout,
 WorkerProtocol, WorkerBootstrap, ProviderTransient, ProviderTerminal,
-MemoryPressure, Cancelled, System
+MemoryPressure, Cancelled, System, ModelAccessDenied
 ```
 
 Retry decision in `is_retryable_worker_failure`:
@@ -368,6 +368,12 @@ matches!(
 property: a bootstrap-class failure cannot reach the retry loop's
 `continue` branch, so a deterministic failure stops at the first
 attempt instead of echoing through three.
+
+`AnalysisUnavailable` is likewise outside the retry set. It reports a valid
+source requesting analysis the configured backend cannot supply, without
+calling the CHAT invalid or substituting generic internal-error advice.
+The morphology admission policy and its primary-versus-secondary distinction
+are documented in [the morphosyntax reference](../reference/morphosyntax.md#language-capability-admission).
 
 ### A retained provider response whose language was not admitted
 

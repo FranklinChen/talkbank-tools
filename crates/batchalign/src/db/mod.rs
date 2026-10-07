@@ -333,6 +333,7 @@ mod tests {
             status: crate::api::FileStatusKind::Done,
             error: row.error.as_deref(),
             error_category: None,
+            diagnostics: None,
             started_at: row.started_at,
             finished_at: row.finished_at,
             next_eligible_at: row.next_eligible_at,

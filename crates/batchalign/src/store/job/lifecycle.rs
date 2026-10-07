@@ -330,9 +330,13 @@ impl Job {
     }
 
     /// Reset the job so unfinished files may run again from queued state.
+    ///
+    /// A file that wrote its output keeps it, clean or diagnosed: a
+    /// diagnosed file's output is the producer's verdict on that recording,
+    /// not a failure a rerun would repair, so it is never retried.
     pub(crate) fn prepare_for_restart(&mut self) {
         for file_status in self.execution.file_statuses.values_mut() {
-            if file_status.status() != FileStatusKind::Done {
+            if !file_status.status().wrote_output() {
                 file_status.requeue();
             }
         }
@@ -360,7 +364,7 @@ impl Job {
             .execution
             .file_statuses
             .values()
-            .filter(|file_status| file_status.status() == FileStatusKind::Done)
+            .filter(|file_status| file_status.status().wrote_output())
             .count() as i64;
         self.execution
             .results
@@ -514,7 +518,11 @@ mod tests {
         // 60home-3.cha succeeds (the only file with an actual output
         // on disk after the incident).
         assert!(job.mark_file_processing("60home-3.cha", started));
-        assert!(job.mark_file_done("60home-3.cha", finished_done, None));
+        assert!(job.mark_file_done(
+            "60home-3.cha",
+            finished_done,
+            super::super::FileCompletion::WithoutResult
+        ));
 
         // 65-3.cha and 65home-3.cha both terminal-error with worker
         // protocol mismatches.

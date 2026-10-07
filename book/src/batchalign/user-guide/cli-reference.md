@@ -1,13 +1,24 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-10-01 14:25 EDT
+**Last updated:** 2026-10-06 21:38 EDT
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
 
 For detailed input/output patterns and mutation behavior per command, see
 [Command I/O Parity](../reference/command-io.md).
+
+## Intentional scope
+
+This `batchalign3` product line has chosen not to adopt generic AI transcript
+editing or acoustic phonetic IPA generation for now. Their absence is an
+intentional scope decision, not an unfinished command or a promised release
+requirement. Do not substitute a different command as an implicit implementation.
+
+Handling existing CHAT phonological tiers is separate from automatically
+generating observed acoustic IPA. The current command list and each command's
+`--help` remain the authority for supported execution.
 
 ## Command shape
 
@@ -407,7 +418,7 @@ Evaluation subcommands. Currently:
 | Subcommand | Purpose |
 | --- | --- |
 | `eval l2-morphotag` | L2 morphotag evaluation: pair `@s` words with `%mor` / `%gra` items via typed AST walk (supersedes `scripts/l2-eval/analyze.py`) |
-| `eval utr-alignment` | Offline global UTR word-to-token replay with fingerprinted typed evidence and no inference or CHAT mutation |
+| `eval utr-alignment` | Offline global UTR word-to-token replay after complete named CHAT admission; `--source-name <FILENAME>` declares the original name for renamed snapshots without exempting filename checks. Schema 3 records the name basis and input fingerprints. No inference or CHAT mutation; invalid CHAT exits 2, internal admission/parser setup failure exits 6 |
 | `eval utseg-replay` | Reapply retained utterance-boundary evidence and report whether it still reproduces the document the run wrote; exits 1 on a difference, 2 on a refused input |
 
 ### `version`
@@ -429,8 +440,13 @@ Prints version and build information.
 | `4` | Network/connectivity error |
 | `5` | Server/job lifecycle error |
 | `6` | Local runtime error |
+| `7` | Job completed with every output written, but some files were written with diagnostics (not certified complete; review them) |
 
-Exit code `1` is reserved for unexpected failures outside the typed categories.
+Exit code `1` is used by an offline evaluation replay whose result differs from
+its retained artifact, and otherwise for unexpected failures outside the typed
+categories. Exit `0` means every file was written clean: a job whose files
+include any written with diagnostics exits `7`, never `0`, and `GET /jobs`
+reports the count as `diagnosed_files`.
 
 A server that reports another build than the CLI's, or no build, is refused
 before anything is submitted, with exit code `5`; see

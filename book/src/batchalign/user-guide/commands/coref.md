@@ -1,7 +1,7 @@
 # coref
 
 **Status:** Current
-**Last updated:** 2026-09-15 20:20 EDT
+**Last updated:** 2026-10-02 22:01 EDT
 
 Add sparse coreference annotation tiers (`%xcoref`) to CHAT transcripts.
 English-only. Uses full document context, all utterances in the file are
@@ -73,8 +73,9 @@ flowchart TD
 | `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the output |
 
 **`coref` has no `--lang` flag.** It is English-only, and each file's
-English-ness is read from that file's own `@Languages` header; a file with no
-header is treated as English. Non-English files pass through unchanged
+English-ness is read from that file's own `@Languages` header after full Chatter
+validation. Missing required headers or other retained CHAT errors are rejected.
+Valid non-English files pass through unchanged
 (Stanza's coreference model is English-only).
 
 Passing a job-level language is refused at submission rather than ignored, so
@@ -134,6 +135,10 @@ batch as failed; non-eligible files (dummy or non-English) pass
 through unchanged. The output `.cha` for a failed file is **not**
 written, there is no path where the file appears successful but
 the `%xcoref` tier is silently missing.
+
+Native sentence and word coverage must match the request even for sentences
+without chains. A missing or extra sentence, dropped word, or substituted word
+is a producer failure, not successful “no coreference” output.
 
 ---
 

@@ -119,6 +119,15 @@ impl ProgressDisplay for TuiProgress {
         // State already updated via update(), no additional action needed.
     }
 
+    fn log_diagnosed(
+        &self,
+        _filename: &str,
+        _diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+    ) {
+        // State already updated via update(): the file line renders the
+        // diagnosed status and its finding count from the poll snapshot.
+    }
+
     fn log_error(&self, filename: &str, msg: &str) {
         self.send_update(TuiUpdate::FileError {
             filename: filename.to_string(),
@@ -277,6 +286,7 @@ mod tests {
             status,
             error: None,
             error_category: None,
+            diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,

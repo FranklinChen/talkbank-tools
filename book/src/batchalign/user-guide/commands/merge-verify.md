@@ -1,7 +1,7 @@
 # merge-verify
 
 **Status:** Current
-**Last updated:** 2026-07-17 01:36 EDT
+**Last updated:** 2026-10-05 07:30 EDT
 
 Tier the machine-flagged utterance placements of a merged draft set
 against engine verdicts, rewriting promoted flags into provenance
@@ -28,9 +28,38 @@ calibrated composed rule to every flagged line:
 - **Demote:** a previously unflagged line whose verdicts contradict
   its placement gains a review flag; text and timing are never moved.
 
-The rewritten drafts must be logically identical to the input on every
-main tier (a built-in preservation invariant fails the run otherwise):
-this pass edits only `%com` flags.
+The rewritten drafts preserve every typed main tier, including timing and
+annotation structure. This pass edits only `%com` text segments or appends a
+demotion comment. Existing comment bullets, pictures, continuation markers and
+text outside the matching flag segment remain intact. The marker is matched
+within a typed text segment, never across a bullet, picture or continuation.
+As before, text from the marker to the end of that segment is the flag payload.
+
+Input must pass complete named CHAT admission, including retained dependent
+tiers; no regeneration exemption applies. Duplicate sessions (including
+case-only and canonically equivalent Unicode aliases), duplicate utterance
+verdicts (even identical duplicates), out-of-range ordinals and unsafe filename
+stems refuse the run. Every session
+is admitted and every transformed document is construction-validated before
+the output directory is created. Semantic refusal writes nothing; filesystem
+failure during persistence can still leave partial output.
+The selected session set remains in memory as typed documents until these
+checks finish; this is not a streaming transform.
+
+Output uses Chatter's typed CHAT writer, so whitespace and attached punctuation
+may normalize. Byte-identical untouched lines are not promised. The verdicts
+and exported review-queue JSON formats and tier-selection policy are unchanged.
+The queue is an interchange artifact, not a persistent review database.
+
+### Developer admission boundary
+
+The source-bound `PreparedSession` owns a `ValidChatFile` together with unique,
+in-range verdicts. Applying it consumes that proof before editing. Only
+`CheckedSession`, containing newly construction-admitted output, exposes the
+writer. Neither raw CHAT nor a caller-selected validity claim grants write
+permission; output admission does not reparse serialized CHAT. Source failures
+retain Chatter's internal-failure distinction, and output-admission failure is
+a tool failure rather than invalid input.
 
 ---
 
@@ -45,7 +74,7 @@ batchalign3 merge-verify \
 ```
 
 Output: one rewritten `.cha` per input session plus
-`review-queue.json` in `--out`, and a one-line tier summary on stdout.
+`review-queue.json` in `--out`, and a one-line tier summary on stderr.
 
 ## Options
 
@@ -75,9 +104,10 @@ Output: one rewritten `.cha` per input session plus
 `utterance_index` is the 0-based ordinal over main-tier utterance
 lines. `category` is the flag taxonomy the calibration was performed
 over; `pitch` is `child` / `adult` / `ambiguous`; `ear` is `yes` /
-`no`. `fa_mean_score` orders the review queue worst-first and is never
-a promote/demote gate (calibration finding: disfluent child speech
-aligns poorly, and the aligner happily aligns the wrong voice).
+`no`. Entries retain input-session and utterance order. Consumers can use
+`fa_mean_score` to prioritize review worst-first; it is never a promote/demote
+gate (calibration finding: disfluent child speech aligns poorly, and the
+aligner happily aligns the wrong voice).
 
 ## The verify engines
 

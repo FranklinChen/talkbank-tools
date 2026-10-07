@@ -1,10 +1,67 @@
 # Overlap-Aware Alignment Improvements
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:14 EDT
+**Last updated:** 2026-10-06 08:38 EDT
 
 This page documents overlap-aware alignment improvements: what is shipped
 and known limitations.
+
+## Bounded partial-order correspondence kernel
+
+The alignment library now provides
+`dp_align::interleaving::TwoSpeakerAlignment`. It preserves two independently
+ordered speaker chains while allowing cross-speaker interleaving. Unlike
+running an aligner independently for each speaker, it cannot assign the same
+ASR word twice. A forward/backward product-DAG analysis examines all
+maximum-match assignments under the existing exact, ASCII-insensitive or fuzzy
+relation. Source-bound read-only views expose selected, possible, missing and
+common correspondence separately; consumers cannot construct a common match
+from a selected index or a certainty flag.
+
+The product size is checked before allocation, with a fixed limit of 1,048,576
+cells. Analysis uses two bounded score tables rather than a recording-wide
+quadratic matrix. Refusal does not assert either ambiguity or absence.
+The offline replay's schema 6 exposes adjacent-speaker controls; see
+[UTR evidence](../architecture/observability.md#utr-word-alignment-evidence).
+
+Production uses a separate `LocalInterleaving` composition over the whole source
+census. Its source DAG permits singleton turns or disjoint episodes consisting
+of one turn and a prefix of the following other-speaker overlap run. The first
+adjacent turn may be unmarked; extending its run requires source-observed `+<`
+or bottom-CA overlap continuations. Ordinary following monologues do not silently
+become a recording-wide overlap hypothesis. Several marked backchannels by that
+speaker form one ordered chain, not independent pair matches.
+Each path consumes every source word once, preserves
+each turn's word order and all same-speaker turn order, and reserves ASR words
+jointly across the complete transcript. This is not independent per-speaker
+alignment, unrestricted transcript reordering or three-way overlap handling.
+
+Reference-layer checkpoints and one recomputed block avoid a recording-wide
+score matrix. Pre-allocation admission bounds work to 64,000,000 source-state ×
+reference cells and score storage to 2,097,152 cells; possible addressed matches
+are separately limited to 1,048,576. Graph/evidence overhead is additional to
+score storage. A producer-owned `CommonLocalMatch` cannot be constructed from
+selection. Only common first/last correspondences authorize UTR hints. When all
+of a turn's words are mandatory on every optimum, its complete candidate hull
+may authorize FA search without choosing a repeated occurrence.
+
+Original same-speaker non-overlap bullets bound production hints/search and
+remain unchanged. Another speaker's provisional crop cannot silently discard
+an interleaved candidate. Budget refusal grants no fallback timing authority.
+End-to-end acoustic recovery remains a separate acceptance obligation: lexical
+proof alone cannot identify who spoke or prove accurate timing. Repeated words
+may remain ambiguous even with complete recovery candidates; neither selecting
+the earliest repeat nor abstaining from every difficult case proves correctness.
+
+### Chatter ownership boundary
+
+Chatter owns CHAT grammar, lexical structure, overlap markers, source admission
+and checked output construction. This matcher consumes that typed structure;
+ASR token correspondence, acoustic order hypotheses and model search remain
+BA3 concerns. No CHAT text scan, additional parser or validity exemption is
+introduced. If a recovery fix reveals missing generic structure or an admission
+hole, repair that boundary in Chatter rather than duplicating CHAT semantics
+in BA3. Acoustic correspondence does not grant output validity or completion.
 
 ## Shipped Features
 
@@ -19,7 +76,7 @@ fuzzy matching, CA window narrowing, density exclusion or tight-buffer tuning.
 | CA marker window narrowing | Enabled (when two-pass active) | `--utr-ca-markers disabled` |
 | Density-aware fallback | 30% threshold | `--utr-density-threshold` |
 | Tight buffer for pass-2 | 500ms | `--utr-tight-buffer` |
-| End-time overlap clamping | Always on | N/A |
+| Same-speaker end-overlap resolution | Always on; cross-speaker overlap preserved by default | `--end-overlap-policy clamp-all-adjacent` additionally clamps cross-speaker file neighbors |
 | %wor suppression for CA | Auto when `@Options: CA` | `--nowor` for non-CA |
 
 **Defaults were tuned on:** SBCSAE, Jefferson NB, TaiwanHakka, APROCSA.
@@ -30,9 +87,11 @@ inputs (CA transcripts with two timestamps on a main line; transcripts
 with substantial overlap between consecutive utterances). `Auto` always
 selects `GlobalUtr`.
 
-**End-time overlap clamping:** `enforce_monotonicity()` clamps utterance
-N's end to utterance N+1's start, eliminating the systematic overlap
-that UTR's independent per-utterance token range assignment can produce.
+**End-time overlap resolution:** finalization resolves same-speaker end overlap
+even across intervening other-speaker turns. The production default preserves
+cross-speaker overlap; the explicit clamp-all policy additionally resolves
+file-adjacent cross-speaker overlap. Original kept bullets remain read-only;
+conflicting kept bullets are recorded rather than silently changed.
 
 **CA %wor suppression:** `@Options: CA` files automatically skip %wor
 generation, CA prosodic notation cannot be represented in %wor.
@@ -58,18 +117,19 @@ improvement needs to be validated empirically on real data.
 
 ## Strategy Selection and Two-Pass Architecture
 
-The UTR strategy is selected based on the file's overlap markers. The
-following diagram shows the selection logic and the two-pass approach.
+Automatic selection retains `GlobalUtr`; two-pass requires explicit opt-in.
+Typed overlap markers affect episode continuity and two-pass recovery, not
+automatic selection of a different strategy.
 
 ```mermaid
 flowchart TD
     start(["UTR alignment requested"])
-    scan{"Any utterance has\n+&lt; linker or ⌊ CA\noverlap markers?"}
+    scan{"Explicit two-pass opt-in?"}
 
-    scan -->|No| global["GlobalUtr\n(utr.rs)\nSingle monotonic pass\nover all utterance words"]
+    scan -->|No| global["GlobalUtr\nJoint source-bound correspondence\nMonotonic or adjacent-speaker episodes"]
 
     scan -->|Yes| twopass["TwoPassOverlapUtr\n(two_pass.rs)"]
-    twopass --> pass1["Pass 1: Global alignment\nFlatten ALL words\n(including &amp;* overlap words)\ninto one reference sequence\nAlign via Hirschberg DP"]
+    twopass --> pass1["Pass 1: Global alignment\nParticipation governed by density policy\nJoint source-bound correspondence"]
     pass1 --> pass2["Pass 2: Per-backchannel\nre-alignment\nNarrow ASR token window\naround overlap regions\nRe-align problematic\nutterances only"]
 
     global --> result
@@ -77,7 +137,7 @@ flowchart TD
 ```
 
 Source: `select_strategy()` in
-`crates/batchalign/src/chat_ops/fa/utr.rs:116`, overlap detection in
+`crates/batchalign/src/chat_ops/fa/utr.rs`, overlap detection in
 `chat_ops/fa/utr/overlap_markers.rs`, two-pass logic in
 `chat_ops/fa/utr/two_pass.rs`.
 

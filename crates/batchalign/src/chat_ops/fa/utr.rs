@@ -5,26 +5,35 @@
 //! pre-pass before forced alignment, FA then operates on a fully-timed file.
 //!
 //! Algorithm:
-//! 1. Flatten ALL utterance words (timed + untimed) into one reference sequence,
-//!    each tagged with its source utterance index.
-//! 2. Try a cheap O(n+m) fast path: if the full transcript words are a
-//!    *uniquely embedded* exact monotonic subsequence of the ASR token stream,
+//! 0. Partition the census into anchored regions (`regions`): the bullets the
+//!    file already has bound both the utterances and the ASR onsets each
+//!    region may match, and every step below runs once per region, within
+//!    that region's own budget.
+//! 1. Bind the region's participating utterance words and speaker identities
+//!    to one source census. Adjacent different-speaker turns use a joint bounded
+//!    singleton/speaker-run composition, preserving each turn's order and assigning
+//!    each ASR word at most once within the region.
+//! 2. A single-speaker region retains the cheap O(n+m) fast path: if the words are a
+//!    *uniquely embedded* exact monotonic subsequence of the region's tokens,
 //!    use that directly.
-//! 3. If the exact subsequence is missing or ambiguous, fall back to a single
-//!    global Hirschberg DP alignment of all words against all ASR tokens
+//! 3. For that monotonic region, if the subsequence is missing or ambiguous, use one
+//!    Hirschberg DP alignment of the region's words against its tokens
 //!    (`dp_align::align`).
-//! 4. Collect per-utterance min/max matched ASR token indices from the chosen
-//!    alignment.
-//! 5. Set `utterance.main.content.bullet` from matched tokens' time span
-//!    (untimed only). Already-timed utterances are left unchanged.
+//! 4. Retain selection separately from correspondences common to every optimum
+//!    of the declared order model. Only common endpoint proof permits a hint;
+//!    a complete candidate hull can bound FA search without choosing a repeat,
+//!    and interior-only proof bounds FA search between the neighbouring proved
+//!    timings without becoming a hint.
+//! 5. Set `utterance.main.content.bullet` from admitted tokens' timing hull
+//!    (untimed only), intersected with retained non-overlap timing bounds.
+//!    Already-timed utterances are left unchanged; exhausted hints are refused.
 //!
-//! This global monotonic alignment is the current correctness boundary for UTR:
-//! it fixes 407-style hand-edited transcript failures where earlier utterances
-//! consumed tokens that later utterances needed. It does not make UTR
-//! non-monotonic, so dense overlap / text-audio reordering cases can still
-//! remain unmatched.
+//! The joint model permits disjoint adjacent-speaker-run interleavings, not arbitrary
+//! transcript reordering or unrestricted multi-speaker overlap. Budget refusal
+//! refuses its region only, and grants neither fallback timing authority nor an
+//! assertion of lexical absence.
 
-use talkbank_model::model::{Bullet, ChatFile, Line};
+use talkbank_model::model::{ChatFile, Line};
 
 use batchalign_transform::dp_align::{self, MatchMode};
 
@@ -33,32 +42,46 @@ use tracing::debug;
 use super::coordinates::{FaWindow, FileMs, Recording, WindowFault};
 
 use super::extraction::collect_fa_words;
+use super::presence::RecordingPresence;
 
 mod anchors;
+#[cfg(test)]
+mod correspondence_tests;
 mod evidence;
+mod interior;
+pub mod interleaving;
 mod lexical;
 pub mod overlap_markers;
+#[cfg(test)]
+mod region_tests;
+mod regions;
+mod search;
 mod two_pass;
 
 pub use anchors::{
     AlignableWords, AnchorDisorder, AnchorIndex, AnchorLookup, UtteranceAnchors, WordAnchor,
 };
-#[cfg(test)]
 use evidence::UtrAsrTokenOrdinal;
 use evidence::UtrWordOrdinal;
 pub use evidence::{
-    NonEmptyUtrWordMatches, UtrAlignmentEvidence, UtrAlignmentPlan, UtrAlignmentStrategy,
-    UtrAsrTokenAddress, UtrLexicalRelation, UtrOverlapRecovery, UtrResult, UtrTimingProposal,
-    UtrUtteranceAlignmentEvidence, UtrUtteranceOrdinal, UtrWordAddress, UtrWordMatch,
+    NonEmptyUtrWordMatches, PositiveUtrInterval, UtrAlignmentEvidence, UtrAlignmentPlan,
+    UtrAlignmentStrategy, UtrAsrTokenAddress, UtrBudgetRefusal, UtrCorrespondenceRefusal,
+    UtrLexicalRelation, UtrOrderModel, UtrOverlapRecovery, UtrRegionSummary, UtrResult,
+    UtrSearchBudget, UtrTimingProposal, UtrUtteranceAlignmentEvidence, UtrUtteranceOrdinal,
+    UtrWordAddress, UtrWordMatch,
 };
+pub use lexical::{
+    AdmittedUtrWordMatch, EndpointBoundUtrWordMatches, MissingUtrEndpoints,
+    NonEmptyAdmittedUtrWordMatches,
+};
+pub use regions::{UtrRegionEdge, UtrRegionSpan};
 
 /// Synthetic drift-class regression scenarios. Public entry point is
 /// [`inject_utr_timing`]; the scenarios generate CHAT + ASR in-memory and
 /// assert monotonicity / non-silent-strip invariants on the output. The
-/// four drift-inducing scenarios are `#[ignore]` because they are currently
-/// RED on `GlobalUtr` (the default dispatch), by design; they codify a
-/// bug. Run explicitly with
-/// `cargo test -p batchalign-chat-ops --lib drift_scenarios -- --ignored`.
+/// four long scenarios are retained opt-in assessments. A passing no-drift
+/// assertion does not establish complete recovery: the printed summary also
+/// records missing turns. Run the selected long deck explicitly, not the sweep.
 #[cfg(test)]
 mod drift_scenarios;
 
@@ -146,8 +169,8 @@ pub fn select_strategy(
 pub(super) struct UtrUtteranceInfo {
     /// Alignable words from the utterance in transcript order.
     pub(super) words: Vec<String>,
-    /// Whether the utterance already had a bullet before UTR.
-    pub(super) has_bullet: bool,
+    /// Original source timing, not an independently maintained presence flag.
+    retained_timing: Option<lexical::ObservedWordTiming>,
     /// Whether the utterance has a `+<` lazy overlap linker.
     pub(super) has_lazy_overlap: bool,
     /// Whether this utterance contains ⌊ (bottom overlap) markers,
@@ -159,6 +182,10 @@ pub(super) struct UtrUtteranceInfo {
     pub(super) overlap_onset_fraction: Option<f64>,
     /// Speaker code for cross-utterance matching.
     pub(super) speaker: String,
+    /// Whether the utterance is speech in the recording. One that is not has
+    /// no words here and no retained timing, and is neither matched nor
+    /// counted unmatched: it is not recovery's to time.
+    pub(super) presence: RecordingPresence,
     /// Indices of bottom overlap regions (for index-aware matching with
     /// predecessor tops). `None` = unindexed, `Some(n)` = indexed.
     pub(super) bottom_indices: Vec<Option<talkbank_model::model::OverlapIndex>>,
@@ -232,21 +259,35 @@ pub(super) fn run_global_utr(
     participation: GlobalUtrParticipation,
     dp_match_mode: MatchMode,
 ) -> UtrResult {
-    let utt_infos = collect_utr_utterance_info(chat_file);
     if asr_tokens.is_empty() {
+        let utt_infos = collect_utr_utterance_info(chat_file);
         // Nothing can match. The plan still records every utterance as
         // unmatched (or excluded, or wordless) so the evidence is complete,
         // but no decision is written and no bullet is touched: the count is
         // the whole outcome.
-        let plan = build_alignment_plan(
-            UtrAlignmentStrategy::GlobalDp,
-            &[],
-            &lexical::UtrLexicalStream::from_tokens(asr_tokens),
-            &utt_infos,
-            std::iter::empty(),
-            participation,
+        let plan = UtrAlignmentPlan::assemble(
+            UtrOrderModel::of(&utt_infos, participation),
+            regions::partition(&utt_infos).iter().map(|region| {
+                build_alignment_plan(
+                    UtrAlignmentStrategy::GlobalDp,
+                    &[],
+                    &lexical::UtrLexicalStream::from_tokens(asr_tokens),
+                    UtrMatchSelection {
+                        selected: Vec::new(),
+                        admission: CorrespondenceProof::Complete(Vec::new()),
+                        per_utterance: region
+                            .searched(&utt_infos)
+                            .map(|_| UtteranceSelection::UNSEARCHED),
+                    },
+                    participation,
+                    &ContestedTokens::none(),
+                )
+            }),
         );
-        let skipped = utt_infos.iter().filter(|info| info.has_bullet).count();
+        let skipped = utt_infos
+            .iter()
+            .filter(|info| info.retained_timing.is_some())
+            .count();
         return UtrResult {
             injected: 0,
             skipped,
@@ -258,223 +299,409 @@ pub(super) fn run_global_utr(
             anchors: AnchorIndex::not_observed(),
         };
     }
-    let plan = plan_global_utr_alignment_for(&utt_infos, asr_tokens, dp_match_mode, participation);
-    // Read here, the one place holding both the plan and the token stream it
-    // was built from, so every anchor's interval is the interval of the token
-    // its word was matched to and no other.
-    let anchors = AnchorIndex::from_plan(&plan, asr_tokens);
-    project_global_utr_plan(chat_file, &utt_infos, plan, anchors)
+    PreparedGlobalUtr::plan(chat_file, asr_tokens, participation, dp_match_mode).project()
 }
 
-/// Project a global plan's typed evidence onto the transcript's bullets.
-///
-/// This consumes each utterance's [`UtrTimingProposal`] as the plan recorded
-/// it. It takes nothing but the plan and the census it was built from, so it
-/// cannot re-derive a span or a positive/non-positive verdict from raw tokens
-/// and disagree with the evidence it also retains: the two used to be
-/// computed twice, from the same tokens, in two places. `utt_infos` is the
-/// census the plan was built from, so its population is the plan's by
-/// construction. `anchors` were read off the same plan by the caller, which
-/// alone holds the tokens; projection only carries them into the result.
-pub(super) fn project_global_utr_plan(
-    chat_file: &mut ChatFile,
-    utt_infos: &[UtrUtteranceInfo],
+/// A selected pass owns the source borrow and every observation derived from
+/// that source. No consumer can pair a plan/census with a different document,
+/// or change the document between planning and projection.
+struct PreparedGlobalUtr<'a> {
+    source: &'a mut ChatFile,
+    census: Vec<UtrUtteranceInfo>,
     plan: UtrAlignmentPlan,
     anchors: AnchorIndex,
-) -> UtrResult {
-    let mut result = UtrResult {
-        injected: 0,
-        skipped: 0,
-        unmatched: 0,
-        alignment: UtrAlignmentEvidence::NotRunNoUntimed,
-        decisions: Vec::new(),
-        anchors,
-    };
+    line_indices: Vec<usize>,
+    following_starts: Vec<FollowingStarts>,
+}
 
-    // Build utterance ordinal → line index mapping for decision records.
-    let utt_line_indices: Vec<usize> = chat_file
-        .lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            if matches!(line, Line::Utterance(_)) {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let decision = |utt_idx: usize,
-                    strategy: batchalign_transform::decisions::UtrStrategy,
-                    reason: String,
-                    needs_review: bool|
-     -> Option<batchalign_transform::decisions::DecisionRecord> {
-        let line_idx = *utt_line_indices.get(utt_idx)?;
-        let Some(Line::Utterance(utt)) = chat_file.lines.get(line_idx) else {
-            return None;
-        };
-        Some(batchalign_transform::decisions::DecisionRecord {
-            line_idx: batchalign_transform::decisions::LineIdx::new(line_idx),
-            speaker: utt.main.speaker.as_str().to_string(),
-            strategy: batchalign_transform::decisions::DecisionStrategy::Utr(strategy),
-            reason,
-            needs_review,
-        })
-    };
+/// The nearest retained non-overlap start after one utterance, under both
+/// order models. The pass's order model chooses which one bounds its hints:
+/// a monotonic pass is bounded by any following turn, an interleaved one
+/// only by the same speaker's.
+#[derive(Debug, Clone, Copy)]
+struct FollowingStarts {
+    document: Option<u64>,
+    same_speaker: Option<u64>,
+}
 
-    // Project proposals onto untimed utterances only; timed ones are kept.
-    let mut bullets_to_set: Vec<Option<(u64, u64)>> = vec![None; utt_infos.len()];
-    for (utt_idx, (info, evidence)) in utt_infos.iter().zip(&plan.utterances).enumerate() {
-        if info.has_bullet {
-            result.skipped += 1;
-            continue;
-        }
-        match evidence {
-            UtrUtteranceAlignmentEvidence::Matched {
-                proposal: UtrTimingProposal::Positive { start_ms, end_ms },
-                ..
-            } => {
-                bullets_to_set[utt_idx] = Some((*start_ms, *end_ms));
-                result.injected += 1;
-            }
-            UtrUtteranceAlignmentEvidence::Matched {
-                proposal: UtrTimingProposal::NonPositive { start_ms, end_ms },
-                matches,
-                alignable_words,
-                ..
-            } => {
-                // A zero- or negative-duration span, produced by Whisper for
-                // very short words (single 20ms frame backchannels like "mhm",
-                // "yeah"). Creating a •T_T• utterance bullet would be actively
-                // harmful: the FA postprocess bounds word timings to the
-                // utterance range, clamping every word timing to the empty
-                // [T,T] interval and dropping them, so the zero-duration
-                // bullet then perpetuates across every subsequent `align`
-                // re-run. Leave the utterance untimed; FA will assign a valid
-                // bullet from the word-level forced alignment instead.
-                result.unmatched += 1;
-                let (min_asr, max_asr) = matches.token_extent();
-                result.decisions.extend(decision(
-                    utt_idx,
-                    batchalign_transform::decisions::UtrStrategy::ZeroDurationSkipped,
-                    format!(
-                        "words={alignable_words} asr_range=[{},{}] \
-                         start_ms={start_ms} end_ms={end_ms} \
-                         reason=zero_or_negative_duration",
-                        min_asr.index(),
-                        max_asr.index()
-                    ),
-                    false,
-                ));
-            }
-            UtrUtteranceAlignmentEvidence::Unmatched {
-                alignable_words, ..
-            }
-            | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap {
-                alignable_words, ..
-            } => {
-                // `+<` utterances skipped in pass 1 count as unmatched here;
-                // the two-pass caller handles them in pass 2.
-                result.unmatched += 1;
-                result.decisions.extend(decision(
-                    utt_idx,
-                    batchalign_transform::decisions::UtrStrategy::Unmatched,
-                    format!("words={alignable_words} no_asr_match"),
-                    true,
-                ));
-            }
-            UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => {
-                result.unmatched += 1;
-                result.decisions.extend(decision(
-                    utt_idx,
-                    batchalign_transform::decisions::UtrStrategy::Unmatched,
-                    "words=0 no_asr_match".to_string(),
-                    true,
-                ));
-            }
+impl FollowingStarts {
+    fn under(self, order: UtrOrderModel) -> Option<u64> {
+        match order {
+            UtrOrderModel::Interleaved => self.same_speaker,
+            UtrOrderModel::Monotonic => self.document,
         }
     }
-    result.alignment = UtrAlignmentEvidence::Global { plan };
+}
 
-    // Post-pass: enforce strictly increasing start_ms for adjacent non-overlap
-    // utterances among the bullets being set.
-    //
-    // The global DP can assign the same start_ms to two adjacent non-overlap
-    // utterances when Whisper's 20ms DTW grid places consecutive short words
-    // (e.g., "mhm" at 1000ms and "yeah" also at 1000ms) at the same token
-    // boundary.  Without this fix, `enforce_monotonicity` pass 2 later clamps
-    // prev.end → next.start = prev.start → zero-duration •T_T•, which fails
-    // E362 validation and then perpetuates through every subsequent align re-run.
-    //
-    // Strategy: walk non-overlap utterances in document order, tracking
-    // `floor_end_ms`: the end_ms of the last bullet we committed (either an
-    // already-timed utterance's existing bullet, or a newly assigned one).  If a
-    // newly assigned bullet starts before `floor_end_ms`, advance its start_ms
-    // (and end_ms if necessary) so it begins strictly after the previous one ended.
-    {
-        // Pre-collect existing timing for already-timed utterances so we can
-        // seed `floor_end_ms` when the first timed block precedes new ones.
-        let existing_timing: Vec<Option<(u64, u64)>> = chat_file
+impl UtrOrderModel {
+    /// The census's order model: interleaved when two adjacent
+    /// participating turns belong to different speakers. The one owner of
+    /// that rule for planning and projection alike.
+    fn of(census: &[UtrUtteranceInfo], participation: GlobalUtrParticipation) -> Self {
+        let interleaves = census.windows(2).any(|pair| {
+            pair[0].speaker != pair[1].speaker
+                && !pair[0].excluded_from(participation)
+                && !pair[1].excluded_from(participation)
+        });
+        if interleaves {
+            Self::Interleaved
+        } else {
+            Self::Monotonic
+        }
+    }
+}
+
+/// Geometry for a non-overlap hint, admitted from retained source boundaries.
+/// Exhaustion is a state, never a fabricated positive interval.
+enum UtrTimingCorridor {
+    Open { floor_end_ms: u64 },
+    Bounded(PositiveUtrInterval),
+    Exhausted,
+}
+
+impl UtrTimingCorridor {
+    fn admit(floor_end_ms: u64, ceiling_start_ms: Option<u64>) -> Self {
+        match ceiling_start_ms {
+            None => Self::Open { floor_end_ms },
+            Some(ceiling) => match PositiveUtrInterval::admit(floor_end_ms, ceiling) {
+                Some(interval) => Self::Bounded(interval),
+                None => Self::Exhausted,
+            },
+        }
+    }
+
+    fn intersect(self, proposal: PositiveUtrInterval) -> Option<PositiveUtrInterval> {
+        match self {
+            Self::Open { floor_end_ms } => proposal.after(floor_end_ms),
+            Self::Bounded(corridor) => PositiveUtrInterval::admit(
+                proposal.start_ms().max(corridor.start_ms()),
+                proposal.end_ms().min(corridor.end_ms()),
+            ),
+            Self::Exhausted => None,
+        }
+    }
+}
+
+impl<'a> PreparedGlobalUtr<'a> {
+    fn plan(
+        source: &'a mut ChatFile,
+        tokens: &[AsrTimingToken],
+        participation: GlobalUtrParticipation,
+        match_mode: MatchMode,
+    ) -> Self {
+        let census = collect_utr_utterance_info(source);
+        let plan = plan_global_utr_alignment_for(&census, tokens, match_mode, participation);
+        let anchors = AnchorIndex::from_plan(&plan);
+        let line_indices: Vec<_> = source
             .lines
             .iter()
-            .filter_map(|l| {
-                if let Line::Utterance(u) = l {
-                    Some(
-                        u.main
-                            .content
-                            .bullet
-                            .as_ref()
-                            .map(|b| (b.timing.start_ms, b.timing.end_ms)),
-                    )
-                } else {
-                    None
-                }
-            })
+            .enumerate()
+            .filter_map(|(index, line)| matches!(line, Line::Utterance(_)).then_some(index))
             .collect();
-
-        let mut floor_end_ms: u64 = 0;
-        for (utt_idx, info) in utt_infos.iter().enumerate() {
-            // Overlap utterances legitimately share timing with the previous
-            // utterance: do not advance their start or update the floor.
-            if info.has_lazy_overlap || info.has_ca_overlap {
-                continue;
+        let mut following_starts = vec![
+            FollowingStarts {
+                document: None,
+                same_speaker: None,
+            };
+            census.len()
+        ];
+        let mut ceiling: Option<u64> = None;
+        let mut speaker_ceilings = std::collections::BTreeMap::<&str, u64>::new();
+        for (ordinal, line_index) in line_indices.iter().enumerate().rev() {
+            let info = &census[ordinal];
+            following_starts[ordinal] = FollowingStarts {
+                document: ceiling,
+                same_speaker: speaker_ceilings.get(info.speaker.as_str()).copied(),
+            };
+            if !info.has_lazy_overlap
+                && !info.has_ca_overlap
+                && let Line::Utterance(utterance) = &source.lines[*line_index]
+                && let Some(bullet) = &utterance.main.content.bullet
+            {
+                ceiling = Some(ceiling.map_or(bullet.timing.start_ms, |previous| {
+                    previous.min(bullet.timing.start_ms)
+                }));
+                speaker_ceilings
+                    .entry(info.speaker.as_str())
+                    .and_modify(|previous| *previous = (*previous).min(bullet.timing.start_ms))
+                    .or_insert(bullet.timing.start_ms);
             }
-            if info.has_bullet {
-                // Already-timed: update floor from existing bullet.
-                if let Some(Some((_, end_ms))) = existing_timing.get(utt_idx) {
-                    floor_end_ms = floor_end_ms.max(*end_ms);
+        }
+        Self {
+            source,
+            census,
+            plan,
+            anchors,
+            line_indices,
+            following_starts,
+        }
+    }
+
+    /// Consume exactly the source-bound pass; raw tokens are no longer present.
+    fn project(self) -> UtrResult {
+        let Self {
+            source: chat_file,
+            census: utt_infos,
+            plan,
+            anchors,
+            line_indices: utt_line_indices,
+            following_starts,
+        } = self;
+        let mut result = UtrResult {
+            injected: 0,
+            skipped: 0,
+            unmatched: 0,
+            alignment: UtrAlignmentEvidence::NotRunNoUntimed,
+            decisions: Vec::new(),
+            anchors,
+        };
+
+        let decision = |utt_idx: usize,
+                        strategy: batchalign_transform::decisions::UtrStrategy,
+                        reason: String,
+                        needs_review: bool|
+         -> Option<batchalign_transform::decisions::DecisionRecord> {
+            let line_idx = *utt_line_indices.get(utt_idx)?;
+            let Some(Line::Utterance(utt)) = chat_file.lines.get(line_idx) else {
+                return None;
+            };
+            Some(batchalign_transform::decisions::DecisionRecord {
+                line_idx: batchalign_transform::decisions::LineIdx::new(line_idx),
+                speaker: utt.main.speaker.as_str().to_string(),
+                strategy: batchalign_transform::decisions::DecisionStrategy::Utr(strategy),
+                reason,
+                needs_review,
+            })
+        };
+
+        // Project proposals onto untimed utterances only; timed ones are kept.
+        // Both floors are kept; the pass's order model chooses which one
+        // bounds each hint (see `FollowingStarts`).
+        let mut bullets_to_set: Vec<Option<PositiveUtrInterval>> = vec![None; utt_infos.len()];
+        let mut document_floor_ms = 0;
+        let mut speaker_floors = std::collections::BTreeMap::<&str, u64>::new();
+        let order = plan.strategy;
+        for (utt_idx, (info, evidence)) in utt_infos.iter().zip(&plan.utterances).enumerate() {
+            // Not in the recording: not recovery's to time, so neither
+            // counted (skipped, injected or unmatched) nor reviewed, whatever
+            // its evidence says (an overlap-marked note is "excluded" in a
+            // two-pass first pass).
+            match info.presence {
+                RecordingPresence::InRecording => {}
+                RecordingPresence::NotInRecording(_) => continue,
+            }
+            let speaker_floor_ms = speaker_floors
+                .get(info.speaker.as_str())
+                .copied()
+                .unwrap_or(0);
+            let floor_end_ms = match order {
+                UtrOrderModel::Interleaved => speaker_floor_ms,
+                UtrOrderModel::Monotonic => document_floor_ms,
+            };
+            let ceiling_start_ms = following_starts[utt_idx].under(order);
+            let overlaps = info.has_lazy_overlap || info.has_ca_overlap;
+            if info.retained_timing.is_some() {
+                result.skipped += 1;
+                if !overlaps
+                    && let Some(Line::Utterance(utt)) =
+                        chat_file.lines.get(utt_line_indices[utt_idx])
+                    && let Some(bullet) = &utt.main.content.bullet
+                {
+                    document_floor_ms = document_floor_ms.max(bullet.timing.end_ms);
+                    speaker_floors.insert(
+                        info.speaker.as_str(),
+                        speaker_floor_ms.max(bullet.timing.end_ms),
+                    );
                 }
                 continue;
             }
-            if let Some((ref mut start_ms, ref mut end_ms)) = bullets_to_set[utt_idx] {
-                if *start_ms < floor_end_ms {
-                    // Advance start so this bullet begins after the previous one ended.
-                    *start_ms = floor_end_ms;
-                    if *end_ms <= *start_ms {
-                        // Also extend end to preserve at least 1ms of duration.
-                        *end_ms = *start_ms + 1;
+            match evidence {
+                UtrUtteranceAlignmentEvidence::Matched {
+                    proposal: UtrTimingProposal::Positive { interval },
+                    admitted_matches: matches,
+                    alignable_words,
+                    ..
+                } => {
+                    let projected = if overlaps {
+                        Some(*interval)
+                    } else {
+                        UtrTimingCorridor::admit(floor_end_ms, ceiling_start_ms)
+                            .intersect(*interval)
+                    };
+                    if let Some(projected) = projected {
+                        bullets_to_set[utt_idx] = Some(projected);
+                        if !overlaps {
+                            document_floor_ms = document_floor_ms.max(projected.end_ms());
+                            speaker_floors.insert(
+                                info.speaker.as_str(),
+                                speaker_floor_ms.max(projected.end_ms()),
+                            );
+                        }
+                    } else {
+                        result.unmatched += 1;
+                        let (min_asr, max_asr) = matches.token_extent();
+                        result.decisions.extend(decision(
+                            utt_idx,
+                            batchalign_transform::decisions::UtrStrategy::ProjectionExhausted,
+                            format!(
+                                "words={alignable_words} asr_range=[{},{}] \
+                                 start_ms={} end_ms={} floor_end_ms={floor_end_ms} \
+                                 ceiling_start_ms={:?} \
+                                 reason=monotonic_projection_exhausted",
+                                min_asr.index(),
+                                max_asr.index(),
+                                interval.start_ms(),
+                                interval.end_ms(),
+                                ceiling_start_ms,
+                            ),
+                            true,
+                        ));
                     }
                 }
-                floor_end_ms = *end_ms;
+                UtrUtteranceAlignmentEvidence::Matched {
+                    proposal: UtrTimingProposal::NonPositive { start_ms, end_ms },
+                    admitted_matches: matches,
+                    alignable_words,
+                    ..
+                } => {
+                    // A zero- or negative-duration span, produced by Whisper for
+                    // very short words (single 20ms frame backchannels like "mhm",
+                    // "yeah"). Creating a •T_T• utterance bullet would be actively
+                    // harmful: the FA postprocess bounds word timings to the
+                    // utterance range, clamping every word timing to the empty
+                    // [T,T] interval and dropping them, so the zero-duration
+                    // bullet then perpetuates across every subsequent `align`
+                    // re-run. Leave the utterance untimed; FA will assign a valid
+                    // bullet from the word-level forced alignment instead.
+                    result.unmatched += 1;
+                    let (min_asr, max_asr) = matches.token_extent();
+                    result.decisions.extend(decision(
+                        utt_idx,
+                        batchalign_transform::decisions::UtrStrategy::ZeroDurationSkipped,
+                        format!(
+                            "words={alignable_words} asr_range=[{},{}] \
+                             start_ms={start_ms} end_ms={end_ms} \
+                             reason=zero_or_negative_duration",
+                            min_asr.index(),
+                            max_asr.index()
+                        ),
+                        false,
+                    ));
+                }
+                UtrUtteranceAlignmentEvidence::InteriorOnly {
+                    alignable_words,
+                    missing_endpoints,
+                    ..
+                } => {
+                    result.unmatched += 1;
+                    // A bounded search window, when the proof yields one, is
+                    // forced alignment's to use; it is never a hint.
+                    let search = match plan.search_envelopes.get(utt_idx) {
+                        Some(Some(_)) => "bounded_search_window",
+                        Some(None) | None => "no_search_window",
+                    };
+                    result.decisions.extend(decision(
+                        utt_idx,
+                        batchalign_transform::decisions::UtrStrategy::IncompleteBoundary,
+                        format!(
+                            "words={alignable_words} missing_endpoints={missing_endpoints:?} \
+                             interior_anchors_retained {search}"
+                        ),
+                        true,
+                    ));
+                }
+                UtrUtteranceAlignmentEvidence::SelectedOnly {
+                    alignable_words,
+                    reason,
+                    ..
+                }
+                | UtrUtteranceAlignmentEvidence::Refused {
+                    alignable_words,
+                    reason,
+                    ..
+                } => {
+                    result.unmatched += 1;
+                    let (strategy, reason) = match reason {
+                        UtrCorrespondenceRefusal::Ambiguous => (
+                            batchalign_transform::decisions::UtrStrategy::AmbiguousCorrespondence,
+                            "ambiguous".to_owned(),
+                        ),
+                        UtrCorrespondenceRefusal::BudgetExhausted(refusal) => (
+                            batchalign_transform::decisions::UtrStrategy::CorrespondenceBudgetExhausted,
+                            format!(
+                                "budget_exhausted budget={:?} region=[{}]",
+                                refusal.budget(),
+                                refusal.region().describe()
+                            ),
+                        ),
+                    };
+                    result.decisions.extend(decision(
+                        utt_idx,
+                        strategy,
+                        format!(
+                            "words={alignable_words} reason={reason} no_admitted_correspondence"
+                        ),
+                        true,
+                    ));
+                }
+                UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. } => {
+                    // Only built for an utterance with retained timing, which
+                    // the retained-timing branch above has already counted
+                    // and kept. Reaching here means the census and the plan
+                    // disagree about that timing; the utterance stays as it
+                    // is and is counted unmatched rather than guessed at.
+                    result.unmatched += 1;
+                    tracing::error!(
+                        utterance = utt_idx,
+                        "UTR plan marks an untimed utterance as retained; left untimed"
+                    );
+                }
+                UtrUtteranceAlignmentEvidence::Unmatched {
+                    alignable_words, ..
+                }
+                | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap {
+                    alignable_words, ..
+                } => {
+                    // `+<` utterances skipped in pass 1 count as unmatched here;
+                    // the two-pass caller handles them in pass 2.
+                    result.unmatched += 1;
+                    result.decisions.extend(decision(
+                        utt_idx,
+                        batchalign_transform::decisions::UtrStrategy::Unmatched,
+                        format!("words={alignable_words} no_asr_match"),
+                        true,
+                    ));
+                }
+                UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => {
+                    result.unmatched += 1;
+                    result.decisions.extend(decision(
+                        utt_idx,
+                        batchalign_transform::decisions::UtrStrategy::Unmatched,
+                        "words=0 no_asr_match".to_string(),
+                        true,
+                    ));
+                }
             }
         }
-    }
+        result.alignment = UtrAlignmentEvidence::Global { plan };
 
-    // Apply bullets to the actual ChatFile utterances
-    let mut utt_idx = 0;
-    for line in &mut chat_file.lines {
-        if let Line::Utterance(utt) = line {
-            if let Some((start_ms, end_ms)) = bullets_to_set[utt_idx] {
-                // Mark as a provisional UTR hint so that update_utterance_bullet
-                // (called after FA injection) overwrites this bullet with the
-                // FA word span instead of union-expanding from it.
-                utt.main.content.bullet = Some(Bullet::utr_hint(start_ms, end_ms));
+        // Apply bullets to the actual ChatFile utterances
+        let mut utt_idx = 0;
+        for line in &mut chat_file.lines {
+            if let Line::Utterance(utt) = line {
+                if let Some(interval) = bullets_to_set[utt_idx] {
+                    // Mark as a provisional UTR hint so that update_utterance_bullet
+                    // (called after FA injection) overwrites this bullet with the
+                    // FA word span instead of union-expanding from it.
+                    utt.main.content.bullet = Some(interval.into_hint());
+                    result.injected += 1;
+                }
+                utt_idx += 1;
             }
-            utt_idx += 1;
         }
-    }
 
-    result
+        result
+    }
 }
 
 /// Extract alignable words, bullet presence, `+<` linker status, and CA
@@ -484,8 +711,17 @@ impl UtrUtteranceInfo {
     /// out of its flattened word sequence: the one owner of that rule, used
     /// both to build the payload and to label the evidence.
     fn excluded_from(&self, participation: GlobalUtrParticipation) -> bool {
-        participation == GlobalUtrParticipation::ExcludeMarkedOverlap
-            && (self.has_lazy_overlap || self.has_ca_overlap)
+        participation == GlobalUtrParticipation::ExcludeMarkedOverlap && self.is_marked_overlap()
+    }
+
+    /// Whether this is a marked overlap recovery may handle on its own: speech
+    /// with a `+<` linker or a bottom CA overlap. An utterance not in the
+    /// recording never is, whatever it is marked with.
+    pub(super) fn is_marked_overlap(&self) -> bool {
+        match self.presence {
+            RecordingPresence::NotInRecording(_) => false,
+            RecordingPresence::InRecording => self.has_lazy_overlap || self.has_ca_overlap,
+        }
     }
 }
 
@@ -493,8 +729,26 @@ pub(super) fn collect_utr_utterance_info(chat_file: &ChatFile) -> Vec<UtrUtteran
     let mut utt_infos = Vec::new();
     for line in &chat_file.lines {
         if let Line::Utterance(utt) = line {
+            // An utterance not in the recording keeps its place in the census
+            // (ordinals are utterance indices) but offers recovery no word to
+            // match and no anchor: its words are not in the audio, and a
+            // bullet on it locates nothing there.
+            let presence = RecordingPresence::of(utt);
             let mut words = Vec::new();
-            collect_fa_words(&utt.main.content.content, &mut words);
+            let retained_timing = match presence {
+                RecordingPresence::NotInRecording(_) => None,
+                RecordingPresence::InRecording => {
+                    collect_fa_words(&utt.main.content.content, &mut words);
+                    utt.main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .map(|bullet| lexical::ObservedWordTiming {
+                            start_ms: bullet.timing.start_ms,
+                            end_ms: bullet.timing.end_ms,
+                        })
+                }
+            };
             let has_lazy_overlap = utt
                 .main
                 .content
@@ -534,7 +788,8 @@ pub(super) fn collect_utr_utterance_info(chat_file: &ChatFile) -> Vec<UtrUtteran
 
             utt_infos.push(UtrUtteranceInfo {
                 words,
-                has_bullet: utt.main.content.bullet.is_some(),
+                retained_timing,
+                presence,
                 has_lazy_overlap,
                 has_ca_overlap: overlap_info.has_bottom_overlap(),
                 overlap_onset_fraction: overlap_info.top_onset_fraction(),
@@ -566,14 +821,128 @@ pub(super) fn plan_global_utr_alignment(
 /// Plan against utterance information already collected, so a caller that
 /// also projects the plan uses ONE census for both and the plan's utterance
 /// population is the projection's by construction.
+///
+/// The census is partitioned into anchored regions and each region is
+/// planned on its own, within its own budget (see `regions`).
 fn plan_global_utr_alignment_for(
     utt_infos: &[UtrUtteranceInfo],
     asr_tokens: &[AsrTimingToken],
     dp_match_mode: MatchMode,
     participation: GlobalUtrParticipation,
 ) -> UtrAlignmentPlan {
+    let order = UtrOrderModel::of(utt_infos, participation);
+    let regions = regions::partition(utt_infos);
+    let plan = |region: &regions::UtrRegion, contested: &ContestedTokens| {
+        let lexical = lexical::UtrLexicalStream::within_region(asr_tokens, region);
+        plan_region(
+            order,
+            region.searched(utt_infos),
+            &lexical,
+            dp_match_mode,
+            participation,
+            contested,
+        )
+    };
+    let uncontested = ContestedTokens::none();
+    let first: Vec<_> = regions
+        .iter()
+        .map(|region| plan(region, &uncontested))
+        .collect();
+    // Neighbouring regions share the anchor between them: tokens inside its
+    // span are in both windows. A token claimed by owned words of both is
+    // one the regional search cannot assign, so the regions that claimed it
+    // are planned again with that claim withdrawn. Rare, and only those
+    // regions pay for it.
+    let contested = ContestedTokens::between(&first);
+    if contested.is_empty() {
+        return UtrAlignmentPlan::assemble(order, first);
+    }
+    UtrAlignmentPlan::assemble(
+        order,
+        regions.iter().zip(first).map(|(region, local)| {
+            if contested.touches(&local) {
+                plan(region, &contested)
+            } else {
+                local
+            }
+        }),
+    )
+}
+
+/// Provider tokens whose correspondence the regional decomposition cannot
+/// assign: admitted by owned words of two different regions.
+///
+/// Regions partition the transcript, but neighbouring regions' ASR windows
+/// overlap on the anchor between them. In an interleaved file an untimed turn
+/// before the anchor (in one region) and one after it (in the next) may each
+/// claim the same token inside the anchor's span, and each region's claim is
+/// common to every optimum of ITS problem only. Which claim the whole file
+/// would admit, if either, the decomposition cannot say, so neither is
+/// admitted: both utterances keep their other evidence, and each region
+/// records the claims it withdrew. Within a region a token is claimed at most
+/// once already.
+struct ContestedTokens(std::collections::BTreeSet<UtrAsrTokenOrdinal>);
+
+impl ContestedTokens {
+    /// No token is contested: the first planning pass.
+    fn none() -> Self {
+        Self(std::collections::BTreeSet::new())
+    }
+
+    /// The tokens two or more of `plans` claim with their owned words.
+    fn between(plans: &[evidence::LocalRegionPlan<'_>]) -> Self {
+        let mut claimed_by = std::collections::BTreeMap::<UtrAsrTokenOrdinal, usize>::new();
+        let mut contested = std::collections::BTreeSet::new();
+        for (region, plan) in plans.iter().enumerate() {
+            for token in plan.owned_claims() {
+                match claimed_by.insert(token, region) {
+                    Some(other) if other != region => {
+                        contested.insert(token);
+                    }
+                    Some(_) | None => {}
+                }
+            }
+        }
+        Self(contested)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn contains(&self, token: UtrAsrTokenOrdinal) -> bool {
+        self.0.contains(&token)
+    }
+
+    /// Whether `plan`'s owned words claim any contested token.
+    fn touches(&self, plan: &evidence::LocalRegionPlan<'_>) -> bool {
+        plan.owned_claims().any(|token| self.contains(token))
+    }
+}
+
+/// Plan one region's searched census (owned utterances and trailing context)
+/// against the region's tokens, in the region's local numbering.
+///
+/// The order model is the file's: an interleaved file's regions all use the
+/// joint composition (on a single-speaker region it admits exactly the
+/// monotonic orders), so regions bound the work without changing the model.
+/// A region with no tokens matches nothing under either model.
+fn plan_region<'c>(
+    order: UtrOrderModel,
+    searched: regions::SearchedCensus<'c>,
+    lexical: &lexical::UtrLexicalStream<'_>,
+    dp_match_mode: MatchMode,
+    participation: GlobalUtrParticipation,
+    contested: &ContestedTokens,
+) -> evidence::LocalRegionPlan<'c> {
+    match order {
+        UtrOrderModel::Interleaved if !lexical.is_empty() => {
+            return lexical.plan_interleaving(searched, dp_match_mode, participation, contested);
+        }
+        UtrOrderModel::Interleaved | UtrOrderModel::Monotonic => {}
+    }
     let mut payload = Vec::new();
-    for (utterance_index, info) in utt_infos.iter().enumerate() {
+    for (utterance_index, info) in searched.infos().iter().enumerate() {
         if info.excluded_from(participation) {
             continue;
         }
@@ -589,10 +958,11 @@ fn plan_global_utr_alignment_for(
     }
     plan_utr_alignment(
         &payload,
-        asr_tokens,
-        utt_infos,
+        lexical,
+        searched,
         dp_match_mode,
         participation,
+        contested,
     )
 }
 
@@ -602,55 +972,105 @@ struct UtrPayloadWord {
     address: UtrWordAddress,
 }
 
-fn plan_utr_alignment(
+fn plan_utr_alignment<'c>(
     payload: &[UtrPayloadWord],
-    asr_tokens: &[AsrTimingToken],
-    utt_infos: &[UtrUtteranceInfo],
+    lexical: &lexical::UtrLexicalStream<'_>,
+    searched: regions::SearchedCensus<'c>,
     dp_match_mode: MatchMode,
     participation: GlobalUtrParticipation,
-) -> UtrAlignmentPlan {
+    contested: &ContestedTokens,
+) -> evidence::LocalRegionPlan<'c> {
+    let region = searched.span();
     let all_words = payload
         .iter()
         .map(|word| word.text.clone())
         .collect::<Vec<_>>();
-    let lexical = lexical::UtrLexicalStream::from_tokens(asr_tokens);
     let asr_texts = lexical.texts();
+    let embeddings = matches!(dp_match_mode, MatchMode::CaseInsensitive)
+        .then(|| search::CompleteExactEmbeddings::observe(&all_words, &asr_texts))
+        .flatten();
+    // The monotonic producers observe common correspondences only, never
+    // every optimum's candidates, so they bound no ambiguous endpoint.
+    let per_utterance = match embeddings.as_ref() {
+        Some(complete) => complete
+            .envelopes(payload, searched, lexical)
+            .map_values(|envelope| UtteranceSelection {
+                envelope,
+                endpoints: lexical::EndpointExtents::UNOBSERVED,
+            }),
+        None => searched.map(|_| UtteranceSelection::UNSEARCHED),
+    };
 
     // This fast path deliberately uses case-folded comparison, so it is only
     // valid for the case-insensitive DP policy. An exact caller must reach the
     // exact DP relation instead of being silently weakened here.
-    if matches!(dp_match_mode, MatchMode::CaseInsensitive)
-        && let Some(reference_indices) =
-            try_unique_exact_subsequence_indices(&all_words, &asr_texts)
+    if let Some(complete) = embeddings
+        && complete.earliest == complete.latest
     {
+        let reference_indices = UniqueEmbedding {
+            indices: complete.earliest,
+        };
+        let admitted = lexical.unique_embedding_matches(payload, &reference_indices);
         return build_alignment_plan(
             UtrAlignmentStrategy::UniqueExactSubsequence,
             payload,
-            &lexical,
-            utt_infos,
-            reference_indices.into_iter().enumerate(),
+            lexical,
+            UtrMatchSelection {
+                selected: reference_indices.indices.into_iter().enumerate().collect(),
+                admission: CorrespondenceProof::Complete(admitted),
+                per_utterance,
+            },
             participation,
+            contested,
         );
     }
 
-    let alignment = dp_align::align(&all_words, &asr_texts, dp_match_mode);
-    let matched_indices = alignment.into_iter().filter_map(|item| match item {
-        dp_align::AlignResult::Match {
-            payload_idx,
-            reference_idx,
-            ..
-        } => Some((payload_idx, reference_idx)),
-        dp_align::AlignResult::ExtraPayload { .. }
-        | dp_align::AlignResult::ExtraReference { .. } => None,
-    });
-    build_alignment_plan(
+    let alignment =
+        dp_align::CorrespondenceAnalysis::observe(&all_words, &asr_texts, dp_match_mode);
+    let admission = match alignment.admission() {
+        dp_align::CorrespondenceAdmission::Complete(common) => {
+            CorrespondenceProof::Complete(lexical.common_matches(common, payload))
+        }
+        dp_align::CorrespondenceAdmission::BudgetExhausted(budget) => {
+            let refusal = UtrBudgetRefusal {
+                region,
+                budget: UtrSearchBudget::monotonic(*budget),
+            };
+            tracing::warn!(
+                region = %region.describe(),
+                budget = ?refusal.budget,
+                "UTR correspondence proof refused for this region; other regions are unaffected"
+            );
+            CorrespondenceProof::BudgetExhausted(refusal)
+        }
+    };
+    let matched_indices = alignment
+        .selected()
+        .iter()
+        .filter_map(|item| match item {
+            dp_align::AlignResult::Match {
+                payload_idx,
+                reference_idx,
+                ..
+            } => Some((*payload_idx, *reference_idx)),
+            dp_align::AlignResult::ExtraPayload { .. }
+            | dp_align::AlignResult::ExtraReference { .. } => None,
+        })
+        .collect();
+    let mut plan = build_alignment_plan(
         UtrAlignmentStrategy::GlobalDp,
         payload,
-        &lexical,
-        utt_infos,
-        matched_indices,
+        lexical,
+        UtrMatchSelection {
+            selected: matched_indices,
+            admission,
+            per_utterance,
+        },
         participation,
-    )
+        contested,
+    );
+    interior::bound_interior_only_searches(&mut plan, lexical);
+    plan
 }
 
 /// Attempt the exact-subsequence fast path for UTR.
@@ -658,17 +1078,8 @@ fn plan_utr_alignment(
 /// The fast path is accepted only when the transcript words have exactly one
 /// monotonic embedding into the ASR stream. Repeated-token ambiguity therefore
 /// forces a DP fallback instead of silently accepting an arbitrary greedy path.
-fn try_unique_exact_subsequence_indices(
-    all_words: &[String],
-    asr_texts: &[String],
-) -> Option<Vec<usize>> {
-    let earliest = greedy_forward_match_indices(all_words, asr_texts)?;
-    let latest = greedy_reverse_match_indices(all_words, asr_texts)?;
-    if earliest != latest {
-        return None;
-    }
-
-    Some(earliest)
+struct UniqueEmbedding {
+    indices: Vec<usize>,
 }
 
 /// Return the earliest monotonic exact-subsequence match indices for the
@@ -714,16 +1125,70 @@ fn greedy_reverse_match_indices(payload: &[String], reference: &[String]) -> Opt
     Some(matches)
 }
 
-fn build_alignment_plan(
+struct UtrMatchSelection<'c> {
+    selected: Vec<(usize, usize)>,
+    admission: CorrespondenceProof,
+    /// What the producer knows about each searched utterance, carried with
+    /// the census it describes.
+    per_utterance: regions::PerSearched<'c, UtteranceSelection>,
+}
+
+/// A producer's per-utterance facts beyond its correspondences: where forced
+/// alignment may search for the utterance, and the extents of its endpoint
+/// words when the producer observed every optimum.
+struct UtteranceSelection {
+    envelope: Option<search::FaSearchEnvelope>,
+    endpoints: lexical::EndpointExtents,
+}
+
+impl UtteranceSelection {
+    /// Nothing searched: no envelope, no endpoint extents.
+    const UNSEARCHED: Self = Self {
+        envelope: None,
+        endpoints: lexical::EndpointExtents::UNOBSERVED,
+    };
+}
+
+enum CorrespondenceProof {
+    Complete(Vec<AdmittedUtrWordMatch>),
+    /// The region's proof work exceeded a budget; carries which region and
+    /// which budget, so every refusal it causes can name both.
+    BudgetExhausted(UtrBudgetRefusal),
+}
+
+fn build_alignment_plan<'c>(
     strategy: UtrAlignmentStrategy,
     payload: &[UtrPayloadWord],
     asr_tokens: &lexical::UtrLexicalStream<'_>,
-    utt_infos: &[UtrUtteranceInfo],
-    matched_indices: impl IntoIterator<Item = (usize, usize)>,
+    selection: UtrMatchSelection<'c>,
     participation: GlobalUtrParticipation,
-) -> UtrAlignmentPlan {
-    let mut by_utterance = vec![Vec::new(); utt_infos.len()];
-    for (payload_idx, reference_idx) in matched_indices {
+    contested: &ContestedTokens,
+) -> evidence::LocalRegionPlan<'c> {
+    let UtrMatchSelection {
+        selected,
+        admission,
+        per_utterance,
+    } = selection;
+    let searched = per_utterance.searched().infos().len();
+    let (admitted, refusal) = match admission {
+        CorrespondenceProof::Complete(admitted) => (admitted, UtrCorrespondenceRefusal::Ambiguous),
+        CorrespondenceProof::BudgetExhausted(refusal) => (
+            Vec::new(),
+            UtrCorrespondenceRefusal::BudgetExhausted(refusal),
+        ),
+    };
+    let mut by_utterance = vec![Vec::new(); searched];
+    let mut admitted_by_utterance = vec![Vec::new(); searched];
+    let mut withdrawn_claims = Vec::new();
+    for matched in admitted {
+        let token = matched.matched().token.token_index;
+        if contested.contains(token) {
+            withdrawn_claims.push(token);
+            continue;
+        }
+        admitted_by_utterance[matched.matched().word.utterance_index()].push(matched);
+    }
+    for (payload_idx, reference_idx) in selected {
         let payload_word = &payload[payload_idx];
         by_utterance[payload_word.address.utterance_index.index()].push(asr_tokens.matched_word(
             reference_idx,
@@ -732,42 +1197,106 @@ fn build_alignment_plan(
         ));
     }
 
-    let utterances = utt_infos
-        .iter()
-        .enumerate()
-        .map(|(utterance_index, info)| {
-            let matches = std::mem::take(&mut by_utterance[utterance_index]);
-            let Some(matches) = NonEmptyUtrWordMatches::from_vec(matches) else {
-                if info.excluded_from(participation) {
-                    return UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap {
-                        utterance_index: UtrUtteranceOrdinal(utterance_index),
-                        alignable_words: info.words.len(),
-                    };
+    evidence::LocalRegionPlan::from_searched(
+        strategy,
+        withdrawn_claims,
+        per_utterance,
+        |utterance_index,
+         info,
+         UtteranceSelection {
+             envelope,
+             endpoints,
+         }| {
+            let evidence = utterance_evidence(
+                UtrUtteranceOrdinal(utterance_index),
+                info,
+                std::mem::take(&mut by_utterance[utterance_index]),
+                std::mem::take(&mut admitted_by_utterance[utterance_index]),
+                refusal,
+                endpoints,
+                participation,
+            );
+            (evidence, envelope)
+        },
+    )
+}
+
+/// One searched utterance's correspondence evidence, from its selected and
+/// admitted matches, the region's refusal (if any) and its endpoint extents.
+fn utterance_evidence(
+    utterance_index: UtrUtteranceOrdinal,
+    info: &UtrUtteranceInfo,
+    matches: Vec<UtrWordMatch>,
+    admitted: Vec<AdmittedUtrWordMatch>,
+    refusal: UtrCorrespondenceRefusal,
+    endpoints: lexical::EndpointExtents,
+    participation: GlobalUtrParticipation,
+) -> UtrUtteranceAlignmentEvidence {
+    let alignable_words = info.words.len();
+    if info.excluded_from(participation) && matches.is_empty() {
+        return UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap {
+            utterance_index,
+            alignable_words,
+        };
+    }
+    if info.words.is_empty() {
+        return UtrUtteranceAlignmentEvidence::NoAlignableWords { utterance_index };
+    }
+    // A budget refusal refuses correspondence, never timing: an utterance
+    // that already has its bullet keeps it and says so.
+    if let (UtrCorrespondenceRefusal::BudgetExhausted(unsearched), Some(_)) =
+        (refusal, info.retained_timing)
+    {
+        return UtrUtteranceAlignmentEvidence::RetainedUnsearched {
+            utterance_index,
+            alignable_words,
+            unsearched,
+        };
+    }
+    let Some(matches) = NonEmptyUtrWordMatches::from_vec(matches) else {
+        return match refusal {
+            UtrCorrespondenceRefusal::BudgetExhausted(_) => {
+                UtrUtteranceAlignmentEvidence::Refused {
+                    utterance_index,
+                    alignable_words,
+                    reason: refusal,
                 }
-                return if info.words.is_empty() {
-                    UtrUtteranceAlignmentEvidence::NoAlignableWords {
-                        utterance_index: UtrUtteranceOrdinal(utterance_index),
-                    }
-                } else {
-                    UtrUtteranceAlignmentEvidence::Unmatched {
-                        utterance_index: UtrUtteranceOrdinal(utterance_index),
-                        alignable_words: info.words.len(),
-                    }
-                };
-            };
-            let proposal = asr_tokens.proposal(&matches);
+            }
+            UtrCorrespondenceRefusal::Ambiguous => UtrUtteranceAlignmentEvidence::Unmatched {
+                utterance_index,
+                alignable_words,
+            },
+        };
+    };
+    let Some(admitted_matches) = NonEmptyAdmittedUtrWordMatches::from_vec(admitted) else {
+        return UtrUtteranceAlignmentEvidence::SelectedOnly {
+            utterance_index,
+            alignable_words,
+            matches,
+            reason: refusal,
+        };
+    };
+    match admitted_matches.admit_endpoints(alignable_words, endpoints) {
+        lexical::BoundaryAdmission::Bound(admitted_matches) => {
+            let proposal = admitted_matches.proposal();
             UtrUtteranceAlignmentEvidence::Matched {
-                utterance_index: UtrUtteranceOrdinal(utterance_index),
-                alignable_words: info.words.len(),
+                utterance_index,
+                alignable_words,
                 matches,
+                admitted_matches,
                 proposal,
             }
-        })
-        .collect();
-
-    UtrAlignmentPlan {
-        strategy,
-        utterances,
+        }
+        lexical::BoundaryAdmission::Interior {
+            matches: admitted_matches,
+            missing,
+        } => UtrUtteranceAlignmentEvidence::InteriorOnly {
+            utterance_index,
+            alignable_words,
+            matches,
+            admitted_matches,
+            missing_endpoints: missing,
+        },
     }
 }
 
@@ -923,10 +1452,15 @@ pub fn find_untimed_windows(
     recording: &Recording,
     padding_ms: u64,
 ) -> Result<Vec<FaWindow>, WindowFault> {
-    // Collect bullet info for each utterance in order
+    // Collect bullet info for each utterance in order. One not in the
+    // recording needs no timing and bounds no window: it is left out.
     let mut utt_bullets: Vec<Option<(u64, u64)>> = Vec::new();
     for line in &chat_file.lines {
         if let Line::Utterance(utt) = line {
+            match RecordingPresence::of(utt) {
+                RecordingPresence::InRecording => {}
+                RecordingPresence::NotInRecording(_) => continue,
+            }
             utt_bullets.push(
                 utt.main
                     .content
@@ -1047,15 +1581,38 @@ mod tests {
                 words: (0..*count)
                     .map(|word_index| format!("u{utterance_index}-w{word_index}"))
                     .collect(),
-                has_bullet: false,
+                retained_timing: None,
                 has_lazy_overlap: false,
                 has_ca_overlap: false,
                 overlap_onset_fraction: None,
                 speaker: "PAR".to_string(),
+                presence: RecordingPresence::InRecording,
                 bottom_indices: Vec::new(),
                 top_onsets: Vec::new(),
             })
             .collect()
+    }
+
+    /// Plan a payload over an untimed census, which is one region spanning
+    /// the whole stream, through the same assembly production uses.
+    fn plan_untimed_payload(
+        payload: &[UtrPayloadWord],
+        asr_tokens: &[AsrTimingToken],
+        utt_infos: &[UtrUtteranceInfo],
+        mode: MatchMode,
+    ) -> UtrAlignmentPlan {
+        let regions = regions::partition(utt_infos);
+        assert_eq!(regions.len(), 1, "an untimed census is one region");
+        let lexical = lexical::UtrLexicalStream::from_tokens(asr_tokens);
+        let local = plan_utr_alignment(
+            payload,
+            &lexical,
+            regions[0].searched(utt_infos),
+            mode,
+            GlobalUtrParticipation::AllUtterances,
+            &ContestedTokens::none(),
+        );
+        UtrAlignmentPlan::assemble(UtrOrderModel::Monotonic, [local])
     }
 
     #[test]
@@ -1091,53 +1648,35 @@ mod tests {
             .collect()
     }
 
-    /// Projection consumes the plan's typed proposal, never the raw token
-    /// stream: the projection signature carries no tokens at all, so a plan
-    /// whose proposal says `[100, 900]` projects exactly that, and a
-    /// `NonPositive` proposal is refused with the zero-duration decision.
+    /// A prepared pass owns producer observations: later token changes cannot
+    /// alter its proposal, and nonpositive evidence remains a typed refusal.
     #[test]
     fn projection_consumes_the_plans_proposal_not_the_raw_tokens() {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\thello world .\n*CHI:\tmhm .\n@End\n";
-        let mut chat = parse_chat(chat_text);
-        let utt_infos = collect_utr_utterance_info(&chat);
-        let matched = |utterance_index: usize, proposal: UtrTimingProposal| {
-            UtrUtteranceAlignmentEvidence::Matched {
-                utterance_index: UtrUtteranceOrdinal(utterance_index),
-                alignable_words: utt_infos[utterance_index].words.len(),
-                matches: NonEmptyUtrWordMatches {
-                    first: UtrWordMatch {
-                        word: test_word_address(utterance_index, 0),
-                        token: test_token_address(utterance_index * 2),
-                        chat_text: "x".to_string(),
-                        asr_text: "x".to_string(),
-                        relation: UtrLexicalRelation::Exact,
-                    },
-                    rest: Vec::new(),
-                },
-                proposal,
-            }
-        };
-        let plan = UtrAlignmentPlan {
-            strategy: UtrAlignmentStrategy::GlobalDp,
-            utterances: vec![
-                matched(
-                    0,
-                    UtrTimingProposal::Positive {
-                        start_ms: 100,
-                        end_ms: 900,
-                    },
-                ),
-                matched(
-                    1,
-                    UtrTimingProposal::NonPositive {
-                        start_ms: 1_000,
-                        end_ms: 1_000,
-                    },
-                ),
-            ],
-        };
-        let result =
-            project_global_utr_plan(&mut chat, &utt_infos, plan, AnchorIndex::not_observed());
+        let parser = TreeSitterParser::new().expect("parser");
+        let errors = talkbank_model::ErrorCollector::new();
+        let mut chat = batchalign_transform::parse_source_with_parser(&parser, chat_text)
+            .admit(talkbank_model::model::TranscriptName::Anonymous, &errors)
+            .expect("complete source admission")
+            .into_valid_file()
+            .into_unchecked();
+        let mut tokens = make_asr_tokens(&[
+            ("hello", 100, 500),
+            ("world", 500, 900),
+            ("mhm", 1_000, 1_000),
+        ]);
+        let prepared = PreparedGlobalUtr::plan(
+            &mut chat,
+            &tokens,
+            GlobalUtrParticipation::AllUtterances,
+            MatchMode::CaseInsensitive,
+        );
+        // The prepared pass owns its observations, not a token-stream borrow.
+        // Changing provider data now cannot change the selected proposal.
+        tokens[0].start_ms = 42;
+        tokens[1].end_ms = 9_000;
+        tokens[2].end_ms = 2_000;
+        let result = prepared.project();
         assert_eq!(
             (result.injected(), result.skipped(), result.unmatched()),
             (1, 0, 1)
@@ -1149,6 +1688,29 @@ mod tests {
                 batchalign_transform::decisions::UtrStrategy::ZeroDurationSkipped
             )
         )));
+    }
+
+    #[test]
+    fn timing_corridor_intersection_is_positive_bounded_and_never_extended() {
+        for floor in [0, 100, 200, u64::MAX - 1, u64::MAX] {
+            for ceiling in [None, Some(0), Some(100), Some(200), Some(u64::MAX)] {
+                for (start, end) in [(0, 100), (100, 200), (u64::MAX - 1, u64::MAX)] {
+                    let proposal = PositiveUtrInterval::admit(start, end).expect("positive");
+                    let actual = UtrTimingCorridor::admit(floor, ceiling).intersect(proposal);
+                    let expected_start = start.max(floor);
+                    let expected_end = ceiling.map_or(end, |bound| end.min(bound));
+                    if expected_start < expected_end {
+                        let interval = actual.expect("nonempty intersection survives");
+                        assert_eq!(
+                            (interval.start_ms(), interval.end_ms()),
+                            (expected_start, expected_end),
+                        );
+                    } else {
+                        assert_eq!(actual, None, "exhausted or contradictory corridor");
+                    }
+                }
+            }
+        }
     }
 
     /// Every utterance's terminal bullet, in document order.
@@ -1328,15 +1890,17 @@ mod tests {
         ]);
         let utt_infos = test_utt_infos(&[2, 2]);
 
-        let plan = plan_utr_alignment(
+        let plan = plan_untimed_payload(
             &payload,
             &asr_tokens,
             &utt_infos,
             MatchMode::CaseInsensitive,
-            GlobalUtrParticipation::AllUtterances,
         );
 
-        assert_eq!(plan.strategy, UtrAlignmentStrategy::UniqueExactSubsequence);
+        assert_eq!(
+            plan.regions[0].strategy,
+            UtrAlignmentStrategy::UniqueExactSubsequence
+        );
         assert_eq!(plan.token_extents(), vec![Some((1, 2)), Some((3, 4))]);
         assert_eq!(
             plan.utterances[0],
@@ -1359,9 +1923,22 @@ mod tests {
                         relation: UtrLexicalRelation::Exact,
                     }],
                 },
+                admitted_matches: match NonEmptyAdmittedUtrWordMatches::from_vec(
+                    lexical::UtrLexicalStream::from_tokens(&asr_tokens).unique_embedding_matches(
+                        &payload[..2],
+                        &UniqueEmbedding {
+                            indices: vec![1, 2]
+                        },
+                    ),
+                )
+                .expect("nonempty producer proof")
+                .admit_endpoints(2, lexical::EndpointExtents::UNOBSERVED)
+                {
+                    lexical::BoundaryAdmission::Bound(matches) => matches,
+                    lexical::BoundaryAdmission::Interior { .. } => panic!("both endpoints proved"),
+                },
                 proposal: UtrTimingProposal::Positive {
-                    start_ms: 10,
-                    end_ms: 30,
+                    interval: PositiveUtrInterval::admit(10, 30).expect("positive fixture"),
                 },
             }
         );
@@ -1387,15 +1964,14 @@ mod tests {
         ]);
         let utt_infos = test_utt_infos(&[2]);
 
-        let plan = plan_utr_alignment(
+        let plan = plan_untimed_payload(
             &payload,
             &asr_tokens,
             &utt_infos,
             MatchMode::CaseInsensitive,
-            GlobalUtrParticipation::AllUtterances,
         );
 
-        assert_eq!(plan.strategy, UtrAlignmentStrategy::GlobalDp);
+        assert_eq!(plan.regions[0].strategy, UtrAlignmentStrategy::GlobalDp);
         let range = plan.token_extents()[0].expect("DP fallback should still time the utterance");
         assert_eq!(range.1, 3, "Range should reach the aligned final token");
     }
@@ -1409,13 +1985,7 @@ mod tests {
         let asr_tokens = make_asr_tokens(&[("hello", 10, 20)]);
         let utt_infos = test_utt_infos(&[1]);
 
-        let plan = plan_utr_alignment(
-            &payload,
-            &asr_tokens,
-            &utt_infos,
-            MatchMode::Exact,
-            GlobalUtrParticipation::AllUtterances,
-        );
+        let plan = plan_untimed_payload(&payload, &asr_tokens, &utt_infos, MatchMode::Exact);
 
         assert!(matches!(
             plan.utterances[0],
@@ -1427,12 +1997,15 @@ mod tests {
     fn global_plan_retains_a_proposal_for_an_already_timed_utterance() {
         let input = include_str!("../../../../../test-fixtures/fa_two_timed_utterances.cha");
         let chat = parse_chat(input);
+        // Tokens agree with the fixture's bullets (0_5000, 5000_10000): each
+        // timed utterance anchors a region, and a token is searched only in
+        // the regions whose onset window holds it.
         let tokens = make_asr_tokens(&[
             ("hello", 100, 300),
             ("world", 500, 900),
-            ("I", 1_100, 1_200),
-            ("want", 1_300, 1_500),
-            ("cookie", 1_600, 1_900),
+            ("I", 5_100, 5_200),
+            ("want", 5_300, 5_500),
+            ("cookie", 5_600, 5_900),
         ]);
 
         let plan = plan_global_utr_alignment(
@@ -1447,11 +2020,10 @@ mod tests {
             plan.utterances[0],
             UtrUtteranceAlignmentEvidence::Matched {
                 proposal: UtrTimingProposal::Positive {
-                    start_ms: 100,
-                    end_ms: 900
+                    interval
                 },
                 ..
-            }
+            } if interval.start_ms() == 100 && interval.end_ms() == 900
         ));
     }
 
@@ -1551,8 +2123,23 @@ mod tests {
     /// to consume ASR tokens that later utterances needed. The regression must
     /// therefore prove two things:
     ///
-    /// 1. coverage matches the known-good legacy output, and
+    /// 1. coverage matches the legacy output, except where the legacy hint
+    ///    was a crop our recovery deliberately declines, and
     /// 2. recovered bullets still land in the same timing neighborhood.
+    ///
+    /// The legacy output is evidence, not gold. Two of its hints were built
+    /// from interior words alone, in utterances whose endpoint word the ASR
+    /// stream does not contain in any reading: U5 "and dad's driving" (no
+    /// "and" was recognised before "Dad's") and U11 "and she's blowing
+    /// bubblegum" (the provider wrote "bubble" "gumm"). A hint there is the
+    /// hull of the interior tokens, which excludes the endpoint's speech; our
+    /// recovery gives those utterances no hint, keeps their interior anchors,
+    /// and lets forced alignment search an order corridor instead
+    /// (`interior_only_regression_utterances_get_windows_containing_the_legacy_span`).
+    /// They are pinned here by utterance and missing endpoint: any other
+    /// legacy-timed utterance without a hint is a coverage regression, and so
+    /// is either of these two gaining or losing a hint without this list
+    /// changing.
     #[test]
     fn test_utr_real_world_trimmed_regression() {
         let chat_input =
@@ -1562,7 +2149,20 @@ mod tests {
         let expected_json =
             include_str!("../../../../../test-fixtures/utr_real_world_regression_expected.json");
 
-        let mut chat = parse_chat(chat_input);
+        let parser = TreeSitterParser::new().expect("parser");
+        let mut chat = batchalign_transform::parse_source_with_parser(&parser, chat_input)
+            .admit(
+                talkbank_model::model::TranscriptName::Named(
+                    talkbank_model::model::FileStem::from_path(std::path::Path::new(
+                        "utr_real_world_regression_input.cha",
+                    ))
+                    .expect("fixture name"),
+                ),
+                &talkbank_model::NullErrorSink,
+            )
+            .expect("complete named fixture admission")
+            .into_valid_file()
+            .into_unchecked();
         let tokens: Vec<AsrTimingToken> = serde_json::from_str(tokens_json).unwrap();
 
         let expected: Vec<ExpectedUtrFixture> = serde_json::from_str(expected_json).unwrap();
@@ -1629,12 +2229,40 @@ mod tests {
             }
         }
 
+        // Declined deliberately: (utterance ordinal, the endpoint no reading
+        // of the ASR stream contains). See the doc comment.
+        let declined = [
+            (4, MissingUtrEndpoints::First),
+            (10, MissingUtrEndpoints::Last),
+        ];
+        let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
+            panic!("global plan");
+        };
+        for (index, endpoint) in declined {
+            assert!(
+                matches!(
+                    plan.utterances[index],
+                    UtrUtteranceAlignmentEvidence::InteriorOnly { missing_endpoints, .. }
+                        if missing_endpoints == endpoint
+                ),
+                "U{} must be declined for its {endpoint:?} endpoint, got {:?}",
+                index + 1,
+                plan.utterances[index]
+            );
+            assert_eq!(actual_timing[index], None, "U{} has no hint", index + 1);
+        }
+        coverage_regressions.retain(|line| {
+            !declined
+                .iter()
+                .any(|(index, _)| line.starts_with(&format!("  U{} ", index + 1)))
+        });
+
         let old_timed = expected.iter().filter(|e| e.start_ms.is_some()).count();
 
-        // The goal: match or exceed old batchalign's coverage.
-        // Old batchalign: 53/54 timed. We allow at most 1 regression.
+        // The goal: match or exceed old batchalign's coverage, apart from the
+        // declined crops, which are pinned above.
         assert!(
-            timed_count >= old_timed,
+            coverage_regressions.is_empty() && timed_count + declined.len() >= old_timed,
             "UTR regression: old batchalign timed {old_timed}/{total} utterances, \
              ba3 only timed {timed_count}/{total}.\n\
              Regressions ({n_reg}):\n{details}",
@@ -1659,6 +2287,64 @@ mod tests {
             expected.len(),
             "result counters should sum to total utterances"
         );
+    }
+
+    /// The two legacy-timed utterances the regression above no longer hints
+    /// (U5, U11) have interior-only proof: an unproved first or last word,
+    /// so no hint. Their neighbours' proved timings still bound where all of
+    /// their words can be, and that bound reaches forced alignment as a
+    /// search window, never as a bullet. Each window contains the legacy span.
+    #[test]
+    fn interior_only_regression_utterances_get_windows_containing_the_legacy_span() {
+        let parser = TreeSitterParser::new().expect("parser");
+        let mut chat = batchalign_transform::parse_source_with_parser(
+            &parser,
+            include_str!("../../../../../test-fixtures/utr_real_world_regression_input.cha"),
+        )
+        .admit(
+            talkbank_model::model::TranscriptName::Named(
+                talkbank_model::model::FileStem::from_path(std::path::Path::new(
+                    "utr_real_world_regression_input.cha",
+                ))
+                .expect("fixture name"),
+            ),
+            &talkbank_model::NullErrorSink,
+        )
+        .expect("complete named fixture admission")
+        .into_valid_file()
+        .into_unchecked();
+        let tokens: Vec<AsrTimingToken> = serde_json::from_str(include_str!(
+            "../../../../../test-fixtures/utr_real_world_regression_tokens.json"
+        ))
+        .expect("tokens");
+        let expected: Vec<ExpectedUtrFixture> = serde_json::from_str(include_str!(
+            "../../../../../test-fixtures/utr_real_world_regression_expected.json"
+        ))
+        .expect("expected");
+        let result = inject_utr_timing(&mut chat, &tokens);
+        let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
+            panic!("global plan");
+        };
+        for index in [4, 10] {
+            assert!(matches!(
+                plan.utterances[index],
+                UtrUtteranceAlignmentEvidence::InteriorOnly { .. }
+            ));
+            assert_eq!(utterance_bullets(&chat)[index], None, "no hint");
+            let window = serde_json::to_value(&plan.search_envelopes[index]).expect("wire");
+            assert_eq!(window["scope"]["kind"], "order_corridor");
+            let (floor, ceiling) = (
+                window["floor_ms"].as_u64().expect("floor"),
+                window["ceiling_ms"].as_u64().expect("bounded ceiling"),
+            );
+            let legacy = &expected[index];
+            assert!(
+                floor <= legacy.start_ms.expect("legacy start")
+                    && ceiling >= legacy.end_ms.expect("legacy end"),
+                "U{} window [{floor},{ceiling}] contains the legacy span",
+                index + 1
+            );
+        }
     }
 
     #[test]

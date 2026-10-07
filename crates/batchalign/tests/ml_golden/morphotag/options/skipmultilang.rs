@@ -66,10 +66,25 @@ async fn option_morphotag_skipmultilang() {
     assert_completed_without_errors("skipmultilang_false", &info_a, &results_a);
     assert_completed_without_errors("skipmultilang_true", &info_b, &results_b);
 
-    assert_eq!(count_mor_lines(&results_a[0].content), 2);
-    assert_eq!(count_mor_lines(&results_b[0].content), 1);
-    assert!(results_b[0].content.contains("*CHI:\t[- spa] hola mundo ."));
-    assert_ne!(results_a[0].content, results_b[0].content);
+    assert_eq!(
+        count_mor_lines(results_a[0].content.as_text().expect("text command result")),
+        2
+    );
+    assert_eq!(
+        count_mor_lines(results_b[0].content.as_text().expect("text command result")),
+        1
+    );
+    assert!(
+        results_b[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("*CHI:\t[- spa] hola mundo .")
+    );
+    assert_ne!(
+        results_a[0].content.as_text().expect("text command result"),
+        results_b[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -117,7 +132,13 @@ async fn option_morphotag_skipmultilang_only_skips_multilingual_neighbors() {
         .find(|result| result.filename == "bilingual_skipped.cha")
         .expect("bilingual file result");
 
-    assert!(count_mor_lines(&mono.content) == 2);
-    assert!(count_mor_lines(&bilingual.content) == 1);
-    assert!(bilingual.content.contains("*CHI:\t[- spa] hola mundo ."));
+    assert!(count_mor_lines(mono.content.as_text().expect("text command result")) == 2);
+    assert!(count_mor_lines(bilingual.content.as_text().expect("text command result")) == 1);
+    assert!(
+        bilingual
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("*CHI:\t[- spa] hola mundo .")
+    );
 }

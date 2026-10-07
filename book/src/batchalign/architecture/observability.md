@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-15 18:27 EDT
+**Last updated:** 2026-10-06 22:34 EDT
 
 ## Release boundary
 
@@ -220,6 +220,15 @@ utterance/word and ASR-token addresses plus an exact, case-insensitive, or
 fixed-point fuzzy relation. Global and two-pass results are different variants,
 so a timing-only overlap recovery cannot masquerade as a global word match.
 
+Global projection consumes a source-bound prepared pass owning the transcript
+borrow and its census, plan, anchors and retained timing bounds. A hint that
+conflicts with preceding/following non-overlap timing is narrowed or refused,
+without changing the selected plan. Review-required `projection_exhausted`
+decisions retain the proposal and floor/ceiling; counts describe actual
+mutation, not every selected match. Marked-overlap exemptions and original
+bullets are preserved. Offline replay returns lexical evidence only, so it
+does not demonstrate that production projection accepted a hint.
+
 `UtrResult` fields are read through accessors rather than public construction.
 UTR evidence construction lives in a dedicated module whose address
 constructors remain private to the UTR implementation. Distinct utterance,
@@ -236,7 +245,42 @@ construction paths.
 The regular `_utr_result.json` debug artifact serializes this plan. The
 offline `eval utr-alignment` action can reconstruct the same global plan from
 an exact `_utr_input.cha` and `_utr_tokens.json` pair without model or provider
-inference. Its report fingerprints both inputs and records the build identity.
+inference, after complete named CHAT admission with no tier exemptions. Its
+report fingerprints both inputs and records the build identity; selected
+correspondence does not by itself establish uniqueness or acoustic correctness.
+For renamed snapshots, `--source-name` supplies the original transcript filename
+without disabling filename checks. Schema 3 records its checked stem and
+caller-declared basis separately from the replay input path and hash.
+Schema 6 also records `interleaving`: bounded, read-only two-speaker lexical
+observations for adjacent different-speaker turns. Each speaker's word order
+is preserved and reference assignments are exclusive across both speakers.
+The producer retains one selected optimum, every possible match, whether each
+word can be omitted on an optimum, and correspondences common to all optima.
+Cell-budget refusal is separate from completed ambiguous evidence.
+
+Schema 7 retains that diagnostic relaxation and separately records the production
+`local_interleaving` plan. Its whole-source DAG jointly selects singleton turns
+or disjoint episodes of one turn and a following other-speaker overlap run, reserving reference words across
+the transcript. Extending beyond the first adjacent turn requires typed-source
+overlap continuations, not a guessed timing or text scan. It does not promote
+independent pair observations. Search
+envelopes produced by this proof include an `interleaved` scope with original
+same-speaker `floor_ms`/`ceiling_ms` bounds; monotonic document envelopes retain
+their existing encoding. Selection remains distinct from admitted common
+correspondence. A pre-selection proof refusal is `refused` with a
+`budget_exhausted` reason naming its anchored region and budget, not
+`unmatched`: no unbounded monotonic rematch is performed just to populate an
+inspection path. The refusal covers that region only; a timed utterance in it
+is `retained_unsearched` (schema 9). See
+[the bounded order model](../developer/backchannel-aware-alignment.md#bounded-partial-order-correspondence-kernel).
+
+The diagnostic relaxation uses the entire retained ASR lexical stream for
+each pair; it does not reserve other turns' words or establish acoustic speaker
+identity. It is **not itself authority for production timing or FA search**. Its
+common matches cannot construct admitted UTR matches, anchors, timing hints
+or output permission. The separate whole-source producer owns those reservations
+and timing bounds; a plausible earlier repeat is not sufficient evidence to
+select that location. Neither lexical analysis establishes acoustic accuracy.
 This is intentionally separate from CHAT: BA3 does not restore `%xalign`, and
 an observation sidecar does not authorize a production bullet or `%wor`
 change.
@@ -368,8 +412,19 @@ Diagram verified against:
 
 ### Per-file progress
 
-Each file tracks: status (queued/processing/done/error), stage, current/total
-counters. Published via `RunnerEventSink::set_file_progress()` to the store
+Each file tracks: status (queued/processing/done/diagnosed/error), stage,
+current/total counters. `diagnosed` is terminal written output that carries its
+admission findings and shortfalls, bounded (see the developer page on CHAT
+validation failures); a job with diagnosed files is not a clean success
+(`diagnosed_files` on the job list, CLI exit code 7).
+While any of a file's worker checkouts waits on a saturated pool, its stage
+is `waiting_for_worker` ("Waiting for a worker"), and otherwise the stage its
+pipeline last reported, with its counts: the store keeps the open waits and
+the reported stage as two facts and derives what the file shows. The wait has no deadline: it is logged and
+reconciled once per report interval, and ends as `PoolAccountingBroken` only
+when a group it waits on counts the same workers nothing holds at two
+consecutive intervals (see
+the batchalign-workers page, saturation safeguards). Published via `RunnerEventSink::set_file_progress()` to the store
 and broadcast over WebSocket to the dashboard.
 
 ### Batch-inference progress

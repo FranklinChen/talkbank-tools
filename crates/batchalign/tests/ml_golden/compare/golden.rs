@@ -52,11 +52,29 @@ async fn golden_compare_eng() {
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_none());
 
-    let file = parse_output(&results[0].content, "compare_eng");
+    let file = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "compare_eng",
+    );
     assert!(has_user_defined_tier(&file, "xsrep"));
-    assert!(!results[0].content.contains("%mor:"));
-    assert!(!results[0].content.contains("%gra:"));
-    assert_golden_snapshot!("compare_eng", &results[0].content);
+    assert!(
+        !results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%mor:")
+    );
+    assert!(
+        !results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%gra:")
+    );
+    assert_golden_snapshot!(
+        "compare_eng",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -103,10 +121,25 @@ async fn golden_compare_uses_template_gold_fallback() {
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_none());
 
-    let file = parse_output(&results[0].content, "compare_template_gold");
+    let file = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "compare_template_gold",
+    );
     assert!(has_user_defined_tier(&file, "xsrep"));
-    assert!(!results[0].content.contains("%mor:"));
-    assert!(!results[0].content.contains("%gra:"));
+    assert!(
+        !results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%mor:")
+    );
+    assert!(
+        !results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%gra:")
+    );
 }
 
 #[tokio::test]

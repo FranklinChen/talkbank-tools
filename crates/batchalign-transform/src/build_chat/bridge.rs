@@ -2,7 +2,7 @@ use talkbank_model::model::{ChatFile, LanguageCode};
 
 use crate::asr_postprocess;
 
-use super::{ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc};
+use super::{DescribedTiming, ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc};
 
 /// Build a CHAT file from a JSON transcript description string.
 ///
@@ -136,10 +136,12 @@ mod diagnostic_tests {
 /// line, where it looks handled. `WordDesc` cannot say "this one is unproved",
 /// so the fact travels beside the description instead.
 ///
-/// Emitting the token verbatim is a deliberate, unchanged POLICY: the surface
-/// is the provider's observation and what it should have been is a human's
-/// call, not the pipeline's. Reporting it is the other half of that policy,
-/// which was never built.
+/// Emitting the token verbatim is a deliberate POLICY for every token whose
+/// CHAT form the surface does not determine: the surface is the provider's
+/// observation and what it should have been is a human's call, not the
+/// pipeline's. Tokens whose form the CHAT manual does determine were written
+/// in it upstream (`asr_postprocess::write_word_forms`). Reporting is the
+/// other half of the policy.
 #[derive(Debug, Clone)]
 pub struct LanguageInvalidWord {
     /// Zero-based index of the utterance the word is in.
@@ -317,8 +319,10 @@ fn build_named_asr_transcript(
             speaker: speaker_id,
             words: Some(words),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            // Word-level utterances take their span from their words.
+            timing: DescribedTiming::Untimed(
+                asr_postprocess::UntimedCause::ProviderReportedNoTiming,
+            ),
             lang: utterance.lang.clone(),
         });
     }
@@ -395,10 +399,12 @@ fn validate_asr_word(
     utt_idx: usize,
     word_idx: usize,
 ) -> Result<WordAdmission, TranscriptBuildError> {
+    // The word's bounds are admitted here, once: a positive interval or an
+    // untimed word with its cause. Nothing downstream sees the two numbers.
+    let timing = DescribedTiming::admit_millis(word.start_ms, word.end_ms);
     let describe = |text: asr_postprocess::ChatWordText| WordDesc {
         text,
-        start_ms: word.start_ms.map(|ms| ms as u64),
-        end_ms: word.end_ms.map(|ms| ms as u64),
+        timing,
         kind: word.kind,
     };
 

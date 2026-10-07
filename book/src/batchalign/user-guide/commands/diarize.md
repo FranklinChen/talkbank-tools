@@ -1,7 +1,7 @@
 # diarize
 
 **Status:** Current
-**Last updated:** 2026-09-16 03:36 EDT
+**Last updated:** 2026-10-06 11:44 EDT
 
 Detect speaker turns in audio (speaker diarization) without transcribing.
 Each input media file produces a speaker-turns JSON artifact naming which
@@ -22,6 +22,45 @@ evidence before utterance segmentation and CHAT construction. Use standalone
 `diarize` when you need reusable acoustic turns for an existing transcript;
 use integrated transcription when creating a new transcript from audio.
 
+These paths do not have the same segmentation contract. Integrated
+transcription projects speaker evidence onto timed ASR words and splits
+prepared speech chunks when the assigned track changes. By contrast,
+`chatter rediarize` reattributes whole existing main-tier utterances; it does
+not split an existing mixed-speaker utterance at its `%wor` boundaries.
+`--contested-at SHARE` makes such mixed whole-turn evidence visible for review.
+Utterances lacking a main-tier bullet or any overlapping diarizer turn are
+retained and explicitly flagged. Neither a successful rewrite nor a contested
+assignment certifies every word's speaker. Standalone `diarize` also has a
+separate, explicit timed-CHAT splitting mode described below; it does not
+change `chatter rediarize`'s whole-turn contract.
+
+## Explicit timed-CHAT splitting
+
+Pass `--speaker-map PAR0=CHI,PAR1=MOT` to select CHAT input and CHAT output.
+Each target must already occur in the source's valid `@Participants`/`@ID`
+declarations. Names, ages, roles and all other header facts remain unchanged.
+The map is supplied by the caller, not inferred from voice or copied from the
+first participant. Anonymous tracks use the same sorted model-label coordinates
+as `.turns.json`; they are not numbered by first appearance. Inspect retained
+turn evidence to establish the mapping. A corpus-wide mapping is appropriate
+only when the caller has established that correspondence for each recording.
+
+Every eligible lexical word must have a positive, lexically corroborated `%wor`
+interval before inference starts. Each word is assigned to the mapped participant
+with the largest positive union-held duration within that interval. Repeated
+acoustic turns do not count twice. Exact ties, uncovered words, missing mappings
+and boundaries inside indivisible annotated groups refuse output; no nearest
+speaker or previous-speaker fallback fills the gap. Nonlexical utterances retain
+their original speaker and are reported explicitly.
+
+Speaker changes split the utterance into contiguous runs, including returns to
+an earlier speaker. Child main-tier bullets come from their actual retained
+word intervals, not subdivision of the parent's hull. Contributor free-text
+annotations remain attached to the first child. Boundary-dependent analysis
+tiers invalidated by partitioning are named in an output `@Comment` and must be
+regenerated when needed. The final document undergoes complete typed construction
+admission before writing; acoustic eligibility alone is not write permission.
+
 ---
 
 ## Quick start
@@ -38,6 +77,9 @@ batchalign3 diarize session.mp3 -o turns/ --speaker-engine pyannote-ai
 
 # Then repair a transcript's speaker attribution with chatter
 chatter rediarize session.cha --turns turns/session.turns.json
+
+# Split an existing completely word-timed transcript with declared identities
+batchalign3 diarize session.cha -o corrected/ --speaker-map PAR0=CHI,PAR1=MOT
 ```
 
 ---
@@ -72,8 +114,9 @@ flowchart TD
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `PATHS...` | | Input media files and/or directories (`.mp3`, `.mp4`, `.wav`) |
-| `-o, --output DIR` | | Output directory for `.turns.json` artifacts |
+| `PATHS...` | | Media files/directories without a mapping; CHAT files/directories with `--speaker-map` |
+| `-o, --output DIR` | | Output directory for `.turns.json` artifacts or mapped CHAT |
+| `--speaker-map MAP` | absent | Select timed-CHAT splitting with explicit `PAR0=CHI,PAR1=MOT` mappings to existing participants |
 | `--num-speakers N` | auto-detect | Expected speaker count, 2 or more. Omit unless known: auto-detection is the point of the engine. A count of 1 is refused when the arguments are parsed |
 | `--speaker-engine {pyannote,pyannote-ai,nemo}` | `pyannote` | Local TalkBank Pyannote, paid pyannoteAI Precision-2, or local NeMo |
 | `--lang CODE` | `eng` | 3-letter ISO code for worker-pool selection only; diarization itself is language-independent |

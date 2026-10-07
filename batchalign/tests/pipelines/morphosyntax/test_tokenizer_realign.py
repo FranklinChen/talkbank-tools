@@ -8,6 +8,8 @@ matching Python master's tokenizer_processor rules exactly:
 
 from __future__ import annotations
 
+import pytest
+
 from batchalign.inference._tokenizer_realign import (
     TokenizerContext,
     _conform,
@@ -117,6 +119,43 @@ class TestRealignSentenceMwtTuples:
         result = _realign_sentence(tokens, words, alpha2="fr")
         assert result == [("l'", False)]
 
+    def test_french_native_components_remain_one_authoritative_word(self) -> None:
+        result = _realign_sentence(
+            ["l'", "escargot", "dort", "."],
+            ["l'escargot", "dort", "."],
+            alpha2="fr",
+        )
+        assert result == [("l'escargot", ["l'", "escargot"]), "dort", "."]
+
+    def test_stanza_accepts_checked_expansion_without_loading_models(self) -> None:
+        from stanza.models.common.doc import Document
+        from stanza.models.tokenization.utils import postprocess_doc
+
+        surface = "l'escargot dort ."
+        native = [
+            [
+                {"id": (1,), "text": "l'"},
+                {"id": (2,), "text": "escargot"},
+                {"id": (3,), "text": "dort"},
+                {"id": (4,), "text": "."},
+            ]
+        ]
+        ctx = TokenizerContext()
+        ctx.original_words = [["l'escargot", "dort", "."]]
+        rows = postprocess_doc(native, make_tokenizer_postprocessor(ctx, "fr"), surface)
+        document = Document(rows, text=surface)
+        assert [token.text for token in document.sentences[0].tokens] == [
+            "l'escargot",
+            "dort",
+            ".",
+        ]
+        assert [word.text for word in document.sentences[0].words] == [
+            "l'",
+            "escargot",
+            "dort",
+            ".",
+        ]
+
     def test_single_token_unchanged(self) -> None:
         """Single-token words pass through unchanged (no merge, no tuple)."""
         tokens = ["hello", "world"]
@@ -160,13 +199,21 @@ class TestRealignSentenceMwtTuples:
         result = _realign_sentence(tokens, words)  # alpha2 defaults to ""
         assert result == [("don't", False)]
 
-    def test_character_mismatch_returns_unchanged(self) -> None:
-        """When chars don't match, return stanza tokens unmodified."""
+    def test_character_mismatch_refuses_unbound_native_tokens(self) -> None:
         tokens = ["totally", "different"]
         words = ["something", "else"]
-        result = _realign_sentence(tokens, words, alpha2="en")
-        # No merge attempt: returned as-is
-        assert result == tokens
+        with pytest.raises(ValueError, match="does not fit"):
+            _realign_sentence(tokens, words, alpha2="en")
+
+    def test_native_token_cannot_cross_word_boundary(self) -> None:
+        with pytest.raises(ValueError, match="does not fit"):
+            _realign_sentence(["foobar"], ["foo", "bar"], alpha2="en")
+
+    def test_embedded_space_fragments_preserve_later_native_hint(self) -> None:
+        result = _realign_sentence(
+            ["ice cream", ("that's", True)], ["ice", "cream", "that's"], "en"
+        )
+        assert result == ["ice", "cream", ("that's", True)]
 
 
 # ---------------------------------------------------------------------------
@@ -201,3 +248,10 @@ class TestMakeTokenizerPostprocessor:
         batch = [["hello", "world"]]
         result = pp(batch)  # type: ignore[operator]
         assert result is batch
+
+    def test_extra_native_sentence_cannot_escape_bound_request(self) -> None:
+        ctx = TokenizerContext()
+        ctx.original_words = [["hello"]]
+        pp = make_tokenizer_postprocessor(ctx, alpha2="en")
+        with pytest.raises(ValueError, match="sentence count"):
+            pp([["hello"], ["unrequested"]])

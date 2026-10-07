@@ -179,6 +179,7 @@ pub mod media;
 pub mod merge_verify;
 pub(crate) mod model_manifest;
 pub mod morphosyntax;
+mod owned_future;
 mod pipeline;
 pub(crate) mod planning;
 pub mod provenance;
@@ -249,7 +250,7 @@ pub(crate) use websocket::ws_route;
 /// The one reader of `BUILD_HASH` in the crate. The CLI's stale-daemon check,
 /// the unchecked-ASR warning, receipts and the registry's foreign-build
 /// refusal all ask here, so they cannot disagree about which build this is.
-pub fn build_hash() -> &'static str {
+pub const fn build_hash() -> &'static str {
     env!("BUILD_HASH")
 }
 

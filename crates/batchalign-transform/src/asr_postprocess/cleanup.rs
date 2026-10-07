@@ -518,6 +518,13 @@ fn apply_utterance_initial_capitalization(utterances: &mut [Utterance]) {
             if !owns_utterance_initial_cap(text) {
                 continue;
             }
+            // A letter string (`www@k`, from a reserved-marker spelling; see
+            // `write_word_forms`) owns the slot but is written in lowercase,
+            // as letters are: capitalizing it would write a different
+            // letter.
+            if is_letter_form(text) {
+                break;
+            }
             // First real word: capitalize it via the local helper (a no-op if
             // it already starts with an uppercase or non-letter character), then
             // stop: one capitalization per utterance.
@@ -526,6 +533,12 @@ fn apply_utterance_initial_capitalization(utterances: &mut [Utterance]) {
             break;
         }
     }
+}
+
+/// Whether `text` carries a CHAT letter form marker: `@l` (a letter) or `@k`
+/// (a string of letters).
+fn is_letter_form(text: &str) -> bool {
+    text.ends_with("@l") || text.ends_with("@k")
 }
 
 /// Does this surface OWN the utterance-initial capitalization slot?

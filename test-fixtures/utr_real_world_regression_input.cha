@@ -5,7 +5,7 @@
 @Participants:	PAR Investigator, INV Participant
 @ID:	eng|ExampleCorpus|PAR|71;00.|female|MCI||Investigator|||
 @ID:	eng|ExampleCorpus|INV|||||Participant|||
-@Media:	utr-regression-trimmed, audio
+@Media:	utr_real_world_regression_input, audio, unlinked
 @Comment:	Batchalign 0.8.1-post.12, ASR Engine rev.
 @G:	Rockwell
 *INV:	tell me &-um a story about this picture .

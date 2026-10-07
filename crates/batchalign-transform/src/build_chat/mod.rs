@@ -33,7 +33,9 @@ pub use bridge::{
     AsrDiagnosticError, AsrTranscript, LanguageInvalidWord, NamedAsrUtterances,
     TranscriptBuildError, build_chat_from_json, transcript_from_asr_utterances,
 };
-pub use schema::{ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc};
+pub use schema::{
+    DescribedTiming, ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc,
+};
 pub use utterances::tag_marker_separator;
 
 use headers::{build_header_lines, build_participant_map};

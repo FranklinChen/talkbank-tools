@@ -81,8 +81,8 @@ pub struct CommandSpec {
     /// (label `"asr,eval"`) diverge: see the table in the Phase β
     /// plan, Step 4.1.
     pub task_label: &'static str,
-    /// Worker profile classification (Gpu / Stanza / Io).
-    pub profile: WorkerProfile,
+    /// Worker profile classification; native work owns no worker profile.
+    pub profile: Option<WorkerProfile>,
     /// Whether this command needs a process worker per runtime mode.
     pub gil_process_need: GilProcessNeed,
     /// Base memory budget when running on a process worker.
@@ -118,7 +118,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Align,
         tasks: &[InferTask::Fa],
         task_label: "fa",
-        profile: WorkerProfile::Gpu,
+        profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
         // Not in process_commands.{gil,free_threaded} in the TOML.
         gil_process_need: GilProcessNeed::Never,
@@ -130,7 +130,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Transcribe,
         tasks: &[InferTask::Asr],
         task_label: "asr",
-        profile: WorkerProfile::Gpu,
+        profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
         // Not in process_commands.{gil,free_threaded} in the TOML.
         gil_process_need: GilProcessNeed::Never,
@@ -142,7 +142,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::TranscribeS,
         tasks: &[InferTask::Asr],
         task_label: "asr",
-        profile: WorkerProfile::Gpu,
+        profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
         // Not in process_commands.{gil,free_threaded} in the TOML.
         gil_process_need: GilProcessNeed::Never,
@@ -154,7 +154,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Translate,
         tasks: &[InferTask::Translate],
         task_label: "translate",
-        profile: WorkerProfile::Io,
+        profile: Some(WorkerProfile::Io),
         // Io (API-call) worker; no subprocess isolation needed.
         // Not in process_commands.{gil,free_threaded} in the TOML.
         gil_process_need: GilProcessNeed::Never,
@@ -166,7 +166,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Morphotag,
         tasks: &[InferTask::Morphosyntax],
         task_label: "morphosyntax",
-        profile: WorkerProfile::Stanza,
+        profile: Some(WorkerProfile::Stanza),
         gil_process_need: GilProcessNeed::OnlyInGilRuntime,
         base_mb_process: MemoryMb(8_000),
         base_mb_threaded: MemoryMb(2_000),
@@ -176,7 +176,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Coref,
         tasks: &[InferTask::Coref],
         task_label: "coref",
-        profile: WorkerProfile::Stanza,
+        profile: Some(WorkerProfile::Stanza),
         gil_process_need: GilProcessNeed::OnlyInGilRuntime,
         base_mb_process: MemoryMb(4_000),
         base_mb_threaded: MemoryMb(2_000),
@@ -188,7 +188,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         // Diverges from InferTask snake_case name: historical TOML label
         // is "utterance", not "utseg". Task 5 codegen emits this verbatim.
         task_label: "utterance",
-        profile: WorkerProfile::Stanza,
+        profile: Some(WorkerProfile::Stanza),
         gil_process_need: GilProcessNeed::OnlyInGilRuntime,
         base_mb_process: MemoryMb(6_000),
         base_mb_threaded: MemoryMb(2_000),
@@ -202,7 +202,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         // the typed InferTask. The task_label is preserved verbatim for
         // Task 5 codegen's cmd2task projection.
         task_label: "asr,eval",
-        profile: WorkerProfile::Gpu,
+        profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
         // Not in process_commands.{gil,free_threaded} in the TOML.
         gil_process_need: GilProcessNeed::Never,
@@ -214,7 +214,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Opensmile,
         tasks: &[InferTask::Opensmile],
         task_label: "opensmile",
-        profile: WorkerProfile::Io,
+        profile: Some(WorkerProfile::Io),
         // In both process_commands.gil and process_commands.free_threaded
         // needs process isolation regardless of runtime.
         gil_process_need: GilProcessNeed::Always,
@@ -226,7 +226,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Compare,
         tasks: &[InferTask::Morphosyntax],
         task_label: "morphosyntax",
-        profile: WorkerProfile::Stanza,
+        profile: Some(WorkerProfile::Stanza),
         // In both process_commands.gil and process_commands.free_threaded.
         gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(8_000),
@@ -237,7 +237,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Avqi,
         tasks: &[InferTask::Avqi],
         task_label: "avqi",
-        profile: WorkerProfile::Io,
+        profile: Some(WorkerProfile::Io),
         // In both process_commands.gil and process_commands.free_threaded.
         gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(1_500),
@@ -248,7 +248,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::Diarize,
         tasks: &[InferTask::Speaker],
         task_label: "speaker",
-        profile: WorkerProfile::Gpu,
+        profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply
         // (same footing as the transcribe_s speaker stage).
         gil_process_need: GilProcessNeed::Never,
@@ -260,7 +260,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: ReleasedCommand::SpeakerIdentify,
         tasks: &[InferTask::Speaker],
         task_label: "speaker",
-        profile: WorkerProfile::Gpu,
+        profile: Some(WorkerProfile::Gpu),
         gil_process_need: GilProcessNeed::Never,
         // Lower than diarization deliberately: the embedding graph is one
         // ~26 MB ONNX model run over a few seconds of audio at a time, where
@@ -270,6 +270,16 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         // refuse spawns it should have allowed.
         base_mb_process: MemoryMb(1_000),
         base_mb_threaded: MemoryMb(1_000),
+        loading_overhead: LoadingOverhead::new_unchecked(1.5),
+    },
+    CommandSpec {
+        name: ReleasedCommand::Convert,
+        tasks: &[],
+        task_label: "",
+        profile: None,
+        gil_process_need: GilProcessNeed::Never,
+        base_mb_process: MemoryMb(256),
+        base_mb_threaded: MemoryMb(256),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
 ];
@@ -317,7 +327,7 @@ mod tests {
     #[test]
     fn morphotag_classification_matches_toml() {
         let spec = command_spec_for(ReleasedCommand::Morphotag);
-        assert_eq!(spec.profile, WorkerProfile::Stanza);
+        assert_eq!(spec.profile, Some(WorkerProfile::Stanza));
         assert_eq!(spec.gil_process_need, GilProcessNeed::OnlyInGilRuntime);
         assert_eq!(spec.base_mb_process.0, 8_000);
         assert_eq!(spec.base_mb_threaded.0, 2_000);
@@ -328,7 +338,7 @@ mod tests {
     #[test]
     fn opensmile_classification_matches_toml() {
         let spec = command_spec_for(ReleasedCommand::Opensmile);
-        assert_eq!(spec.profile, WorkerProfile::Io);
+        assert_eq!(spec.profile, Some(WorkerProfile::Io));
         assert_eq!(spec.gil_process_need, GilProcessNeed::Always);
     }
 

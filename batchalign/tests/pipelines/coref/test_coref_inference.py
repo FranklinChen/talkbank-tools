@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from batchalign.inference.coref import (
     ChainRef,
     CorefBatchItem,
@@ -45,7 +47,8 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
     seen_texts: list[str] = []
 
     class _FakeWord:
-        def __init__(self, coref_chains: list[object] | None = None) -> None:
+        def __init__(self, text: str, coref_chains: list[object] | None = None) -> None:
+            self.text = text
             self.coref_chains = coref_chains or []
 
     class _FakeSentence:
@@ -64,21 +67,22 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
                         _FakeSentence(
                             [
                                 _FakeWord(
+                                    "the",
                                     [
                                         SimpleNamespace(
                                             chain=SimpleNamespace(index=7),
                                             is_start=True,
                                             is_end=True,
                                         )
-                                    ]
+                                    ],
                                 ),
-                                _FakeWord(),
+                                _FakeWord("dog"),
                             ]
                         ),
-                        _FakeSentence([_FakeWord(), _FakeWord()]),
+                        _FakeSentence([_FakeWord("it"), _FakeWord("ran")]),
                     ]
                 )
-            return SimpleNamespace(sentences=[_FakeSentence([_FakeWord()])])
+            return SimpleNamespace(sentences=[_FakeSentence([_FakeWord("hello")])])
 
     monkeypatch.setitem(
         __import__("sys").modules,
@@ -123,8 +127,8 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
     }
 
 
-def test_batch_infer_coref_ignores_extra_sentences_from_runtime(monkeypatch) -> None:
-    """Worker output with more sentences than the request should be truncated safely."""
+def test_batch_infer_coref_refuses_extra_sentences_from_runtime(monkeypatch) -> None:
+    """Extra native sentences are a producer fault, not successful truncation."""
 
     class _FakeWord:
         def __init__(self, coref_chains: list[object] | None = None) -> None:
@@ -184,16 +188,8 @@ def test_batch_infer_coref_ignores_extra_sentences_from_runtime(monkeypatch) -> 
         )
     )
 
-    assert response.results[0].result == {
-        "kind": "resolved",
-        "engine": "stanza-1.99.0/ontonotes-singletons_roberta-large-lora",
-        "annotations": [
-            {
-                "sentence_idx": 0,
-                "words": [[{"chain_id": 2, "is_start": True, "is_end": True}]],
-            }
-        ],
-    }
+    assert response.results[0].result is None
+    assert "sentence coverage mismatch" in response.results[0].error
 
 
 def test_batch_infer_coref_reports_invalid_items_and_empty_documents(
@@ -289,3 +285,88 @@ def test_batch_infer_coref_fails_the_document_on_runtime_failure(
     assert response.results[0].result is None
     assert response.results[0].error == "Coref failed: coref runtime exploded"
     assert response.results[0].elapsed_s >= 0.0
+
+
+@pytest.mark.parametrize(
+    "native",
+    [
+        [],
+        [["she"]],
+        [["she"], []],
+        [["she"], ["left", "now"]],
+        [["he"], ["left"]],
+    ],
+)
+def test_unannotated_native_shape_faults_cannot_be_resolved(
+    monkeypatch, native
+) -> None:
+    """Coverage is checked even when every native word has no chain."""
+
+    class Pipeline:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __call__(self, _text: str):
+            return SimpleNamespace(
+                sentences=[
+                    SimpleNamespace(
+                        words=[
+                            SimpleNamespace(text=word, coref_chains=[])
+                            for word in sentence
+                        ]
+                    )
+                    for sentence in native
+                ]
+            )
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "stanza",
+        SimpleNamespace(Pipeline=Pipeline, __version__="1.99.0"),
+    )
+    response = batch_infer_coref(
+        BatchInferRequest(
+            task="coref",
+            lang="eng",
+            items=[{"sentences": [["she"], ["left"]]}],
+        )
+    )
+    assert response.results[0].result is None
+    assert response.results[0].error is not None
+    assert "mismatch" in response.results[0].error
+
+
+def test_incomplete_native_item_does_not_poison_next_complete_document(
+    monkeypatch,
+) -> None:
+    """A reusable model can fail one item and still admit the next."""
+
+    class Pipeline:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __call__(self, text: str):
+            words = (
+                []
+                if text == "broken"
+                else [SimpleNamespace(text="complete", coref_chains=[])]
+            )
+            return SimpleNamespace(sentences=[SimpleNamespace(words=words)])
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "stanza",
+        SimpleNamespace(Pipeline=Pipeline, __version__="1.99.0"),
+    )
+    response = batch_infer_coref(
+        BatchInferRequest(
+            task="coref",
+            lang="eng",
+            items=[{"sentences": [["broken"]]}, {"sentences": [["complete"]]}],
+        )
+    )
+    assert response.results[0].result is None
+    assert response.results[0].error is not None
+    assert response.results[1].error is None
+    assert response.results[1].result["kind"] == "resolved"
+    assert response.results[1].result["annotations"] == []

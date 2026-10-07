@@ -153,6 +153,7 @@ impl MediaTool {
     {
         self.async_command()
             .args(args)
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|source| self.classify_spawn_failure(source))

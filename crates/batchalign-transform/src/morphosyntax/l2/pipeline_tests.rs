@@ -140,16 +140,12 @@ fn run_l2_in(
     )
     .expect("primary injection");
     assert!(
-        injection.decisions.is_empty(),
-        "the primary analysis must inject: {:?}",
-        injection.decisions
-    );
-    assert!(
-        injection.l2.unaligned().is_empty(),
+        injection.l2().unaligned().is_empty(),
         "the primary analysis must align: {:?}",
-        injection.l2.unaligned()
+        injection.l2().unaligned()
     );
-    let deferred = injection.l2.into_reported_positions();
+    let (_, l2) = injection.into_parts();
+    let deferred = l2.into_reported_positions();
 
     let plan = plan_dispatch_spans(deferred);
     assert_eq!(

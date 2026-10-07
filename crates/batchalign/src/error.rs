@@ -162,7 +162,328 @@ impl std::fmt::Display for MissingSpeakerEvidence {
     }
 }
 
-/// Typed family of intentional cache-only precondition refusals.
+/// An outstanding source-bound timing obligation. This is missing evidence,
+/// not invalid submitted CHAT or permission to write an untimed result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingTimingRegenerationEvidence {
+    header_span: talkbank_model::Span,
+    origin: TimingObligationOrigin,
+    reason: TimingRegenerationFailure,
+}
+
+/// Why an admitted source owes timing before its `@Media` linkage can be
+/// written. Both leave the same obligation (the output must carry timing,
+/// because a linked declaration without timing is E544), and the message
+/// differs: one source lost timing it had, the other never had any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingObligationOrigin {
+    /// Recorded word timing was unusable and Chatter's admission removed it,
+    /// so alignment must regenerate it.
+    DiscardedWordTiming,
+    /// The source declares linked media (`@Media: name, audio`, no status)
+    /// and its retained model carries no timing: the state before a first
+    /// alignment, which alignment exists to leave. (A `%wor` tier Chatter
+    /// could not read is removed before that check, so timing it may have
+    /// carried is not seen; the obligation is the same either way.)
+    NeverTimed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TimingRegenerationFailure {
+    NoRequest {
+        line_idx: batchalign_transform::decisions::LineIdx,
+        window: batchalign_transform::decisions::RefusedWindow,
+    },
+    NoRestoredTiming,
+}
+
+impl MissingTimingRegenerationEvidence {
+    /// Location of the source declaration whose obligation remains outstanding.
+    pub fn header_span(&self) -> talkbank_model::Span {
+        self.header_span
+    }
+
+    /// Only a checked pending source and an actually refused empty grouping
+    /// can establish this disposition. An unexplained empty plan stays internal.
+    pub(crate) fn from_refused_grouping(
+        obligation: &talkbank_model::validation::MediaTimingObligation,
+        origin: TimingObligationOrigin,
+        grouping: &crate::chat_ops::fa::Grouping,
+        timing: talkbank_model::model::TranscriptTimingEvidence<'_>,
+    ) -> Option<Self> {
+        use batchalign_transform::decisions::{DecisionStrategy, FaStrategy};
+        if !grouping.groups.is_empty()
+            || matches!(
+                timing,
+                talkbank_model::model::TranscriptTimingEvidence::Recorded(_)
+            )
+        {
+            return None;
+        }
+        grouping
+            .decisions
+            .iter()
+            .find_map(|decision| match &decision.strategy {
+                DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => Some(Self {
+                    header_span: obligation.header_span(),
+                    origin,
+                    reason: TimingRegenerationFailure::NoRequest {
+                        line_idx: decision.line_idx,
+                        window: *window,
+                    },
+                }),
+                _ => None,
+            })
+    }
+
+    /// The source-admission owner checks the actual attempted output, not a
+    /// diagnostic string or a claimed inference success.
+    pub(crate) fn from_untimed_output(
+        obligation: &talkbank_model::validation::MediaTimingObligation,
+        origin: TimingObligationOrigin,
+        timing: talkbank_model::model::TranscriptTimingEvidence<'_>,
+    ) -> Option<Self> {
+        matches!(
+            timing,
+            talkbank_model::model::TranscriptTimingEvidence::Absent
+        )
+        .then(|| Self {
+            header_span: obligation.header_span(),
+            origin,
+            reason: TimingRegenerationFailure::NoRestoredTiming,
+        })
+    }
+}
+
+impl std::fmt::Display for MissingTimingRegenerationEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive over both axes: a new origin or failure must say what
+        // the user can change, not inherit another case's sentence.
+        match (&self.reason, self.origin) {
+            (
+                TimingRegenerationFailure::NoRequest { line_idx, window },
+                TimingObligationOrigin::DiscardedWordTiming,
+            ) => write!(
+                formatter,
+                "timing regeneration has no admissible alignment request at transcript entry {}: {}; \
+                 recover narrower acoustic timing with a compatible UTR backend or supply corrected timing; \
+                 no output was written",
+                line_idx.raw() + 1,
+                window
+            ),
+            (
+                TimingRegenerationFailure::NoRequest { line_idx, window },
+                TimingObligationOrigin::NeverTimed,
+            ) => write!(
+                formatter,
+                "alignment has no admissible request at transcript entry {}: {}; the transcript's \
+                 @Media header declares it linked, and a linked transcript must carry timing (E544); \
+                 recover narrower acoustic timing with a compatible UTR backend, or add `, unlinked` \
+                 to the @Media header to have the transcript written without timing; no output was written",
+                line_idx.raw() + 1,
+                window
+            ),
+            (
+                TimingRegenerationFailure::NoRestoredTiming,
+                TimingObligationOrigin::DiscardedWordTiming,
+            ) => formatter.write_str(
+                "timing regeneration produced no retained timing evidence; the source media linkage \
+                 obligation remains outstanding; use a compatible timing backend or supply corrected \
+                 timing; no output was written",
+            ),
+            (TimingRegenerationFailure::NoRestoredTiming, TimingObligationOrigin::NeverTimed) => {
+                formatter.write_str(
+                    "alignment produced no timing, and the transcript's @Media header declares it \
+                     linked, which requires timing (E544); use a compatible timing backend, or add \
+                     `, unlinked` to the @Media header to have the transcript written without timing; \
+                     no output was written",
+                )
+            }
+        }
+    }
+}
+
+/// The source's `@Media` declaration cannot be the subject of alignment.
+///
+/// Decided at input admission, before media is resolved or any inference
+/// runs, from the declaration alone: every case is something the user changes
+/// in the transcript's header, and resubmitting unchanged can never help.
+/// Each message names the change.
+///
+/// The cases mirror the preconditions of Chatter's
+/// `batchalign_transform::media_timing::reconcile_media_timing`, the
+/// transition that turns aligned output into linked media. Deciding them here
+/// is what lets that transition run only on a declaration known to admit it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AlignmentMediaRefusal {
+    /// No `@Media` header. CHAT requires one on any timed transcript (E752),
+    /// and align does not author it: the media type is a declaration about
+    /// the recording that the media search does not establish.
+    #[error(
+        "the transcript has no @Media header, so the timing align writes would name no \
+         recording; add the header `@Media:\t{suggested}, audio, unlinked` (or `video` for a \
+         video recording) after the @ID headers and resubmit; `unlinked` is CHAT's mark for a \
+         transcript not yet linked to its media, and align removes it once it writes timing"
+    )]
+    Undeclared {
+        /// The name the header must carry: the transcript's own file name,
+        /// as CHAT requires (E531).
+        suggested: SuggestedMediaName,
+    },
+    /// Linked `@Media`, no timing anywhere, and `--main-bullets exact`:
+    /// `exact` keeps every utterance without a bullet untimed and admits no
+    /// UTR, so the timing a linked declaration requires (E544) can never be
+    /// written.
+    #[error(
+        "the @Media header declares the transcript linked but it has no timing, and \
+         `--main-bullets exact` keeps every utterance without a bullet untimed, so no timing \
+         could be written; run with `--main-bullets derive` or `keep`, or add `, unlinked` to \
+         the @Media header"
+    )]
+    LinkedUntimedUnderExactBullets,
+    /// More than one `@Media` header leaves the timeline ambiguous.
+    ///
+    /// Not reached through align's admission today: Chatter's validation
+    /// refuses a second `@Media` (E501) first, as a validation failure with
+    /// its own message. Kept so the decision stays total over what the
+    /// transition refuses.
+    #[error(
+        "the transcript has {count} @Media headers; a transcript links to one recording, so \
+         keep only the header naming it and resubmit"
+    )]
+    Multiple {
+        /// Number of `@Media` headers found.
+        count: usize,
+    },
+    /// The declaration says the recording is missing, as a media type
+    /// (`@Media: name, missing`) or a status (`, missing`).
+    #[error(
+        "the @Media header declares the recording `{media}` missing, so there is nothing to \
+         align against; if the recording exists, change the header to \
+         `@Media:\t{media}, audio, unlinked` (or `video`) and resubmit"
+    )]
+    DeclaredMissing {
+        /// The declared media name, as written.
+        media: String,
+    },
+    /// `notrans` declares the recording untranscribed, which contradicts
+    /// aligning a transcript to it.
+    #[error(
+        "the @Media header marks the recording `{media}` as not transcribed (`notrans`), which \
+         contradicts aligning this transcript to it; replace `notrans` with `unlinked` and resubmit"
+    )]
+    NotTranscribed {
+        /// The declared media name, as written.
+        media: String,
+    },
+    /// A media type or status CHAT does not define. Not reached through
+    /// align's admission today: Chatter's validation refuses these first
+    /// (E535, E536). Kept so the match over Chatter's enums stays exhaustive.
+    #[error(
+        "the @Media header's {field} `{as_written}` is not one CHAT defines; use `audio` or \
+         `video`, optionally followed by `unlinked`, and resubmit"
+    )]
+    Unsupported {
+        /// Which field: `media type` or `status`.
+        field: &'static str,
+        /// The token as written.
+        as_written: String,
+    },
+}
+
+/// The name a missing `@Media` header must carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuggestedMediaName {
+    /// The transcript's file name without its extension.
+    Transcript(String),
+    /// The transcript was submitted without a file name.
+    Unnamed,
+}
+
+impl std::fmt::Display for SuggestedMediaName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transcript(stem) => formatter.write_str(stem),
+            Self::Unnamed => formatter.write_str("<transcript file name without extension>"),
+        }
+    }
+}
+
+/// Alignment completion is distinct from CHAT validity and provider success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignmentCompletionFailure {
+    /// Final lexical structure no longer corresponds to its admitted source.
+    SourceChanged {
+        /// First utterance whose required word structure differs.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+    /// An utterance the transcript marks as not in the recording came out
+    /// with timing it could only have been given by the pipeline: a timed
+    /// word, or a bullet other than the one the input gave it under a policy
+    /// that keeps given bullets.
+    OffRecordUtteranceTimed {
+        /// The utterance.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+}
+
+impl std::fmt::Display for AlignmentCompletionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceChanged { utterance } => write!(
+                formatter,
+                "alignment output no longer corresponds to admitted lexical structure at utterance {}; no output was written",
+                utterance.raw() + 1
+            ),
+            Self::OffRecordUtteranceTimed { utterance } => write!(
+                formatter,
+                "alignment output timed utterance {}, which the transcript marks as not in the recording; no output was written",
+                utterance.raw() + 1
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AlignmentCompletionFailure {}
+
+#[cfg(all(test, feature = "server"))]
+mod alignment_completion_tests {
+    use super::*;
+
+    #[test]
+    fn alignment_completion_has_typed_http_and_retry_dispositions() {
+        use crate::runner::util::{classify_server_error, is_retryable_worker_failure};
+        use crate::scheduling::FailureCategory;
+        // Untimed words are no longer a refusal (they are a partial result,
+        // written and diagnosed); a changed lexical structure still is, and
+        // it is our own fault, never retried.
+        // A timed utterance the transcript marks as not in the recording is
+        // the same kind of fault: the pipeline invented a placement.
+        for (failure, category, status) in [
+            (
+                AlignmentCompletionFailure::SourceChanged {
+                    utterance: talkbank_model::UtteranceIdx::new(0),
+                },
+                FailureCategory::System,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                AlignmentCompletionFailure::OffRecordUtteranceTimed {
+                    utterance: talkbank_model::UtteranceIdx::new(0),
+                },
+                FailureCategory::System,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let error = ServerError::from(failure);
+            assert_eq!(classify_server_error(&error), category);
+            assert_eq!(error.status_code(), status);
+            assert!(!is_retryable_worker_failure(category));
+        }
+    }
+}
+
+/// Typed family of intentional required-evidence precondition refusals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingRequiredEvidence {
     /// One or more forced-alignment groups were absent.
@@ -171,6 +492,8 @@ pub enum MissingRequiredEvidence {
     Speaker(MissingSpeakerEvidence),
     /// Raw Rev.AI transcript evidence for one provider request was absent.
     RevAsr(MissingRevAsrEvidence),
+    /// Source timing was discarded and its regeneration remains unfulfilled.
+    TimingRegeneration(MissingTimingRegenerationEvidence),
 }
 
 impl std::fmt::Display for MissingRequiredEvidence {
@@ -179,6 +502,7 @@ impl std::fmt::Display for MissingRequiredEvidence {
             Self::ForcedAlignment(missing) => missing.fmt(formatter),
             Self::Speaker(missing) => missing.fmt(formatter),
             Self::RevAsr(missing) => missing.fmt(formatter),
+            Self::TimingRegeneration(missing) => missing.fmt(formatter),
         }
     }
 }
@@ -269,13 +593,83 @@ pub enum ServerError {
     #[error(transparent)]
     TranscriptBuild(#[from] batchalign_transform::build_chat::TranscriptBuildError),
 
-    /// A timing-producing CHAT transform could not reconcile its output with
-    /// the document's typed media declaration.
+    /// Input admission refused the source's `@Media` declaration for
+    /// alignment, before any media was resolved or inference ran.
     ///
-    /// **HTTP 500.** Alignment reached an internally contradictory output
-    /// state and must not serialize it as a successful result.
-    #[error("media/timing transition failed: {0}")]
-    MediaTiming(#[from] batchalign_transform::media_timing::MediaTimingError),
+    /// **HTTP 400.** The user changes the header; the message says how.
+    #[error(transparent)]
+    AlignmentMedia(#[from] AlignmentMediaRefusal),
+
+    /// Chatter's complete admission refused a never-timed source that its
+    /// timing-regeneration admission, running the same rules with only E544
+    /// deferred, accepts with nothing deferred.
+    ///
+    /// **HTTP 500.** The two admissions disagree: a tool fault, not the input's.
+    #[error(
+        "internal fault: Chatter's complete and timing-regeneration admissions disagree about \
+         this transcript; no output was written"
+    )]
+    AdmissionDisagreement,
+
+    /// Under `--main-bullets keep` or `exact`, the bullets the input gave
+    /// these utterances (not in the recording, e.g. `[+ diary]`) conflict
+    /// with the timing aligned around them, so the output cannot be valid.
+    ///
+    /// **HTTP 400.** The input and the requested policy conflict: such a
+    /// bullet is kept exactly but is never an anchor for its neighbours.
+    #[error(
+        "--main-bullets keep: the bullets the input gave utterance(s) {utterances:?}, which \
+         are not in the recording, conflict with the timing aligned around them; nothing \
+         was written. Run with --main-bullets derive, or correct or remove those bullets"
+    )]
+    KeptOffRecordBulletConflict {
+        /// The utterances, counting from 1.
+        utterances: Vec<usize>,
+    },
+
+    /// Chatter's tier-replacement admission selected a replacement other
+    /// than the one the planner chose from the headers.
+    ///
+    /// **HTTP 500.** The planner's choice is the admission's input, so a
+    /// different selection is a tool fault, never the transcript's.
+    #[error(
+        "internal fault: Chatter admitted tier replacement {admitted:?} where {planned:?} was \
+         planned; no output was written"
+    )]
+    ReplacementPlanContradicted {
+        /// What the planner chose (`None`: retain every tier).
+        planned: Option<talkbank_parser::ReplacementTiers>,
+        /// What the admission reports it selected.
+        admitted: Option<talkbank_parser::ReplacementTiers>,
+    },
+
+    /// Aligned output could not take the media/timing transition its source
+    /// declaration was admitted for.
+    ///
+    /// **HTTP 500.** Every condition this transition refuses is decided at
+    /// input admission ([`Self::AlignmentMedia`]), so reaching it means the
+    /// alignment itself changed the declaration: an internal fault, never
+    /// the user's input. Deliberately not `#[from]`: its one producer is the
+    /// admitted transition in `fa::input`, named there.
+    #[error("internal fault: aligned output contradicts its admitted @Media declaration: {0}")]
+    MediaTiming(batchalign_transform::media_timing::MediaTimingError),
+
+    /// Required morphology could not be completely applied. This is a failed
+    /// analysis/transform, not a declaration that the submitted CHAT is invalid.
+    /// **HTTP 500.** Preserve the typed refusal and do not automatically retry.
+    #[error("Result injection failed: {0}")]
+    MorphosyntaxInjection(#[from] batchalign_transform::morphosyntax::InjectionError),
+
+    /// The proposed segmentation cannot preserve the admitted CHAT structure.
+    /// This is a failed transform, not a declaration that its input is invalid.
+    /// HTTP 500; retain the typed refusal and do not automatically retry.
+    #[error(transparent)]
+    UtterancePartition(#[from] batchalign_transform::utseg::UtsegApplyRefusal),
+
+    /// Valid CHAT requests analysis unavailable from the configured backend.
+    /// HTTP 412, non-retryable; never advise changing truthful source language.
+    #[error(transparent)]
+    AnalysisUnavailable(#[from] crate::morphosyntax::AnalysisUnavailable),
 
     /// Serialized pipeline output failed parsing before provenance publication.
     ///
@@ -284,12 +678,18 @@ pub enum ServerError {
     #[error("pipeline output could not receive provenance: {0}")]
     OutputParse(#[source] talkbank_model::ParseErrors),
 
-    /// A cache-only request reached a non-empty set of FA cache misses.
+    /// Required evidence is unavailable, either in cache-only mode or because
+    /// source-bound timing regeneration could not admit an acoustic request.
     ///
     /// This is an intentional, actionable precondition refusal, not corrupt
     /// persistence and not an internal system failure.
     #[error("{0}")]
     RequiredEvidenceUnavailable(MissingRequiredEvidence),
+
+    /// CHAT validity is not complete alignment. Missing timing is unavailable
+    /// evidence; loss of source correspondence is an internal producer fault.
+    #[error(transparent)]
+    AlignmentCompletion(#[from] AlignmentCompletionFailure),
 
     /// Transcription produced no words, so there is no transcript to write.
     ///
@@ -360,6 +760,45 @@ pub enum ServerError {
     /// **HTTP 400.** Callers should fix the request payload and resubmit.
     #[error("validation error: {0}")]
     Validation(String),
+
+    /// Offline verification retains typed input refusal versus producer failure.
+    #[error(transparent)]
+    MergeVerification(Box<crate::merge_verify::MergeVerifyError>),
+
+    /// Speaker evidence could not be produced. Original worker failures retain
+    /// their retry/memory classification; only enrollment refusals are input errors.
+    #[error(transparent)]
+    SpeakerIdentity(crate::chat_ops::speaker_identity::SpeakerIdentityFailure),
+
+    /// The packaged embedding model identity cannot be established.
+    #[error(transparent)]
+    SpeakerModelManifest(#[from] crate::chat_ops::speaker_identity::InvalidModelManifest),
+
+    /// Preparing the shared recording failed before any embedding request.
+    #[error(transparent)]
+    SpeakerAudioPreparation(
+        #[from] crate::worker::speaker_embedding_request_v2::SpeakerEmbeddingRequestBuildErrorV2,
+    ),
+
+    /// Complete CHAT admission refused the input. The producing failure keeps
+    /// internal tool faults distinct from CHAT invalidity.
+    #[error("CHAT pre-validation failed: {}", chat_admission_details(.0))]
+    ChatAdmission(batchalign_transform::ValidatedParseError),
+
+    /// Source-bound tier replacement refused retained input, without treating
+    /// an internal producer failure as invalid CHAT.
+    #[error("CHAT replacement admission failed: {}", chat_replacement_details(.0))]
+    ChatReplacementAdmission(talkbank_parser::ReplacementFailure),
+
+    /// A producer could not establish admission of its output. This is a tool
+    /// failure, not a verdict that the caller submitted invalid CHAT.
+    #[error("{command} output admission failed: {details}")]
+    OutputAdmission {
+        /// The command whose produced output could not be admitted.
+        command: crate::api::ReleasedCommand,
+        /// Why, typed: the judgement's findings, or the producer's statement.
+        details: OutputAdmissionRefusal,
+    },
 
     /// A Python worker process failed (crashed, timed out, or returned an
     /// error response over the stdio IPC protocol).
@@ -515,6 +954,50 @@ pub enum ServerError {
     Cancelled,
 }
 
+/// Why a producer's output could not be admitted.
+///
+/// Typed so a caller that reports it can bound it: a judgement can make
+/// thousands of findings, and its rendered list must not travel where a
+/// bounded record belongs (see `api::StageRefusalRecord`).
+#[derive(Debug, Clone)]
+pub enum OutputAdmissionRefusal {
+    /// The output was judged and failed: the bar and every finding, the
+    /// first one its own field so the list is never empty.
+    Judged {
+        /// The bar it was judged against.
+        bar: crate::api::JudgementBar,
+        /// The first finding.
+        first: crate::api::OutputFindingRecord,
+        /// The others, in the order the judgement found them.
+        rest: Vec<crate::api::OutputFindingRecord>,
+    },
+    /// The producer could not establish an output to judge (a malformed or
+    /// incomplete worker result, a stage run out of order). One statement.
+    Unestablished(String),
+}
+
+impl OutputAdmissionRefusal {
+    /// The producer's statement of why it established no output.
+    pub fn unestablished(statement: impl Into<String>) -> Self {
+        Self::Unestablished(statement.into())
+    }
+}
+
+impl std::fmt::Display for OutputAdmissionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Judged { bar, first, rest } => {
+                write!(f, "post-validation failed ({bar}): {first}")?;
+                for finding in rest {
+                    write!(f, "; {finding}")?;
+                }
+                Ok(())
+            }
+            Self::Unestablished(statement) => f.write_str(statement),
+        }
+    }
+}
+
 /// Which transcription stage produced nothing.
 ///
 /// Three stages can each end with no words, and they mean different things to
@@ -552,6 +1035,58 @@ pub enum EmptyTranscription {
     },
 }
 
+impl From<crate::chat_ops::speaker_identity::SpeakerIdentityFailure> for ServerError {
+    fn from(error: crate::chat_ops::speaker_identity::SpeakerIdentityFailure) -> Self {
+        use crate::chat_ops::speaker_identity::{
+            EmbeddingInferenceFailure, SpeakerIdentityFailure,
+        };
+        match error {
+            // The audio shell's worker-retry capability requires the original
+            // worker variant, not merely an equal rendered message or category.
+            SpeakerIdentityFailure::Inference(EmbeddingInferenceFailure::Dispatch(worker)) => {
+                Self::Worker(worker)
+            }
+            other => Self::SpeakerIdentity(other),
+        }
+    }
+}
+
+pub(crate) fn chat_admission_is_internal(
+    error: &batchalign_transform::ValidatedParseError,
+) -> bool {
+    use batchalign_transform::ValidatedParseError;
+    match error {
+        ValidatedParseError::InternalFailure { .. } => true,
+        ValidatedParseError::Validation(failure) => failure.has_internal_failure(),
+        ValidatedParseError::Parse(_) => false,
+    }
+}
+
+fn chat_admission_details(error: &batchalign_transform::ValidatedParseError) -> String {
+    match error {
+        batchalign_transform::ValidatedParseError::Parse(product) => product
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| format!("{} {}", diagnostic.code.as_str(), diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("; "),
+        _ => error.to_string(),
+    }
+}
+
+fn chat_replacement_details(error: &talkbank_parser::ReplacementFailure) -> String {
+    if error.diagnostics().is_empty() {
+        error.to_string()
+    } else {
+        error
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| format!("{} {}", diagnostic.code.as_str(), diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
 #[cfg(feature = "server")]
 impl ServerError {
     fn status_code(&self) -> StatusCode {
@@ -568,8 +1103,25 @@ impl ServerError {
             }
             Self::Database(_) | Self::Migration(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Persistence(_) | Self::StoredLease(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::MediaTiming(_) | Self::OutputParse(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::RequiredEvidenceUnavailable(_) => StatusCode::PRECONDITION_FAILED,
+            Self::AlignmentMedia(_) | Self::KeptOffRecordBulletConflict { .. } => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::AdmissionDisagreement | Self::ReplacementPlanContradicted { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            Self::MediaTiming(_)
+            | Self::OutputParse(_)
+            | Self::MorphosyntaxInjection(_)
+            | Self::UtterancePartition(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::RequiredEvidenceUnavailable(_) | Self::AnalysisUnavailable(_) => {
+                StatusCode::PRECONDITION_FAILED
+            }
+            Self::AlignmentCompletion(failure) => match failure {
+                AlignmentCompletionFailure::SourceChanged { .. }
+                | AlignmentCompletionFailure::OffRecordUtteranceTimed { .. } => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            },
             // The request was fine and the server worked; the submitted media
             // yielded no words. Neither a 400 (nothing wrong with the payload)
             // nor a 500 (nothing broke).
@@ -581,7 +1133,42 @@ impl ServerError {
             Self::FileNotReady(_) => StatusCode::CONFLICT,
             Self::UnknownCommand(_) => StatusCode::BAD_REQUEST,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
+            Self::MergeVerification(error) => {
+                if error.is_internal() {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            }
+            Self::SpeakerIdentity(_) => {
+                // One policy owner also drives the task's retry decision.
+                if crate::runner::util::classify_server_error(self)
+                    == crate::scheduling::FailureCategory::Validation
+                {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }
+            Self::SpeakerModelManifest(_) | Self::SpeakerAudioPreparation(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            Self::ChatAdmission(error) => {
+                if chat_admission_is_internal(error) {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            }
+            Self::ChatReplacementAdmission(error) => {
+                if error.has_internal_failure() {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            }
             Self::UnresolvedAsrLanguage(_) => StatusCode::BAD_GATEWAY,
+            Self::OutputAdmission { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Worker(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::WhisperEngine(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -638,6 +1225,163 @@ impl IntoResponse for ServerError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn speaker_protocol_setup_and_enrollment_failures_keep_their_typed_dispositions() {
+        use super::ServerError;
+        use crate::chat_ops::speaker_identity::{
+            EmbeddingInferenceFailure, EnrolledLabel, InvalidModelManifest, OutsidePreparedAudio,
+            SpeakerIdentityFailure, TrackAnalysisFailure,
+        };
+        use crate::runner::util::{classify_server_error, is_retryable_worker_failure};
+        use crate::scheduling::FailureCategory;
+        use crate::worker::speaker_embedding_request_v2::{
+            SpeakerEmbeddingRequestBuildErrorV2, SpeakerEmbeddingResultParseError,
+        };
+        use axum::http::StatusCode;
+
+        let label = || EnrolledLabel::parse("VOICE").unwrap();
+        for (error, category, status) in [
+            (
+                ServerError::from(SpeakerIdentityFailure::EnrollmentOutsideRecording {
+                    label: label(),
+                    source: OutsidePreparedAudio {
+                        start_ms: 20,
+                        end_ms: 30,
+                        recording_ms: 10,
+                    },
+                }),
+                FailureCategory::Validation,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ServerError::from(SpeakerIdentityFailure::EnrollmentTooShort {
+                    label: label(),
+                    frames: 1,
+                    minimum_frames: 2,
+                }),
+                FailureCategory::Validation,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ServerError::from(SpeakerIdentityFailure::MissingOutcome {
+                    span_id: "utt:0".into(),
+                }),
+                FailureCategory::WorkerProtocol,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ServerError::from(SpeakerIdentityFailure::Inference(
+                    EmbeddingInferenceFailure::from(
+                        SpeakerEmbeddingResultParseError::SpanSetMismatch {
+                            missing: vec!["utt:0".into()],
+                            unexpected: vec![],
+                        },
+                    ),
+                )),
+                FailureCategory::WorkerProtocol,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ServerError::from(SpeakerIdentityFailure::Tracks(
+                    TrackAnalysisFailure::EnrolledVoiceWithoutDirection { label: label() },
+                )),
+                FailureCategory::System,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ServerError::from(InvalidModelManifest {
+                    detail: "same detail".into(),
+                }),
+                FailureCategory::System,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ServerError::from(SpeakerEmbeddingRequestBuildErrorV2::MissingAudioPath),
+                FailureCategory::System,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ServerError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                FailureCategory::System,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            assert_eq!(classify_server_error(&error), category);
+            assert!(!is_retryable_worker_failure(category));
+            let detail = error.to_string();
+            let response = axum::response::IntoResponse::into_response(error);
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["detail"].as_str(), Some(detail.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_morphology_is_a_nonretryable_http_precondition_not_bad_chat() {
+        use crate::morphosyntax::AnalysisUnavailable;
+        let language = crate::api::LanguageCode3::try_new("que").unwrap();
+        let error =
+            super::ServerError::from(AnalysisUnavailable::admit_primary(&language).unwrap_err());
+        let category = crate::runner::util::classify_server_error(&error);
+        assert_eq!(
+            category,
+            crate::scheduling::FailureCategory::AnalysisUnavailable
+        );
+        assert!(!crate::runner::util::is_retryable_worker_failure(category));
+        let message = error.to_string();
+        assert!(message.contains("que") && message.contains("Keep truthful language declarations"));
+        assert!(!message.contains("internal error") && !message.contains("Fix the @Languages"));
+        let response = axum::response::IntoResponse::into_response(error);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::PRECONDITION_FAILED
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("analysis unavailable")
+        );
+    }
+
+    #[test]
+    fn morphosyntax_completion_failure_is_system_not_bad_chat() {
+        use batchalign_transform::morphosyntax::{
+            InjectionError, ResponseCountMismatch, UnexpectedSentenceCount,
+        };
+        for injection in [
+            InjectionError::ResponseCount(ResponseCountMismatch {
+                expected: 1,
+                actual: 0,
+            }),
+            InjectionError::SentenceCount {
+                index: 1,
+                error: UnexpectedSentenceCount { actual: 2 },
+            },
+        ] {
+            let error = super::ServerError::from(injection);
+            assert_eq!(
+                error.status_code(),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            assert_eq!(
+                crate::runner::util::classify_server_error(&error),
+                crate::scheduling::FailureCategory::System,
+            );
+            assert!(matches!(
+                error,
+                super::ServerError::MorphosyntaxInjection(_)
+            ));
+        }
+    }
+
     #[test]
     fn asr_diagnostic_failure_is_system_not_bad_transcript() {
         use batchalign_transform::build_chat::{AsrDiagnosticError, TranscriptBuildError};

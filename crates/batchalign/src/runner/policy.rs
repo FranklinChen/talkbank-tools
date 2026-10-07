@@ -6,8 +6,6 @@
 
 use crate::api::ReleasedCommand;
 use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
-#[cfg(test)]
-use crate::recipe_runner::runtime::result_display_path_for_command;
 
 /// Return `true` when the released command must use a Rust-owned CHAT-backed
 /// infer dispatch path instead of a pure content relay.
@@ -21,12 +19,6 @@ pub(crate) fn command_requires_chat_infer(command: ReleasedCommand) -> bool {
         command_runner_dispatch_kind(command),
         RunnerDispatchKind::BatchedTextInfer | RunnerDispatchKind::ForcedAlignment
     )
-}
-
-/// Derive the result filename for one released command.
-#[cfg(test)]
-pub(crate) fn result_filename_for_command(command: ReleasedCommand, filename: &str) -> String {
-    result_display_path_for_command(command, filename).to_string()
 }
 
 #[cfg(test)]

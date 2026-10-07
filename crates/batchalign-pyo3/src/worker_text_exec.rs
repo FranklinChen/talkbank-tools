@@ -210,7 +210,11 @@ fn run_translate(
     let runner = require_runner(runner, "no translate host loaded for worker protocol V2")?;
     let response = runner
         .bind(py)
-        .call1((task_request.source_lang.as_ref(), batch.json.as_str()))
+        .call1((
+            task_request.source_lang.as_ref(),
+            task_request.target_lang.as_ref(),
+            batch.json.as_str(),
+        ))
         .map_err(|error| classify_runner_error(py, error))?;
     let response: BatchInferResponse = parse_host_output(&response, "translate")?;
     Ok(TaskResultV2::TranslationResult(

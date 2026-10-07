@@ -440,7 +440,10 @@ mod tests {
 
     /// Inject `sentence` as the primary analysis of one `eng, spa`
     /// utterance, in preserve mode.
-    fn inject(main_tier: &str, sentence: UdSentence) -> InjectionResult {
+    fn inject(
+        main_tier: &str,
+        sentence: UdSentence,
+    ) -> Result<InjectionResult, crate::morphosyntax::InjectionError> {
         let mut chat = parse_chat(&one_utterance_in("eng, spa", main_tier));
         let eng = LanguageCode::new("eng").expect("valid language code");
         let spa = LanguageCode::new("spa").expect("valid language code");
@@ -462,7 +465,6 @@ mod tests {
             TokenizationMode::Preserve,
             &std::collections::BTreeMap::new(),
         )
-        .expect("injection")
     }
 
     /// A deferred position carries the word and the terminator of the
@@ -481,10 +483,11 @@ mod tests {
                 ("the", 4, "det"),
                 ("camino", 2, "obj"),
             ]),
-        );
+        )
+        .expect("injection");
 
         let position = injection
-            .l2
+            .l2()
             .positions()
             .first()
             .expect("the @s word must defer to secondary dispatch");
@@ -537,21 +540,15 @@ mod tests {
     #[test]
     fn a_misaligned_utterance_defers_nothing() {
         // Three UD words for four CHAT words.
-        let injection = inject(
+        let refusal = inject(
             "I took the camino@s:spa .",
             sentence(&[("I", 2, "nsubj"), ("took", 0, "root"), ("the", 2, "obj")]),
-        );
-
-        assert!(injection.l2.positions().is_empty());
-        assert!(injection.l2.unaligned().is_empty());
-        assert_eq!(
-            injection
-                .decisions
-                .iter()
-                .map(|decision| decision.strategy.strategy_name())
-                .collect::<Vec<_>>(),
-            ["misalignment_bug"]
-        );
+        )
+        .expect_err("incomplete morphology cannot admit secondary dispatch");
+        let crate::morphosyntax::InjectionError::Incomplete(decision) = refusal else {
+            panic!("expected an utterance refusal");
+        };
+        assert_eq!(decision.strategy.strategy_name(), "misalignment_bug");
     }
 
     /// An utterance whose every word is code-switched is injected without
@@ -563,13 +560,14 @@ mod tests {
         let injection = inject(
             "camino@s:spa .",
             sentence(&[("cami", 0, "root"), ("no", 1, "advmod")]),
-        );
+        )
+        .expect("special-form synthesis is complete");
 
-        assert!(injection.l2.positions().is_empty());
+        assert!(injection.l2().positions().is_empty());
         assert_eq!(
-            injection.l2.unaligned(),
+            injection.l2().unaligned(),
             &[UnalignedL2Utterance {
-                line_idx: injection.l2.unaligned()[0].line_idx,
+                line_idx: injection.l2().unaligned()[0].line_idx,
                 at_s_words: 1,
                 error: L2ExtractError::Alignment(UdAlignmentError::WordCountMismatch {
                     chat_words: 1,

@@ -1,7 +1,7 @@
 # Regression Fixtures
 
 **Status:** Current
-**Last updated:** 2026-05-19 23:51 EDT
+**Last updated:** 2026-10-06 15:51 EDT
 
 This page describes the per-command regression-fixture system: how it is
 laid out, how to add a new fixture when a user reports a bug, and how the
@@ -42,6 +42,48 @@ access to the private fixture repository will see the regression
 tests skip gracefully rather than fail.
 
 ## Directory layout
+
+### Distinguish timing hints, request crops and completed output
+
+Joint lexical recovery has two different search capabilities. A complete
+candidate envelope covers all optimal lexical placements. When source words
+can be missing, a borrowed partial-order corridor instead uses obligatory words
+outside every permitted overlap episode containing that turn, plus the
+preserved preceding/following words on the same speaker's chain. The joint matcher
+owns the episode policy; adjacent document-order turns are not automatically
+temporal bounds. All candidate locations for each obligatory boundary word are
+retained, including its full provider interval; an ambiguous boundary does not
+become a word anchor. The corridor retains the exact source word census and may end
+at the actual recording edge when no following bound is proved. It grants no
+word timing, main-tier bullet or output permission. Request containment, engine
+budgets and final complete timing remain separate admissions; contradictory or
+over-budget search bounds are refused rather than clipped into convenient crops.
+
+The `utr-debug` research report is schema 8. Existing complete candidate
+envelopes retain their previous shape. Partial-order envelopes explicitly carry
+`floor_ms`, nullable `ceiling_ms` and `scope.kind = "order_corridor"`; a null
+ceiling is a recording-bound search obligation, not a made-up timestamp.
+
+UTR hint coverage is an intermediate observation, not the alignment output
+contract. A withheld hint must not prevent FA from searching the words' actual
+acoustic region. Keep selected lexical matches, common correspondences,
+candidate search ranges and producer-admitted complete output distinct.
+
+The deterministic opt-in
+`joint_recovery_request_windows_retain_the_complete_source_population` control
+checks every planned FA request, including anchored pieces, against the synthetic
+fixture producer's word intervals. It retains missing requests, duplicate
+requests and intervals excluded by crops as separate failures; scheduling every
+word is not proof that its audio was searched. Run it explicitly in a planned
+recovery batch rather than adding repeated long probes to routine editing.
+An ignored control is unverified, not a pass. Its retained red result identifies
+remaining overlap-window truncation; it does not certify acoustic-model accuracy.
+
+Actual managed model outputs still require complete timing, checked CHAT output
+admission and independent timing assessment. Synthetic request-window proofs,
+test doubles and acoustic-model controls establish different facts. Batch
+compatible controls on one reviewed build; reuse admitted source/media and
+retained results until a specific contrary fact reopens them.
 
 ```text
 batchalign3/test-fixtures/

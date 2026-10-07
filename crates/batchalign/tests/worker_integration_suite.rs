@@ -20,6 +20,8 @@ mod shared_worker_fixture_smoke;
 mod worker_failure_paths;
 #[path = "worker_integration.rs"]
 mod worker_integration;
+#[path = "worker_pool_saturation_wait.rs"]
+mod worker_pool_saturation_wait;
 #[path = "worker_pool_thundering_herd.rs"]
 mod worker_pool_thundering_herd;
 #[path = "worker_protocol_matrix.rs"]

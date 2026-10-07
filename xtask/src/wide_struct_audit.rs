@@ -82,6 +82,16 @@ struct NamedStructInfo {
 /// into the sealed ASR plan).
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
+        path: "crates/batchalign-transform/src/compare/cross_mode/morphotag.rs",
+        struct_name: "MorphotagTokenDifference",
+        max_fields: 10,
+        max_bool_fields: 1,
+        disposition: WideStructDisposition::TransportRecord,
+        reason: "one serialized comparison row: both sides' speaker, text and annotation \
+                 coverage at one token position, its difference set and the agreement verdict; \
+                 private fields, built only by its producer",
+    },
+    WideStructAllowance {
         path: "crates/batchalign-transform/src/retokenize/rebuild.rs",
         struct_name: "RetokenizeContext",
         max_fields: 10,
@@ -120,11 +130,12 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/worker/pool/mod.rs",
         struct_name: "WorkerGroup",
-        max_fields: 10,
+        max_fields: 11,
         max_bool_fields: 0,
         disposition: WideStructDisposition::RealAggregate,
-        reason: "one worker-key group owns idle transport queues, admission counts, bootstrap \
-                 serialization and return notifications; synchronized shared state is not a pipeline stage bag",
+        reason: "one worker-key group owns idle transport queues, admission counts (total and \
+                 away, the guard-moved count a saturated wait reads), bootstrap serialization and \
+                 return notifications; synchronized shared state is not a pipeline stage bag",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/chat_ops/speaker_identity/evidence.rs",
@@ -371,7 +382,7 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
                  config file; its width is the width of server.yaml",
     },
     WideStructAllowance {
-        path: "crates/batchalign/src/types/options.rs",
+        path: "crates/batchalign/src/types/options/align.rs",
         struct_name: "AlignOptions",
         max_fields: 10,
         max_bool_fields: 2,
@@ -419,10 +430,11 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/types/response.rs",
         struct_name: "JobListItem",
-        max_fields: 18,
+        max_fields: 19,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "API response row for job list summaries",
+        reason: "API response row for job list summaries, with a diagnosed-file count beside \
+                 the done and error counts",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/scheduling.rs",

@@ -2,6 +2,7 @@ import type { FileCounts, FilterTab } from "../hooks/useFileFilters";
 
 const SEGMENTS: Array<{ key: keyof FileCounts; color: string; label: string; tab: FilterTab }> = [
   { key: "done", color: "bg-emerald-500", label: "done", tab: "done" },
+  { key: "diagnosed", color: "bg-yellow-400", label: "with diagnostics", tab: "diagnosed" },
   { key: "error", color: "bg-red-500", label: "error", tab: "error" },
   { key: "processing", color: "bg-blue-500", label: "processing", tab: "processing" },
   { key: "queued", color: "bg-zinc-300", label: "queued", tab: "queued" },
@@ -17,7 +18,8 @@ export function StatusSummaryStrip({
   const total = counts.all;
   if (total === 0) return null;
 
-  const pct = total > 0 ? Math.round(((counts.done + counts.error) / total) * 100) : 0;
+  const pct =
+    total > 0 ? Math.round(((counts.done + counts.diagnosed + counts.error) / total) * 100) : 0;
 
   return (
     <div className="flex items-center gap-3">

@@ -24,9 +24,8 @@ use batchalign_transform::coref::{
     ChainRef, CorefBatchItem, CorefRawAnnotation, CorefRawResponse, CorefResponse,
     apply_coref_results, collect_coref_payloads, raw_to_bracket_response,
 };
-use batchalign_transform::parse::{is_dummy, parse_lenient};
-use batchalign_transform::validate::{ValidityLevel, validate_to_level};
-use tracing::{info, warn};
+use batchalign_transform::parse::is_dummy;
+use tracing::info;
 
 use crate::api::FileStampOutcome;
 use crate::error::ServerError;
@@ -70,8 +69,8 @@ fn file_has_english(chat_file: &crate::chat_ops::ChatFile) -> Result<bool, Serve
 pub(crate) enum ResolvedCoref {
     /// Resolved, by the engine the worker named on the result.
     Resolved {
-        /// The bracket annotations to apply.
-        response: CorefResponse,
+        /// Raw sparse annotations, admitted against this request before application.
+        annotations: Vec<CorefAnnotationV2>,
         /// The engine that produced them.
         engine: ReportedEngineName,
     },
@@ -97,269 +96,261 @@ pub(crate) async fn process_coref_batch(
     pool: &WorkerPool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    run_coref_batch_impl(files, pool, cancellation).await
+    run_coref_batch_impl(files, pool, async move |pool, items| {
+        infer_batch(pool, items, &LanguageCode3::eng(), cancellation).await
+    })
+    .await
 }
 
-async fn run_coref_batch_impl(
+/// The source and its exact collected request stay paired until application.
+struct PendingCoref {
+    input: talkbank_model::validation::ValidChatFile,
+    sentences: Vec<CorefSentenceBinding>,
+    batch_idx: usize,
+}
+
+struct CorefSentenceBinding {
+    line_idx: usize,
+    word_count: usize,
+}
+
+fn sentence_bindings(
+    payload: &batchalign_transform::coref::CorefPayloadCollection,
+) -> Vec<CorefSentenceBinding> {
+    // The collector produces both entries in the same utterance visit.
+    payload
+        .line_indices
+        .iter()
+        .zip(&payload.batch_item.sentences)
+        .map(|(&line_idx, words)| CorefSentenceBinding {
+            line_idx,
+            word_count: words.len(),
+        })
+        .collect()
+}
+
+struct AppliedCoref {
+    document: crate::chat_ops::ChatFile,
+    engine: ReportedEngineName,
+}
+
+fn coref_protocol_error(message: impl Into<String>) -> ServerError {
+    ServerError::Worker(crate::worker::error::WorkerError::Protocol(message.into()))
+}
+
+impl PendingCoref {
+    fn complete(self, result: ResolvedCoref) -> Result<AppliedCoref, ServerError> {
+        let ResolvedCoref::Resolved {
+            annotations,
+            engine,
+        } = result
+        else {
+            return Err(coref_protocol_error(
+                "coref returned no_sentences for a dispatched non-empty document",
+            ));
+        };
+        let mut annotation_map = HashMap::new();
+        for annotation in annotations {
+            let Some(binding) = self.sentences.get(annotation.sentence_idx) else {
+                return Err(coref_protocol_error(format!(
+                    "coref annotation sentence {} is outside its request",
+                    annotation.sentence_idx,
+                )));
+            };
+            if annotation.words.len() != binding.word_count {
+                return Err(coref_protocol_error(format!(
+                    "coref annotation sentence {} has {} word positions for {} requested words",
+                    annotation.sentence_idx,
+                    annotation.words.len(),
+                    binding.word_count,
+                )));
+            }
+            // Sparse output is legal; duplicate ownership of one sentence is not.
+            let response = coref_response_from_v2_annotations(&[annotation]);
+            for bound in response.annotations {
+                if annotation_map
+                    .insert(binding.line_idx, bound.annotation)
+                    .is_some()
+                {
+                    return Err(coref_protocol_error("duplicate coref annotation sentence"));
+                }
+            }
+        }
+        let mut document = self.input.into_unchecked();
+        apply_coref_results(&mut document, &annotation_map);
+        Ok(AppliedCoref { document, engine })
+    }
+}
+
+async fn run_coref_batch_impl<Infer>(
     files: &[TextBatchFileInput],
     pool: &WorkerPool,
-    cancellation: Cancellation<'_>,
-) -> TextBatchFileResults {
-    // No language parameter. Coref is English-only (BA2 parity): per-file
-    // English-ness is read from each file's `@Languages:` header
-    // (`file_has_english`) and the inference language is the constant
-    // `LanguageCode3::eng()`. The parameter that used to sit here existed only
-    // for shared-trait symmetry with utseg/translate; it was never read, and
-    // the dispatch that filled it refused every coref job trying to produce a
-    // value for it. See the 2026-05-03 morphotag incident for why a job-level
-    // lang must not flow through.
+    infer: Infer,
+) -> TextBatchFileResults
+where
+    Infer: AsyncFnOnce(
+        &WorkerPool,
+        &[CorefBatchItem],
+    ) -> Result<Vec<Result<ResolvedCoref, EngineItemFailure>>, ServerError>,
+{
+    use crate::pipeline::text_infer::admit_retained_text;
+    use crate::text_batch::TextWorkflowFileError;
+    use talkbank_model::model::TranscriptName;
+
+    enum Admission {
+        Pending(PendingCoref),
+        PassThrough(PostValidated),
+        Refused(TextWorkflowFileError),
+    }
+
     let parser = crate::chat_parser();
-    let mut results: TextBatchFileResults = Vec::with_capacity(files.len());
-
-    // 1. Parse all files
-    let mut parsed_files: Vec<crate::chat_ops::ChatFile> = Vec::with_capacity(files.len());
-    let mut parse_error_lists: Vec<Vec<crate::chat_ops::ParseError>> =
-        Vec::with_capacity(files.len());
+    let command = crate::api::ReleasedCommand::Coref;
+    let mut admissions = Vec::with_capacity(files.len());
+    let mut items = Vec::new();
     for file in files {
-        let filename = file.filename.as_ref();
-        let (chat_file, parse_errors) = parse_lenient(&parser, file.chat_text.as_ref());
-        if !parse_errors.is_empty() {
-            warn!(
-                filename = %filename,
-                num_errors = parse_errors.len(),
-                "Parse errors (continuing with recovery)"
-            );
-        }
-        parse_error_lists.push(parse_errors);
-        parsed_files.push(chat_file);
-    }
-
-    // 2. Collect payloads per file (per-file English gate)
-    struct FileCorefInfo {
-        line_indices: Vec<usize>,
-        batch_idx: usize, // index into the execute_v2 batch array
-    }
-
-    let mut eligible_files: Vec<(usize, FileCorefInfo)> = Vec::new();
-    let mut batch_items: Vec<CorefBatchItem> = Vec::new();
-    let mut validation_errors: Vec<Option<String>> = vec![None; files.len()];
-
-    for (file_idx, parsed_file) in parsed_files.iter().enumerate() {
-        // Skip dummy files: they pass through unchanged
-        if is_dummy(parsed_file) {
-            continue;
-        }
-
-        // Pre-validation gate (L1: StructurallyComplete)
-        if let Err(errors) = validate_to_level(
-            parsed_file,
-            &parse_error_lists[file_idx],
-            ValidityLevel::StructurallyComplete,
+        let admitted = match admit_retained_text(
+            &parser,
+            file.chat_text.as_ref(),
+            TranscriptName::for_path(std::path::Path::new(file.filename.as_ref())),
         ) {
-            let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-            validation_errors[file_idx] =
-                Some(format!("coref pre-validation failed: {}", msgs.join("; ")));
+            Ok(admitted) => admitted,
+            Err(error) => {
+                admissions.push(Admission::Refused(
+                    TextWorkflowFileError::from_server_error(&error),
+                ));
+                continue;
+            }
+        };
+        if is_dummy(admitted.document()) {
+            admissions.push(Admission::PassThrough(PostValidated::pass_through(
+                admitted, command,
+            )));
             continue;
         }
-
-        // Per-file English-only gate: non-English files pass through unchanged.
-        // A gate failure (unreachable in practice: the fallback code is the
-        // constant `eng`) is recorded as a per-file error, mirroring the
-        // pre-validation gate above, rather than silently skipping the file.
-        match file_has_english(parsed_file) {
+        match file_has_english(admitted.document()) {
             Ok(true) => {}
-            Ok(false) => continue,
-            Err(e) => {
-                validation_errors[file_idx] = Some(e.to_string());
+            Ok(false) => {
+                admissions.push(Admission::PassThrough(PostValidated::pass_through(
+                    admitted, command,
+                )));
+                continue;
+            }
+            Err(error) => {
+                admissions.push(Admission::Refused(
+                    TextWorkflowFileError::from_server_error(&error),
+                ));
                 continue;
             }
         }
-
-        let collected = collect_coref_payloads(parsed_file);
-        let coref_item = collected.batch_item;
-        let line_indices = collected.line_indices;
-
-        if coref_item.sentences.is_empty() {
+        let payload = collect_coref_payloads(admitted.document());
+        if payload.batch_item.sentences.is_empty() {
+            admissions.push(Admission::PassThrough(PostValidated::pass_through(
+                admitted, command,
+            )));
             continue;
         }
-
-        let batch_idx = batch_items.len();
-        batch_items.push(coref_item);
-        eligible_files.push((
-            file_idx,
-            FileCorefInfo {
-                line_indices,
-                batch_idx,
-            },
-        ));
+        let batch_idx = items.len();
+        let sentences = sentence_bindings(&payload);
+        items.push(payload.batch_item);
+        admissions.push(Admission::Pending(PendingCoref {
+            input: admitted.into_valid_file(),
+            sentences,
+            batch_idx,
+        }));
     }
 
-    // 3. Single batched execute_v2 call across all files. Outer Err
-    //    (worker spawn / IPC / schema) marks every eligible file as
-    //    failed: silently emitting no-coref output would mask the
-    //    failure as success.
-    let all_responses = if batch_items.is_empty() {
-        Vec::new()
+    let responses = if items.is_empty() {
+        Ok(Vec::new())
     } else {
         info!(
-            num_items = batch_items.len(),
+            num_items = items.len(),
             "Dispatching coref execute_v2 batch"
         );
-
-        match infer_batch(pool, &batch_items, &LanguageCode3::eng(), cancellation).await {
-            Ok(responses) => responses,
-            Err(e) => {
-                warn!(error = %e, "Batch coref execute_v2 failed for all files");
-                for (file_idx, file) in files.iter().enumerate() {
-                    if let Some(ref err) = validation_errors[file_idx] {
-                        results.push(TextBatchFileResult::err(
-                            file.filename.clone(),
-                            crate::text_batch::TextWorkflowFileError::validation(err.clone()),
-                        ));
-                    } else if eligible_files.iter().any(|(idx, _)| *idx == file_idx) {
-                        // The control plane's classifier owns the verdict; a
-                        // bare string here reported every batch break, memory
-                        // pressure included, as a terminal provider failure.
-                        results.push(TextBatchFileResult::err(
-                            file.filename.clone(),
-                            crate::text_batch::TextWorkflowFileError::from_server_error(&e),
-                        ));
-                    } else {
-                        // Non-eligible files (dummy / non-English) had
-                        // no payload in the batch, so the batch
-                        // failure does not affect them.
-                        results.push(TextBatchFileResult::ok(
-                            file.filename.clone(),
-                            PostValidated::pass_through(
-                                file.chat_text.as_ref(),
-                                crate::api::ReleasedCommand::Coref,
-                            ),
-                        ));
-                    }
-                }
-                return results;
-            }
-        }
+        infer(pool, &items).await
     };
-
-    // 4. Per-file outcome map driven by per-item engine errors.
-    //    Files whose item came back Err are marked failed; files whose
-    //    item came back Ok have annotations applied, and the engine that
-    //    resolved them is kept for that file's provenance stamp, which the
-    //    batch path used to drop on the floor. ``per_file_failures`` is
-    //    indexed by file_idx so step 5 can take ownership of the failure via
-    //    ``.take()`` without a HashMap lookup.
-    let mut per_file_failures: Vec<Option<EngineItemFailure>> = vec![None; files.len()];
-    let mut per_file_engines: Vec<Option<ReportedEngineName>> = vec![None; files.len()];
-    // No bounds guard: `infer_batch` refuses a count mismatch, so every
-    // `batch_idx` recorded above indexes a response. The guard that used to sit
-    // here was unreachable, and had it ever run it would have dropped a file's
-    // result silently, which is the shape this file's admission exists to stop.
-    for &(file_idx, ref info) in &eligible_files {
-        match &all_responses[info.batch_idx] {
-            Err(failure) => {
-                per_file_failures[file_idx] = Some(failure.clone());
+    let mut results = Vec::with_capacity(files.len());
+    for (file, admission) in files.iter().zip(admissions) {
+        let pending = match admission {
+            Admission::Refused(failure) => {
+                results.push(TextBatchFileResult::err(file.filename.clone(), failure));
+                continue;
             }
-            Ok(ResolvedCoref::NoSentences) => {}
-            Ok(ResolvedCoref::Resolved {
-                response: coref_resp,
-                engine,
-            }) => {
-                per_file_engines[file_idx] = Some(engine.clone());
-                let mut annotation_map: HashMap<usize, String> = HashMap::new();
-                for ann in &coref_resp.annotations {
-                    if ann.sentence_idx < info.line_indices.len() {
-                        let line_idx = info.line_indices[ann.sentence_idx];
-                        annotation_map.insert(line_idx, ann.annotation.clone());
-                    }
-                }
-                if !annotation_map.is_empty() {
-                    apply_coref_results(&mut parsed_files[file_idx], &annotation_map);
-                }
+            Admission::PassThrough(output) => {
+                results.push(TextBatchFileResult::ok(file.filename.clone(), output));
+                continue;
             }
-        }
-    }
-
-    // 5. Serialize all files
-    for (file_idx, file) in files.iter().enumerate() {
-        let filename = file.filename.as_ref();
-        // Skip files that failed pre-validation
-        if let Some(ref err) = validation_errors[file_idx] {
-            results.push(TextBatchFileResult::err(
-                file.filename.clone(),
-                crate::text_batch::TextWorkflowFileError::validation(err.clone()),
-            ));
-            continue;
-        }
-
-        // Per-item engine failure: file marked failed with typed
-        // ItemErrors variant so the user sees the engine reason.
-        if let Some(failure) = per_file_failures[file_idx].take() {
-            results.push(TextBatchFileResult::err(
-                file.filename.clone(),
-                crate::text_batch::TextWorkflowFileError::item_errors(
-                    "coref",
-                    ItemFailures::of_one(ItemError {
-                        item_index: 0,
-                        failure,
-                    }),
-                ),
-            ));
-            continue;
-        }
-
-        // Provenance, before the gate so the proof covers the bytes that are
-        // written: the engine THIS file's own result named. Coref is
-        // English-only, so the stamp's language is the constant `eng` rather
-        // than any job-level value (see the 2026-05-03 incident). A file that
-        // was never eligible (dummy, or not English) had no coref run, so no
-        // stamp question arises for it.
-        let mut stamp = FileStampOutcome::Unrecorded;
-        if eligible_files.iter().any(|(idx, _)| *idx == file_idx) {
-            let command = crate::api::ReleasedCommand::Coref.to_string();
-            match crate::provenance::result_named_provenance(
-                crate::provenance::ResultNamedCommand::Coref,
-                &LanguageCode3::eng(),
-                per_file_engines[file_idx].as_ref(),
-            ) {
-                TextStamp::Stamped(comment) => {
-                    crate::provenance::inject_provenance(&mut parsed_files[file_idx], &comment);
-                    stamp = FileStampOutcome::Stamped { command };
-                }
-                TextStamp::NotStamped(reason) => {
-                    info!(
-                        filename = %filename,
-                        reason = %reason,
-                        "coref wrote no provenance stamp"
-                    );
-                    stamp = FileStampOutcome::NotStamped {
-                        command,
-                        reason: reason.to_string(),
-                    };
-                }
+            Admission::Pending(pending) => pending,
+        };
+        let result = match &responses {
+            Err(error) => {
+                results.push(TextBatchFileResult::err(
+                    file.filename.clone(),
+                    TextWorkflowFileError::from_server_error(error),
+                ));
+                continue;
             }
-        }
-
-        // Fail-closed post-validation, per file: a file whose output fails
-        // the gate is reported as a validation failure and never written.
-        // The rest of the cross-file batch is unaffected.
-        match PostValidated::gate(
-            &parsed_files[file_idx],
-            ValidityLevel::StructurallyComplete,
-            crate::api::ReleasedCommand::Coref,
+            Ok(responses) => match responses.get(pending.batch_idx) {
+                Some(Ok(result)) => result.clone(),
+                Some(Err(failure)) => {
+                    results.push(TextBatchFileResult::err(
+                        file.filename.clone(),
+                        TextWorkflowFileError::item_errors(
+                            "coref",
+                            ItemFailures::of_one(ItemError {
+                                item_index: 0,
+                                failure: failure.clone(),
+                            }),
+                        ),
+                    ));
+                    continue;
+                }
+                None => {
+                    results.push(TextBatchFileResult::err(
+                        file.filename.clone(),
+                        TextWorkflowFileError::from_server_error(&coref_protocol_error(
+                            "coref response batch does not cover its pending request",
+                        )),
+                    ));
+                    continue;
+                }
+            },
+        };
+        let applied = match pending.complete(result) {
+            Ok(applied) => applied,
+            Err(error) => {
+                results.push(TextBatchFileResult::err(
+                    file.filename.clone(),
+                    TextWorkflowFileError::from_server_error(&error),
+                ));
+                continue;
+            }
+        };
+        let mut document = applied.document;
+        let stamp = match crate::provenance::result_named_provenance(
+            crate::provenance::ResultNamedCommand::Coref,
+            &LanguageCode3::eng(),
+            [&applied.engine],
         ) {
+            TextStamp::Stamped(comment) => {
+                crate::provenance::inject_provenance(&mut document, &comment);
+                FileStampOutcome::Stamped {
+                    command: command.to_string(),
+                }
+            }
+            TextStamp::NotStamped(reason) => FileStampOutcome::NotStamped {
+                command: command.to_string(),
+                reason: reason.to_string(),
+            },
+        };
+        match PostValidated::gate_owned(document, command) {
             Ok(output) => results.push(TextBatchFileResult::ok_stamped(
                 file.filename.clone(),
                 output,
                 stamp,
             )),
-            Err(failure) => {
-                warn!(filename = %filename, error = %failure, "coref output refused");
-                results.push(TextBatchFileResult::err(file.filename.clone(), failure));
-            }
+            Err(failure) => results.push(TextBatchFileResult::err(file.filename.clone(), failure)),
         }
     }
-
     results
 }
 
@@ -393,9 +384,9 @@ async fn infer_batch(
 
     let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
     let result = parse_coref_result_v2(response)
-        .map_err(|error| ServerError::Validation(format!("invalid coref V2 result: {error}")))?;
+        .map_err(|error| coref_protocol_error(format!("invalid coref V2 result: {error}")))?;
     if result.items.len() != items.len() {
-        return Err(ServerError::Validation(format!(
+        return Err(coref_protocol_error(format!(
             "coref V2 returned {} items for {} requests",
             result.items.len(),
             items.len()
@@ -411,7 +402,7 @@ async fn infer_batch(
                 annotations,
                 engine,
             } => Ok(ResolvedCoref::Resolved {
-                response: coref_response_from_v2_annotations(&annotations),
+                annotations,
                 engine,
             }),
             CorefItemResultV2::NoSentences => Ok(ResolvedCoref::NoSentences),
@@ -451,7 +442,137 @@ fn coref_response_from_v2_annotations(annotations: &[CorefAnnotationV2]) -> Core
 #[cfg(test)]
 mod tests {
     use super::*;
-    use batchalign_transform::parse::TreeSitterParser;
+    use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
+
+    const VALID: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n\
+        @ID:\teng|test|CHI|||||Child|||\n*CHI:\thello world .\n@End\n";
+
+    fn pending() -> PendingCoref {
+        let parser = crate::chat_parser();
+        let input = crate::pipeline::text_infer::admit_retained_text(
+            &parser,
+            VALID,
+            talkbank_model::model::TranscriptName::Anonymous,
+        )
+        .expect("source fixture is fully valid CHAT");
+        let payload = collect_coref_payloads(input.document());
+        PendingCoref {
+            input: input.into_valid_file(),
+            sentences: sentence_bindings(&payload),
+            batch_idx: 0,
+        }
+    }
+
+    fn resolved(annotations: Vec<CorefAnnotationV2>) -> ResolvedCoref {
+        ResolvedCoref::Resolved {
+            annotations,
+            engine: ReportedEngineName::try_from("test-coref").expect("engine name"),
+        }
+    }
+
+    #[test]
+    fn coref_completion_refuses_unbound_or_incomplete_annotations() {
+        let cases = [
+            resolved(vec![CorefAnnotationV2 {
+                sentence_idx: usize::MAX,
+                words: vec![],
+            }]),
+            resolved(vec![CorefAnnotationV2 {
+                sentence_idx: 0,
+                words: vec![vec![]],
+            }]),
+            resolved(vec![
+                CorefAnnotationV2 {
+                    sentence_idx: 0,
+                    words: vec![vec![], vec![]],
+                },
+                CorefAnnotationV2 {
+                    sentence_idx: 0,
+                    words: vec![vec![], vec![]],
+                },
+            ]),
+            ResolvedCoref::NoSentences,
+        ];
+        for response in cases {
+            let error = match pending().complete(response) {
+                Ok(_) => panic!("unbound analysis must not produce applied coreference"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                crate::runner::util::classify_server_error(&error),
+                crate::scheduling::FailureCategory::WorkerProtocol
+            );
+        }
+        assert!(
+            pending().complete(resolved(vec![])).is_ok(),
+            "a resolved document with no chains is legitimate sparse output"
+        );
+        assert!(
+            pending()
+                .complete(resolved(vec![CorefAnnotationV2 {
+                    sentence_idx: 0,
+                    words: vec![vec![], vec![]],
+                }]))
+                .is_ok(),
+            "bound per-word annotations complete normally"
+        );
+    }
+
+    #[tokio::test]
+    async fn coref_mixed_batch_keeps_admission_verdicts_when_inference_fails() {
+        use crate::api::DisplayPath;
+        use crate::scheduling::FailureCategory;
+        use crate::worker::pool::PoolConfig;
+        let non_english = VALID.replace("eng", "spa");
+        let invalid = VALID.replace("hello world .", "<the dog> [///] .");
+        let invalid_non_english = non_english.replace("@End", "%mor:\tnoun| .\n@End");
+        let files = [
+            TextBatchFileInput::new(DisplayPath::from("english.cha"), VALID.to_owned()),
+            TextBatchFileInput::new(DisplayPath::from("spanish.cha"), non_english.clone()),
+            TextBatchFileInput::new(DisplayPath::from("invalid.cha"), invalid),
+            TextBatchFileInput::new(
+                DisplayPath::from("invalid-spanish.cha"),
+                invalid_non_english,
+            ),
+        ];
+        let pool = WorkerPool::new(PoolConfig::default());
+        let results = run_coref_batch_impl(&files, &pool, async |_pool, items| {
+            assert_eq!(
+                items.len(),
+                1,
+                "only the valid English document reaches inference"
+            );
+            Err(coref_protocol_error("test provider failure"))
+        })
+        .await;
+        assert_eq!(results.len(), 4);
+        assert_eq!(
+            results[0]
+                .result
+                .as_ref()
+                .expect_err("eligible file failed")
+                .category(),
+            FailureCategory::WorkerProtocol
+        );
+        assert_eq!(
+            results[1]
+                .result
+                .as_ref()
+                .expect("valid non-English pass-through")
+                .as_str(),
+            non_english
+        );
+        for result in &results[2..] {
+            assert_eq!(
+                result
+                    .result
+                    .as_ref()
+                    .expect_err("invalidity survives an unrelated provider failure")
+                    .category(),
+                FailureCategory::Validation
+            );
+        }
+    }
 
     #[test]
     fn test_file_has_english_with_eng_languages() {

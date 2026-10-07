@@ -9,6 +9,64 @@ use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
 
 #[test]
+fn dense_overlap_counterfactual_retains_sound_exclusion_without_changing_default_policy() {
+    use talkbank_model::model::{FileStem, TranscriptName};
+    use utr::{TwoPassConfig, TwoPassOverlapUtr, UtrStrategy};
+    let source = include_str!("../../../../../../test-fixtures/utr_lazy_overlap_backchannel.cha");
+    let parser = TreeSitterParser::new().expect("parser");
+    let admitted = batchalign_transform::parse_source_with_parser(&parser, source)
+        .admit(
+            TranscriptName::Named(
+                FileStem::from_path(std::path::Path::new("utr_lazy_overlap_backchannel.cha"))
+                    .expect("name"),
+            ),
+            &talkbank_model::NullErrorSink,
+        )
+        .expect("complete named fixture admission")
+        .into_valid_file()
+        .into_unchecked();
+    let tokens = make_utr_tokens(&[
+        ("I", 100, 300),
+        ("went", 400, 800),
+        ("to", 900, 1100),
+        ("the", 1200, 1400),
+        ("store", 1500, 2000),
+        ("mhm", 1800, 2200),
+        ("yesterday", 2300, 3000),
+        ("and", 5000, 5300),
+        ("I", 5400, 5600),
+        ("bought", 5700, 6200),
+        ("some", 6300, 6600),
+        ("groceries", 6700, 7500),
+    ]);
+    let mut included = admitted.clone();
+    let mut excluded = admitted;
+    let default = TwoPassOverlapUtr::new().inject(&mut included, &tokens);
+    let alternative = TwoPassOverlapUtr::new()
+        .with_config(TwoPassConfig {
+            max_exclusion_density: "1.0".parse().expect("checked density"),
+            ..TwoPassConfig::default()
+        })
+        .inject(&mut excluded, &tokens);
+    assert_eq!((default.injected(), alternative.injected()), (3, 3));
+    for (index, expected) in [(0, (100, 3000)), (1, (1800, 2200)), (2, (5000, 7500))] {
+        assert_eq!(
+            get_utterance_bullet(&included, index),
+            Some(expected),
+            "joint default {index}"
+        );
+        assert_eq!(
+            get_utterance_bullet(&excluded, index),
+            Some(expected),
+            "excluded candidate {index}"
+        );
+    }
+    println!(
+        "dense overlap counterfactual: joint default=3/3; explicit exclusion=3/3; all three observed intervals retained"
+    );
+}
+
+#[test]
 fn test_two_pass_correctly_times_lazy_overlap() {
     use utr::UtrStrategy;
     let chat_text =
@@ -188,23 +246,33 @@ fn test_two_pass_dense_backchannels() {
 
     let result = utr::TwoPassOverlapUtr::new().inject(&mut chat, &tokens);
 
-    // PAR's utterance (1) + 4 INV backchannels = 5 injected
+    // Independent local windows leave repeated oh/mhm ambiguous. The whole
+    // source episode preserves the following speaker's complete chain, so
+    // those repeated occurrences are exclusive, ordered and jointly unique.
     assert_eq!(
         result.injected(),
         5,
-        "PAR + 4 INV backchannels should be timed"
+        "joint source reservations recover every unique backchannel"
     );
     assert_eq!(result.unmatched(), 0);
 
-    // All 4 INV utterances (indices 1-4) should have bullets within PAR's range
-    for inv_idx in 1..=4 {
-        let bullet = get_utterance_bullet(&chat, inv_idx)
-            .unwrap_or_else(|| panic!("INV utterance {inv_idx} should have a bullet"));
-        assert!(
-            bullet.0 >= 100 && bullet.1 <= 11000,
-            "INV utterance {inv_idx} bullet {}-{} should be within PAR's range",
-            bullet.0,
-            bullet.1,
+    let bullet = get_utterance_bullet(&chat, 1).expect("uniquely supported first backchannel");
+    assert!(
+        bullet.0 >= 100 && bullet.1 <= 11000,
+        "first backchannel {}-{} should be within PAR's range",
+        bullet.0,
+        bullet.1
+    );
+    for (inv_idx, expected) in [
+        (1, (2100, 2800)),
+        (2, (5100, 5400)),
+        (3, (6800, 7100)),
+        (4, (8400, 8700)),
+    ] {
+        assert_eq!(
+            get_utterance_bullet(&chat, inv_idx),
+            Some(expected),
+            "backchannel {inv_idx} must recover its own observed interval"
         );
     }
 }

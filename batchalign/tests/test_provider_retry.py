@@ -124,12 +124,38 @@ def _install_translator(monkeypatch: pytest.MonkeyPatch, translator: type) -> An
     monkeypatch.setitem(
         sys.modules, "googletrans", types.SimpleNamespace(Translator=translator)
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "googletrans.constants",
+        types.SimpleNamespace(
+            LANGUAGES={"en": "english", "es": "spanish", "fr": "french"}
+        ),
+    )
     from batchalign.worker._model_loading import translation as loader
     from batchalign.worker._types import _state
 
     loader._load_google_translate()
     assert _state.translation is not None
     return _state.translation.translate
+
+
+def test_google_session_carries_checked_source_and_target(monkeypatch):
+    calls = []
+
+    class Translator:
+        def __init__(self, **kwargs):
+            self.client = _FakeClient()
+
+        async def translate(self, text, *, src, dest):
+            calls.append((text, src, dest))
+            return types.SimpleNamespace(text="bonjour")
+
+    translate = _install_translator(monkeypatch, Translator)
+    assert translate("hello", "eng", "fra") == "bonjour"
+    assert calls == [("hello", "en", "fr")]
+    with pytest.raises(ValueError, match="does not support"):
+        translate("hello", "eng", "xyz")
+    assert len(calls) == 1
 
 
 def test_the_session_reports_a_provider_status_instead_of_returning_the_input(
@@ -145,7 +171,7 @@ def test_the_session_reports_a_provider_status_instead_of_returning_the_input(
             assert kwargs.get("timeout") is not None
             self.client = _FakeClient()
 
-        async def translate(self, text: str) -> Any:
+        async def translate(self, text: str, *, src: str, dest: str) -> Any:
             calls.append(text)
             for hook in self.client.event_hooks["response"]:
                 await hook(_response(403, {"retry-after": "30"}))
@@ -173,7 +199,7 @@ def test_a_success_does_not_stand_in_for_a_later_transport_failure(
         def __init__(self, **_kwargs: Any) -> None:
             self.client = _FakeClient()
 
-        async def translate(self, text: str) -> Any:
+        async def translate(self, text: str, *, src: str, dest: str) -> Any:
             answer = answers.pop(0)
             if isinstance(answer, BaseException):
                 raise answer
@@ -199,7 +225,7 @@ def test_a_success_status_with_an_exception_behind_it_is_an_engine_failure(
         def __init__(self, **_kwargs: Any) -> None:
             self.client = _FakeClient()
 
-        async def translate(self, text: str) -> Any:
+        async def translate(self, text: str, *, src: str, dest: str) -> Any:
             for hook in self.client.event_hooks["response"]:
                 await hook(_response(200))
             raise Exception("Expecting value: line 1 column 1 (char 0)")

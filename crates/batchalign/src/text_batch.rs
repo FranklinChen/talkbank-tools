@@ -260,7 +260,7 @@ impl ServerError {
 
 impl From<PostValidationFailure> for TextWorkflowFileError {
     fn from(value: PostValidationFailure) -> Self {
-        Self::validation(value.to_string())
+        Self::from_server_error(&value.into_server_error())
     }
 }
 
@@ -563,6 +563,15 @@ mod tests {
             (
                 ServerError::ModelAccessDenied("gated repository".into()),
                 FailureCategory::ModelAccessDenied,
+            ),
+            (
+                ServerError::from(
+                    crate::morphosyntax::AnalysisUnavailable::admit_primary(
+                        &crate::api::LanguageCode3::try_new("que").unwrap(),
+                    )
+                    .unwrap_err(),
+                ),
+                FailureCategory::AnalysisUnavailable,
             ),
             (
                 ServerError::Persistence("disk full".into()),

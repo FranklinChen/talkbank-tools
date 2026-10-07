@@ -1,7 +1,7 @@
 # Number Expansion in ASR Post-Processing
 
 **Status:** Current
-**Last updated:** 2026-09-24 19:15 EDT
+**Last updated:** 2026-10-06 23:58 EDT
 
 This page is the **single source of truth** for how batchalign3 turns
 ASR-emitted number tokens (`"3"`, `"$5"`, `"1950s"`, `"3rd"`,
@@ -82,7 +82,7 @@ twenty-four`) and the Chinese zero between skipped four-digit groups
 (`100000001` had been `一亿零零一`), both of which Batchalign carried in
 its former copy of the generator until that copy was deleted.
 
-After per-word expansion, `split_words_with_whitespace` widens
+After per-word expansion, `write_word_forms` widens
 multi-token expansions (`"100"` becomes `"one hundred"`) into separate
 `AsrWord`s so each fits in a single `ChatWordText`. The percent split
 (`80%` to `80` plus the language's percent word) happens earlier, in

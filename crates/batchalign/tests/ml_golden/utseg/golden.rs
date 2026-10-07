@@ -51,7 +51,10 @@ async fn golden_utseg_eng_multi_utt() {
         .await;
 
     assert_completed_without_errors("utseg_eng_multi_utt", &info, &results);
-    assert_golden_snapshot!("utseg_eng_multi_utt", &results[0].content);
+    assert_golden_snapshot!(
+        "utseg_eng_multi_utt",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -85,7 +88,10 @@ async fn golden_utseg_spa() {
     }
 
     assert_completed_without_errors("utseg_spa", &info, &results);
-    assert_golden_snapshot!("utseg_spa", &results[0].content);
+    assert_golden_snapshot!(
+        "utseg_spa",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -114,7 +120,7 @@ async fn utseg_multispeaker_preserves_turns_and_timing_bullets() {
     assert_completed_without_errors("utseg_multispeaker_preserves_structure", &info, &results);
     assert_eq!(results.len(), 1);
 
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert!(
         output.contains("*CHI:\t"),
         "utseg should preserve child turns in multi-speaker transcripts"

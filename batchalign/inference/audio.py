@@ -455,6 +455,18 @@ def _extract_token_timestamps(
             )
             num_frames = np.repeat(num_frames, repeat_time)
 
+    # The generation producer knows the decoder conditioning length. Bind that
+    # row selection to output placement here, rather than normalizing the prefix
+    # as lexical attention and shifting the resulting word intervals.
+    if num_input_ids is not None:
+        if not 0 <= num_input_ids <= weights.shape[2]:
+            raise ValueError(
+                "Whisper generation conditioning exceeds its attention rows"
+            )
+        weights = weights[:, :, num_input_ids:, :]
+    if weights.shape[2] == 0:
+        return timestamps
+
     if num_frames is None or isinstance(num_frames, int):
         std = torch.std(weights, dim=-2, keepdim=True, unbiased=False)
         mean = torch.mean(weights, dim=-2, keepdim=True)
@@ -480,7 +492,14 @@ def _extract_token_timestamps(
         )
         jumps = np.pad(np.diff(text_indices), (1, 0), constant_values=1).astype(bool)
         jump_times = time_indices[jumps] * time_precision
-        timestamps[batch_idx, 1:] = torch.tensor(jump_times)
+        if num_input_ids is None:
+            timestamps[batch_idx, 1:] = torch.tensor(jump_times)
+        else:
+            # Autoregressive generation has no attention row for its final
+            # predicted token. Upstream repeats the final observed boundary;
+            # prefix labels remain zero, and no lexical label is shifted.
+            timestamps[batch_idx, num_input_ids:-1] = torch.tensor(jump_times)
+            timestamps[batch_idx, -1] = float(jump_times[-1])
 
     return timestamps
 

@@ -86,7 +86,20 @@ mod tests {
         // default would reintroduce, in miniature, the silent-default hazard
         // the deleted `output_path_kind_for` embodied.
         for command in ReleasedCommand::ALL {
+            let options = if command == ReleasedCommand::Convert {
+                crate::options::CommandOptions::Convert(crate::options::ConvertOptions {
+                    common: crate::options::CommonOptions::default(),
+                    format: crate::media::export::AudioExportFormat::Wav,
+                })
+            } else {
+                crate::recipe_runner::runtime::test_options(command)
+            };
             let expected = match command {
+                ReleasedCommand::Convert => FileNamingPolicy::RewriteStem(StemRewrite {
+                    strip_suffix: None,
+                    append_suffix: ".converted",
+                    extension: "wav",
+                }),
                 ReleasedCommand::Transcribe
                 | ReleasedCommand::TranscribeS
                 | ReleasedCommand::Benchmark => FileNamingPolicy::ReplaceExtension("cha"),
@@ -122,7 +135,11 @@ mod tests {
                 | ReleasedCommand::Compare => FileNamingPolicy::PreserveInput,
             };
             assert_eq!(
-                command_spec(command).output_policy.primary,
+                command_spec(command)
+                    .selected_output_policy(&options)
+                    .unwrap()
+                    .primary_for_source(&"sample.wav".into())
+                    .naming,
                 expected,
                 "output naming changed for {command}"
             );
@@ -143,7 +160,7 @@ mod tests {
         capability_kind: CommandCapabilityKind,
         io_profile: CommandIoProfile,
         runner_dispatch_kind: RunnerDispatchKind,
-        primary_infer_task: InferTask,
+        primary_infer_task: Option<InferTask>,
     }
 
     /// The pinned metadata for every released command.
@@ -167,7 +184,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::Text,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-                    primary_infer_task: InferTask::Morphosyntax,
+                    primary_infer_task: Some(InferTask::Morphosyntax),
                 },
                 ReleasedCommand::Benchmark => CommandMetadataPin {
                     command,
@@ -175,7 +192,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::ServerComposed,
                     io_profile: CommandIoProfile::MediaInput,
                     runner_dispatch_kind: RunnerDispatchKind::BenchmarkAudioInfer,
-                    primary_infer_task: InferTask::Asr,
+                    primary_infer_task: Some(InferTask::Asr),
                 },
                 ReleasedCommand::Transcribe => CommandMetadataPin {
                     command,
@@ -183,7 +200,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::ServerComposed,
                     io_profile: CommandIoProfile::MediaInput,
                     runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
-                    primary_infer_task: InferTask::Asr,
+                    primary_infer_task: Some(InferTask::Asr),
                 },
                 ReleasedCommand::TranscribeS => CommandMetadataPin {
                     command,
@@ -191,7 +208,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::ServerComposed,
                     io_profile: CommandIoProfile::MediaInput,
                     runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
-                    primary_infer_task: InferTask::Asr,
+                    primary_infer_task: Some(InferTask::Asr),
                 },
                 ReleasedCommand::Align => CommandMetadataPin {
                     command,
@@ -199,7 +216,15 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::ResolvedAudio,
                     runner_dispatch_kind: RunnerDispatchKind::ForcedAlignment,
-                    primary_infer_task: InferTask::Fa,
+                    primary_infer_task: Some(InferTask::Fa),
+                },
+                ReleasedCommand::Convert => CommandMetadataPin {
+                    command,
+                    family: CommandFamily::NativeMedia,
+                    capability_kind: CommandCapabilityKind::NativeMedia,
+                    io_profile: CommandIoProfile::MediaInput,
+                    runner_dispatch_kind: RunnerDispatchKind::NativeAudioExport,
+                    primary_infer_task: None,
                 },
                 ReleasedCommand::Morphotag => CommandMetadataPin {
                     command,
@@ -207,7 +232,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::Text,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-                    primary_infer_task: InferTask::Morphosyntax,
+                    primary_infer_task: Some(InferTask::Morphosyntax),
                 },
                 ReleasedCommand::Utseg => CommandMetadataPin {
                     command,
@@ -215,7 +240,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::Text,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-                    primary_infer_task: InferTask::Utseg,
+                    primary_infer_task: Some(InferTask::Utseg),
                 },
                 ReleasedCommand::Translate => CommandMetadataPin {
                     command,
@@ -223,7 +248,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::Text,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-                    primary_infer_task: InferTask::Translate,
+                    primary_infer_task: Some(InferTask::Translate),
                 },
                 ReleasedCommand::Coref => CommandMetadataPin {
                     command,
@@ -231,7 +256,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::Text,
                     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-                    primary_infer_task: InferTask::Coref,
+                    primary_infer_task: Some(InferTask::Coref),
                 },
                 ReleasedCommand::Opensmile => CommandMetadataPin {
                     command,
@@ -239,7 +264,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::MediaInput,
                     runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
-                    primary_infer_task: InferTask::Opensmile,
+                    primary_infer_task: Some(InferTask::Opensmile),
                 },
                 ReleasedCommand::Avqi => CommandMetadataPin {
                     command,
@@ -247,7 +272,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::MediaInput,
                     runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
-                    primary_infer_task: InferTask::Avqi,
+                    primary_infer_task: Some(InferTask::Avqi),
                 },
                 ReleasedCommand::Diarize => CommandMetadataPin {
                     command,
@@ -255,7 +280,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::MediaInput,
                     runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
-                    primary_infer_task: InferTask::Speaker,
+                    primary_infer_task: Some(InferTask::Speaker),
                 },
                 ReleasedCommand::SpeakerIdentify => CommandMetadataPin {
                     command,
@@ -263,7 +288,7 @@ mod tests {
                     capability_kind: CommandCapabilityKind::DirectInfer,
                     io_profile: CommandIoProfile::ResolvedAudio,
                     runner_dispatch_kind: RunnerDispatchKind::SpeakerIdentity,
-                    primary_infer_task: InferTask::Speaker,
+                    primary_infer_task: Some(InferTask::Speaker),
                 },
             })
             .collect()
@@ -285,7 +310,11 @@ mod tests {
                 capability_kind: spec.capability_kind,
                 io_profile: spec.io_profile,
                 runner_dispatch_kind: spec.runner_dispatch_kind,
-                primary_infer_task: spec.capabilities.primary_infer_task,
+                primary_infer_task: spec
+                    .capabilities
+                    .require_inference()
+                    .ok()
+                    .map(|requirement| requirement.task()),
             };
             assert_eq!(actual, pin, "declared metadata for {}", pin.command);
         }
@@ -348,6 +377,14 @@ mod tests {
                 CommandFamily::MediaAnalysis => FamilyPolicyPin {
                     scheduling: SchedulingPolicy::PerFileMediaAnalysis,
                     model_sharing: ModelSharingPolicy::SharedWarmWorkers,
+                    batching: BatchingPolicy::None,
+                    parallelism: ParallelismPolicy::BoundedFileWorkers,
+                    resource_lane: ResourceLane::IoBound,
+                    constrained_host: ConstrainedHostPolicy::SequentialFallback,
+                },
+                CommandFamily::NativeMedia => FamilyPolicyPin {
+                    scheduling: SchedulingPolicy::PerFileMediaAnalysis,
+                    model_sharing: ModelSharingPolicy::NoModels,
                     batching: BatchingPolicy::None,
                     parallelism: ParallelismPolicy::BoundedFileWorkers,
                     resource_lane: ResourceLane::IoBound,

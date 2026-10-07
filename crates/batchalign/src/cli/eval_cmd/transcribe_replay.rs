@@ -140,6 +140,26 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
         )
         .await
         .map_err(CliError::from)?;
+        // Replay writes what transcription would write: a generated
+        // transcript that did not pass admission is kept, and the diagnosis
+        // is reported here rather than lost with the bytes.
+        if let crate::pipeline::post_validate::OutputReport::Diagnosed(report) =
+            crate::pipeline::post_validate::OutputReport::of(&chat.document, &chat.shortfalls)
+        {
+            eprintln!(
+                "warning: {recording_id}: written with {} diagnostic(s): {}",
+                report.findings().count(),
+                report
+                    .findings()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            for skipped in report.shortfalls() {
+                eprintln!("warning: {recording_id}: {skipped}");
+            }
+        }
+        let chat = chat.document.into_text();
         let final_output_path = args.output.join(format!("{recording_id}.cha"));
         std::fs::write(
             staging.path().join(format!("{recording_id}.cha")),

@@ -56,7 +56,11 @@ pub(super) fn align_options_with_media_dir_and_utr(
             ..Default::default()
         },
         wor,
-        media_dir,
+        media_dir: media_dir.map(|root| {
+            batchalign::options::AbsoluteMediaRoot::admit(root)
+                .expect("fixture media root is absolute")
+                .into()
+        }),
         ..AlignOptions::default()
     })
 }

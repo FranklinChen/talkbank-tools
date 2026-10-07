@@ -17,8 +17,8 @@ mod catalog;
 
 pub(crate) use crate::recipe_runner::command_spec::{
     BatchingPolicy, CapabilityPlan, CatalogEntry, CommandCapabilityKind, CommandIoProfile,
-    ConstrainedHostPolicy, ModelSharingPolicy, ParallelismPolicy, ResourceLane, RunnerDispatchKind,
-    SchedulingPolicy,
+    ConstrainedHostPolicy, InferenceRequirement, ModelSharingPolicy, ParallelismPolicy,
+    ResourceLane, RunnerDispatchKind, SchedulingPolicy,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::recipe_runner::materialize::{

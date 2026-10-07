@@ -219,3 +219,205 @@ fn every_execute_action_accepts_recompute() {
             .failure();
     }
 }
+
+/// Run the complete offline comparison boundary over immutable artifacts.
+fn compare_artifacts(left: &str, right: &str) -> (CliHarness, std::process::Output) {
+    compare_artifacts_with_options(left, right, "morphotag", "")
+}
+
+fn compare_artifacts_with_options(
+    left: &str,
+    right: &str,
+    mode: &str,
+    options: &str,
+) -> (CliHarness, std::process::Output) {
+    let harness = CliHarness::new();
+    for (side, body) in [("left", left), ("right", right)] {
+        let root = harness.home_dir().join(side);
+        write_chat(&root, "session.cha", body);
+        harness
+            .cmd()
+            .args(["compare-runs", "manifest", "machine"])
+            .arg("--artifacts")
+            .arg(&root)
+            .arg("--output")
+            .arg(harness.home_dir().join(format!("{side}.json")))
+            .args([
+                "--run-id",
+                side,
+                "--source-id",
+                "same-input",
+                "--implementation",
+                "test-producer",
+                "--command",
+                mode,
+                "--build",
+                "immutable-test-build",
+            ])
+            .assert()
+            .success();
+    }
+    let plan = harness.home_dir().join("plan.toml");
+    fs::write(&plan, format!("schema_version = 1\npairing = \"same_source_chat\"\noutput = \"comparison\"\n{options}\n[left]\nmanifest = \"left.json\"\nartifacts = \"left\"\n[right]\nmanifest = \"right.json\"\nartifacts = \"right\"\n[[pairs]]\nleft = \"session.cha\"\nright = \"session.cha\"\n")).unwrap();
+    let output = harness
+        .cmd()
+        .args(["compare-runs", mode])
+        .arg("--plan")
+        .arg(&plan)
+        .output()
+        .unwrap();
+    (harness, output)
+}
+
+fn comparison_root(harness: &CliHarness) -> std::path::PathBuf {
+    let mut roots = fs::read_dir(harness.home_dir().join("comparison/runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(roots.len(), 1);
+    roots.pop().unwrap()
+}
+
+#[test]
+fn absent_annotations_are_visible_in_real_report_and_csv() {
+    let (harness, output) = compare_artifacts(MINIMAL_CHAT, MINIMAL_CHAT);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let root = comparison_root(&harness);
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["algorithm_version"], 4);
+    let result = &report["pairs"][0]["outcome"]["result"];
+    assert_eq!(result["compared_tokens"], 2);
+    assert_eq!(result["fully_annotated_tokens"], 0);
+    assert!(result["tokens"][0]["analysis_agreement"].is_null());
+    let mut csv = csv::Reader::from_path(root.join("summary.csv")).unwrap();
+    let headers = csv.headers().unwrap().clone();
+    let presence = headers
+        .iter()
+        .position(|name| name == "left_annotation_state")
+        .unwrap();
+    let agreement = headers
+        .iter()
+        .position(|name| name == "analysis_agreement")
+        .unwrap();
+    for row in csv.records() {
+        let row = row.unwrap();
+        assert_eq!(&row[presence], "absent");
+        assert_eq!(&row[agreement], "");
+    }
+    // Identical admitted inputs reuse only this version's result.
+    harness
+        .cmd()
+        .args(["compare-runs", "morphotag"])
+        .arg("--plan")
+        .arg(harness.home_dir().join("plan.toml"))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 computed, 1 reused"));
+}
+
+#[test]
+fn post_clitic_differences_survive_the_cli_wire_boundary() {
+    let left = MINIMAL_CHAT.replace("*PAR:\thello world .",
+        "*PAR:\thello world .\n%mor:\tintj|hello~pron|you noun|world .\n%gra:\t1|0|ROOT 2|1|NSUBJ 3|1|OBJ 4|1|PUNCT");
+    let right = left
+        .replace("pron|you", "pron|we")
+        .replace("2|1|NSUBJ", "2|3|AMOD");
+    let (harness, output) = compare_artifacts(&left, &right);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(comparison_root(&harness).join("report.json")).unwrap())
+            .unwrap();
+    let row = &report["pairs"][0]["outcome"]["result"]["tokens"][0];
+    for axis in ["lemma", "dependency_head", "relation"] {
+        assert!(
+            row["differences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == axis)
+        );
+    }
+    assert_eq!(row["analysis_agreement"], false);
+}
+
+#[test]
+fn fully_invalid_retained_chat_is_unpairable_not_an_algorithm_input() {
+    let invalid = MINIMAL_CHAT.replace(
+        "*PAR:\thello world .",
+        "*PAR:\thello world .\n%mor:\tintj|hello .",
+    );
+    let (harness, output) = compare_artifacts(MINIMAL_CHAT, &invalid);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let root = comparison_root(&harness);
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("report.json")).unwrap()).unwrap();
+    let outcome = &report["pairs"][0]["outcome"];
+    assert_eq!(outcome["outcome"], "unpairable");
+    assert_eq!(outcome["reason"]["kind"], "artifact_invalid");
+    assert!(outcome.get("result").is_none());
+}
+
+#[test]
+fn token_modes_refuse_partial_speaker_maps_instead_of_omitting_content() {
+    let left = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant, OTH Participant\n@ID:\teng|test|PAR|||||Participant|||\n@ID:\teng|test|OTH|||||Participant|||\n*PAR:\thello world .\n*OTH:\tgood morning .\n@End\n";
+    let right = left.replace("good morning", "good evening");
+    for mode in ["morphotag", "align"] {
+        let (harness, output) =
+            compare_artifacts_with_options(left, &right, mode, "speaker_map = { PAR = \"PAR\" }");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(
+            &fs::read(comparison_root(&harness).join("report.json")).unwrap(),
+        )
+        .unwrap();
+        let outcome = &report["pairs"][0]["outcome"];
+        assert_eq!(outcome["reason"]["kind"], "incomplete_speaker_map");
+        assert_eq!(
+            outcome["reason"]["unmatched_left"],
+            serde_json::json!(["OTH"])
+        );
+        assert_eq!(
+            outcome["reason"]["unmatched_right"],
+            serde_json::json!(["OTH"])
+        );
+        assert!(outcome.get("result").is_none());
+
+        let (harness, output) = compare_artifacts_with_options(
+            left,
+            left,
+            mode,
+            "speaker_map = { PAR = \"PAR\", OTH = \"OTH\" }",
+        );
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(
+            &fs::read(comparison_root(&harness).join("report.json")).unwrap(),
+        )
+        .unwrap();
+        let outcome = &report["pairs"][0]["outcome"];
+        assert_eq!(outcome["outcome"], "compared");
+        assert_eq!(outcome["result"]["tokens"].as_array().unwrap().len(), 4);
+    }
+}

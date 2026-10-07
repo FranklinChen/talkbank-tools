@@ -43,6 +43,8 @@ class _FakeWhisperProcessor:
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.feature_extractor = SimpleNamespace(hop_length=160)
+        self.tokenizer = SimpleNamespace(prefix_tokens=[1, 2], eos_token_id=3)
 
     def __call__(
         self, *, audio, text: str, sampling_rate: int, return_tensors: str
@@ -57,12 +59,18 @@ class _FakeWhisperProcessor:
         )
         return _FeatureBatch(
             {
-                "labels": torch.tensor([[10, 20]], dtype=torch.int64),
+                "labels": torch.tensor([[1, 2, 10, 20, 3]], dtype=torch.int64),
                 "input_features": torch.tensor([[1.0, 2.0]], dtype=torch.float32),
             }
         )
 
-    def decode(self, token_id: torch.Tensor) -> str:
+    def decode(self, token_id: int | torch.Tensor) -> str:
+        if int(token_id) in (1, 2, 3):
+            return {
+                1: "<|startoftranscript|>",
+                2: "<|notimestamps|>",
+                3: "<|endoftext|>",
+            }[int(token_id)]
         return f"tok-{int(token_id)}"
 
 
@@ -80,7 +88,19 @@ class _FakeWhisperModel:
     def __call__(self, **_kwargs):
         return SimpleNamespace(
             cross_attentions=[
-                torch.tensor([[[[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0]]]])
+                torch.tensor(
+                    [
+                        [
+                            [
+                                [9.0, 8.0, 7.0, 6.0],
+                                [6.0, 7.0, 8.0, 9.0],
+                                [1.0, 2.0, 3.0, 4.0],
+                                [2.0, 3.0, 4.0, 5.0],
+                                [3.0, 4.0, 5.0, 6.0],
+                            ]
+                        ]
+                    ]
+                )
             ]
         )
 
@@ -113,8 +133,8 @@ def _install_whisper_alignment_helpers(monkeypatch) -> None:
 
     module = ModuleType("transformers.models.whisper.generation_whisper")
     module._dynamic_time_warping = lambda _matrix: (
-        np.asarray([0, 1], dtype=np.int64),
-        np.asarray([2, 6], dtype=np.int64),
+        np.asarray([0, 1, 2], dtype=np.int64),
+        np.asarray([0, 2, 3], dtype=np.int64),
     )
     module._median_filter = lambda weights, _width: weights
     monkeypatch.setitem(
@@ -458,7 +478,7 @@ def test_infer_whisper_fa_decodes_tokens_from_alignment_heads(monkeypatch) -> No
 
     result = infer_whisper_fa(
         handle,
-        torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32),
+        torch.zeros(1280, dtype=torch.float32),
         "ab",
     )
 
@@ -468,7 +488,122 @@ def test_infer_whisper_fa_decodes_tokens_from_alignment_heads(monkeypatch) -> No
     # covered there.
     assert handle.processor.calls[0]["text"] == "ab"
     assert handle.processor.calls[0]["sampling_rate"] == 16000
-    assert result == [("tok-10", 0.04), ("tok-20", 0.12)]
+    assert result == [
+        ("<|startoftranscript|>", 0.0),
+        ("<|notimestamps|>", 0.0),
+        ("tok-10", 0.0),
+        ("tok-20", 0.04),
+        ("<|endoftext|>", 0.06),
+    ]
+
+
+def test_whisper_fa_excludes_padding_before_normalization_and_dtw(monkeypatch) -> None:
+    _install_whisper_alignment_helpers(monkeypatch)
+    module = __import__("sys").modules["transformers.models.whisper.generation_whisper"]
+    captured: list[tuple[int, ...]] = []
+
+    def dtw(matrix):
+        captured.append(matrix.shape)
+        return np.asarray([0, 1, 2]), np.asarray([0, 1, 1])
+
+    module._dynamic_time_warping = dtw
+    handle = SimpleNamespace(
+        model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
+    )
+    result = infer_whisper_fa(handle, torch.zeros(640), "ab")
+    assert captured == [(3, 2)], (
+        "conditioning rows and padded frames must both be absent"
+    )
+    assert result == [
+        ("<|startoftranscript|>", 0.0),
+        ("<|notimestamps|>", 0.0),
+        ("tok-10", 0.0),
+        ("tok-20", 0.02),
+        ("<|endoftext|>", 0.02),
+    ]
+
+
+def test_live_whisper_host_binds_dtw_rows_to_lexical_labels(monkeypatch) -> None:
+    """The actual worker callback must exclude conditioning before DTW."""
+    from batchalign.worker._fa_v2 import build_default_fa_execution_host_v2
+
+    _install_whisper_alignment_helpers(monkeypatch)
+    module = __import__("sys").modules["transformers.models.whisper.generation_whisper"]
+    captured = []
+
+    def dtw(matrix):
+        captured.append(matrix.clone())
+        return np.asarray([0, 1, 2]), np.asarray([0, 1, 3])
+
+    module._dynamic_time_warping = dtw
+    handle = SimpleNamespace(
+        model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
+    )
+    host = build_default_fa_execution_host_v2(
+        whisper_model=handle, wave2vec_model=None, canto_host=None, qwen_host=None
+    )
+    result = host.whisper_runner(np.zeros(1280, dtype=np.float32), "ab")
+    assert captured[0].shape == (3, 4)
+    assert result[2:4] == [("tok-10", 0.0), ("tok-20", 0.02)]
+    # Conditioning values deliberately differ from lexical rows. Normalizing
+    # them together would change these costs even if sliced before DTW but
+    # after normalization.
+    lexical = handle.model().cross_attentions[0][0, 0, 2:]
+    std, mean = torch.std_mean(lexical, dim=-2, keepdim=True, unbiased=False)
+    assert torch.equal(captured[0], -(lexical - mean) / std)
+
+
+@pytest.mark.parametrize("labels", [[9, 2, 10, 20, 3], [1, 2, 10, 20, 9], [1, 2, 3]])
+def test_whisper_fa_refuses_unbound_decoder_labels(monkeypatch, labels) -> None:
+    _install_whisper_alignment_helpers(monkeypatch)
+
+    class ChangedLabels(_FakeWhisperProcessor):
+        def __call__(self, **kwargs):
+            features = super().__call__(**kwargs)
+            features["labels"] = torch.tensor([labels])
+            return features
+
+    processor = ChangedLabels()
+    handle = SimpleNamespace(
+        model=_FakeWhisperModel(), processor=processor, sample_rate=16000
+    )
+    with pytest.raises(ValueError, match=r"decoder labels|tokenizer prefix"):
+        infer_whisper_fa(handle, torch.zeros(1280), "ab")
+
+
+def test_whisper_fa_refuses_incomplete_dtw_label_coverage(monkeypatch) -> None:
+    _install_whisper_alignment_helpers(monkeypatch)
+    module = __import__("sys").modules["transformers.models.whisper.generation_whisper"]
+    module._dynamic_time_warping = lambda matrix: (
+        np.asarray([0, 1]),
+        np.asarray([0, 1]),
+    )
+    handle = SimpleNamespace(
+        model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
+    )
+    with pytest.raises(ValueError, match="every admitted decoder label"):
+        infer_whisper_fa(handle, torch.zeros(1280), "ab")
+
+
+@pytest.mark.parametrize("sample_count", [0, 319, 1600])
+def test_whisper_fa_refuses_audio_without_supported_attention_extent(
+    monkeypatch, sample_count: int
+) -> None:
+    _install_whisper_alignment_helpers(monkeypatch)
+    handle = SimpleNamespace(
+        model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
+    )
+    with pytest.raises(ValueError, match="encoder"):
+        infer_whisper_fa(handle, torch.zeros(sample_count), "ab")
+
+
+def test_whisper_fa_refuses_dtw_indices_outside_observed_audio(monkeypatch) -> None:
+    _install_whisper_alignment_helpers(monkeypatch)
+    handle = SimpleNamespace(
+        model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
+    )
+    with pytest.raises(ValueError, match="admitted acoustic window"):
+        infer_whisper_fa(handle, torch.zeros(640), "ab")
 
 
 def test_infer_wave2vec_fa_converts_spans_to_milliseconds(monkeypatch) -> None:

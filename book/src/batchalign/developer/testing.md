@@ -1,9 +1,14 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-10-01 17:35 EDT
+**Last updated:** 2026-10-06 21:07 EDT
 
 ## Philosophy
+
+Keep typed admission failure details in tests: do not convert a `Result` into
+an `Option` before asserting success. A failed fixture should show the producer's
+refusal, especially for source-bound retokenization and alignment. Formatting
+or lint success is not model-quality evidence or a replacement for these tests.
 
 The test suite is split into tiers by design. The following diagram shows
 the tiers, their resource requirements, and how to invoke each.
@@ -143,11 +148,12 @@ flowchart TD
    expensive, and dangerous on developer machines.
 
    Every processed output carries a provenance stamp (`@Comment:` with
-   `[fc-ba3 ...]`) naming the models that ran and the wall-clock time they
-   ran. The ML harness treats the two halves differently. Golden snapshots
-   (`assert_golden_snapshot!`) keep the stamp, so a change in which model or
-   pipeline variant produced the output is a visible snapshot change, but pin
-   its timestamp to `<timestamp>` so a snapshot can be accepted at all. BA2
+   `[fc-ba3 ...]`) naming the models that ran, the build that ran them and
+   the wall-clock time they ran. The ML harness treats these differently.
+   Golden snapshots (`assert_golden_snapshot!`) keep the stamp, so a change in
+   which model or pipeline variant produced the output is a visible snapshot
+   change, but pin its timestamp to `<timestamp>` and its `build=` field to
+   `<build>` so a snapshot can be accepted at all. BA2
    parity (`assert_ba2_parity`) drops stamp lines, because BA2 wrote none and
    the parity question is about tiers. Both recognize a stamp with
    `provenance::extract_provenance`, the codec the writer uses, never a text

@@ -109,13 +109,17 @@ async fn morphotag_server_multilingual_warm_cache_preserves_per_language_outputs
         // assertion could not pass as written; it was invisible from 2026-05-06,
         // when the whole suite started failing at submission, to 2026-07-29.
         assert_eq!(
-            strip_provenance_stamps(&cold_file.content),
-            strip_provenance_stamps(&warm_file.content),
+            strip_provenance_stamps(cold_file.content.as_text().expect("text command result")),
+            strip_provenance_stamps(warm_file.content.as_text().expect("text command result")),
             "warm server cache rerun should preserve exact output for {}",
             cold_file.filename
         );
         assert!(
-            cold_file.content.contains("%mor:"),
+            cold_file
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("%mor:"),
             "server cache output should still include morphology for {}",
             cold_file.filename
         );
@@ -215,9 +219,18 @@ async fn morphotag_server_cantonese_retokenize_cache_isolated_from_preserve_mode
         "final server Cantonese preserve-mode run should complete"
     );
 
-    let first_output = &first_results.files[0].content;
-    let second_output = &second_results.files[0].content;
-    let third_output = &third_results.files[0].content;
+    let first_output = first_results.files[0]
+        .content
+        .as_text()
+        .expect("text command result");
+    let second_output = second_results.files[0]
+        .content
+        .as_text()
+        .expect("text command result");
+    let third_output = third_results.files[0]
+        .content
+        .as_text()
+        .expect("text command result");
 
     assert!(
         first_output.contains("*CHI:\t故 事 係 好 ."),

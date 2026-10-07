@@ -40,8 +40,6 @@ use single::{ServerTarget, dispatch_single_server};
 /// Named dispatch request for one CLI processing invocation.
 #[derive(Debug)]
 pub struct DispatchRequest<'a> {
-    /// Canonical processing command name.
-    pub command: ReleasedCommand,
     /// Primary language for the command.
     pub lang: &'a str,
     /// Requested number of speakers.
@@ -54,8 +52,9 @@ pub struct DispatchRequest<'a> {
     pub inputs: &'a [std::path::PathBuf],
     /// Optional output directory.
     pub out_dir: Option<&'a std::path::Path>,
-    /// Typed command options for submission.
-    pub options: Option<CommandOptions>,
+    /// Typed command options for submission. They also name the command:
+    /// there is no separate command field to disagree with them.
+    pub options: CommandOptions,
     /// Optional TalkBank bank name.
     pub bank: Option<&'a str>,
     /// Optional bank subdirectory.
@@ -129,7 +128,6 @@ pub async fn dispatch(
     layout: &RuntimeLayout,
 ) -> Result<(), CliError> {
     let DispatchRequest {
-        command,
         lang,
         num_speakers,
         input_kind,
@@ -151,6 +149,7 @@ pub async fn dispatch(
         sequential,
         memory_tier,
     } = request;
+    let command = options.command();
 
     let no_server = no_server || sequential;
     let workers = if sequential { Some(1) } else { workers };
@@ -186,13 +185,12 @@ pub async fn dispatch(
             return dispatch_single_server(
                 &client,
                 &target,
-                command,
                 lang,
                 num_speakers,
                 input_kind,
                 inputs,
                 out_dir,
-                options.as_ref(),
+                &options,
                 lexicon,
                 before,
                 use_tui,
@@ -240,13 +238,12 @@ pub async fn dispatch(
         return dispatch_single_server(
             &client,
             &target,
-            command,
             lang,
             num_speakers,
             input_kind,
             inputs,
             out_dir,
-            options.as_ref(),
+            &options,
             lexicon,
             before,
             use_tui,
@@ -271,13 +268,12 @@ pub async fn dispatch(
         return dispatch_single_server(
             &client,
             &target,
-            command,
             lang,
             num_speakers,
             input_kind,
             inputs,
             out_dir,
-            options.as_ref(),
+            &options,
             lexicon,
             before,
             use_tui,
@@ -302,13 +298,12 @@ pub async fn dispatch(
     dispatch_direct_mode(
         cfg,
         layout.clone(),
-        command,
         lang,
         num_speakers,
         input_kind,
         inputs,
         out_dir,
-        options.as_ref(),
+        &options,
         lexicon,
         before,
         force_cpu,
@@ -324,13 +319,12 @@ pub async fn dispatch(
 async fn dispatch_direct_mode(
     mut cfg: ServerConfig,
     layout: RuntimeLayout,
-    command: ReleasedCommand,
     lang: &str,
     num_speakers: u32,
     input_kind: InputKind,
     inputs: &[std::path::PathBuf],
     out_dir: Option<&std::path::Path>,
-    options: Option<&CommandOptions>,
+    options: &CommandOptions,
     lexicon: Option<&str>,
     before: Option<&std::path::Path>,
     force_cpu: bool,
@@ -356,14 +350,14 @@ async fn dispatch_direct_mode(
         .keys()
         .map(|k| k.as_str().to_owned())
         .collect();
+    let command = options.command();
     let Some(prepared) = prepare_paths_submission(
-        command,
+        options,
         lang,
         num_speakers,
         input_kind,
         inputs,
         out_dir,
-        options,
         lexicon,
         before,
         &mapping_keys,
@@ -470,7 +464,7 @@ async fn dispatch_direct_mode(
         &final_info,
         &error_details,
         prepared.total_files as u64,
-        &prepared.effective_out,
+        &prepared.destinations.reporting_directory()?,
     )
 }
 
@@ -725,14 +719,13 @@ mod tests {
     async fn sequential_rejects_server_flag() {
         let result = dispatch(
             DispatchRequest {
-                command: ReleasedCommand::Morphotag,
                 lang: "eng",
                 num_speakers: 0,
                 input_kind: InputKind::Chat,
                 server_arg: Some("http://server-01:8001"),
                 inputs: &[],
                 out_dir: None,
-                options: None,
+                options: CommandOptions::Morphotag(crate::options::MorphotagOptions::default()),
                 bank: None,
                 subdir: None,
                 lexicon: None,

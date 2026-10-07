@@ -1,12 +1,18 @@
 # Speaker Identity Evidence
 
 **Status:** Current
-**Last updated:** 2026-09-09 13:24 EDT
+**Last updated:** 2026-10-05 00:54 EDT
 
 Field-by-field reference for the `<stem>_speaker_identity.json` artifact
 written by [`speaker-identify`](../user-guide/commands/speaker-identify.md).
 The user page covers when and why to run the command; this page is what a
 consumer parses.
+
+The released command produces this artifact only from a completely admitted,
+named CHAT source. Per-utterance `unscored` states report unavailable acoustic
+evidence in valid CHAT; they do not grant a parse-recovery or invalid-tier
+exemption. Input refusal writes no evidence artifact. This admission change
+does not change the evidence schema.
 
 ## Schema version
 

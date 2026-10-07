@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-09-30 08:00 EDT
+**Last updated:** 2026-10-03 18:35 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -49,6 +49,21 @@ target is:
 make batchalign-build-wheel       # build the maturin wheel
 make batchalign-python-prepare    # build + install the wheel into the dev env
 ```
+
+The wheel target defaults to optimized `release` builds for both the native CLI
+and Python extension. For functional development, explicitly select the same
+development profile for both:
+
+```bash
+make batchalign-build-wheel BATCHALIGN_BUILD_PROFILE=dev
+```
+
+Only `release` and `dev` are admitted. Development builds always compile and
+stage `target/debug/batchalign3`, never reuse a pre-staged release binary.
+A failed native compilation stops packaging before an older binary can be
+copied into the wheel. The development profile is not suitable for performance
+benchmarks or release distribution; source/runtime identity checks remain
+necessary in either profile.
 
 `uv run batchalign3` then uses the installed wheel. Most contributors
 skip the wheel step and rely on the dev fallback in
@@ -117,11 +132,9 @@ checkout, `batchalign/_cli.py` falls back to
 present, so most contributors do not need to install the wheel
 during iteration.
 
-To exercise the installed-package experience locally, build the CLI
-once (`cargo build -p batchalign`) and copy it into
-`batchalign/_bin/batchalign3` before running `make
-batchalign-python-prepare`; the maturin `include` directive in
-`pyproject.toml` will then bundle it into the wheel.
+To exercise the installed-package experience locally, use the wheel or prepare
+target with an explicit profile. The recipe builds and stages the matching
+CLI itself; manually copying a separate binary is unnecessary.
 
 ## CLI Binary Packaging (`batchalign/_bin/`)
 

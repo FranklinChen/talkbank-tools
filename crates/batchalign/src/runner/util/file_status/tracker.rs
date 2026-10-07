@@ -7,7 +7,7 @@
 
 use crate::api::{ContentType, DisplayPath, JobId};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
-use crate::store::CompletedFileOutput;
+use crate::store::{CompletedFileOutput, FileCompletion};
 
 use super::{FileStage, RunnerEventSink};
 
@@ -199,7 +199,7 @@ impl<'a> FileRunTracker<'a> {
         content_type: ContentType,
         stamp: crate::api::FileStampOutcome,
     ) {
-        self.complete(Some(CompletedFileOutput {
+        self.complete(FileCompletion::Clean(CompletedFileOutput {
             filename: result_filename,
             content_type,
             stamp,
@@ -207,17 +207,38 @@ impl<'a> FileRunTracker<'a> {
         .await;
     }
 
+    /// Mark the file as diagnosed: its output was written, together with what
+    /// output admission found in it. Closes the attempt as successful, since
+    /// the attempt did produce and write its output; the diagnostics travel
+    /// with the file's terminal phase, never as an error and never retried.
+    pub(crate) async fn complete_diagnosed(
+        &self,
+        result_filename: DisplayPath,
+        content_type: ContentType,
+        diagnostics: crate::api::FileOutputDiagnostics,
+    ) {
+        self.complete(FileCompletion::Diagnosed {
+            result: CompletedFileOutput {
+                filename: result_filename,
+                content_type,
+                stamp: crate::api::FileStampOutcome::Unrecorded,
+            },
+            diagnostics,
+        })
+        .await;
+    }
+
     /// Mark the file as done without a downloadable artifact and close the
     /// active attempt as successful.
     pub(crate) async fn complete_without_result(&self) {
-        self.complete(None).await;
+        self.complete(FileCompletion::WithoutResult).await;
     }
 
-    /// The file is done and its attempt succeeded, both at one instant.
-    async fn complete(&self, result: Option<CompletedFileOutput>) {
+    /// The file finished and its attempt succeeded, both at one instant.
+    async fn complete(&self, completion: FileCompletion) {
         let finished_at = self.sink.now();
         self.sink
-            .mark_file_done(self.job_id, self.filename, finished_at, result)
+            .mark_file_done(self.job_id, self.filename, finished_at, completion)
             .await;
         self.sink
             .finish_file_attempt(
@@ -237,6 +258,7 @@ impl<'a> FileRunTracker<'a> {
 // ---------------------------------------------------------------------------
 
 /// A progress update from an orchestrator to the dispatch layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProgressUpdate {
     /// Typed lifecycle/progress label.
     pub label: FileStage,

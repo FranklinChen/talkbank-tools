@@ -1,7 +1,7 @@
 # utseg
 
 **Status:** Current
-**Last updated:** 2026-09-16 08:18 EDT
+**Last updated:** 2026-10-06 10:48 EDT
 
 Re-segment utterance boundaries in an existing CHAT transcript. Text-only
 , no audio involved. The model selected per language is either a trained
@@ -46,14 +46,14 @@ the same heuristic as `fa_pipeline.rs`.
 
 ```mermaid
 flowchart TD
-    start([utseg invoked]) --> parse[Parse one file → AST]
+    start([utseg invoked]) --> parse[Admit valid retained CHAT → AST]
     parse --> collect[collect_payloads\nExtract word sequences per utterance]
     collect --> worker[gateway.utseg_batch(&[file], lang)\n→ BERT assignments\nor Stanza constituency trees]
-    worker --> apply[Apply segmentation\nSplit/merge utterances at predicted boundaries]
+    worker --> apply[Admit source-bound partitions\nSplit at structurally safe boundaries]
     apply --> merge_check{--merge-abbrev?}
     merge_check -->|Yes| merge[merge_abbreviations]
     merge_check -->|No| serialize
-    merge --> serialize[Serialize → .cha output]
+    merge --> serialize[Checked construction → serialize .cha output]
     serialize --> done([Write file's .cha; next file in pool])
 ```
 
@@ -91,11 +91,20 @@ or scheduling.
 
 ## What changes in the `.cha` file
 
-- Utterance boundaries (`*SPK:` lines) are recomputed, utterances may be
-  split or merged
-- Existing `%mor` and `%gra` tiers on recomputed utterances will be
+- Existing utterances (`*SPK:` lines) may be split at predicted boundaries;
+  separate source utterances are not merged
+- Existing `%mor` and `%gra` tiers on actually split utterances will be
   invalidated; re-run `morphotag` after `utseg` if those tiers are needed
+- Invalidated analysis tiers are listed in an output `@Comment`. Contributor
+  dependent-tier comments are retained on the first child. Corroborated `%wor`
+  is partitioned, and complete word timing determines each child's interval;
+  the full parent interval is never assigned to a partial child
 - No audio is involved
+
+A predicted boundary inside an indivisible annotated group or replacement,
+or one that would strand punctuation, refuses that file before output is
+written. This is a segmentation failure, not a claim that its valid input CHAT
+is invalid. Other successfully processed files retain their own results.
 
 The boundary model uses lexical context only. It does not receive audio pause,
 energy, pitch, or diarization evidence. Internally BA3 validates one assignment

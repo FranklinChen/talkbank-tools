@@ -29,11 +29,11 @@ from batchalign.inference.coref import (
     batch_infer_coref,
 )
 from batchalign.inference.morphosyntax import MorphosyntaxBatchItem
-from batchalign.inference.translate import TranslateBatchItem
+from batchalign.inference.translate import TranslateBatchItem, TranslateInferenceRequest
 from batchalign.inference.utseg import UtsegBatchItem
 from batchalign.worker._infer_hosts import (
     build_morphosyntax_batch_infer_handler,
-    build_translate_batch_infer_handler,
+    build_translate_inference_handler,
     build_utseg_batch_infer_handler,
 )
 from batchalign.worker._types import BatchInferRequest, BatchInferResponse, InferTask
@@ -77,7 +77,9 @@ class TextExecutionHostV2:
 
     morphosyntax_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
     utseg_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
-    translate_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
+    translate_runner: (
+        Callable[[TranslateInferenceRequest], BatchInferResponse] | None
+    ) = None
     coref_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
 
 
@@ -87,7 +89,7 @@ def build_default_text_execution_host_v2() -> TextExecutionHostV2:
     return TextExecutionHostV2(
         morphosyntax_runner=build_morphosyntax_batch_infer_handler(),
         utseg_runner=build_utseg_batch_infer_handler(),
-        translate_runner=build_translate_batch_infer_handler(),
+        translate_runner=build_translate_inference_handler(),
         coref_runner=batch_infer_coref,
     )
 
@@ -161,16 +163,16 @@ def _utseg_adapter(
 
 
 def _translate_adapter(
-    runner: Callable[[BatchInferRequest], BatchInferResponse],
-) -> Callable[[str, str], BatchInferResponse]:
+    runner: Callable[[TranslateInferenceRequest], BatchInferResponse],
+) -> Callable[[str, str, str], BatchInferResponse]:
     """Adapt one loaded translation runner to the Rust control plane's call."""
 
-    def _run(source_lang: str, batch_json: str) -> BatchInferResponse:
+    def _run(source_lang: str, target_lang: str, batch_json: str) -> BatchInferResponse:
         batch = TranslatePreparedBatchV2.model_validate_json(batch_json)
         return runner(
-            BatchInferRequest(
-                task=InferTask.TRANSLATE,
-                lang=source_lang,
+            TranslateInferenceRequest(
+                source_lang=source_lang,
+                target_lang=target_lang,
                 items=[item.model_dump(mode="json") for item in batch.items],
             )
         )

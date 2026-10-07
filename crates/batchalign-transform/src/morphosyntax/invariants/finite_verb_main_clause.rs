@@ -79,11 +79,70 @@ struct IngHead {
 
 #[derive(Debug, Clone)]
 struct RescuePlan {
-    part_id: UdWordId,
-    possessor_id: UdWordId,
-    verb_id: UdWordId,
-    verb_lemma: VerbLemma,
+    roles: distinct_roles::Progressive,
     old_root_id: UdWordId,
+}
+
+/// A rewrite cannot bind the subject and predicate to the same syntactic word.
+/// Candidate admission establishes distinct roles; completion additionally
+/// requires the model's verbal lemma before mutation becomes available.
+mod distinct_roles {
+    use super::{IngHead, UdWordId, VerbLemma};
+
+    pub(super) struct Candidate {
+        part: UdWordId,
+        subject: UdWordId,
+        predicate: IngHead,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(super) struct Progressive {
+        part: UdWordId,
+        subject: UdWordId,
+        predicate: UdWordId,
+        lemma: VerbLemma,
+    }
+
+    impl Candidate {
+        pub(super) fn admit(part: UdWordId, subject: UdWordId, predicate: IngHead) -> Option<Self> {
+            if part == subject || part == predicate.id || subject == predicate.id {
+                return None;
+            }
+            Some(Self {
+                part,
+                subject,
+                predicate,
+            })
+        }
+
+        pub(super) fn predicate(&self) -> UdWordId {
+            self.predicate.id
+        }
+
+        pub(super) fn complete(self) -> Option<Progressive> {
+            Some(Progressive {
+                part: self.part,
+                subject: self.subject,
+                predicate: self.predicate.id,
+                lemma: self.predicate.verb_lemma?,
+            })
+        }
+    }
+
+    impl Progressive {
+        pub(super) fn part(&self) -> UdWordId {
+            self.part
+        }
+        pub(super) fn subject(&self) -> UdWordId {
+            self.subject
+        }
+        pub(super) fn predicate(&self) -> UdWordId {
+            self.predicate
+        }
+        pub(super) fn into_lemma(self) -> VerbLemma {
+            self.lemma
+        }
+    }
 }
 
 fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
@@ -106,11 +165,14 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
         return None;
     }
 
-    let mut ing_heads = sentence.words.iter().filter_map(ing_head);
-    let IngHead {
-        id: verb_id,
-        verb_lemma,
-    } = ing_heads.next()?;
+    let part_id = single_id(part)?;
+    let mut ing_heads = sentence
+        .words
+        .iter()
+        .filter_map(ing_head)
+        .filter_map(|head| distinct_roles::Candidate::admit(part_id, possessor_id, head));
+    let candidate = ing_heads.next()?;
+    let verb_id = candidate.predicate();
     if ing_heads.next().is_some() {
         return None;
     }
@@ -123,32 +185,22 @@ fn detect_rescue(sentence: &UdSentence) -> Option<RescuePlan> {
     }
     // No verb lemma, no rescue: a VERB with a noun's lemma is the fabrication
     // this rule exists to prevent.
-    let verb_lemma = verb_lemma?;
+    let roles = candidate.complete()?;
 
     let root = sentence
         .words
         .iter()
         .find(|w| w.head == UdHead::Root && w.dep_rel() == DepRel::Root)?;
     let old_root_id = single_id(root)?;
-    let part_id = single_id(part)?;
-
-    Some(RescuePlan {
-        part_id,
-        possessor_id,
-        verb_id,
-        verb_lemma,
-        old_root_id,
-    })
+    Some(RescuePlan { roles, old_root_id })
 }
 
 fn apply_rescue(sentence: &mut UdSentence, plan: RescuePlan) {
-    let RescuePlan {
-        part_id,
-        possessor_id,
-        verb_id,
-        verb_lemma,
-        old_root_id,
-    } = plan;
+    let RescuePlan { roles, old_root_id } = plan;
+    let part_id = roles.part();
+    let possessor_id = roles.subject();
+    let verb_id = roles.predicate();
+    let verb_lemma = roles.into_lemma();
     // Moved into the one word it belongs to, the first time that word is met.
     let mut verb_lemma = Some(verb_lemma.into_string());
 
@@ -425,6 +477,49 @@ mod tests {
     fn assert_unchanged(sentence: UdSentence) {
         let out = rescue_english_copula_progressive(sentence.clone());
         assert_eq!(sentence, out, "expected rule to be a no-op");
+    }
+
+    #[test]
+    fn an_ing_subject_cannot_be_its_own_progressive_predicate() {
+        let mut sentence = fixture_sink();
+        // Controlled nominal reading: building's units, no independent
+        // progressive predicate. Even a valid verbal reading of "building"
+        // must not authorize a self-dependent subject/predicate rewrite.
+        let subject = sentence
+            .words
+            .iter_mut()
+            .find(|word| word.id == UdId::Single(3))
+            .unwrap();
+        subject.text = "building".into();
+        subject.lemma = "building".into();
+        *subject = with_verb_reading(subject.clone(), "build");
+        let root = sentence
+            .words
+            .iter_mut()
+            .find(|word| word.id == UdId::Single(5))
+            .unwrap();
+        root.text = "units".into();
+        root.lemma = "unit".into();
+        root.misc = None;
+        assert_unchanged(sentence);
+    }
+
+    #[test]
+    fn an_ing_subject_does_not_hide_a_distinct_progressive_predicate() {
+        let mut sentence = fixture_sink();
+        let subject = sentence
+            .words
+            .iter_mut()
+            .find(|word| word.id == UdId::Single(3))
+            .unwrap();
+        subject.text = "building".into();
+        subject.lemma = "building".into();
+        *subject = with_verb_reading(subject.clone(), "build");
+        let output = rescue_english_copula_progressive(sentence);
+        assert_eq!(find_by_id(&output, 3).head.conllu(), 5);
+        assert_eq!(find_by_id(&output, 5).head.conllu(), 0);
+        assert_eq!(find_by_id(&output, 4).lemma, "be");
+        assert!(crate::morphosyntax::alignment::UdTokens::walk(&output).is_ok());
     }
 
     #[test]

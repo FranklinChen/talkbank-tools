@@ -12,6 +12,7 @@ expression: item
   "total_files": 10,
   "completed_files": 10,
   "error_files": 1,
+  "diagnosed_files": 2,
   "submitted_at": "2026-01-15T10:00:00.000Z",
   "submitted_by": "192.168.1.1",
   "submitted_by_name": "Lab-Mac-1",

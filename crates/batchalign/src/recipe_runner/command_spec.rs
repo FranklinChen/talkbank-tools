@@ -9,7 +9,7 @@
 use crate::api::ReleasedCommand;
 use crate::worker::InferTask;
 
-use super::materialize::OutputPolicy;
+use super::materialize::{OutputDeclaration, OutputPolicy};
 use super::recipe::Recipe;
 
 /// High-level command family in the replacement architecture.
@@ -25,6 +25,8 @@ pub(crate) enum CommandFamily {
     Composite,
     /// Media-analysis commands that emit non-CHAT artifacts.
     MediaAnalysis,
+    /// Native media work, with no resident model or inference task.
+    NativeMedia,
 }
 
 /// High-level scheduling shape the command expects from the shared kernel.
@@ -45,6 +47,8 @@ pub(crate) enum SchedulingPolicy {
 /// How the command expects model state to be shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelSharingPolicy {
+    /// No ML model or inference worker participates.
+    NoModels,
     /// Reuse warm workers and shared model state whenever possible.
     SharedWarmWorkers,
     /// Let composed child commands own model sharing.
@@ -123,12 +127,13 @@ impl CommandFamily {
         dead_code,
         reason = "a property of the enum, consumed by the catalog pin tests"
     )]
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::BatchedText,
         Self::ReferenceProjection,
         Self::AudioSequential,
         Self::MediaAnalysis,
         Self::Composite,
+        Self::NativeMedia,
     ];
 
     /// High-level scheduling shape implied by this command family.
@@ -137,7 +142,7 @@ impl CommandFamily {
             Self::BatchedText => SchedulingPolicy::CrossFileBatch,
             Self::ReferenceProjection => SchedulingPolicy::ReferenceProjection,
             Self::AudioSequential => SchedulingPolicy::PerFileAudio,
-            Self::MediaAnalysis => SchedulingPolicy::PerFileMediaAnalysis,
+            Self::MediaAnalysis | Self::NativeMedia => SchedulingPolicy::PerFileMediaAnalysis,
             Self::Composite => SchedulingPolicy::Composite,
         }
     }
@@ -146,6 +151,7 @@ impl CommandFamily {
     pub const fn model_sharing_policy(self) -> ModelSharingPolicy {
         match self {
             Self::Composite => ModelSharingPolicy::DelegatedToSubcommands,
+            Self::NativeMedia => ModelSharingPolicy::NoModels,
             Self::BatchedText
             | Self::ReferenceProjection
             | Self::AudioSequential
@@ -159,14 +165,16 @@ impl CommandFamily {
             Self::BatchedText => BatchingPolicy::CrossFileBatch,
             Self::ReferenceProjection => BatchingPolicy::PairedInputs,
             Self::AudioSequential => BatchingPolicy::InternalStageBatching,
-            Self::MediaAnalysis | Self::Composite => BatchingPolicy::None,
+            Self::MediaAnalysis | Self::NativeMedia | Self::Composite => BatchingPolicy::None,
         }
     }
 
     /// Parallelism policy implied by this command family.
     pub const fn parallelism_policy(self) -> ParallelismPolicy {
         match self {
-            Self::AudioSequential | Self::MediaAnalysis => ParallelismPolicy::BoundedFileWorkers,
+            Self::AudioSequential | Self::MediaAnalysis | Self::NativeMedia => {
+                ParallelismPolicy::BoundedFileWorkers
+            }
             Self::BatchedText | Self::ReferenceProjection => {
                 ParallelismPolicy::SingleDispatchPerJob
             }
@@ -180,7 +188,7 @@ impl CommandFamily {
             Self::BatchedText => ResourceLane::CpuBound,
             Self::ReferenceProjection | Self::Composite => ResourceLane::Mixed,
             Self::AudioSequential => ResourceLane::GpuHeavy,
-            Self::MediaAnalysis => ResourceLane::IoBound,
+            Self::MediaAnalysis | Self::NativeMedia => ResourceLane::IoBound,
         }
     }
 
@@ -191,7 +199,8 @@ impl CommandFamily {
             Self::BatchedText
             | Self::ReferenceProjection
             | Self::AudioSequential
-            | Self::MediaAnalysis => ConstrainedHostPolicy::SequentialFallback,
+            | Self::MediaAnalysis
+            | Self::NativeMedia => ConstrainedHostPolicy::SequentialFallback,
         }
     }
 
@@ -225,44 +234,66 @@ pub(crate) enum CapabilitySurface {
     Composite,
 }
 
-/// Worker-capability requirements for one released command.
+/// Execution requirements declared by the command catalog.
 ///
-/// ONE task, not a list. A second field, `additional_infer_tasks`, listed the
-/// tasks a recipe was said to reach after the first. It was deleted on
-/// 2026-09-16, and deleted rather than promoted into a per-stage admission
-/// check, because nothing could have read it correctly: a later stage does not
-/// run on the worker this plan admitted. The command's worker is keyed on
-/// `primary_infer_task` alone (`WorkerTarget::for_command_with_mode`, and
-/// `WorkerPool::ensure_command_capabilities`, which loads exactly that one
-/// task), while a later stage goes back to the pool and derives its OWN key
-/// from its OWN request. The speaker stage of `transcribe_s` is therefore
-/// served by a speaker worker, about which the admitted ASR worker's report
-/// says nothing, so checking the list here would have refused jobs on the
-/// evidence of the wrong worker.
-///
-/// What a recipe reaches is already declared, stage by stage, in its `Recipe`,
-/// and `Recipe::new` validates that declaration in a `const` context. The
-/// deleted field was a hand-written second copy of it, and it had already
-/// drifted from the fact it claimed to state: `transcribe` declared no further
-/// tasks while its recipe reaches Speaker, Utseg and Morphosyntax, and
-/// `transcribe_s` declared Speaker while its recipe reaches the other two as
-/// well.
+/// Inference owns exactly one initial task, not a list of downstream stages:
+/// later stages select their own workers from their own typed requests. Native
+/// operations own no inference task. Neither case can manufacture evidence
+/// about a different worker's loaded models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CapabilityPlan {
-    /// The infer task the command is ADVERTISED from: the one whose presence in
-    /// a worker's reported task set makes this command available at all.
-    ///
-    /// Named and separated from the rest so that "a command has at least one
-    /// infer task" is a fact about the type rather than a runtime `expect` on
-    /// `infer_tasks.first()`, which is what it was until 2026-07-29.
-    pub primary_infer_task: InferTask,
-    /// Whether the released command is recipe-owned or composed.
-    pub surface: CapabilitySurface,
+pub(crate) enum CapabilityPlan {
+    /// Worker-backed execution; possession of the payload permits deriving a
+    /// worker key. Native execution has no such payload.
+    Inference(InferenceRequirement),
+    /// Native media execution, without an inference task or Python worker.
+    NativeMedia(NativeMediaCapability),
+}
+
+/// A native operation supported by the Rust execution host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeMediaCapability {
+    /// Checked WAV/MP3 encoding and no-clobber publication.
+    AudioExport,
+}
+
+/// Catalog-owned evidence that an operation actually requires inference.
+///
+/// Its fields are private: worker consumers cannot invent a task for a native
+/// command. Both targeting and engine selection consume this same requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InferenceRequirement {
+    task: InferTask,
+    surface: CapabilitySurface,
+}
+
+impl InferenceRequirement {
+    pub(crate) const fn task(self) -> InferTask {
+        self.task
+    }
+}
+
+impl CapabilityPlan {
+    pub(super) const fn inference(task: InferTask, surface: CapabilitySurface) -> Self {
+        Self::Inference(InferenceRequirement { task, surface })
+    }
+
+    /// Admission precedes worker inspection, allocation or startup. Refusal
+    /// carries the native operation rather than a fabricated inference task.
+    pub(crate) const fn require_inference(
+        self,
+    ) -> Result<InferenceRequirement, NativeMediaCapability> {
+        match self {
+            Self::Inference(requirement) => Ok(requirement),
+            Self::NativeMedia(capability) => Err(capability),
+        }
+    }
 }
 
 /// How one released command is surfaced relative to the worker infer-task layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandCapabilityKind {
+    /// Available natively, with no inference capability to probe.
+    NativeMedia,
     /// Command is advertised directly from one infer task.
     DirectInfer,
     /// Command is synthesized by Rust from lower-level infer capability.
@@ -272,6 +303,8 @@ pub(crate) enum CommandCapabilityKind {
 /// Which server-side runtime path currently owns one released command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunnerDispatchKind {
+    /// Checked native audio export, not worker protocol inference.
+    NativeAudioExport,
     /// Text-only commands pooled through the batched infer path.
     BatchedTextInfer,
     /// Forced alignment with per-file audio/media resolution.
@@ -345,7 +378,23 @@ pub(crate) struct CatalogEntry {
     /// Worker capability requirements.
     pub capabilities: CapabilityPlan,
     /// Output naming and sidecar policy.
-    pub output_policy: OutputPolicy,
+    pub output_policy: OutputDeclaration,
     /// Ordered stage recipe for the command.
     pub recipe: &'static Recipe,
+}
+
+impl CatalogEntry {
+    /// Selection binds a catalog command to its submitted options once.
+    pub(crate) fn selected_output_policy(
+        &self,
+        options: &crate::options::CommandOptions,
+    ) -> Result<OutputPolicy, super::planner::PlanningError> {
+        if self.command != options.command() {
+            return Err(super::planner::PlanningError::OutputOptionsMismatch {
+                expected: self.command,
+                observed: options.command(),
+            });
+        }
+        self.output_policy.select(options)
+    }
 }

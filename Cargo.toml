@@ -73,7 +73,7 @@ indexmap = { version = "2.14", features = ["serde"] }
 indicatif = "0.18"
 
 # Testing
-insta = { version = "1.48", features = ["json", "yaml"] }
+insta = { version = "1.49", features = ["json", "yaml"] }
 predicates = "3.1"
 proptest = "1.11.0"
 # pyo3 moves in lockstep with the numpy crate (pyo3-ffi's `links = "python"`
@@ -102,18 +102,16 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 strsim = "0.11.1"
 batchalign-transform = { path = "crates/batchalign-transform" }
 
-# CHAT core crates consumed from the published, public chatter repo via git deps
-# pinned to a release tag. Self-contained: a plain checkout builds with no
-# ../chatter sibling. To co-develop chatter+batchalign locally, add an UNCOMMITTED
-# [patch."https://github.com/TalkBank/chatter"] block pointing these at
-# ../chatter/crates/...; never commit a path override here. Adopt a newer chatter
-# by bumping the tag. talkbank-transform is the GENERIC transform;
+# CHAT core crates consume immutable upstream source revisions via Git.
+# Release/distribution pins must be fetchable from the public origin.
+# Keep every CHAT crate on the same revision; never commit path overrides.
+# talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", tag = "v0.28.0", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", tag = "v0.28.0" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", tag = "v0.28.0" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", tag = "v0.28.0" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e" }
 
 tempfile = "3.27"
 thiserror = "^2.0.21"

@@ -134,6 +134,13 @@ impl JobSubmission {
 
         self.validate_cache_policy()?;
 
+        if let CommandOptions::Align(options) = &self.options
+            && let Some(root) = &options.media_dir
+        {
+            root.admit_absolute()
+                .map_err(|error| ValidationError(error.to_string()))?;
+        }
+
         // Refuse an engine this build cannot run, before any language or path
         // check: an unimplemented engine is wrong for every language, and a
         // language-shaped message would send the operator hunting the wrong
@@ -422,6 +429,17 @@ impl JobSubmission {
     ///
     fn validate_source_kinds(&self) -> Result<(), ValidationError> {
         use crate::recipe_runner::command_spec::PlannerKind;
+
+        if let CommandOptions::Diarize(options) = &self.options {
+            for name in self.submitted_source_names() {
+                if !options.output_mode.accepts_source_name(name) {
+                    return Err(ValidationError(format!(
+                        "diarize source {name:?} does not match its mode: use --speaker-map for timed CHAT; omit it for media-to-turns JSON"
+                    )));
+                }
+            }
+            return Ok(());
+        }
 
         if crate::command_model::command_spec(self.command).planner != PlannerKind::BenchmarkPairs {
             return Ok(());
@@ -1065,6 +1083,54 @@ mod tests {
     /// Convenience for the common case: a legal morphotag submission.
     fn morphotag_submission() -> JobSubmission {
         morphotag_submission_with_lang(LanguageSpec::PerFile)
+    }
+
+    #[test]
+    fn standalone_diarize_refuses_sources_outside_its_selected_mode() {
+        for (mode, source, accepted) in [
+            (
+                crate::options::DiarizeOutputMode::TurnsJson,
+                "timed.cha",
+                false,
+            ),
+            (
+                crate::options::DiarizeOutputMode::TurnsJson,
+                "timed.wav",
+                true,
+            ),
+            (
+                crate::options::DiarizeOutputMode::MappedChat {
+                    mapping: "PAR0=CHI".parse().unwrap(),
+                },
+                "timed.cha",
+                true,
+            ),
+            (
+                crate::options::DiarizeOutputMode::MappedChat {
+                    mapping: "PAR0=CHI".parse().unwrap(),
+                },
+                "timed.wav",
+                false,
+            ),
+        ] {
+            let mut submission = morphotag_submission();
+            submission.command = ReleasedCommand::Diarize;
+            submission.options = CommandOptions::Diarize(crate::options::DiarizeOptions {
+                common: CommonOptions::default(),
+                speaker_engine: crate::options::SpeakerEngineName::Pyannote,
+                expected_speakers: None,
+                output_mode: mode,
+            });
+            submission.files = vec![FilePayload {
+                filename: source.into(),
+                content: String::new(),
+            }];
+            assert_eq!(
+                submission.validate_source_kinds().is_ok(),
+                accepted,
+                "{source}"
+            );
+        }
     }
 
     /// A transcribe request in a language with no boundary model is refused at

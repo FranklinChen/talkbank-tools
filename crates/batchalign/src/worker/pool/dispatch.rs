@@ -17,10 +17,11 @@ use crate::worker::{BatchInferRequest, BatchInferResponse, WorkerBootstrapMode, 
 use tracing::{instrument, warn};
 
 use super::checkout::CheckedOutWorker;
+use super::checkout_wait::{GroupCounts, Parked, SaturatedWait};
 use super::eviction::EvictionOutcome;
 use super::execute_v2::{self, execute_v2_worker_key};
 use super::job_tracker::TrackerGuard;
-use super::{WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
+use super::{AwayFromQueue, WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
 
 /// A TCP worker handle checked out of its group for one exchange.
 ///
@@ -35,6 +36,8 @@ use super::{WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
 pub(super) struct TcpCheckout {
     handle: TcpWorkerHandle,
     lease: TcpSlotLease,
+    /// Accounts for this worker while it is out of the TCP queue.
+    _away: AwayFromQueue,
 }
 
 impl TcpCheckout {
@@ -45,7 +48,12 @@ impl TcpCheckout {
 
     /// End the exchange: return the handle to its group, or retire it.
     pub(super) fn finish<T>(self, outcome: &Result<T, WorkerError>) {
-        let Self { handle, lease } = self;
+        // The away guard is held to the end, after the handle is back.
+        let Self {
+            handle,
+            lease,
+            _away,
+        } = self;
         match outcome
             .as_ref()
             .map(|_| ())
@@ -69,6 +77,16 @@ impl TcpCheckout {
 
 /// The group slot a checked-out TCP handle occupies.
 ///
+/// Which groups a saturated checkout's reconciliation looks at: the groups
+/// whose accounting can keep what it is parked on from coming back.
+#[derive(Debug, Clone, Copy)]
+enum ReconcileScope<'a> {
+    /// Parked on its own group's permits.
+    OwnGroup(&'a WorkerKey),
+    /// Parked on the pool-wide worker-returned signal.
+    Pool,
+}
+
 /// Releases the slot (the group's live count and its global worker permit)
 /// when dropped, unless [`Self::return_handle`] gave the handle back first.
 struct TcpSlotLease {
@@ -95,37 +113,28 @@ impl Drop for TcpSlotLease {
     }
 }
 
-/// Build the typed error returned when a saturated checkout exhausts its
-/// wait deadline without freeing a slot. Factored out so the three
-/// dispatch sites (initial timeout, race-after-eviction, notify timeout)
-/// produce one consistent message shape.
-fn saturation_timeout_err(
-    target: &WorkerTarget,
-    lang: &WorkerLanguage,
-    wait: crate::api::PositiveSeconds,
-) -> WorkerError {
-    WorkerError::SpawnFailed(format!(
-        "no worker available for {target:?}/{lang} within {wait}s, \
-         pool saturated with no idle workers to evict"
-    ))
-}
-
 impl WorkerPool {
     /// Check out an idle worker or spawn a new one.
     ///
     /// 1. Try to acquire a semaphore permit immediately.
     /// 2. If none available, try to spawn a new worker (if under capacity).
-    /// 3. If at capacity, wait for a permit (async suspend).
+    /// 3. If at capacity, wait for a worker to come back (async suspend).
     /// 4. Pop from the idle queue and wrap in `CheckedOutWorker` (RAII guard).
+    ///
+    /// A saturated pool is congestion, not a failure of the request: the
+    /// wait has no deadline, only a report interval after which it is logged
+    /// and re-probed. It ends when a worker is available, when the pool
+    /// shuts down, or when the caller drops it. See [`super::checkout_wait`].
     pub(super) async fn checkout(&self, key: &WorkerKey) -> Result<CheckedOutWorker, WorkerError> {
         let group = self.get_or_create_group(key);
-
-        // Deadline for the saturation branch (no workers for this key,
-        // global cap reached, no idle worker to evict). Bounds how long
-        // we park on `worker_returned` before returning a typed error
-        // the orchestrator can surface as a per-file failure.
-        let wait_limit = self.config.checkout_wait_timeout();
-        let wait_deadline = crate::worker::Deadline::after(wait_limit);
+        let report_interval = self.config.checkout_wait_report_interval();
+        // Begun at the first park, so a checkout that never waits reports
+        // nothing; dropped on return, which ends its observation.
+        let mut saturated: Option<SaturatedWait> = None;
+        let group_counts = || GroupCounts {
+            total: group.total.load(Ordering::Relaxed),
+            idle: lock_recovered(&group.idle).len(),
+        };
 
         loop {
             // Invariant (normal operation): `group.available.permits() ==
@@ -144,10 +153,7 @@ impl WorkerPool {
             if let Ok(permit) = group.available.try_acquire() {
                 permit.forget();
                 if let Some(handle) = lock_recovered(&group.idle).pop_front() {
-                    return Ok(CheckedOutWorker {
-                        handle: Some(handle),
-                        group: group.clone(),
-                    });
+                    return Ok(CheckedOutWorker::from_idle(&group, handle));
                 }
                 group.available.add_permits(1);
                 tokio::task::yield_now().await;
@@ -166,8 +172,7 @@ impl WorkerPool {
                     // fall through to the async wait below. Otherwise
                     // try to free a slot by evicting an idle worker
                     // from another group; if that fails, park on the
-                    // pool-wide `worker_returned` Notify with a
-                    // bounded deadline.
+                    // pool-wide `worker_returned` Notify.
                     if group.is_empty() {
                         // Register on `worker_returned` BEFORE the
                         // eviction probe. `Notified::enable()` puts
@@ -177,7 +182,7 @@ impl WorkerPool {
                         // instead of being absorbed by the Notify's
                         // single-slot buffer (a burst of N>1 returns
                         // would otherwise lose N−1 wakeups, forcing
-                        // late-comers to wait the full deadline).
+                        // late-comers to wait a whole report interval).
                         // checkout.rs uses `notify_one()` (not
                         // `notify_waiters()`) so each return wakes
                         // exactly one waiter: the BUG-028 herd fix.
@@ -190,12 +195,19 @@ impl WorkerPool {
                             continue;
                         }
 
-                        if wait_deadline.within(notified).await.is_none() {
-                            return Err(saturation_timeout_err(
-                                &key.target,
-                                &key.language,
-                                wait_limit,
-                            ));
+                        // A wakeup and an elapsed report interval both
+                        // re-probe from the top; a shutdown, or accounting
+                        // that stays broken, ends it.
+                        let wait = saturated.get_or_insert_with(|| {
+                            SaturatedWait::begin(&key.target, &key.language, report_interval)
+                        });
+                        match wait.park(notified, &self.cancel, group_counts).await? {
+                            Parked::Ready(()) => {}
+                            Parked::StillSaturated => {
+                                // Parked on the pool-wide return signal: any
+                                // group's broken count can be what blocks it.
+                                wait.reconcile(self.unaccounted_groups(ReconcileScope::Pool))?;
+                            }
                         }
                         continue;
                     }
@@ -204,23 +216,30 @@ impl WorkerPool {
                 Err(e) => return Err(e),
             }
 
-            // All workers busy and at capacity. Wait asynchronously for
-            // a permit, but bound the wait with the same checkout deadline
-            // used for the zero-worker saturation path. A stale `total > 0`
-            // count or a wedged checked-out worker must fail explicitly
-            // instead of hanging the caller forever.
-            let permit = wait_deadline
-                .within(group.available.acquire())
-                .await
-                .ok_or_else(|| saturation_timeout_err(&key.target, &key.language, wait_limit))?
-                .map_err(|_| WorkerError::SpawnFailed("worker pool semaphore closed".into()))?;
+            // All workers busy and at capacity. Wait for a permit. An elapsed
+            // report interval re-probes from the top, so a stale `total > 0`
+            // count or a group that emptied meanwhile is re-read rather than
+            // waited on forever without a word.
+            let wait = saturated.get_or_insert_with(|| {
+                SaturatedWait::begin(&key.target, &key.language, report_interval)
+            });
+            let permit = match wait
+                .park(group.available.acquire(), &self.cancel, group_counts)
+                .await?
+            {
+                Parked::Ready(acquired) => acquired
+                    .map_err(|_| WorkerError::SpawnFailed("worker pool semaphore closed".into()))?,
+                Parked::StillSaturated => {
+                    // Parked on this group's own permits: only its own
+                    // accounting can keep them from coming back.
+                    wait.reconcile(self.unaccounted_groups(ReconcileScope::OwnGroup(key)))?;
+                    continue;
+                }
+            };
             permit.forget();
 
             if let Some(handle) = lock_recovered(&group.idle).pop_front() {
-                return Ok(CheckedOutWorker {
-                    handle: Some(handle),
-                    group: group.clone(),
-                });
+                return Ok(CheckedOutWorker::from_idle(&group, handle));
             }
             // Rare: async-acquire returned a permit but idle is empty.
             // Same load-bearing yield as above, returning the permit
@@ -228,6 +247,34 @@ impl WorkerPool {
             group.available.add_permits(1);
             tokio::task::yield_now().await;
         }
+    }
+
+    /// Every group in `scope` whose live count exceeds what holds its
+    /// workers. Lock order is groups, then each group's queues, as
+    /// elsewhere.
+    fn unaccounted_groups(
+        &self,
+        scope: ReconcileScope<'_>,
+    ) -> Vec<super::checkout_wait::UnaccountedGroup> {
+        let groups = lock_recovered(&self.groups);
+        groups
+            .iter()
+            .filter(|(key, _)| match scope {
+                ReconcileScope::OwnGroup(own) => *key == own,
+                ReconcileScope::Pool => true,
+            })
+            .filter_map(|(key, group)| {
+                let unaccounted = group.unaccounted();
+                (unaccounted > 0).then(|| super::checkout_wait::UnaccountedGroup {
+                    key: key.clone(),
+                    unaccounted,
+                    total: group.total.load(Ordering::Relaxed),
+                    idle: lock_recovered(&group.idle).len()
+                        + lock_recovered(&group.tcp_workers).len(),
+                    away: group.away.load(Ordering::Relaxed),
+                })
+            })
+            .collect()
     }
 
     /// Dispatch a batch inference request to a single worker.
@@ -307,6 +354,7 @@ impl WorkerPool {
         permit.forget();
         Some(TcpCheckout {
             handle,
+            _away: AwayFromQueue::new(&group, 1),
             lease: TcpSlotLease { group: Some(group) },
         })
     }
@@ -508,15 +556,17 @@ impl WorkerPool {
         lang: impl Into<WorkerLanguage>,
         options: &crate::options::CommandOptions,
     ) -> Result<super::LoadedCapabilities, WorkerError> {
+        let requirement = crate::command_model::command_spec(command)
+            .capabilities
+            .require_inference()
+            .map_err(|_| WorkerError::NativeCommand { command })?;
         let key = WorkerKey::from_command_options(
-            command,
+            requirement,
             lang.into(),
             options,
             self.config.runtime.bootstrap_mode,
         );
-        let loaded_task = crate::command_model::command_spec(command)
-            .capabilities
-            .primary_infer_task;
+        let loaded_task = requirement.task();
         let overrides = key.engine_selection.overrides().dispatch_overrides();
         let overrides = (!overrides.is_empty()).then_some(overrides);
         let timeout = self.config.effective_ensure_task_timeout();
@@ -645,7 +695,10 @@ mod tcp_checkout_tests {
         let pool = WorkerPool::new(config);
         let options = CommandOptions::Morphotag(MorphotagOptions::default());
         let key = WorkerKey::from_command_options(
-            ReleasedCommand::Morphotag,
+            crate::command_model::command_spec(ReleasedCommand::Morphotag)
+                .capabilities
+                .require_inference()
+                .expect("morphotag requires inference"),
             WorkerLanguage::from(LanguageCode3::eng()),
             &options,
             pool.bootstrap_mode(),
@@ -779,38 +832,124 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn checkout_times_out_when_group_claims_live_worker_but_no_permit_returns() {
-        let pool = WorkerPool::new(super::super::PoolConfig {
+    /// A pool whose one counted worker is checked out and held.
+    fn saturated_pool() -> (std::sync::Arc<WorkerPool>, WorkerKey) {
+        let pool = std::sync::Arc::new(WorkerPool::new(super::super::PoolConfig {
             max_workers_per_key: crate::host_facts::PerProfile::uniform(1),
             max_total_workers: 1,
-            checkout_wait_timeout: Some(crate::api::PositiveSeconds::literal::<1>()),
+            checkout_wait_report_interval: Some(crate::api::PositiveSeconds::literal::<1>()),
             ..Default::default()
-        });
+        }));
         let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
         let lang = WorkerLanguage::from(LanguageCode3::eng());
         let key = WorkerKey::without_engine_selection(target, lang);
-        let group = pool.get_or_create_group(&key);
+        pool.get_or_create_group(&key)
+            .total
+            .store(1, Ordering::Relaxed);
+        (pool, key)
+    }
 
-        // Simulate the wedged state seen in the live morphotag job:
-        // the pool believes one worker exists for this key, but no idle
-        // handle or semaphore permit can ever be returned.
-        group.total.store(1, Ordering::Relaxed);
+    /// RED FIRST (2026-10-06): a saturated checkout waits; it does not fail.
+    ///
+    /// The group's one counted worker is held (by a checkout that never
+    /// returns it), so nothing can be checked out. This used to return
+    /// `SpawnFailed("no worker available ... pool saturated")` once a fixed
+    /// deadline passed, which failed the file that was waiting. Now ten
+    /// report intervals pass and the checkout is still waiting (reported and
+    /// reconciled each interval: the held worker is accounted for), and only
+    /// the pool's shutdown ends it, with its own typed error.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_saturated_checkout_keeps_waiting_until_the_pool_shuts_down() {
+        let (pool, key) = saturated_pool();
+        let held = AwayFromQueue::new(&pool.get_or_create_group(&key), 1);
 
-        let result = tokio::time::timeout(Duration::from_secs(2), pool.checkout(&key))
-            .await
-            .expect("checkout should resolve via its own timeout, not hang forever");
+        let waiting = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.checkout(&key).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(
+            !waiting.is_finished(),
+            "a saturated pool is congestion: the checkout must still be waiting"
+        );
 
-        match result {
-            Err(WorkerError::SpawnFailed(message)) => {
-                assert!(
-                    message.contains("no worker available"),
-                    "expected saturation timeout error, got: {message}"
-                );
-            }
-            Ok(_) => panic!("expected timeout-style spawn error, got successful checkout"),
-            Err(other) => panic!("expected timeout-style spawn error, got {other}"),
-        }
+        pool.cancel.cancel();
+        let outcome = waiting.await.expect("the checkout task does not panic");
+        assert!(
+            matches!(outcome, Err(WorkerError::PoolShuttingDown)),
+            "only the pool's shutdown ends the wait, got {outcome:?}"
+        );
+        drop(held);
+    }
+
+    /// A counted worker that nothing holds (a stale `total`) is not
+    /// congestion: no worker will ever come back. Seen at two consecutive
+    /// report intervals, the wait ends with the typed, terminal accounting
+    /// failure instead of waiting forever.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_count_nothing_holds_ends_the_wait_as_broken_accounting() {
+        let (pool, key) = saturated_pool();
+        let waiting = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.checkout(&key).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(!waiting.is_finished(), "one mismatch is only reported");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let outcome = waiting.await.expect("the checkout task does not panic");
+        let Err(error @ WorkerError::PoolAccountingBroken { .. }) = outcome else {
+            panic!("a persistent mismatch is broken accounting, got {outcome:?}");
+        };
+        assert!(
+            matches!(
+                error,
+                WorkerError::PoolAccountingBroken {
+                    unaccounted: 1,
+                    total: 1,
+                    idle: 0,
+                    away: 0,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            crate::runner::util::classify_worker_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+    }
+
+    /// A checkout parked on its own group's permits waits on that group
+    /// alone: another group's broken count is not what keeps its worker from
+    /// coming back, and does not fail it.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn another_groups_broken_count_does_not_fail_an_own_group_wait() {
+        let (pool, key) = saturated_pool();
+        let held = AwayFromQueue::new(&pool.get_or_create_group(&key), 1);
+        let other = WorkerKey::without_engine_selection(
+            WorkerTarget::infer_task(InferTask::Utseg),
+            WorkerLanguage::from(LanguageCode3::eng()),
+        );
+        pool.get_or_create_group(&other)
+            .total
+            .store(1, Ordering::Relaxed);
+
+        let waiting = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.checkout(&key).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(
+            !waiting.is_finished(),
+            "the own group's worker is held: this is congestion, whatever another group shows"
+        );
+        pool.cancel.cancel();
+        let outcome = waiting.await.expect("the checkout task does not panic");
+        assert!(
+            matches!(outcome, Err(WorkerError::PoolShuttingDown)),
+            "{outcome:?}"
+        );
+        drop(held);
     }
 
     /// Admission control reads the per-profile cap from

@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn the_real_failure_is_refused() {
         // The measured case: 175 untimed words distributed across the 291 ms of
-        // audio left at the end of NF213-1parent. 601 words per second.
+        // audio left at the end of a real session. 601 words per second.
         let rate = SpeechRate::of(175, Ms(291));
         assert!(!rate.is_possible());
         let SpeechRate::Impossible { rate, words, span } = rate else {

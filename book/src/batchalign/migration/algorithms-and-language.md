@@ -1,7 +1,7 @@
 # Algorithms, Language, and Alignment Migration
 
 **Status:** Current
-**Last updated:** 2026-10-01 17:34 EDT
+**Last updated:** 2026-10-06 20:55 EDT
 
 Comparison anchors:
 
@@ -100,8 +100,12 @@ For FA, the precise current claim is narrower:
 
 ### UTR: global DP is the steady-state correctness boundary
 
-UTR timing recovery (`fa/utr.rs`) uses a single global Hirschberg DP alignment
-of all document words against all ASR tokens.
+UTR timing recovery (`fa/utr.rs`) uses one joint Hirschberg DP alignment of
+document words against ASR tokens. Since the anchored-region change, that
+problem is partitioned at the transcript's retained bullets: each region owns
+the utterances between two anchors and the ASR onsets between them, so the
+joint reasoning below holds within a region, regions cannot consume each
+other's tokens, and a region over its proof budget is refused alone.
 
 This is the correct steady-state algorithm for the hand-edited transcript
 case (see the `407 trimmed fixture` regression test in

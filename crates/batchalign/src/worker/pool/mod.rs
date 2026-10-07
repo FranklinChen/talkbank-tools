@@ -38,6 +38,7 @@
 //! | `reaper.rs` | Orphaned worker process reaping |
 
 mod checkout;
+pub(crate) mod checkout_wait;
 mod cpu_gate;
 mod discovery;
 mod dispatch;
@@ -64,7 +65,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::api::{PositiveSeconds, ReleasedCommand, WorkerLanguage};
+#[cfg(test)]
+use crate::api::ReleasedCommand;
+use crate::api::{PositiveSeconds, WorkerLanguage};
 use crate::host_facts::PerProfile;
 use crate::options::CommandOptions;
 use crate::types::engines::{EngineOverrides, FaEngineName, SelectableEngine};
@@ -158,7 +161,8 @@ impl EngineSelection {
             // No engine override: the embedding model is the one node of the
             // released local model graph, and there is nothing to select
             // between.
-            | CommandOptions::SpeakerIdentify(_) => {}
+            | CommandOptions::SpeakerIdentify(_)
+            | CommandOptions::Convert(_) => {}
         }
         overrides
     }
@@ -405,15 +409,13 @@ impl WorkerKey {
     }
 
     pub(super) fn from_command_options(
-        command: ReleasedCommand,
+        requirement: crate::command_model::InferenceRequirement,
         language: WorkerLanguage,
         options: &CommandOptions,
         bootstrap_mode: WorkerBootstrapMode,
     ) -> Self {
-        let target = WorkerTarget::for_command_with_mode(command, bootstrap_mode);
-        let task = crate::command_model::command_spec(command)
-            .capabilities
-            .primary_infer_task;
+        let target = WorkerTarget::for_inference_with_mode(requirement, bootstrap_mode);
+        let task = requirement.task();
         let engine_selection = EngineSelection::derive(
             task,
             EngineSelection::overrides_for_command(options),
@@ -488,10 +490,11 @@ pub struct PoolConfig {
     /// `DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS`. Must always be a concrete
     /// nonzero value.
     pub max_total_workers: usize,
-    /// Maximum seconds `checkout()` may park when the pool is saturated
-    /// and no idle worker is available to evict. `None`: the built-in
-    /// default (300s).
-    pub checkout_wait_timeout: Option<PositiveSeconds>,
+    /// How often a checkout waiting on a saturated pool reports that it is
+    /// still waiting and re-probes. Not a deadline: a saturated pool is
+    /// congestion, and the checkout keeps waiting (see
+    /// `checkout_wait`). `None`: the built-in default (300s).
+    pub checkout_wait_report_interval: Option<PositiveSeconds>,
     /// Verbosity level forwarded to Python workers (0=warn, 1=info, 2=debug).
     pub verbose: u8,
     /// Runtime-owned worker launch inputs (device policy, injected creds).
@@ -528,13 +531,11 @@ pub struct PoolConfig {
 /// Built-in default for `ensure_task` timeout (seconds).
 const DEFAULT_ENSURE_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<120>();
 
-/// Built-in default for `checkout_wait_timeout` (seconds).
+/// Built-in default for `checkout_wait_report_interval` (seconds).
 ///
-/// Matches the morphosyntax batch's `group_timeout`: a checkout that has
-/// waited 5 minutes with the pool saturated and no idle worker to evict is
-/// operationally a stall, and failing here lets the orchestrator surface
-/// a per-file error instead of hanging indefinitely.
-const DEFAULT_CHECKOUT_WAIT_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<300>();
+/// Long enough that an ordinary queue behind a few long requests is not
+/// reported, short enough that a wait an operator should look at is.
+const DEFAULT_CHECKOUT_WAIT_REPORT_INTERVAL: PositiveSeconds = PositiveSeconds::literal::<300>();
 
 impl Default for PoolConfig {
     fn default() -> Self {
@@ -545,7 +546,7 @@ impl Default for PoolConfig {
             test_echo: false,
             max_workers_per_key: DEFAULT_MAX_WORKERS_PER_KEY,
             max_total_workers: DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS,
-            checkout_wait_timeout: None,
+            checkout_wait_report_interval: None,
             verbose: 0,
             runtime: WorkerRuntimeConfig::default(),
             task_timeouts: TaskTimeoutOverrides::NONE,
@@ -575,11 +576,11 @@ impl PoolConfig {
         }
     }
 
-    /// Resolved checkout wait timeout: the configured one, else the built-in
-    /// default (300s).
-    pub(super) fn checkout_wait_timeout(&self) -> PositiveSeconds {
-        self.checkout_wait_timeout
-            .unwrap_or(DEFAULT_CHECKOUT_WAIT_TIMEOUT)
+    /// Resolved checkout wait report interval: the configured one, else the
+    /// built-in default (300s).
+    pub(super) fn checkout_wait_report_interval(&self) -> PositiveSeconds {
+        self.checkout_wait_report_interval
+            .unwrap_or(DEFAULT_CHECKOUT_WAIT_REPORT_INTERVAL)
     }
 }
 
@@ -631,6 +632,14 @@ pub(super) struct WorkerGroup {
     /// (idle timeout, health failure, or `CheckedOutWorker::take()`).
     pub(super) total: AtomicUsize,
 
+    /// Workers counted in `total` that are not in either idle queue right
+    /// now: checked out, being spawned, or drained for a health check. Moved
+    /// only by [`AwayFromQueue`] guards, so it cannot drift: every increment
+    /// is matched by the guard's drop. It is what lets a saturated checkout
+    /// tell congestion (every counted worker is held by something) from
+    /// broken accounting (`total` counts workers nothing holds).
+    pub(super) away: AtomicUsize,
+
     /// Serialize worker bootstrap for one key.
     ///
     /// This prevents a burst of concurrent requests from launching multiple
@@ -681,6 +690,7 @@ impl WorkerGroup {
             tcp_workers: std::sync::Mutex::new(VecDeque::new()),
             tcp_available: Semaphore::new(0),
             total: AtomicUsize::new(0),
+            away: AtomicUsize::new(0),
             bootstrap: AsyncMutex::new(()),
             worker_returned,
             spawn_permits,
@@ -715,6 +725,61 @@ impl WorkerGroup {
     /// admission.
     pub(super) fn is_empty(&self) -> bool {
         self.total.load(Ordering::Relaxed) == 0
+    }
+
+    /// How many workers `total` counts that no idle queue holds and no
+    /// [`AwayFromQueue`] guard accounts for. Zero in a consistent pool; a
+    /// transition can make it briefly positive (a worker between a queue and
+    /// its guard), so a caller acts only on a value that persists.
+    pub(super) fn unaccounted(&self) -> usize {
+        let held = lock_recovered(&self.idle).len()
+            + lock_recovered(&self.tcp_workers).len()
+            + self.away.load(Ordering::Relaxed);
+        self.total.load(Ordering::Relaxed).saturating_sub(held)
+    }
+}
+
+/// `n` workers of one group that are counted in its `total` but are not in
+/// an idle queue while this guard lives: checked out, spawning, or drained
+/// for a health check. The only mover of [`WorkerGroup::away`].
+pub(super) struct AwayFromQueue {
+    group: Arc<WorkerGroup>,
+    n: usize,
+}
+
+impl AwayFromQueue {
+    /// Account for `n` workers of `group` leaving its queues.
+    pub(super) fn new(group: &Arc<WorkerGroup>, n: usize) -> Self {
+        group.away.fetch_add(n, Ordering::Relaxed);
+        Self {
+            group: Arc::clone(group),
+            n,
+        }
+    }
+
+    /// The `n` workers this guard accounts for leave the group for good.
+    ///
+    /// They are removed from `total` (and their global permits refunded)
+    /// before the guard stops counting them in `away`, so no instant shows
+    /// them as counted workers that nothing holds, and none shows the guard
+    /// still counting workers `total` no longer has (which would mask a real
+    /// loss elsewhere in the group). The only way a guarded worker is
+    /// removed, so removal and release cannot be done in the wrong order or
+    /// with an await between them.
+    pub(super) fn retire(self) {
+        self.group.record_worker_removed(self.n);
+    }
+}
+
+impl Drop for AwayFromQueue {
+    fn drop(&mut self) {
+        self.group.away.fetch_sub(self.n, Ordering::Relaxed);
+    }
+}
+
+impl std::fmt::Debug for AwayFromQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwayFromQueue").field("n", &self.n).finish()
     }
 }
 
@@ -1124,6 +1189,18 @@ impl WorkerPool {
         self.stanza_registry.get().map(|b| b.as_ref())
     }
 
+    /// Capability double for deterministic tests; never spawns a model worker.
+    #[cfg(test)]
+    pub(crate) fn with_test_stanza_registry(
+        registry: crate::stanza_registry::StanzaRegistry,
+    ) -> Self {
+        let pool = Self::new(PoolConfig::default());
+        pool.stanza_registry
+            .set(Box::new(registry))
+            .expect("fresh test pool");
+        pool
+    }
+
     /// Admit one worker's capability report and record the outcome for `key`.
     ///
     /// The ONE place a report is admitted. The outcome is stored per worker
@@ -1517,7 +1594,10 @@ mod default_pool_config_tests {
         // Through the production constructor, which is the one derivation
         // every real key comes from.
         let key = WorkerKey::from_command_options(
-            ReleasedCommand::Align,
+            crate::command_model::command_spec(ReleasedCommand::Align)
+                .capabilities
+                .require_inference()
+                .expect("align requires inference"),
             WorkerLanguage::from(LanguageCode3::eng()),
             &CommandOptions::Align(options),
             WorkerBootstrapMode::Profile,
@@ -1547,7 +1627,10 @@ mod default_pool_config_tests {
     fn lazy_profile_command_options_key_retains_engine_selection() {
         let options = CommandOptions::Align(AlignOptions::default());
         let key = WorkerKey::from_command_options(
-            ReleasedCommand::Align,
+            crate::command_model::command_spec(ReleasedCommand::Align)
+                .capabilities
+                .require_inference()
+                .expect("align requires inference"),
             WorkerLanguage::from(LanguageCode3::eng()),
             &options,
             WorkerBootstrapMode::LazyProfile,

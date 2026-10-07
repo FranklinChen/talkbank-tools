@@ -16,6 +16,15 @@ use super::work_unit::{
 /// Planning-time error while deriving typed work units.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(crate) enum PlanningError {
+    /// Output selection cannot combine one command with another's options.
+    #[error("output plan for {expected} received options for {observed}")]
+    OutputOptionsMismatch {
+        expected: crate::ReleasedCommand,
+        observed: crate::ReleasedCommand,
+    },
+    /// A catalog policy failed to declare its primary artifact.
+    #[error("output policy for {0} has no primary artifact")]
+    MissingPrimary(crate::ReleasedCommand),
     /// The source path did not expose a file stem for companion derivation.
     #[error("cannot derive companion path for source input {0}")]
     MissingFileStem(DisplayPath),

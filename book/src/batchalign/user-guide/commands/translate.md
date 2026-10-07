@@ -1,9 +1,9 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-02 23:08 EDT
 
-Add English translations to non-English CHAT transcripts by injecting a
+Add translations to CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only, no audio involved.
 
 ## What gets translated
@@ -76,9 +76,9 @@ Five backends are available:
   request signing). Quotas and pricing per Aliyun MT service terms.
 - **Meta NLLB-200-distilled-1.3B** (`nllb`), runs locally in the Python
   worker. Model downloaded from HuggingFace on first use (~5.5 GB) and
-  cached thereafter; no outbound network at inference time. **Best
-  self-hosted fallback**: handles Cantonese first-class; for Mandarin
-  short greetings prefer `tencent`. Long-form CJK is excellent. Runs
+  cached thereafter; no outbound network at inference time. Handles Cantonese
+  first-class, but short utterances can acquire unwarranted extra content.
+  Review fidelity: a nonempty translation is not a quality guarantee. Runs
   unthrottled.
 - **Meta SeamlessM4T** (`seamless`), runs locally in the Python worker.
   BA2-inherited fallback. Empirical 2026-05-23 comparison found
@@ -135,13 +135,19 @@ batchalign3 translate file.cha
 # Translate a corpus directory
 batchalign3 translate corpus/ -o translated/
 
+# Translate to French instead of the default English
+batchalign3 translate corpus/ -o french/ --target fra --translate-engine nllb
+
 # Use the remote server
 batchalign3 --server http://your-server:8001 translate corpus/ -o out/
 ```
 
 `translate` has **no `--lang` flag**. Source language for each file is
 read from that file's own `@Languages:` header. Translation target is
-fixed to English. To "override" the source language, edit the file's
+selected with `--target`, defaulting to `eng`. Codes are checked three-letter
+ISO 639-3 codes, not two-letter provider codes. Engine/provider support is a
+separate constraint: an unsupported source or target fails the file, never
+substitutes English. To "override" the source language, edit the file's
 `@Languages:` line.
 
 ---
@@ -186,6 +192,7 @@ re-invoke the worker.
 | --- | --- | --- |
 | `--translate-engine google\|tencent\|aliyun\|nllb\|seamless` | `google` | Pick the translation engine for this invocation. `tencent` is best for Mandarin (requires CAM credentials, no Cantonese support); `aliyun` is the Cantonese-capable cloud option (requires Aliyun access keys); `nllb` is the recommended self-hosted fallback and handles Cantonese; `seamless` is BA2-inherited and retained for back-compat. |
 | `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the translated output |
+| `--target ISO3` | `eng` | Translation target, independent of each file's source language. Provider/model language-pair restrictions still apply. |
 
 ---
 
@@ -202,6 +209,10 @@ them adds one. See [Processing Provenance](../provenance.md).
 ---
 
 ## Failure modes
+
+The complete retained CHAT input must pass Chatter validation before inference,
+including existing dependent tiers. Translation regenerates no linguistic
+analysis tier, so it has no invalid-tier exemption.
 
 batchalign3 translate fails fast on engine failures rather than emitting
 partial output. When an utterance fails (engine network failure, GFW block
@@ -237,7 +248,7 @@ will say so.
 ## What changes in the `.cha` file
 
 - A `%xtra:` tier is added after each utterance that produced words, containing
-  the English translation
+  the translation in the selected target language
 - An utterance the engine returned nothing usable for does not get an empty
   tier: the file fails instead, and nothing is written
 - All other tiers (`%mor`, `%gra`, `%wor`) are preserved unchanged

@@ -9,6 +9,7 @@
 
 pub(crate) mod access;
 pub mod declared;
+pub mod export;
 pub mod extensions;
 pub mod probe;
 pub mod tools;

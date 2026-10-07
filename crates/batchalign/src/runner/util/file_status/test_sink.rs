@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::api::{DisplayPath, JobId, JobStatus, MachineTime};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
-use crate::store::CompletedFileOutput;
+use crate::store::FileCompletion;
 
 use super::FileStage;
 use super::event_sink::RunnerEventSink;
@@ -43,8 +43,10 @@ pub(crate) struct RecordedError {
 #[derive(Default)]
 pub(crate) struct RecordingSink {
     progress: Mutex<Vec<RecordedProgress>>,
+    worker_waits: Mutex<Vec<(String, crate::store::WorkerWaitChange)>>,
     attempts: Mutex<Vec<RecordedAttempt>>,
     errors: Mutex<Vec<RecordedError>>,
+    completed_files: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -64,10 +66,14 @@ impl RunnerEventSink for RecordingSink {
     async fn mark_file_done(
         &self,
         _job_id: &JobId,
-        _filename: &str,
+        filename: &str,
         _finished_at: crate::store::EventTime,
-        _result: Option<CompletedFileOutput>,
+        _completion: FileCompletion,
     ) {
+        self.completed_files
+            .lock()
+            .expect("completed files lock")
+            .push(filename.to_owned());
     }
 
     async fn mark_file_error(
@@ -148,6 +154,18 @@ impl RunnerEventSink for RecordingSink {
             });
     }
 
+    async fn set_file_worker_wait(
+        &self,
+        _job_id: &JobId,
+        filename: &str,
+        change: crate::store::WorkerWaitChange,
+    ) {
+        self.worker_waits
+            .lock()
+            .expect("worker waits lock")
+            .push((filename.to_owned(), change));
+    }
+
     async fn unfinished_files(&self, _job_id: &JobId) -> Vec<DisplayPath> {
         Vec::new()
     }
@@ -182,9 +200,22 @@ impl RunnerEventSink for RecordingSink {
 }
 
 impl RecordingSink {
+    /// Files whose successful completion was recorded, in order.
+    pub(crate) fn completed_files(&self) -> Vec<String> {
+        self.completed_files
+            .lock()
+            .expect("completed files lock")
+            .clone()
+    }
+
     /// Every file-progress write the sink received, in order.
     pub(crate) fn progress(&self) -> Vec<RecordedProgress> {
         self.progress.lock().expect("progress lock").clone()
+    }
+
+    /// Every worker-wait change, in order, with its file.
+    pub(crate) fn worker_waits(&self) -> Vec<(String, crate::store::WorkerWaitChange)> {
+        self.worker_waits.lock().expect("worker waits lock").clone()
     }
 
     /// Every durable attempt the sink was asked to open, in order.

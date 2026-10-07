@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 use batchalign::api::{ContentType, FileResult};
 use batchalign::cli::args::InputKind;
-use batchalign::cli::discover::{build_server_names, discover_server_inputs};
+use batchalign::cli::discover::{discover_server_inputs, plan_server_inputs};
 use batchalign::cli::output::write_result;
 
 /// Exercises the real client-side path composition: discovery builds the
@@ -88,17 +88,27 @@ fn write_one_result(out_dir: &Path) {
         discover_server_inputs(&inputs, Some(out_dir), InputKind::Chat).expect("discover inputs");
     assert_eq!(files.len(), 1, "one input file was planted");
 
-    let (server_names, result_map) =
-        build_server_names(&files, &outputs, &inputs).expect("build server names");
+    let plan = plan_server_inputs(
+        &batchalign::options::CommandOptions::Morphotag(
+            batchalign::options::MorphotagOptions::default(),
+        ),
+        &files,
+        &outputs,
+        &inputs,
+        Some(out_dir),
+    )
+    .expect("admit destinations");
 
     let result = FileResult {
-        filename: server_names[0].as_str().into(),
-        content: "@UTF8\n@Begin\n*CHI:\thello .\n@End\n".to_string(),
+        filename: plan.inputs()[0].server_name().into(),
+        content: batchalign::api::ResultContent::Text(
+            "@UTF8\n@Begin\n*CHI:\thello .\n@End\n".to_string(),
+        ),
         content_type: ContentType::Chat,
         error: None,
         provenance: batchalign::api::FileProvenance::NotRead,
     };
 
-    let written = write_result(&result, &result_map, out_dir).expect("write result");
+    let written = write_result(&result, &plan.into_destinations()).expect("write result");
     assert!(written, "a result with no error must be written");
 }

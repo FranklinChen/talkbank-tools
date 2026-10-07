@@ -7,7 +7,7 @@ expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestam
 @Languages:	eng
 @Participants:	CHI Target_Child
 @ID:	eng|test|CHI||female|||Target_Child|||
-@Comment:	[fc-ba3 coref | engine=stanza-1.14.0/ontonotes-singletons_roberta-large-lora ; lang=eng | <timestamp>]
+@Comment:	[fc-ba3 coref | build=<build> ; engine=stanza-1.14.0/ontonotes-singletons_roberta-large-lora ; lang=eng | <timestamp>]
 *CHI:	the dog ran .
 %xcoref:	(0, 0), -
 *CHI:	it was fast .

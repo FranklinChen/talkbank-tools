@@ -42,7 +42,10 @@ async fn golden_translate_eng_simple() {
         .await;
 
     assert_completed_without_errors("translate_eng_simple", &info, &results);
-    assert_golden_snapshot!("translate_eng_simple", &results[0].content);
+    assert_golden_snapshot!(
+        "translate_eng_simple",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -74,7 +77,13 @@ async fn golden_translate_spa_to_eng() {
     }
 
     assert_completed_without_errors("translate_spa_to_eng", &info, &results);
-    let file = parse_output(&results[0].content, "translate_spa_to_eng");
+    let file = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "translate_spa_to_eng",
+    );
     assert!(has_user_defined_tier(&file, "xtra"));
-    assert_golden_snapshot!("translate_spa_to_eng", &results[0].content);
+    assert_golden_snapshot!(
+        "translate_spa_to_eng",
+        &results[0].content.as_text().expect("text command result")
+    );
 }

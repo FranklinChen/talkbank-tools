@@ -271,14 +271,15 @@ async fn dispatch_no_server() {
     // contains job-level error reports, not a crash.
     let result = batchalign::cli::dispatch::dispatch(
         batchalign::cli::dispatch::DispatchRequest {
-            command: batchalign::ReleasedCommand::Morphotag,
             lang: "eng",
             num_speakers: 1,
             input_kind: InputKind::Chat,
             server_arg: None,
             inputs: &inputs,
             out_dir: None,
-            options: None,
+            options: batchalign::options::CommandOptions::Morphotag(
+                batchalign::options::MorphotagOptions::default(),
+            ),
             bank: None,
             subdir: None,
             lexicon: None,

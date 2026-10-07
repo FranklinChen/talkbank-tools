@@ -23,6 +23,7 @@ from batchalign.inference._domain_types import (
     SpeakerId,
     TimestampSeconds,
     WhisperCpuPrecision,
+    WhisperTimestampMode,
 )
 from batchalign.worker._types_v2 import ProviderDiarizationV2
 
@@ -191,11 +192,14 @@ def load_whisper_asr(
     *,
     device_policy=None,
     cpu_precision: WhisperCpuPrecision = WhisperCpuPrecision.FLOAT32,
+    timestamp_mode: WhisperTimestampMode = WhisperTimestampMode.WORD,
 ) -> WhisperASRHandle:
     """Load a Whisper ASR pipeline. Returns a typed handle.
 
     ``cpu_precision`` applies only when the resolved device is a CPU; CUDA
-    always loads float16.
+    always loads float16. Stock checkpoints request acoustic word timestamps;
+    fine-tune callers explicitly select segments instead. Neither mode fills
+    absent timestamps or divides segment spans into guessed word intervals.
     """
     import torch
     from transformers import (
@@ -247,7 +251,7 @@ def load_whisper_asr(
         stride_length_s=3,
         device=device,
         torch_dtype=asr_dtype,
-        return_timestamps=True,
+        return_timestamps=timestamp_mode.value,
     )
     bind_whisper_token_timestamp_extractor(pipe.model)
     pipe.model.eval()

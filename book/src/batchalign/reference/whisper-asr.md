@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-10-01 14:00 EDT
+**Last updated:** 2026-10-06 19:25 EDT
 
 ## Overview
 
@@ -89,6 +89,15 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
 - Chunk length 25s with 3s stride for long files
 - Device selection: CUDA > CPU (`MPS` is intentionally excluded; see
   `developer/apple-mps-workarounds.md`)
+- Stock Whisper requests HuggingFace's `return_timestamps="word"`: spans
+  come from acoustic token alignment, not equal division of sentence times.
+  Whisper Hub fine-tunes explicitly retain segment mode because their
+  alignment-head support is not assumed. This loading policy uses
+  `WhisperTimestampMode`, not an untyped boolean/string choice.
+- The instance-local generated-token callback excludes decoder-conditioning
+  rows before acoustic normalization and DTW, retaining zero prefix times.
+  Lexical timestamps occupy their original decoder positions; the terminal
+  prediction repeats the final observed boundary, as in upstream Transformers.
 - Chunk timestamps: a chunk with a missing bound keeps its words and goes
   downstream untimed on that side (the producer reports how many; an absence
   is not a time, and it is not an absence of words either). The HuggingFace
@@ -255,12 +264,15 @@ batchalign3 align input/ output/ --lang=eng
 
 1. Whisper processes an audio chunk with the transcript as forced decoder input
 2. Cross-attention weights are extracted from designated alignment heads
-3. Attention matrix is normalized (mean/std) and median-filtered
+3. The source-bound alignment window excludes padded audio frames and decoder
+   conditioning rows, validates label correspondence, then normalizes (mean/std)
+   and median-filters the admitted matrix
 4. Dynamic time warping aligns decoder tokens to audio frames (20ms resolution)
 5. Token-level timestamps are mapped back to words
 6. Current Rust FA handling matches Whisper token timings to CHAT words by
-   deterministic in-order stitching; unmatched words remain explicit untimed
-   slots rather than triggering transcript-wide remap.
+   deterministic in-order stitching and a bounded character-level residue remap;
+   unresolved words remain explicit untimed slots. Normal output requires complete
+   source-bound timing admission, not merely valid CHAT serialization.
 
 ## Utterance Timing Recovery (UTR)
 
@@ -273,8 +285,15 @@ Two UTR engines exist:
 ### Whisper UTR (default)
 
 - Whisper UTR loads via `load_whisper_asr()` in
-  `batchalign/inference/asr.py:119` and reuses the `WhisperASRHandle`
+  `batchalign/inference/asr.py` and reuses the `WhisperASRHandle`
   type.
+- Stock UTR requests word timestamps. Only exact or case-equivalent matches
+  common to every optimal lexical alignment, bound to a single timed ASR word,
+  admit word anchors; word mode does not make an ambiguous match reliable.
+- Terminal ASR sentence punctuation is excluded from lexical comparison, with
+  an explicit `terminal_punctuation` relation. Original provider surfaces and
+  addresses remain in evidence; internal apostrophes and hyphens are preserved.
+  This does not strip or reparse CHAT: its lexical words come from the typed AST.
 - The same stock checkpoint is used for every language: `openai/whisper-large-v3`,
   pinned to an exact hub commit in
   `crates/batchalign/src/model_manifest.rs`. UTR engines are not
@@ -283,7 +302,8 @@ Two UTR engines exist:
   §"Model Resolution (UTR)"). Per-language fine-tunes for UTR are
   not wired in the current resolver.
 - Results cached by audio file identity (BLAKE3 of path + size), under a
-  namespace naming the UTR engine AND the models it pinned, so changing any of
+  namespace naming the producer algorithm, UTR engine AND models it pinned,
+  so changing any of
   those models makes the older rows unreadable instead of silently reusable. A
   plan with any floating model is ineligible for the cache and neither reads
   nor writes it.
@@ -378,7 +398,10 @@ use, not at CLI startup.
   through the CANDLE arm, reproducing the HF algorithm exactly:
   teacher-forced forward pass, `alignment_heads` cross-attentions,
   per-(head,frame) standardization over tokens, median filter,
-  head-mean cost matrix (row 0 flattened), DTW at 20 ms frames. Pieces:
+  head-mean cost matrix (row 0 flattened), DTW at 20 ms frames. This describes
+  the historical pilot: current Python FA excludes conditioning rows and padded
+  frames through its source-bound window and has a new cache identity. The old
+  parity measurements do not establish equivalence to the revised algorithm. Pieces:
   the shared numeric core (`whisper_native/fa_dtw.rs`, unit-tested),
   and a vendored capture-enabled candle model + driver + parity harness
   (`fa_model.rs`, `fa.rs`, `bin/fa_parity`) in the
@@ -402,8 +425,8 @@ use, not at CLI startup.
   `setup --prefetch-whisper-rs` complete the ASR-side surface.
   Remaining for production: the `FaInferItem`-shaped dispatch behind
   the FA engine seam (with `FaAssets` cached per model+device) and
-  corpus-scale parity (the 114 aligned IISRP sessions are the
-  designated parity corpus).
+  corpus-scale parity against a designated corpus of aligned
+  sessions.
 - **Utterance segmentation BERT models**: Unrelated to Whisper, would remain
   in Python regardless.
 

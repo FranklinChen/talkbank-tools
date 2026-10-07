@@ -399,6 +399,131 @@ mod tests {
         );
     }
 
+    /// A file written with diagnostics is terminal written output end to
+    /// end through the store: reported diagnosed with its findings, not a
+    /// failure (the job completes), persisted, and restored by a fresh store
+    /// from the database as the same phase with the same findings.
+    #[tokio::test]
+    async fn a_diagnosed_file_completes_its_job_and_round_trips_through_the_database() {
+        use crate::store::{CompletedFileOutput, EventTime, FileCompletion};
+
+        let (store, db, dir) = test_store_with_db().await;
+        let job_id = JobId::from("diagnosed-job");
+        store
+            .submit(make_job(
+                "diagnosed-job",
+                ReleasedCommand::Morphotag,
+                vec!["a.cha".into(), "b.cha".into()],
+            ))
+            .await
+            .expect("submit");
+        store.mark_job_running(&job_id).await;
+        let diagnostics = crate::api::FileOutputDiagnostics::of_findings(
+            vec![crate::api::FileOutputDiagnostics::coded_finding(
+                "E220",
+                "digits inside a word",
+            )],
+            vec![crate::api::OutputShortfallRecord::StageSkipped {
+                stage: crate::api::OptionalStage::Morphosyntax,
+            }],
+        );
+        for filename in ["a.cha", "b.cha"] {
+            store
+                .mark_file_processing(&job_id, filename, EventTime::fixed(crate::unix_time(1.0)))
+                .await;
+        }
+        store
+            .mark_file_done(
+                &job_id,
+                "a.cha",
+                EventTime::fixed(crate::unix_time(2.0)),
+                FileCompletion::Diagnosed {
+                    result: CompletedFileOutput {
+                        filename: DisplayPath::from("a.cha"),
+                        content_type: crate::api::ContentType::Chat,
+                        stamp: crate::api::FileStampOutcome::Unrecorded,
+                    },
+                    diagnostics: diagnostics.clone(),
+                },
+            )
+            .await;
+        store
+            .mark_file_done(
+                &job_id,
+                "b.cha",
+                EventTime::fixed(crate::unix_time(3.0)),
+                FileCompletion::Clean(CompletedFileOutput {
+                    filename: DisplayPath::from("b.cha"),
+                    content_type: crate::api::ContentType::Chat,
+                    stamp: crate::api::FileStampOutcome::Unrecorded,
+                }),
+            )
+            .await;
+
+        let completion = store
+            .completion_snapshot(&job_id)
+            .await
+            .expect("completion facts");
+        assert!(!completion.any_failed, "a diagnosed file is not a failure");
+        assert!(!completion.all_failed);
+        store
+            .finalize_job(
+                &job_id,
+                crate::store::RunGeneration::FIRST,
+                JobStatus::Completed,
+                EventTime::fixed(crate::unix_time(4.0)),
+            )
+            .await;
+
+        let info = store.get(&job_id).await.expect("job");
+        assert_eq!(info.status, JobStatus::Completed);
+        assert_eq!(info.completed_files, 2);
+        let entry = |info: &crate::api::JobInfo, name: &str| {
+            info.file_statuses
+                .iter()
+                .find(|entry| entry.filename.as_ref() == name)
+                .cloned()
+                .expect("file entry")
+        };
+        let diagnosed = entry(&info, "a.cha");
+        assert_eq!(diagnosed.status, crate::api::FileStatusKind::Diagnosed);
+        assert_eq!(diagnosed.diagnostics.as_ref(), Some(&diagnostics));
+        assert_eq!(diagnosed.error, None);
+        assert_eq!(diagnosed.finished_at, Some(crate::unix_time(2.0)));
+        let detail = store.get_job_detail(&job_id).await.expect("detail");
+        assert_eq!(
+            detail
+                .results
+                .iter()
+                .filter(|result| result.error.is_none())
+                .count(),
+            2,
+            "the diagnosed output is a downloadable result"
+        );
+
+        // A fresh store over the same database restores the same phase.
+        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let restored = JobStore::new(
+            test_config(),
+            Some(Arc::new(
+                JobDB::open(Some(dir.path())).await.expect("reopen"),
+            )),
+            tx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
+        drop(db);
+        restored.load_from_db().await.expect("load");
+        let info = restored.get(&job_id).await.expect("restored job");
+        assert_eq!(info.status, JobStatus::Completed);
+        let diagnosed = entry(&info, "a.cha");
+        assert_eq!(diagnosed.status, crate::api::FileStatusKind::Diagnosed);
+        assert_eq!(diagnosed.diagnostics, Some(diagnostics));
+        assert_eq!(
+            entry(&info, "b.cha").status,
+            crate::api::FileStatusKind::Done
+        );
+    }
+
     async fn test_store_with_db() -> (JobStore, Arc<JobDB>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(JobDB::open(Some(dir.path())).await.unwrap());

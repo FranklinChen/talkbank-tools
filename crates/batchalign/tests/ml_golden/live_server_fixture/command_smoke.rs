@@ -88,7 +88,11 @@ async fn live_fixture_runs_translate_job_when_available() {
     assert_completed_without_errors("live_fixture_translate", &info, &results);
     assert_eq!(results.len(), 1);
     assert!(
-        results[0].content.contains("%xtra:"),
+        results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%xtra:"),
         "translate output should contain %xtra tier"
     );
 }
@@ -129,7 +133,16 @@ async fn live_fixture_runs_coref_job_when_available() {
     assert_completed_without_errors("live_fixture_coref", &info, &results);
     assert_eq!(results.len(), 1);
     assert!(
-        results[0].content.contains("@Begin") && results[0].content.contains("*CHI:"),
+        results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("@Begin")
+            && results[0]
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("*CHI:"),
         "coref output should remain valid CHAT with CHI speaker"
     );
 }

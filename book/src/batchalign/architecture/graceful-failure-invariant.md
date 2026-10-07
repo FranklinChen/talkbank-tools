@@ -134,7 +134,7 @@ Today the rule is enforced at these seams:
 
 | Layer | File | Function | Note |
 |---|---|---|---|
-| Driver (per-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_text_pipeline` | Single-file flow; per-item Err collapses to one typed `ServerError::Validation` |
+| Driver (per-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_admitted_text_pipeline` | Checked single-file flow; per-item Err collapses to one typed `ServerError::Validation` |
 | Driver (cross-file) | `crates/batchalign/src/pipeline/text_infer.rs` | `run_text_batch_pipeline` | Cross-file flow; per-item Err attributed back to source file via `per_file_info` |
 | Shared helper | `crates/batchalign/src/text_batch.rs` | `unwrap_per_item_results` | Collapses `Vec<Result<R, ItemFailure<S>>>` → `Result<Vec<R>, TextWorkflowFileError>` |
 | translate worker | `crates/batchalign/src/translate/items.rs` | `translate_items` | Per-item admission; a provider answer the policy gives up on, an engine error, and a translation with nothing to apply all → `Err`, and the file stops there; a result count other than one is a protocol `Err` (`single_item`) |

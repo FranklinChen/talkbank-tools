@@ -3,16 +3,18 @@
 //! # What an anchor is
 //!
 //! UTR matches every transcript word it can to a token of the ASR stream, and
-//! the token carries the time the recognizer heard it. A match that is EXACT
-//! or CASE-INSENSITIVE, to a token holding exactly one word, is an acoustic
-//! observation of that word: "this word was said between these two instants".
+//! the token carries the time the recognizer heard it. A correspondence common
+//! to EVERY optimal lexical alignment, EXACT or CASE-INSENSITIVE, to a token
+//! holding exactly one word, is an admitted lexical observation. It is not an
+//! independent proof of acoustic truth or transcript accuracy.
 //! That is a [`WordAnchor`]. Forced-alignment grouping uses anchors to cut an
 //! utterance whose window is longer than the engine's budget into pieces that
 //! each fit (see `chat_ops::fa::split`), so every cut point is something the
 //! recording was heard to contain rather than a time we chose.
 //!
-//! Two kinds of match are deliberately NOT anchors:
+//! These kinds of match are deliberately NOT anchors:
 //!
+//! * an ambiguous selected match: optimal tie breaking is not correspondence;
 //! * a FUZZY match, admitted by string similarity: it says the words look
 //!   alike, not that this word was heard at that time;
 //! * a match to a multi-word token (a provider SEGMENT rather than a word):
@@ -37,10 +39,8 @@ use std::collections::BTreeMap;
 
 use talkbank_model::{UtteranceIdx, WordIdx};
 
-use super::AsrTimingToken;
-use super::evidence::{
-    UtrAlignmentPlan, UtrLexicalRelation, UtrUtteranceAlignmentEvidence, UtrWordMatch,
-};
+use super::evidence::{UtrAlignmentPlan, UtrLexicalRelation, UtrUtteranceAlignmentEvidence};
+use super::lexical::AdmittedUtrWordMatch;
 use crate::chat_ops::fa::coordinates::FileMs;
 
 /// How many alignable words an utterance has: the length of the word list
@@ -108,37 +108,24 @@ impl WordAnchor {
         self.end
     }
 
-    /// The anchor one UTR match provides: `Ok(None)` for a fuzzy match or a
-    /// multi-word token (see the module docs), and an error for a token
-    /// address the stream does not hold, which would mean the plan and the
-    /// stream disagree.
-    fn from_match(
-        matched: &UtrWordMatch,
-        tokens: &[AsrTimingToken],
-    ) -> Result<Option<Self>, AnchorDisorder> {
+    /// The anchor one UTR match provides: `None` for a fuzzy match or a
+    /// multi-word token (see the module docs). Original timing is owned by
+    /// the correspondence proof; no independent stream needs checking.
+    fn from_match(admitted: &AdmittedUtrWordMatch) -> Option<Self> {
+        let matched = admitted.matched();
         match matched.relation {
-            UtrLexicalRelation::Exact | UtrLexicalRelation::CaseInsensitive => {}
-            UtrLexicalRelation::Fuzzy { .. } => return Ok(None),
+            UtrLexicalRelation::Exact
+            | UtrLexicalRelation::CaseInsensitive
+            | UtrLexicalRelation::TerminalPunctuation => {}
+            UtrLexicalRelation::Fuzzy { .. } => return None,
         }
         let word = matched.word.word_index.fa_word();
-        let token_index = matched.token.token_index();
-        let Some(token) = tokens.get(token_index) else {
-            return Err(AnchorDisorder::TokenNotInStream {
-                word,
-                token: token_index,
-                stream_len: tokens.len(),
-            });
-        };
-        // Exactly one word in the token, so its interval is this word's.
-        let mut words = token.text.split_whitespace();
-        match (words.next(), words.next()) {
-            (Some(_), None) => Ok(Some(Self {
-                word,
-                start: FileMs::new(token.start_ms),
-                end: FileMs::new(token.end_ms),
-            })),
-            (None, _) | (Some(_), Some(_)) => Ok(None),
-        }
+        // The producer bound original single-word timing into the proof.
+        admitted.word_timing().map(|timing| Self {
+            word,
+            start: FileMs::new(timing.start_ms),
+            end: FileMs::new(timing.end_ms),
+        })
     }
 
     /// An anchor for a unit test of a consumer. Test-only, so production
@@ -199,17 +186,6 @@ pub enum AnchorDisorder {
         later: WordIdx,
         /// When the later word started.
         later_start: FileMs,
-    },
-    /// A match names a token the stream does not hold: the plan and the
-    /// stream it was read against disagree.
-    #[error("anchor for word {word} names token {token} of a {stream_len}-token stream")]
-    TokenNotInStream {
-        /// The matched word.
-        word: WordIdx,
-        /// The token ordinal the match named.
-        token: usize,
-        /// How many tokens the stream holds.
-        stream_len: usize,
     },
 }
 
@@ -295,7 +271,7 @@ pub enum AnchorLookup<'a> {
     /// no tokens, or matched none of its words.
     NotRecovered,
     /// Recovery matched words of this utterance, but none is an anchor:
-    /// every match was fuzzy or to a multi-word token.
+    /// matches were ambiguous, fuzzy or to multi-word tokens.
     NoReliableMatch,
     /// Reliable matches existed and were refused as a set.
     Refused(&'a AnchorDisorder),
@@ -320,6 +296,7 @@ enum UtteranceAnchorState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorIndex {
     state: Observation,
+    search_envelopes: BTreeMap<UtteranceIdx, super::search::FaSearchEnvelope>,
 }
 
 /// Whether a token stream was ever matched.
@@ -336,6 +313,7 @@ impl AnchorIndex {
     pub fn not_observed() -> Self {
         Self {
             state: Observation::NotObserved,
+            search_envelopes: BTreeMap::new(),
         }
     }
 
@@ -346,49 +324,78 @@ impl AnchorIndex {
     /// An utterance UTR matched appears with its anchors, with the reason
     /// they were refused, or as having no reliable match; one it did not
     /// match is absent.
-    pub(in crate::chat_ops::fa::utr) fn from_plan(
-        plan: &UtrAlignmentPlan,
-        tokens: &[AsrTimingToken],
-    ) -> Self {
+    pub(in crate::chat_ops::fa::utr) fn from_plan(plan: &UtrAlignmentPlan) -> Self {
         let mut by_utterance = BTreeMap::new();
         for utterance in &plan.utterances {
-            match utterance {
+            let (utterance_index, alignable_words, anchors) = match utterance {
                 UtrUtteranceAlignmentEvidence::Matched {
                     utterance_index,
                     alignable_words,
-                    matches,
+                    admitted_matches,
                     ..
-                } => {
-                    let anchors: Result<Vec<WordAnchor>, AnchorDisorder> =
-                        std::iter::once(&matches.first)
-                            .chain(matches.rest.iter())
-                            .filter_map(|matched| {
-                                WordAnchor::from_match(matched, tokens).transpose()
-                            })
-                            .collect();
-                    let state = match anchors {
-                        Err(disorder) => UtteranceAnchorState::Refused(disorder),
-                        Ok(anchors) if anchors.is_empty() => UtteranceAnchorState::NoReliableMatch,
-                        Ok(anchors) => {
-                            match UtteranceAnchors::admit(
-                                AlignableWords::recorded(*alignable_words),
-                                anchors,
-                            ) {
-                                Ok(admitted) => UtteranceAnchorState::Anchored(admitted),
-                                Err(disorder) => UtteranceAnchorState::Refused(disorder),
-                            }
-                        }
-                    };
-                    by_utterance.insert(utterance_index.fa_utterance(), state);
-                }
+                } => (
+                    utterance_index,
+                    alignable_words,
+                    admitted_matches
+                        .iter()
+                        .filter_map(WordAnchor::from_match)
+                        .collect::<Vec<_>>(),
+                ),
+                UtrUtteranceAlignmentEvidence::InteriorOnly {
+                    utterance_index,
+                    alignable_words,
+                    admitted_matches,
+                    ..
+                } => (
+                    utterance_index,
+                    alignable_words,
+                    admitted_matches
+                        .iter()
+                        .filter_map(WordAnchor::from_match)
+                        .collect::<Vec<_>>(),
+                ),
                 // No match, so no observation to anchor at.
-                UtrUtteranceAlignmentEvidence::Unmatched { .. }
+                UtrUtteranceAlignmentEvidence::SelectedOnly {
+                    utterance_index, ..
+                }
+                | UtrUtteranceAlignmentEvidence::Refused {
+                    utterance_index, ..
+                } => {
+                    by_utterance.insert(
+                        utterance_index.fa_utterance(),
+                        UtteranceAnchorState::NoReliableMatch,
+                    );
+                    continue;
+                }
+                // A retained utterance in a refused region was never
+                // searched: recovery has nothing to say about its words.
+                UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
+                | UtrUtteranceAlignmentEvidence::Unmatched { .. }
                 | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
-                | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => {}
-            }
+                | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => continue,
+            };
+            let state = if anchors.is_empty() {
+                UtteranceAnchorState::NoReliableMatch
+            } else {
+                match UtteranceAnchors::admit(AlignableWords::recorded(*alignable_words), anchors) {
+                    Ok(admitted) => UtteranceAnchorState::Anchored(admitted),
+                    Err(disorder) => UtteranceAnchorState::Refused(disorder),
+                }
+            };
+            by_utterance.insert(utterance_index.fa_utterance(), state);
         }
         Self {
             state: Observation::Observed(by_utterance),
+            search_envelopes: plan
+                .search_envelopes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, envelope)| {
+                    envelope
+                        .as_ref()
+                        .map(|envelope| (UtteranceIdx::new(index), envelope.clone()))
+                })
+                .collect(),
         }
     }
 
@@ -399,6 +406,7 @@ impl AnchorIndex {
         entries: impl IntoIterator<Item = (UtteranceIdx, Result<UtteranceAnchors, AnchorDisorder>)>,
     ) -> Self {
         Self {
+            search_envelopes: BTreeMap::new(),
             state: Observation::Observed(
                 entries
                     .into_iter()
@@ -435,6 +443,25 @@ impl AnchorIndex {
                 Some(UtteranceAnchorState::Anchored(anchors)) => AnchorLookup::Anchored(anchors),
             },
         }
+    }
+
+    /// Preserve all candidate occurrences and verify the exact source census.
+    /// This grants only an FA search window, never a timing hint or cut point.
+    pub(in crate::chat_ops::fa) fn search_window(
+        &self,
+        utterance: UtteranceIdx,
+        words: &[crate::chat_ops::fa::FaWord],
+        corridor: crate::chat_ops::fa::TimeSpan,
+        recording: &crate::chat_ops::fa::coordinates::Recording,
+    ) -> Option<crate::chat_ops::fa::TimeSpan> {
+        if words.iter().enumerate().any(|(index, word)| {
+            word.utterance_index != utterance || word.utterance_word_index != WordIdx::new(index)
+        }) {
+            return None;
+        }
+        self.search_envelopes
+            .get(&utterance)?
+            .within(words, corridor, recording.duration().get())
     }
 
     /// How many utterances have admitted anchors, for logging.
@@ -523,58 +550,6 @@ mod tests {
         assert_eq!(
             AnchorIndex::not_observed().lookup(UtteranceIdx::new(0)),
             AnchorLookup::NotRecovered
-        );
-    }
-
-    /// A match naming a token the stream does not hold is refused with that
-    /// fact, never mistaken for a fuzzy match and silently skipped.
-    #[test]
-    fn a_match_to_a_token_outside_the_stream_is_refused() {
-        use super::super::evidence::{
-            NonEmptyUtrWordMatches, UtrAlignmentStrategy, UtrAsrTokenAddress, UtrAsrTokenOrdinal,
-            UtrAsrWordOrdinal, UtrTimingProposal, UtrUtteranceOrdinal, UtrWordAddress,
-            UtrWordMatch, UtrWordOrdinal,
-        };
-        let plan = UtrAlignmentPlan {
-            strategy: UtrAlignmentStrategy::GlobalDp,
-            utterances: vec![UtrUtteranceAlignmentEvidence::Matched {
-                utterance_index: UtrUtteranceOrdinal(0),
-                alignable_words: 2,
-                matches: NonEmptyUtrWordMatches {
-                    first: UtrWordMatch {
-                        word: UtrWordAddress {
-                            utterance_index: UtrUtteranceOrdinal(0),
-                            word_index: UtrWordOrdinal(1),
-                        },
-                        token: UtrAsrTokenAddress {
-                            token_index: UtrAsrTokenOrdinal(5),
-                            word_index: UtrAsrWordOrdinal(0),
-                        },
-                        chat_text: "hello".to_owned(),
-                        asr_text: "hello".to_owned(),
-                        relation: UtrLexicalRelation::Exact,
-                    },
-                    rest: Vec::new(),
-                },
-                proposal: UtrTimingProposal::Positive {
-                    start_ms: 0,
-                    end_ms: 10,
-                },
-            }],
-        };
-        let tokens = [AsrTimingToken {
-            text: "hello".to_owned(),
-            start_ms: 0,
-            end_ms: 10,
-        }];
-        let index = AnchorIndex::from_plan(&plan, &tokens);
-        assert_eq!(
-            index.lookup(UtteranceIdx::new(0)),
-            AnchorLookup::Refused(&AnchorDisorder::TokenNotInStream {
-                word: WordIdx::new(1),
-                token: 5,
-                stream_len: 1,
-            })
         );
     }
 

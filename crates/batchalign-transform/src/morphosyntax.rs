@@ -91,7 +91,7 @@ mod ud_types;
 
 pub use evidence::{UtteranceEvidence, WordIsolation};
 pub use gra_validate::validate_generated_gra;
-pub use injection::{InjectionResult, RetokenizationInfo, inject_results};
+pub use injection::{InjectionError, InjectionResult, RetokenizationInfo, inject_results};
 pub use invariants::*;
 pub use lang_en::is_irregular;
 pub use lang_fr::{FrenchPronounCase, french_pronoun_case, is_apm_noun};
@@ -102,16 +102,19 @@ pub use mapping_provenance::{ChunkHead, ChunkProvenance, MappedItem, MorProvenan
 pub use mor_word::{clean_lemma, is_clitic, map_ud_word};
 pub use outcome::{MorOutcome, MorOutcomeKind, NotApplicableReason, classify_not_applicable};
 pub use payload::{
-    AlignmentWarning, BatchWord, CollectedUtterance, MorphosyntaxBatchItem, PayloadCollection,
-    WordRole, clear_morphosyntax, clear_morphosyntax_selective, collect_payloads,
-    declared_languages, prepare_text, remove_empty_morphosyntax_placeholders,
+    AlignmentWarning, BatchWord, CollectedUtterance, MorphologyInput, MorphosyntaxBatchItem,
+    PayloadCollection, WordRole, clear_morphosyntax, clear_morphosyntax_selective,
+    collect_payloads, declared_languages, prepare_text, remove_empty_morphosyntax_placeholders,
     validate_mor_alignment,
 };
 pub use pos_hints::{
     HintOutcome, PosHintEvidence, apply_pos_hint_evidence, apply_pos_hints, collect_pos_hints,
     is_stanza_supported, supported_iso3_codes,
 };
-pub use responses::{MatchedMorphosyntaxResponses, ResponseCountMismatch};
+pub use responses::{
+    AdmittedUdResponse, MatchedMorphosyntaxResponses, ResponseAdmissionError,
+    ResponseCountMismatch, UnexpectedSentenceCount,
+};
 pub use sentence_mapping::{
     ItemLayout, MappedTokens, TokenItems, is_terminator_punct, map_tokens, map_ud_sentence,
     map_ud_sentence_expanded,

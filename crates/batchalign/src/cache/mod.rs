@@ -233,16 +233,20 @@ impl UtrAsrCacheNamespace {
     /// makes that distinction structural: change any model and rows written
     /// under the old one are unreadable rather than silently reused.
     ///
-    /// The `utr-asr-v1:` prefix is kept deliberately. W1 already moved this
-    /// namespace once in this build, and reusing its prefix folds the identity
-    /// into that same move, so the release costs ONE recompute rather than two.
+    /// Stock Whisper's word-timestamp producer has its own revision: segment
+    /// rows cannot be replayed as acoustic word evidence. Other engines retain
+    /// their existing namespaces.
     pub(crate) fn for_pinned_plan(
         engine: &UtrEngine,
         models: &crate::types::worker_v2::AsrRequestedModelsV2,
     ) -> UtrAsrCacheEligibility {
+        let revision = match engine {
+            UtrEngine::Whisper => "utr-asr-word-v3",
+            UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1",
+        };
         match models.pinned_namespace_text() {
             Some(pin) => UtrAsrCacheEligibility::Pinned(Self(BuildOwnedNamespace::derived(
-                format!("utr-asr-v1:{}:{pin}", engine.as_wire_name()),
+                format!("{revision}:{}:{pin}", engine.as_wire_name()),
             ))),
             None => UtrAsrCacheEligibility::Floating,
         }
@@ -470,16 +474,17 @@ mod typed_cache_tests {
         }
     }
 
-    /// Each UTR engine's namespace keeps the `utr-asr-v1:<wire name>:` prefix
-    /// and then names the models it ran. The prefix is pinned byte for byte, so
-    /// rows one run writes are read back by later runs; the model half means a
-    /// checkpoint move lands in a different namespace instead of silently
-    /// reusing rows produced by other weights.
+    /// Each namespace names both its producer algorithm and pinned models.
+    /// Stock Whisper word evidence must not replay the older segment producer.
     #[test]
     fn utr_asr_namespaces_name_the_engine_and_its_pinned_models() {
         for engine in [UtrEngine::RevAi, UtrEngine::Whisper, UtrEngine::HkTencent] {
             let bytes = namespace_for(&engine).namespace().to_owned();
-            let prefix = format!("utr-asr-v1:{}:", engine.wire_name());
+            let revision = match engine {
+                UtrEngine::Whisper => "utr-asr-word-v3",
+                UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1",
+            };
+            let prefix = format!("{revision}:{}:", engine.wire_name());
             assert!(
                 bytes.starts_with(&prefix),
                 "{bytes} should start with {prefix}"
@@ -507,6 +512,24 @@ mod typed_cache_tests {
             .expect("cache");
         let data = serde_json::json!({"segments": []});
         let whisper = namespace_for(&UtrEngine::Whisper);
+        for old_revision in ["utr-asr-v1:", "utr-asr-word-v2:"] {
+            let old = UtrAsrCacheNamespace(super::BuildOwnedNamespace::derived(
+                whisper
+                    .namespace()
+                    .replace("utr-asr-word-v3:", old_revision),
+            ));
+            cache
+                .put("old-producer", super::tasks::UTR_ASR, &old, &data)
+                .await
+                .expect("write old producer row");
+            assert_eq!(
+                cache
+                    .get("old-producer", super::tasks::UTR_ASR, &whisper)
+                    .await
+                    .expect("read under word producer"),
+                None
+            );
+        }
         cache
             .put("k", super::tasks::UTR_ASR, &whisper, &data)
             .await

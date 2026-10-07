@@ -45,7 +45,7 @@ pub(super) async fn run_parity_test(
     assert_completed_without_errors(&format!("{command}_{fixture_name}"), &info, &results);
     assert_eq!(results.len(), 1);
 
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     if let Some(golden) = load_ba2_golden(command.as_ref(), fixture_name) {
         assert_ba2_parity(&format!("{command}_{fixture_name}"), output, &golden);
     }

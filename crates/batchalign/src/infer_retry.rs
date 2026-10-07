@@ -18,21 +18,19 @@ use tracing::warn;
 use crate::error::ServerError;
 use crate::runner::util::{classify_worker_error, is_retryable_worker_failure};
 
-/// Whether a dispatch has a real job cancellation token to observe.
+/// The cancellation authority available locally to an operation.
 ///
 /// Not `Option<&CancellationToken>`: a `None` there reads identically
-/// whether a call site genuinely has no job to cancel (a CLI direct path,
-/// `compare`'s offline analysis) or simply never got wired up (the defect
-/// this type replaces -- four call sites each passing a fresh
-/// `CancellationToken::new()`, indistinguishable at every one of them from
-/// a real absence). `NotWired` names the reason, so a caller admits which
-/// case it is instead of fabricating a permanently-uncancellable stand-in
-/// that looks, at the type level, exactly like a real one.
+/// whether a call is jobless, belongs to an enclosing supervised file task,
+/// or lost its caller's token. `NotWired` states the absence of a LOCAL token,
+/// not the absence of job cancellation: its reason must identify the actual
+/// owner or the jobless caller. A caller that already carries an authority
+/// forwards it instead of inventing a permanently-uncancellable stand-in.
 #[derive(Debug, Clone, Copy)]
 pub enum Cancellation<'a> {
     /// A real job cancellation token. Cancelling it stops the dispatch.
     Token(&'a CancellationToken),
-    /// This dispatch path has no job-level cancellation token to observe.
+    /// This operation has no local cancellation token to observe.
     /// `reason` names why, so a log line or panic message at this call
     /// site says which case it is rather than reading like a bug; also
     /// read by anything that wants to explain a stuck-looking dispatch
@@ -44,6 +42,19 @@ pub enum Cancellation<'a> {
 }
 
 impl Cancellation<'_> {
+    /// Run work under this cancellation authority. A stopped operation cannot
+    /// yield an output; its future is dropped before any later work can use it.
+    pub(crate) async fn supervise<T>(
+        &self,
+        operation: crate::owned_future::OwnedFuture<'_, T>,
+    ) -> Result<T, ServerError> {
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Err(ServerError::Cancelled),
+            output = operation => Ok(output),
+        }
+    }
+
     /// Wait for cancellation. [`Self::NotWired`] returns a future that
     /// never resolves (`std::future::pending`), so racing it in a
     /// `select!` simply means that branch never wins: the same runtime
@@ -63,11 +74,7 @@ impl Cancellation<'_> {
     /// finished. Every wait a dispatch takes on a job's behalf goes through
     /// here, so none of them can outlive a stop.
     pub(crate) async fn sleep(&self, duration: Duration) -> Result<(), ServerError> {
-        tokio::select! {
-            biased;
-            () = self.cancelled() => Err(ServerError::Cancelled),
-            () = tokio::time::sleep(duration) => Ok(()),
-        }
+        self.supervise(Box::pin(tokio::time::sleep(duration))).await
     }
 }
 
@@ -90,8 +97,8 @@ pub(crate) async fn dispatch_execute_v2_with_retry(
 
 /// Dispatch one `execute_v2` request with retries and progress forwarding.
 ///
-/// `cancellation` is a required parameter, not an optional add-on: a retry
-/// after cancellation is unconstructible by this signature. It is raced
+/// `cancellation` is a required parameter, not an optional add-on: the caller
+/// explicitly names its local cancellation authority. A supplied token is raced
 /// against BOTH points where this loop can otherwise block indefinitely:
 /// the attempt itself (`pool.dispatch_execute_v2_with_progress`, which can
 /// be mid-decode on a long file) and the backoff sleep between attempts.
@@ -119,11 +126,13 @@ pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
     let retry_policy = RetryPolicy::default();
 
     for attempt_number in 1..=retry_policy.max_attempts {
-        let attempt = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(ServerError::Cancelled),
-            result = pool.dispatch_execute_v2_with_progress(lang, request, progress_tx) => result,
-        };
+        let attempt = cancellation
+            .supervise(Box::pin(pool.dispatch_execute_v2_with_progress(
+                lang,
+                request,
+                progress_tx,
+            )))
+            .await?;
 
         match attempt {
             Ok(response) => return Ok(response),
@@ -172,8 +181,6 @@ pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
 // Test code: the panic-family lints are relaxed in source by house policy.
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::time::Instant;
-
     use crate::api::LanguageCode3;
     use crate::types::worker_v2::{
         AsrBackendV2, AsrInputV2, AsrRequestV2, ExecuteRequestV2, InferenceTaskV2,
@@ -219,24 +226,17 @@ mod tests {
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
 
-        let started = Instant::now();
-        let result = dispatch_execute_v2_with_retry(
+        let mut dispatch = Box::pin(dispatch_execute_v2_with_retry(
             &pool,
             &lang,
             &request,
             Cancellation::Token(&cancel_token),
-        )
-        .await;
-        let elapsed = started.elapsed();
+        ));
+        let result = futures::poll!(&mut dispatch);
 
         assert!(
-            matches!(result, Err(ServerError::Cancelled)),
+            matches!(result, std::task::Poll::Ready(Err(ServerError::Cancelled))),
             "expected Err(ServerError::Cancelled), got {result:?}"
-        );
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "a pre-cancelled call must return immediately, not after any real dispatch attempt \
-             (took {elapsed:?})"
         );
     }
 
@@ -260,11 +260,11 @@ mod tests {
             reason: "test: no job token in scope",
         };
 
-        let outcome =
-            tokio::time::timeout(Duration::from_millis(50), cancellation.cancelled()).await;
+        let mut waiting = Box::pin(cancellation.cancelled());
+        let outcome = futures::poll!(&mut waiting);
 
         assert!(
-            outcome.is_err(),
+            matches!(outcome, std::task::Poll::Pending),
             "Cancellation::NotWired.cancelled() must never resolve; a NotWired dispatch has \
              nothing that could fire it"
         );
@@ -343,13 +343,47 @@ mod tests {
 
         cancel_token.cancel();
 
-        let result = tokio::time::timeout(Duration::from_secs(5), fut)
-            .await
-            .expect("cancellation must stop the loop promptly, not hang");
+        let result = futures::poll!(&mut fut);
 
         assert!(
-            matches!(result, Err(ServerError::Cancelled)),
+            matches!(result, std::task::Poll::Ready(Err(ServerError::Cancelled))),
             "expected Err(ServerError::Cancelled), got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn supervising_cancellation_drops_suspended_work_without_an_output() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let token = CancellationToken::new();
+        let cancellation = Cancellation::Token(&token);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let receipt = Dropped(Arc::clone(&dropped));
+        let work = async move {
+            let _receipt = receipt;
+            std::future::pending::<()>().await;
+        };
+        let mut supervised = Box::pin(cancellation.supervise(Box::pin(work)));
+        assert!(matches!(
+            futures::poll!(&mut supervised),
+            std::task::Poll::Pending
+        ));
+        assert!(!dropped.load(Ordering::SeqCst));
+        token.cancel();
+        assert!(matches!(
+            futures::poll!(&mut supervised),
+            std::task::Poll::Ready(Err(ServerError::Cancelled))
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

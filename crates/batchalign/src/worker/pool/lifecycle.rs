@@ -334,6 +334,10 @@ impl WorkerPool {
             Ok((_, g)) => g,
             Err(_) => return Ok(false), // At capacity
         };
+        // The claimed slot is counted in `total` from here until the worker
+        // is in the idle queue (or the claim is released): a spawn can take
+        // as long as a model load, and it must not look like a lost worker.
+        let _spawning = super::AwayFromQueue::new(group, 1);
 
         let _bootstrap_guard = group.bootstrap.lock().await;
 
@@ -507,6 +511,9 @@ pub(super) async fn run_health_check(
         // Drain the idle queue for health checking.
         let workers_to_check: Vec<WorkerHandle> =
             { super::lock_recovered(&group.idle).drain(..).collect() };
+        // Drained workers are still counted in `total` while they are
+        // checked; the guard accounts for them until the survivors are back.
+        let checking = super::AwayFromQueue::new(group, workers_to_check.len());
         // We drained idle workers. Their permits are already consumed
         // (no one can acquire them). We'll re-add permits for healthy ones.
 
@@ -561,6 +568,7 @@ pub(super) async fn run_health_check(
         }
 
         group.record_worker_removed(removed_count);
+        drop(checking);
 
         // Restart failed workers
         for _ in 0..restart_count {
@@ -694,7 +702,7 @@ async fn pressure_evict_idle_workers_if_needed(groups_ref: &GroupsMap) {
         // queue. Lock is held just long enough to remove the handle;
         // the async shutdown happens after `drop(idle)`.
         let group = &sample.group;
-        let removed = {
+        let (removed, leaving) = {
             let mut idle = super::lock_recovered(&group.idle);
             let Some(pos) = idle.iter().position(|h| h.pid() == sample.pid) else {
                 // Worker checked out since snapshot, leave it for
@@ -719,11 +727,15 @@ async fn pressure_evict_idle_workers_if_needed(groups_ref: &GroupsMap) {
                 // best-effort skip rather than a panic.
                 continue;
             };
-            handle
+            // The victim is still counted in `total` through its shutdown,
+            // which can take seconds; the guard accounts for it from the
+            // moment it leaves the queue until it is retired, so a saturated
+            // checkout never mistakes it for a lost worker.
+            (handle, super::AwayFromQueue::new(group, 1))
         };
         let mut worker = removed;
         let _ = worker.shutdown_in_place().await;
-        group.record_worker_removed(1);
+        leaving.retire();
         info!(
             pid = %sample.pid,
             rss_mb = sample.rss_mb,

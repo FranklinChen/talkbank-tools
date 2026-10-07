@@ -1,0 +1,19 @@
+---
+source: crates/batchalign/src/runner/dispatch/diarize_chat.rs
+expression: output.as_str()
+---
+@UTF8
+@Begin
+@Languages:	eng
+@Participants:	CHI Child, MOT Mother
+@ID:	eng|sample|CHI|2;00.||||Child|||
+@ID:	eng|sample|MOT|||||Mother|||
+@Media:	timed, audio
+*CHI:	one . 100_200
+%com:	contributor annotation
+%wor:	one 100_200 .
+*MOT:	two . 200_300
+%wor:	two 200_300 .
+*CHI:	three . 300_400
+%wor:	three 300_400 .
+@End

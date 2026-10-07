@@ -21,6 +21,8 @@ from batchalign.inference._domain_types import (
 from batchalign.inference.types import Wave2VecWordAlignment
 
 if TYPE_CHECKING:
+    from transformers import WhisperProcessor
+
     from batchalign.inference.types import (
         Wave2VecFAHandle,
         Wave2VecFAResult,
@@ -85,6 +87,10 @@ class Wave2VecIndexedResponse(BaseModel):
 # Whisper FA load/infer
 # ---------------------------------------------------------------------------
 
+# Namespace the callback's acoustic-window algorithm, not only its checkpoint.
+# Old padded-grid token evidence must not enter this implementation's cache.
+WHISPER_FA_ENGINE_ID = "whisper-fa-large-v2-lexical-window-v2"
+
 
 def load_whisper_fa(
     model: str = "openai/whisper-large-v2",
@@ -134,6 +140,84 @@ def load_whisper_fa(
     )
 
 
+class _WhisperAlignmentWindow:
+    """Label-bound attention over lexical rows and the actual waveform.
+
+    Conditioning rows cannot constrain a lexical alignment. The terminal row
+    remains an acoustic end sentinel; prefix labels retain explicit zero times
+    in the worker response. This owner pairs row selection with output labels.
+    """
+
+    def __init__(
+        self,
+        audio: torch.Tensor,
+        sample_rate: SampleRate,
+        hop_length: int,
+        weights: torch.Tensor,
+        tokens: torch.Tensor,
+        prefix_tokens: list[int],
+        eos_token_id: int,
+    ) -> None:
+        if audio.ndim != 1 or sample_rate <= 0 or hop_length <= 0:
+            raise ValueError(
+                "Whisper FA requires mono audio and positive frame geometry"
+            )
+        if tokens.ndim != 1 or weights.ndim != 3 or weights.shape[-2] != tokens.numel():
+            raise ValueError("Whisper FA attention rows do not match decoder labels")
+        self._tokens = tuple(int(token) for token in tokens)
+        self._prefix_length = len(prefix_tokens)
+        if (
+            not prefix_tokens
+            or self._tokens[: self._prefix_length] != tuple(prefix_tokens)
+            or len(self._tokens) <= self._prefix_length + 1
+            or self._tokens[-1] != eos_token_id
+        ):
+            raise ValueError(
+                "Whisper FA requires the tokenizer prefix, lexical labels and terminal label"
+            )
+        # Whisper's encoder downsamples mel frames by two, as in the shared
+        # token-timestamp extractor. The feature extractor's hop is the model's
+        # geometry, not a hard-coded recording duration or fabricated endpoint.
+        frames = audio.numel() // hop_length // 2
+        if frames == 0:
+            raise ValueError("Whisper FA audio contains no complete encoder frame")
+        if frames > weights.shape[-1]:
+            raise ValueError("Whisper FA audio exceeds the supplied encoder attention")
+        self._weights = weights[:, self._prefix_length :, :frames]
+        self._time_precision = 2 * hop_length / sample_rate
+
+    def normalized(self) -> torch.Tensor:
+        std, mean = torch.std_mean(self._weights, dim=-2, keepdim=True, unbiased=False)
+        return (self._weights - mean) / std
+
+    def timed_tokens(
+        self, processor: WhisperProcessor, rows: np.ndarray, indices: np.ndarray
+    ) -> list[tuple[str, float]]:
+        if (
+            indices.ndim != 1
+            or not np.array_equal(
+                rows, np.arange(len(self._tokens) - self._prefix_length)
+            )
+            or len(indices) != len(rows)
+        ):
+            raise ValueError(
+                "Whisper FA DTW did not cover every admitted decoder label"
+            )
+        if (
+            np.any(indices < 0)
+            or np.any(indices >= self._weights.shape[-1])
+            or np.any(np.diff(indices) < 0)
+        ):
+            raise ValueError("Whisper FA DTW escaped its admitted acoustic window")
+        times = np.concatenate(
+            (np.zeros(self._prefix_length), indices * self._time_precision)
+        )
+        return [
+            (processor.decode(token), float(time))
+            for token, time in zip(self._tokens, times, strict=True)
+        ]
+
+
 def infer_whisper_fa(
     handle: WhisperFAHandle,
     audio_chunk: torch.Tensor,
@@ -173,24 +257,23 @@ def infer_whisper_fa(
         ]
     )
 
-    std, mean = torch.std_mean(weights, dim=-2, keepdim=True, unbiased=False)
-    weights = (weights - mean) / std
-    weights = median_filter(weights, handle.model.config.median_filter_width)
+    window = _WhisperAlignmentWindow(
+        audio_chunk,
+        handle.sample_rate,
+        handle.processor.feature_extractor.hop_length,
+        weights,
+        tokens,
+        handle.processor.tokenizer.prefix_tokens,
+        handle.processor.tokenizer.eos_token_id,
+    )
+    weights = median_filter(
+        window.normalized(), handle.model.config.median_filter_width
+    )
     matrix = weights.mean(dim=0)
-    matrix[0] = matrix.mean()
 
     text_idx, time_idx = dtw(-matrix)
     jumps = np.pad(np.diff(text_idx), (1, 0), constant_values=1).astype(bool)
-    jump_times = time_idx[jumps] * 0.02
-
-    # `strict` because the correspondence is one timestamp per label token: the
-    # attention matrix has one row per decoder position, so the DTW path yields
-    # one jump each. A mismatch means the alignment is wrong, and truncating to
-    # the shorter side would silently return timings for a PREFIX of the text
-    # while the caller believes it aligned all of it.
-    return [
-        (handle.processor.decode(i), j) for i, j in zip(tokens, jump_times, strict=True)
-    ]
+    return window.timed_tokens(handle.processor, text_idx[jumps], time_idx[jumps])
 
 
 # ---------------------------------------------------------------------------

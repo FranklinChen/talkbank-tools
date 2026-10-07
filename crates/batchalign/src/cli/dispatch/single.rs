@@ -1,7 +1,6 @@
 //! Single-server dispatch: submit files to one server, poll, write results.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::ReleasedCommand;
 use crate::api::JobSubmission;
@@ -9,9 +8,9 @@ use crate::command_model::{CommandIoProfile, command_spec};
 use crate::options::CommandOptions;
 
 use crate::cli::client::{BatchalignClient, server_label};
-use crate::cli::discover::{build_server_names, copy_nonmatching, infer_base_dir};
+use crate::cli::discover::{copy_nonmatching, infer_base_dir, plan_server_inputs};
 use crate::cli::error::CliError;
-use crate::cli::progress::BatchProgress;
+use crate::cli::progress::{BatchProgress, ProgressDisplay};
 use crate::cli::tui::TuiProgress;
 
 /// How the client transfers job inputs to one selected server.
@@ -153,22 +152,24 @@ use super::{refuse_foreign_server_build, server_supports_command};
 use crate::cli::args::InputKind;
 
 /// Submit files to a single server, poll for completion, write results.
+///
+/// The command is the one `options` names; see `prepare_paths_submission`.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_single_server(
     client: &BatchalignClient,
     target: &ServerTarget,
-    command: ReleasedCommand,
     lang: &str,
     num_speakers: u32,
     input_kind: InputKind,
     inputs: &[std::path::PathBuf],
     out_dir: Option<&std::path::Path>,
-    options: Option<&CommandOptions>,
+    options: &CommandOptions,
     lexicon: Option<&str>,
     before: Option<&std::path::Path>,
     use_tui: bool,
     open_dashboard: bool,
 ) -> Result<(), CliError> {
+    let command = options.command();
     let server_url = target.url();
     // Health check
     let health = match client.health_check(server_url).await {
@@ -192,16 +193,15 @@ pub(super) async fn dispatch_single_server(
     // The transport was decided when the origin was parsed and alone decides
     // path versus content submission. Producer selection was already resolved
     // by dispatch.
-    let (submission, effective_out, result_map) = match target.transport {
+    let (submission, destinations) = match target.transport {
         ServerTransport::SharedFilesystem => {
             let Some(prepared) = prepare_paths_submission(
-                command,
+                options,
                 lang,
                 num_speakers,
                 input_kind,
                 inputs,
                 out_dir,
-                options,
                 lexicon,
                 before,
                 &health.media_mapping_keys,
@@ -218,13 +218,14 @@ pub(super) async fn dispatch_single_server(
                 "note: the server must be able to read these input paths. Successful outputs will also be copied back to this machine.\n"
             );
 
-            (prepared.submission, prepared.effective_out, HashMap::new())
+            (prepared.submission, prepared.destinations)
         }
         ServerTransport::Content | ServerTransport::ContentResolvingAudio => {
             let (files, outputs) =
                 crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
             let (files, outputs) = filter_files_for_command(command, files, outputs);
             let (files, outputs) = order_files_for_command(command, files, outputs)?;
+            let plan = plan_server_inputs(options, &files, &outputs, inputs, out_dir)?;
 
             if let Some(od) = out_dir {
                 let mut passthrough = crate::cli::discover::PassthroughReport::default();
@@ -239,8 +240,17 @@ pub(super) async fn dispatch_single_server(
             }
 
             let base_dir = infer_base_dir(inputs)?;
-            let (server_names, result_map) = build_server_names(&files, &outputs, inputs)?;
-            let (file_payloads, media_file_names) = classify_files(&files, &server_names)?;
+            let source_paths = plan
+                .inputs()
+                .iter()
+                .map(|input| input.source().to_path_buf())
+                .collect::<Vec<_>>();
+            let server_names = plan
+                .inputs()
+                .iter()
+                .map(|input| input.server_name().to_owned())
+                .collect::<Vec<_>>();
+            let (file_payloads, media_file_names) = classify_files(&source_paths, &server_names)?;
             if file_payloads.is_empty() && media_file_names.is_empty() {
                 eprintln!("warning: no files found for {input_kind:?} input");
                 return Ok(());
@@ -257,19 +267,9 @@ pub(super) async fn dispatch_single_server(
                 );
             }
 
-            let mut opts = options.cloned().unwrap_or_else(|| {
-                CommandOptions::Morphotag(crate::options::MorphotagOptions {
-                    common: Default::default(),
-
-                    ..Default::default()
-                })
-            });
+            let mut opts = options.clone();
             inject_lexicon(&mut opts, lexicon)?;
             let debug_traces = opts.common().debug_dir.is_some();
-
-            let effective_out = out_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| base_dir.clone());
 
             (
                 JobSubmission {
@@ -290,8 +290,7 @@ pub(super) async fn dispatch_single_server(
                     debug_traces,
                     before_paths: vec![],
                 },
-                effective_out,
-                result_map,
+                plan.into_destinations(),
             )
         }
     };
@@ -340,8 +339,7 @@ pub(super) async fn dispatch_single_server(
                 server_url,
                 job_id,
                 total_files as u64,
-                &result_map,
-                &effective_out,
+                &destinations,
                 command.as_wire_name(),
                 &tui_progress,
             );
@@ -349,9 +347,17 @@ pub(super) async fn dispatch_single_server(
 
             tokio::select! {
                 result = &mut poll_fut => {
-                    result?;
-                    // Job finished: wait for TUI to exit
+                    // Polling ended, with the job's outcome or an error
+                    // (diagnosed output and failed jobs are errors here, so
+                    // they set the exit code). Either way the TUI is told
+                    // the run is over, which is idempotent for paths that
+                    // already told it, and it is awaited before the outcome
+                    // propagates: the caller exits the process on an error,
+                    // which would skip the TUI thread's terminal restore and
+                    // its final summary.
+                    tui_progress.finish();
                     let _ = tui_handle.await;
+                    result?;
                 }
                 _ = &mut tui_handle => {
                     // User closed TUI: continue writing results to disk
@@ -366,8 +372,7 @@ pub(super) async fn dispatch_single_server(
                 server_url,
                 job_id,
                 total_files as u64,
-                &result_map,
-                &effective_out,
+                &destinations,
                 command.as_wire_name(),
                 &progress,
             )

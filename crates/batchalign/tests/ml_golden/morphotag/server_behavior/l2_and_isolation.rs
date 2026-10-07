@@ -88,10 +88,19 @@ async fn morphotag_server_no_l2_switch_controls_code_switched_words() {
         "both server L2 runs should complete cleanly"
     );
 
-    let tienda_on = find_mor_line_for(&enabled_file.content, "tienda@s:spa")
-        .expect("tienda MOR with server L2 enabled");
-    let tienda_off = find_mor_line_for(&disabled_file.content, "tienda@s:spa")
-        .expect("tienda MOR with server L2 disabled");
+    let tienda_on = find_mor_line_for(
+        enabled_file.content.as_text().expect("text command result"),
+        "tienda@s:spa",
+    )
+    .expect("tienda MOR with server L2 enabled");
+    let tienda_off = find_mor_line_for(
+        disabled_file
+            .content
+            .as_text()
+            .expect("text command result"),
+        "tienda@s:spa",
+    )
+    .expect("tienda MOR with server L2 disabled");
 
     assert!(
         !tienda_on.contains("L2|xxx"),
@@ -102,7 +111,11 @@ async fn morphotag_server_no_l2_switch_controls_code_switched_words() {
         "server L2-disabled run should preserve L2|xxx fallback, got: {tienda_off}"
     );
     assert_ne!(
-        enabled_file.content, disabled_file.content,
+        enabled_file.content.as_text().expect("text command result"),
+        disabled_file
+            .content
+            .as_text()
+            .expect("text command result"),
         "server L2 opt-out should materially change bilingual output"
     );
 }
@@ -180,16 +193,27 @@ async fn morphotag_server_unsupported_inline_language_does_not_poison_neighbor_f
         "unsupported-inline file should still complete with fallback"
     );
     assert!(
-        clean.content.contains("%mor:"),
+        clean
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%mor:"),
         "clean neighbor should still receive morphology on the server path"
     );
     assert!(
-        !clean.content.contains("L2|xxx"),
+        !clean
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("L2|xxx"),
         "clean neighbor should not inherit unsupported-language fallback"
     );
 
-    let blorx_mor = find_mor_line_for(&unsupported.content, "blorx@s:xyz")
-        .expect("unsupported inline file should still have a MOR line");
+    let blorx_mor = find_mor_line_for(
+        unsupported.content.as_text().expect("text command result"),
+        "blorx@s:xyz",
+    )
+    .expect("unsupported inline file should still have a MOR line");
     assert!(
         blorx_mor.contains("L2|xxx"),
         "unsupported inline fallback should stay on the affected server file, got: {blorx_mor}"
@@ -276,17 +300,21 @@ async fn morphotag_server_skipmultilang_only_skips_non_primary_utterances() {
         "bilingual server file should complete cleanly under skipmultilang"
     );
     assert_eq!(
-        count_mor_lines(&mono.content),
+        count_mor_lines(mono.content.as_text().expect("text command result")),
         2,
         "monolingual server neighbor should keep both utterances tagged"
     );
     assert_eq!(
-        count_mor_lines(&bilingual.content),
+        count_mor_lines(bilingual.content.as_text().expect("text command result")),
         1,
         "server skipmultilang should skip only the non-primary [- spa] utterance"
     );
     assert!(
-        bilingual.content.contains("*CHI:\t[- spa] hola mundo ."),
+        bilingual
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("*CHI:\t[- spa] hola mundo ."),
         "server output should retain the skipped bilingual utterance"
     );
 }

@@ -676,7 +676,11 @@ impl ReplayAsrPlan {
 }
 
 /// Shared post-processing policy, sealed to the two admitted execution modes.
-pub(crate) trait TranscribePlan: Clone + sealed::Sealed {
+/// `Send + Sync`: a plan travels inside the pipeline context through every
+/// stage future, and stage futures are heap-owned `Send` futures
+/// (`pipeline::plan::StageFuture`); the bound states what spawned execution
+/// already relied on implicitly.
+pub(crate) trait TranscribePlan: Clone + Send + Sync + sealed::Sealed {
     const REPLAY: bool;
     fn language(&self) -> AsrLanguageRequest;
     fn expected_speakers(&self) -> Option<crate::api::NumSpeakers>;

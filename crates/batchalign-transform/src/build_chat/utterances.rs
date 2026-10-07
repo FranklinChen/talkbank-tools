@@ -1,14 +1,14 @@
 use super::BuildChatError;
 use talkbank_model::Span;
 use talkbank_model::model::{
-    BracketedContent, BracketedItem, Bullet, DependentTier, LanguageCode, Line, Retrace,
-    RetraceKind, Separator, Terminator, Utterance, UtteranceContent, Word,
+    BracketedContent, BracketedItem, DependentTier, LanguageCode, Line, Retrace, RetraceKind,
+    Separator, Terminator, Utterance, UtteranceContent, Word,
 };
 use talkbank_parser::TreeSitterParser;
 
 use crate::asr_postprocess;
 
-use super::{TranscriptDescription, WordDesc};
+use super::{DescribedTiming, TranscriptDescription, WordDesc};
 
 pub(super) fn build_utterance_lines(
     desc: &TranscriptDescription,
@@ -24,14 +24,7 @@ pub(super) fn build_utterance_lines(
 
         let built = if words.is_empty() {
             utterance.text.as_ref().map_or(Ok(None), |text| {
-                build_text_utterance(
-                    parser,
-                    &utterance.speaker,
-                    text,
-                    utterance.start_ms,
-                    utterance.end_ms,
-                    langs,
-                )
+                build_text_utterance(parser, &utterance.speaker, text, utterance.timing, langs)
             })?
         } else {
             build_word_utterance(parser, &utterance.speaker, words, desc.write_wor)?
@@ -99,8 +92,7 @@ fn build_text_utterance(
     parser: &TreeSitterParser,
     speaker: &str,
     text: &str,
-    start_ms: Option<u64>,
-    end_ms: Option<u64>,
+    timing: DescribedTiming,
     langs: &[LanguageCode],
 ) -> Result<Option<Line>, BuildChatError> {
     let text = text.trim();
@@ -108,9 +100,12 @@ fn build_text_utterance(
         return Ok(None);
     }
 
-    let bullet_str = match (start_ms, end_ms) {
-        (Some(start), Some(end)) => format!(" \x15{start}_{end}\x15"),
-        _ => String::new(),
+    // Only a positive interval is written; the parser then admits it.
+    let bullet_str = match timing {
+        DescribedTiming::Positive(interval) => {
+            format!(" \x15{}_{}\x15", interval.start_ms(), interval.end_ms())
+        }
+        DescribedTiming::Untimed(_) => String::new(),
     };
 
     let lang_code = langs.first().map(LanguageCode::as_str).unwrap_or("eng");
@@ -155,25 +150,34 @@ fn parse_asr_word(parser: &TreeSitterParser, text: &str) -> Result<Word, BuildCh
     }
 }
 
+/// The span an utterance's timed words cover so far: none, or the positive
+/// interval covering every one of them. Absence is the only "untimed" state,
+/// so there is no separate has-timing flag to keep in step with it.
+#[derive(Debug, Clone, Copy, Default)]
+struct UtteranceSpan(Option<asr_postprocess::PositiveInterval>);
+
+impl UtteranceSpan {
+    /// Extend the span over one timed word.
+    fn cover(&mut self, word: asr_postprocess::PositiveInterval) {
+        self.0 = Some(match self.0 {
+            Some(span) => span.covering(word),
+            None => word,
+        });
+    }
+}
+
 /// Parse a word and attach inline bullet timing, updating utterance-level
 /// timing bookkeeping only after successful word admission.
 fn parse_and_time_word(
     parser: &TreeSitterParser,
     text: &str,
-    start_ms: Option<u64>,
-    end_ms: Option<u64>,
-    utt_start_ms: &mut Option<u64>,
-    utt_end_ms: &mut Option<u64>,
-    has_timing: &mut bool,
+    timing: DescribedTiming,
+    span: &mut UtteranceSpan,
 ) -> Result<Word, BuildChatError> {
     let mut word = parse_asr_word(parser, text)?;
-    if let (Some(start), Some(end)) = (start_ms, end_ms) {
-        word.inline_bullet = Some(Bullet::new(start, end));
-        *has_timing = true;
-        if utt_start_ms.is_none() {
-            *utt_start_ms = Some(start);
-        }
-        *utt_end_ms = Some(end);
+    if let Some(interval) = timing.positive() {
+        word.inline_bullet = Some(interval.bullet());
+        span.cover(interval);
     }
     Ok(word)
 }
@@ -202,9 +206,7 @@ fn build_word_utterance(
     write_wor: bool,
 ) -> Result<Option<Line>, BuildChatError> {
     let mut content: Vec<UtteranceContent> = Vec::new();
-    let mut utt_start_ms: Option<u64> = None;
-    let mut utt_end_ms: Option<u64> = None;
-    let mut has_timing = false;
+    let mut span = UtteranceSpan::default();
 
     let last_text = words.last().map(|word| word.text.as_str()).unwrap_or(".");
     let terminator = Terminator::try_from_chat_str(last_text)
@@ -232,27 +234,11 @@ fn build_word_utterance(
         }
 
         if word.kind == asr_postprocess::WordKind::Retrace {
-            index = push_retrace_run(
-                parser,
-                words,
-                index,
-                &mut content,
-                &mut utt_start_ms,
-                &mut utt_end_ms,
-                &mut has_timing,
-            )?;
+            index = push_retrace_run(parser, words, index, &mut content, &mut span)?;
             continue;
         }
 
-        let parsed = parse_and_time_word(
-            parser,
-            text,
-            word.start_ms,
-            word.end_ms,
-            &mut utt_start_ms,
-            &mut utt_end_ms,
-            &mut has_timing,
-        )?;
+        let parsed = parse_and_time_word(parser, text, word.timing, &mut span)?;
         content.push(UtteranceContent::Word(Box::new(parsed)));
         index += 1;
     }
@@ -262,12 +248,13 @@ fn build_word_utterance(
     }
 
     let mut main = talkbank_model::model::MainTier::new(speaker, content, terminator);
-    if let (Some(start), Some(end)) = (utt_start_ms, utt_end_ms) {
-        main = main.with_bullet(Bullet::new(start, end));
+    // The utterance bullet covers every timed word: positive by construction.
+    if let UtteranceSpan(Some(interval)) = span {
+        main = main.with_bullet(interval.bullet());
     }
 
     let mut utterance = Utterance::new(main);
-    if write_wor && has_timing {
+    if write_wor && span.0.is_some() {
         let wor_tier = utterance.main.generate_wor_tier();
         utterance
             .dependent_tiers
@@ -282,9 +269,7 @@ fn push_retrace_run(
     words: &[WordDesc],
     start_index: usize,
     content: &mut Vec<UtteranceContent>,
-    utt_start_ms: &mut Option<u64>,
-    utt_end_ms: &mut Option<u64>,
-    has_timing: &mut bool,
+    span: &mut UtteranceSpan,
 ) -> Result<usize, BuildChatError> {
     let mut end_index = start_index;
     while end_index < words.len() && words[end_index].kind == asr_postprocess::WordKind::Retrace {
@@ -297,15 +282,7 @@ fn push_retrace_run(
         if text.is_empty() {
             continue;
         }
-        let word = parse_and_time_word(
-            parser,
-            text,
-            retrace_word.start_ms,
-            retrace_word.end_ms,
-            utt_start_ms,
-            utt_end_ms,
-            has_timing,
-        )?;
+        let word = parse_and_time_word(parser, text, retrace_word.timing, span)?;
         parsed.push(word);
     }
 

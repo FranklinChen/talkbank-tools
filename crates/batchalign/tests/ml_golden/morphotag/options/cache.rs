@@ -82,9 +82,9 @@ async fn option_morphotag_cantonese_retokenize_cache_isolated_from_preserve_mode
     assert_completed_without_errors("yue_cache_retok_second", &info_b, &results_b);
     assert_completed_without_errors("yue_cache_preserve_third", &info_c, &results_c);
 
-    let output_a = &results_a[0].content;
-    let output_b = &results_b[0].content;
-    let output_c = &results_c[0].content;
+    let output_a = results_a[0].content.as_text().expect("text command result");
+    let output_b = results_b[0].content.as_text().expect("text command result");
+    let output_c = results_c[0].content.as_text().expect("text command result");
 
     assert!(output_a.contains("*CHI:\t故 事 係 好 ."));
     assert!(output_b.contains("*CHI:\t故事 係 好 ."));
@@ -156,10 +156,19 @@ async fn option_morphotag_multilingual_warm_cache_preserves_per_language_outputs
         // The two runs may stamp different seconds; everything else, the
         // stamp's fields included, must be identical.
         assert_eq!(
-            crate::ml_golden::golden::helpers::pin_provenance_timestamps(&cold.content),
-            crate::ml_golden::golden::helpers::pin_provenance_timestamps(&warm.content)
+            crate::ml_golden::golden::helpers::pin_provenance_timestamps(
+                cold.content.as_text().expect("text command result")
+            ),
+            crate::ml_golden::golden::helpers::pin_provenance_timestamps(
+                warm.content.as_text().expect("text command result")
+            )
         );
-        assert!(cold.content.contains("%mor:"));
+        assert!(
+            cold.content
+                .as_text()
+                .expect("text command result")
+                .contains("%mor:")
+        );
     }
 }
 
@@ -212,5 +221,8 @@ async fn option_override_media_cache_forces_recompute() {
     .await;
     assert_completed_without_errors("cache_override", &info2, &results2);
 
-    assert_eq!(results1[0].content, results2[0].content);
+    assert_eq!(
+        results1[0].content.as_text().expect("text command result"),
+        results2[0].content.as_text().expect("text command result")
+    );
 }

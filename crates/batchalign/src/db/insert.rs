@@ -123,12 +123,12 @@ impl JobDB {
             super::update::bind_phase_columns(
                 sqlx::query(
                     "INSERT INTO file_statuses
-                         (status, error, error_category, started_at, finished_at,
-                          next_eligible_at, job_id, filename)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (status, error, error_category, diagnostics, started_at,
+                          finished_at, next_eligible_at, job_id, filename)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ),
                 queued.columns(),
-            )
+            )?
             .bind(&job.job_id)
             .bind(filename)
             .execute(&mut *tx)

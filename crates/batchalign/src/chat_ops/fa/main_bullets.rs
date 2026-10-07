@@ -20,6 +20,9 @@
 //! input bullet --classify--> GivenMainBullet::{Extent, Empty, Backward}
 //!     Backward: bind refuses the file (BackwardGivenBullet)
 //!     Extent | Empty: KeptBullet, read-only for the run
+//! utterance not in the recording ([+ diary]), with or without a bullet:
+//!     Given::OffRecord, no bullet during the run (input admission removed
+//!     it), skipped by impose, restored by restore_and_verify, last
 //! input without a bullet: Given::Unbulleted, read through the document's ONE
 //! AbsencePolicy (a binding cannot mix the two):
 //!     keep  (AbsencePolicy::Derive): derives one from its words as by default
@@ -31,7 +34,8 @@
 //!     + KeptWordCuts   (utterances whose %wor must be regenerated)
 //!     + records
 //! ImposedBullets --required by--> bullet repair, monotonicity
-//! MainBulletAuthority --verify_held(chat)--> KeptBulletsHeld | KeptBulletError
+//! MainBulletAuthority --restore_and_verify(chat)--> KeptBulletsHeld | KeptBulletError
+//!     (restore off-record bullets, then verify_held)
 //! ```
 //!
 //! Repair and monotonicity cannot run without an [`ImposedBullets`], and their
@@ -53,6 +57,7 @@ use talkbank_model::UtteranceIdx;
 use talkbank_model::model::{Bullet, ChatFile};
 
 use super::orchestrate::{ClampedWordCounts, WordTier, clamp_words_within};
+use super::presence::RecordingPresence;
 use super::{
     FaProjectionPolicy, MainBulletPolicy, TimeSpan, utterances_indexed, utterances_indexed_mut,
 };
@@ -146,6 +151,14 @@ enum Given {
     Unbulleted,
     /// This bullet, which the run keeps.
     Kept(KeptBullet),
+    /// An utterance not in the recording (`[+ diary]`), with the bullet the
+    /// input gave it, if any. It takes no part in alignment: input
+    /// admission removed its timing from the working model, no phase sees a
+    /// bullet on it, and the given one is put back only after every phase
+    /// that orders bullets has run ([`MainBulletAuthority::restore_off_record`]),
+    /// so it is never a fixed point its neighbours are cut or ordered
+    /// against.
+    OffRecord(Option<KeptBullet>),
 }
 
 /// What the run does with an utterance the input left without a bullet. One
@@ -170,6 +183,9 @@ enum GivenSlot {
     KeptAbsent,
     /// The input gave this bullet and the run keeps it.
     Kept(KeptBullet),
+    /// Not in the recording: no bullet during the run, and the given one, if
+    /// any, restored after it.
+    OffRecord(Option<KeptBullet>),
 }
 
 /// The main bullets one input document carried, by utterance ordinal.
@@ -192,6 +208,7 @@ impl GivenMainBullets {
         )?;
         Ok(match (given, self.absence) {
             (Given::Kept(kept), _) => GivenSlot::Kept(kept),
+            (Given::OffRecord(kept), _) => GivenSlot::OffRecord(kept),
             (Given::Unbulleted, AbsencePolicy::Derive) => GivenSlot::Unbulleted,
             (Given::Unbulleted, AbsencePolicy::Keep) => GivenSlot::KeptAbsent,
         })
@@ -288,6 +305,20 @@ pub enum KeptBulletError {
         /// The live bullet, as `start_end`, or `no bullet`.
         live: String,
     },
+    /// An utterance not in the recording has a bullet that is not the one
+    /// the input gave it (or has one while the run is in progress).
+    #[error(
+        "--main-bullets keep: utterance {utterance_idx} is not in the recording but has \
+         {start_ms}_{end_ms}, which the input did not give it"
+    )]
+    OffRecordBullet {
+        /// The utterance.
+        utterance_idx: usize,
+        /// The live start.
+        start_ms: u64,
+        /// The live end.
+        end_ms: u64,
+    },
     /// An utterance the input left without a bullet, under `exact`, has one.
     #[error(
         "--main-bullets exact: utterance {utterance_idx} was given no bullet but now has \
@@ -304,6 +335,14 @@ pub enum KeptBulletError {
 }
 
 impl KeptBulletError {
+    fn off_record(utterance_idx: UtteranceIdx, live: &Bullet) -> Self {
+        Self::OffRecordBullet {
+            utterance_idx: utterance_idx.raw(),
+            start_ms: live.timing.start_ms,
+            end_ms: live.timing.end_ms,
+        }
+    }
+
     fn gained(utterance_idx: UtteranceIdx, live: &Bullet) -> Self {
         Self::GainedBullet {
             utterance_idx: utterance_idx.raw(),
@@ -340,29 +379,34 @@ impl MainBulletAuthority {
         };
         let by_utterance = utterances_indexed(input)
             .map(|(line_idx, utterance_idx, utterance)| {
-                match utterance
+                let kept = match utterance
                     .main
                     .content
                     .bullet
                     .as_ref()
                     .map(GivenMainBullet::classify)
                 {
-                    None => Ok(Given::Unbulleted),
+                    None => None,
                     Some(GivenMainBullet::Extent { start_ms, end_ms }) => {
-                        Ok(Given::Kept(KeptBullet(Kept::Extent { start_ms, end_ms })))
+                        Some(KeptBullet(Kept::Extent { start_ms, end_ms }))
                     }
                     Some(GivenMainBullet::Empty { at_ms }) => {
-                        Ok(Given::Kept(KeptBullet(Kept::Empty { at_ms })))
+                        Some(KeptBullet(Kept::Empty { at_ms }))
                     }
                     Some(GivenMainBullet::Backward { start_ms, end_ms }) => {
-                        Err(BackwardGivenBullet {
+                        return Err(BackwardGivenBullet {
                             utterance_ordinal: utterance_idx.raw(),
                             line_idx,
                             start_ms,
                             end_ms,
-                        })
+                        });
                     }
-                }
+                };
+                Ok(match (RecordingPresence::of(utterance), kept) {
+                    (RecordingPresence::NotInRecording(_), kept) => Given::OffRecord(kept),
+                    (RecordingPresence::InRecording, None) => Given::Unbulleted,
+                    (RecordingPresence::InRecording, Some(kept)) => Given::Kept(kept),
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::Keep(GivenMainBullets {
@@ -379,7 +423,9 @@ impl MainBulletAuthority {
     ) -> Result<GivenMutability, KeptBulletError> {
         match self.slot(utterance_idx)? {
             None | Some(GivenSlot::Unbulleted) => Ok(GivenMutability::Revisable),
-            Some(GivenSlot::Kept(_) | GivenSlot::KeptAbsent) => Ok(GivenMutability::ReadOnly),
+            Some(GivenSlot::Kept(_) | GivenSlot::KeptAbsent | GivenSlot::OffRecord(_)) => {
+                Ok(GivenMutability::ReadOnly)
+            }
         }
     }
 
@@ -392,7 +438,9 @@ impl MainBulletAuthority {
         }
     }
 
-    /// Put every kept bullet back exactly as given and clamp its words into it.
+    /// Put every kept bullet of an utterance in the recording back exactly as
+    /// given and clamp its words into it (an off-record bullet waits for
+    /// [`Self::restore_and_verify`]).
     ///
     /// The first step of `FaApplied::then_finalize`, on every route to
     /// finalization (a fresh injection, the all-`%wor` fast path, a partially
@@ -417,6 +465,10 @@ impl MainBulletAuthority {
             for (line_idx, utterance_idx, utterance) in utterances_indexed_mut(chat_file) {
                 let kept = match given.slot(utterance_idx)? {
                     GivenSlot::Unbulleted => continue,
+                    // Not in the recording: the working model holds no timing
+                    // for it, and its given bullet waits for
+                    // `restore_off_record`, after every ordering phase.
+                    GivenSlot::OffRecord(_) => continue,
                     GivenSlot::KeptAbsent => {
                         // No bullet, and no word timing a later reader could
                         // derive one from. An empty bound fits no word, so
@@ -463,6 +515,63 @@ impl MainBulletAuthority {
         })
     }
 
+    /// The last step of finalization: put back the bullet the input gave
+    /// each utterance not in the recording, then check every kept bullet
+    /// held ([`Self::verify_held`]). One consuming step, so the restoration
+    /// cannot be skipped before the check.
+    pub(super) fn restore_and_verify(
+        &self,
+        chat_file: &mut ChatFile,
+    ) -> Result<KeptBulletsHeld, KeptBulletError> {
+        self.restore_off_record(chat_file)?;
+        self.verify_held(chat_file)
+    }
+
+    /// Put back the bullet the input gave each utterance not in the
+    /// recording, after every phase that orders or cuts bullets has run.
+    ///
+    /// Under `keep` and `exact` such a bullet is kept exactly as given, like
+    /// any other, but it locates nothing in the recording, so no phase may
+    /// order a neighbour against it: input admission removed it from the
+    /// working model, [`Self::impose`] leaves it out, and it returns here,
+    /// last. Under the default policy nothing is kept and this does nothing.
+    fn restore_off_record(&self, chat_file: &mut ChatFile) -> Result<(), KeptBulletError> {
+        let Self::Keep(given) = self else {
+            return Ok(());
+        };
+        for (_, utterance_idx, utterance) in utterances_indexed_mut(chat_file) {
+            match given.slot(utterance_idx)? {
+                GivenSlot::OffRecord(Some(kept)) => {
+                    utterance.main.content.bullet = Some(kept.to_bullet());
+                }
+                GivenSlot::OffRecord(None)
+                | GivenSlot::Unbulleted
+                | GivenSlot::KeptAbsent
+                | GivenSlot::Kept(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The bullet an utterance not in the recording may carry in the output:
+    /// the one the input gave it, under a policy that keeps given bullets;
+    /// otherwise none.
+    pub(crate) fn off_record_bullet(
+        &self,
+        utterance_idx: UtteranceIdx,
+    ) -> Result<Option<Bullet>, KeptBulletError> {
+        Ok(match self.slot(utterance_idx)? {
+            Some(GivenSlot::OffRecord(Some(kept))) => Some(kept.to_bullet()),
+            Some(
+                GivenSlot::OffRecord(None)
+                | GivenSlot::Unbulleted
+                | GivenSlot::KeptAbsent
+                | GivenSlot::Kept(_),
+            )
+            | None => None,
+        })
+    }
+
     /// Check, after every phase has run, that each kept bullet is exactly the
     /// given one and that the output has exactly the input's utterances.
     pub(super) fn verify_held(
@@ -489,6 +598,18 @@ impl MainBulletAuthority {
                     match kept.is_live(live) {
                         true => kept_count += 1,
                         false => return Err(KeptBulletError::drifted(utterance_idx, kept, live)),
+                    }
+                }
+                GivenSlot::OffRecord(given) => {
+                    match (given, utterance.main.content.bullet.as_ref()) {
+                        (None, None) => {}
+                        (Some(kept), live) if kept.is_live(live) => kept_count += 1,
+                        (Some(kept), live) => {
+                            return Err(KeptBulletError::drifted(utterance_idx, kept, live));
+                        }
+                        (None, Some(live)) => {
+                            return Err(KeptBulletError::off_record(utterance_idx, live));
+                        }
                     }
                 }
             }
@@ -622,6 +743,8 @@ impl ImposedBullets<'_> {
         match self.authority.slot(utterance_idx)? {
             None | Some(GivenSlot::Unbulleted) => Ok(BulletMutability::Revisable),
             Some(GivenSlot::KeptAbsent) => Err(KeptBulletError::gained(utterance_idx, live)),
+            // No bullet until `restore_off_record`, after every phase that asks.
+            Some(GivenSlot::OffRecord(_)) => Err(KeptBulletError::off_record(utterance_idx, live)),
             Some(GivenSlot::Kept(kept)) => match kept.is_live(Some(live)) {
                 true => Ok(BulletMutability::ReadOnly(kept)),
                 false => Err(KeptBulletError::drifted(utterance_idx, kept, Some(live))),

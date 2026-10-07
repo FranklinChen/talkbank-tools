@@ -48,7 +48,7 @@ async fn golden_morphotag_eng_simple() {
         .await;
 
     assert_completed_without_errors("morphotag_eng_simple", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_eng_simple");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
@@ -79,7 +79,10 @@ async fn golden_morphotag_eng_multi_utt() {
         .await;
 
     assert_completed_without_errors("morphotag_eng_multi_utt", &info, &results);
-    assert_golden_snapshot!("morphotag_eng_multi_utt", &results[0].content);
+    assert_golden_snapshot!(
+        "morphotag_eng_multi_utt",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -120,8 +123,8 @@ async fn golden_morphotag_with_cache() {
     // The two runs may stamp different seconds; everything else, the stamp's
     // fields included, must be identical.
     assert_eq!(
-        pin_provenance_timestamps(&results1[0].content),
-        pin_provenance_timestamps(&results2[0].content)
+        pin_provenance_timestamps(&results1[0].content.as_text().expect("text command result")),
+        pin_provenance_timestamps(&results2[0].content.as_text().expect("text command result"))
     );
 }
 
@@ -154,11 +157,14 @@ async fn golden_morphotag_spa_simple() {
     }
 
     assert_completed_without_errors("morphotag_spa_simple", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_spa_simple");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
-    assert_golden_snapshot!("morphotag_spa_simple", &results[0].content);
+    assert_golden_snapshot!(
+        "morphotag_spa_simple",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -185,11 +191,14 @@ async fn golden_morphotag_retokenize_eng() {
         .await;
 
     assert_completed_without_errors("morphotag_retokenize_eng", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_retokenize_eng");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
-    assert_golden_snapshot!("morphotag_retokenize_eng", &results[0].content);
+    assert_golden_snapshot!(
+        "morphotag_retokenize_eng",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -222,8 +231,11 @@ async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
     );
     assert_eq!(results.len(), 1);
 
-    let mmhmm_mor = find_mor_line_for(&results[0].content, "mm-hmm that's right")
-        .expect("expected %mor line for mm-hmm that's right");
+    let mmhmm_mor = find_mor_line_for(
+        &results[0].content.as_text().expect("text command result"),
+        "mm-hmm that's right",
+    )
+    .expect("expected %mor line for mm-hmm that's right");
     assert!(
         mmhmm_mor.contains("pron|that-Dem~aux|be-Fin-Ind-Pres-S3"),
         "expected explicit subject+copula analysis for \"that's right\", got: {mmhmm_mor}"
@@ -273,7 +285,10 @@ async fn golden_morphotag_cache_is_faster() {
     let elapsed2 = start2.elapsed();
     assert_completed_without_errors("morphotag_cache_is_faster_warm", &info2, &results2);
 
-    assert_eq!(results1[0].content, results2[0].content);
+    assert_eq!(
+        results1[0].content.as_text().expect("text command result"),
+        results2[0].content.as_text().expect("text command result")
+    );
     eprintln!(
         "Cache timing: cold={:?}, warm={:?} (speedup: {:.1}x)",
         elapsed1,
@@ -343,7 +358,7 @@ async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
         .await;
 
     assert_completed_without_errors("morphotag_ita_single_word", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_ita_single_word");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
@@ -424,7 +439,7 @@ async fn golden_morphotag_ita_multi_word_keeps_genuine_mwts() {
         .await;
 
     assert_completed_without_errors("morphotag_ita_multi_word", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     // Parsed for its side effect: parse_output asserts the output is valid CHAT.
     let _file = parse_output(output, "morphotag_ita_multi_word");
 

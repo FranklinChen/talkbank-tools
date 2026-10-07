@@ -1,7 +1,7 @@
 # %wor Tier Specification
 
 **Status:** Current
-**Last updated:** 2026-08-31 00:03 EDT
+**Last updated:** 2026-10-05 10:54 EDT
 
 How main tier words map to the %wor (word-level timing) dependent tier.
 
@@ -333,6 +333,10 @@ speaker evidence received from ASR and diarization.
    policies without another model run. Pre-grouping `%wor` refresh always uses
    compatibility preservation; rebuilding there would change audio windows
    and invalidate the controlled comparison.
+   For onset-only engines, final-word extension is likewise restricted to a
+   retained transcript boundary, never a provisional runtime UTR hint. Without
+   such a boundary, the producer's fallback and review provenance are retained.
+   See [Word end times](forced-alignment.md#word-end-times-for-an-onset-only-engine).
 5. `MainTier::generate_wor_tier()` walks the AST one final time, collecting
    each spoken word slot's `cleaned_text` and `timing_alignment` into a flat
    `WorTier`

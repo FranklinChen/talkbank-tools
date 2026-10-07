@@ -8,9 +8,6 @@
 use crate::chat_ops::fa::WordGapHealing;
 use crate::chat_ops::morphosyntax_ops::RetokenizationInfo;
 use batchalign_transform::asr_postprocess::AsrPipelineSnapshot;
-use batchalign_transform::media_timing::{
-    MediaTimingError, MediaTimingState, reconcile_media_timing,
-};
 use talkbank_model::ChatFile;
 
 use super::traces::{
@@ -24,9 +21,21 @@ use super::traces::{
 // ---------------------------------------------------------------------------
 
 /// Structured result from the internal `crate::fa::run_fa_from_ast` pipeline.
-pub(crate) struct FaResult {
-    /// CHAT document after timing/media reconciliation.
-    pub(crate) output: FaOutput,
+///
+/// Two phases, one type: `FaResult<ChatFile>` is the DRAFT an FA path builds,
+/// whose document has not yet taken the media/timing transition, and
+/// `FaResult<FaOutput>` (the default) is the result after it. Every FA path
+/// builds a draft and hands it to `FaAdmission::finish`, which owns the
+/// source's admitted `@Media` declaration and so is the one place the
+/// transition runs, against a declaration known to admit it. The paths used
+/// to reconcile the document themselves, each with a `?` that turned an input
+/// condition (no `@Media`) into an internal error after all of the work.
+/// The fields stay crate-visible for the pass-through path and the trace
+/// conversions, but `FaOutput::Processed` holds a
+/// [`crate::fa::ReconciledOutput`], which only that transition constructs.
+pub(crate) struct FaResult<O = FaOutput> {
+    /// The CHAT document: a draft, or reconciled output.
+    pub(crate) output: O,
     /// Per-group evidence whose fields cannot become cardinality-misaligned.
     pub(crate) group_evidence: Vec<FaGroupEvidence>,
     /// Selected forced-alignment engine.
@@ -49,21 +58,17 @@ pub(crate) struct FaResult {
 pub(crate) enum FaOutput {
     /// A declared dummy/NoAlign path that must preserve the input document.
     PassThrough(ChatFile),
-    /// A path that performed timing work and reconciled the document state.
-    Processed(MediaTimingState),
+    /// A path that performed timing work and reconciled the document state
+    /// against its admitted `@Media` declaration.
+    Processed(crate::fa::ReconciledOutput),
 }
 
 impl FaOutput {
-    /// Reconcile a document produced by timing work before it can be output.
-    pub(crate) fn processed(chat_file: ChatFile) -> Result<Self, MediaTimingError> {
-        reconcile_media_timing(chat_file).map(Self::Processed)
-    }
-
     /// Borrow the AST without erasing whether it was processed or passed through.
     pub(crate) fn as_chat_file(&self) -> &ChatFile {
         match self {
             Self::PassThrough(file) => file,
-            Self::Processed(state) => state.as_chat_file(),
+            Self::Processed(output) => output.as_chat_file(),
         }
     }
 }
@@ -79,17 +84,19 @@ pub(crate) struct FaGroupEvidence {
     pub(crate) pre_injection_timings: Vec<Option<TimingTrace>>,
 }
 
-impl FaResult {
-    /// Construct a processed result for a legitimate no-group path such as
-    /// complete `%wor` reuse or a file with no alignable words.
+impl FaResult<ChatFile> {
+    /// Construct a draft for a legitimate no-group path such as complete
+    /// `%wor` reuse or a file with no alignable words.
+    ///
+    /// Infallible: the media/timing transition belongs to `FaAdmission::finish`.
     pub(crate) fn without_groups(
         chat_file: ChatFile,
         gap_healing: WordGapHealing,
         engine: &str,
         cache_namespace: &crate::engine_reports::FaCacheNamespace,
-    ) -> Result<Self, MediaTimingError> {
-        Ok(Self {
-            output: FaOutput::processed(chat_file)?,
+    ) -> Self {
+        Self {
+            output: chat_file,
             group_evidence: Vec::new(),
             engine: engine.to_owned(),
             cache_namespace: cache_namespace.clone(),
@@ -97,6 +104,27 @@ impl FaResult {
             timing_decisions: Vec::new(),
             gap_healing,
             fallback_events: Vec::new(),
+        }
+    }
+}
+
+impl<O> FaResult<O> {
+    /// Replace the document, keeping every piece of evidence with it. The
+    /// phase transition `FaAdmission::finish` is written with this, so no
+    /// evidence field can be dropped on the way from draft to output.
+    pub(crate) fn try_map_output<P, E>(
+        self,
+        transition: impl FnOnce(O) -> Result<P, E>,
+    ) -> Result<FaResult<P>, E> {
+        Ok(FaResult {
+            output: transition(self.output)?,
+            group_evidence: self.group_evidence,
+            engine: self.engine,
+            cache_namespace: self.cache_namespace,
+            decisions: self.decisions,
+            timing_decisions: self.timing_decisions,
+            gap_healing: self.gap_healing,
+            fallback_events: self.fallback_events,
         })
     }
 
@@ -281,37 +309,5 @@ mod fa_result_tests {
         let decoded: AsrPipelineTrace = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.raw_tokens[0].ts, None);
         assert_eq!(decoded.raw_tokens[0].end_ts, zero);
-    }
-
-    #[test]
-    fn processed_output_consumes_unlinked_before_the_text_boundary() {
-        let input = "@UTF8\n@Begin\n@Languages:\teng\n\
-@Participants:\tCHI Target_Child\n\
-@ID:\teng|test|CHI|||||Target_Child|||\n\
-@Media:\tsample, audio, unlinked\n\
-*CHI:\thello . \u{15}0_500\u{15}\n\
-@End\n";
-        let parser = talkbank_parser::TreeSitterParser::new().expect("tree-sitter parser");
-        let chat_file = parser.parse_chat_file(input).expect_built();
-
-        let result = FaResult::without_groups(
-            chat_file,
-            WordGapHealing::PreserveMeasured,
-            "test_engine",
-            &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
-        )
-        .expect("timed output has one usable @Media declaration");
-        let output = batchalign_transform::serialize::to_chat_string(result.output.as_chat_file());
-
-        assert!(output.contains("@Media:\tsample, audio\n"));
-        assert!(!output.contains("unlinked"));
-        let validation = batchalign_transform::parse_and_validate(
-            &output,
-            talkbank_model::ParseValidateOptions::default().with_validation(),
-        );
-        assert!(
-            validation.is_ok(),
-            "serialized forced-alignment output must be valid CHAT: {validation:?}"
-        );
     }
 }

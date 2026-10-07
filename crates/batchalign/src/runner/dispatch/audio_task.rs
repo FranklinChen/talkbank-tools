@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::error::ServerError;
 use crate::runner::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    is_retryable_worker_failure, spawn_progress_forwarder, user_facing_error,
+    is_retryable_worker_failure, spawn_observed_progress_forwarder, user_facing_error,
 };
 use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
 use crate::store::{PendingJobFile, RunnerJobSnapshot};
@@ -111,10 +111,20 @@ where
             lifecycle.stage(running_stage).await;
         }
 
-        let progress_tx =
-            spawn_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
+        // The observer records each checkout of this attempt that waits on a
+        // saturated pool (without a deadline); the file shows "waiting for a
+        // worker" while one does.
+        let (progress_tx, wait_observer, forwarder) =
+            spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
 
-        match task.run_attempt(progress_tx).await {
+        let attempt = crate::worker::pool::checkout_wait::observing_checkout_waits(
+            wait_observer,
+            task.run_attempt(progress_tx),
+        )
+        .await;
+        // Every update the attempt sent is published before its next stage.
+        forwarder.finished().await;
+        match attempt {
             Ok(output) => {
                 let file_output = match task.finalize_success(output).await {
                     Ok(file_output) => file_output,
@@ -136,16 +146,17 @@ where
                     }
                 };
                 lifecycle.stage(FileStage::Writing).await;
-                let primary_output = match write_primary_output_artifact(
+                let written = match write_primary_output_artifact(
                     &job.filesystem,
                     job.dispatch.command,
+                    &job.dispatch.options,
                     file_index,
                     filename,
                     file_output,
                 )
                 .await
                 {
-                    Ok(primary_output) => primary_output,
+                    Ok(written) => written,
                     Err(error) => {
                         warn!(
                             job_id = %job_id,
@@ -170,12 +181,10 @@ where
                     }
                 };
 
-                lifecycle
-                    .complete_with_result(
-                        primary_output.display_path.clone(),
-                        primary_output.content_type,
-                    )
-                    .await;
+                // Done, or Diagnosed when a generating producer's output was
+                // written with its findings: terminal either way, never an
+                // error and never retried.
+                written.record(lifecycle).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(error) => {
@@ -237,6 +246,7 @@ mod tests {
     use crate::options::{
         AsrEngineName, CommandOptions, CommonOptions, TranscribeOptions, WorTierPolicy,
     };
+    use crate::runner::dispatch::audio_output::ChatOutput;
     use crate::scheduling::{AttemptOutcome, RetryDisposition};
     use crate::store::{
         PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
@@ -248,6 +258,7 @@ mod tests {
     struct RecordingState {
         retries: usize,
         done: usize,
+        diagnosed: Vec<crate::api::FileOutputDiagnostics>,
         errors: usize,
         started_attempts: usize,
         finished_attempts: Vec<AttemptOutcome>,
@@ -287,9 +298,16 @@ mod tests {
             _job_id: &JobId,
             _filename: &str,
             _finished_at: crate::store::EventTime,
-            _result: Option<crate::store::CompletedFileOutput>,
+            completion: crate::store::FileCompletion,
         ) {
-            self.state.lock().unwrap().done += 1;
+            let mut state = self.state.lock().unwrap();
+            match completion {
+                crate::store::FileCompletion::Diagnosed { diagnostics, .. } => {
+                    state.diagnosed.push(diagnostics);
+                }
+                crate::store::FileCompletion::Clean(_)
+                | crate::store::FileCompletion::WithoutResult => state.done += 1,
+            }
         }
         async fn mark_file_error(
             &self,
@@ -342,6 +360,13 @@ mod tests {
             _total: Option<i64>,
         ) {
         }
+        async fn set_file_worker_wait(
+            &self,
+            _job_id: &JobId,
+            _filename: &str,
+            _change: crate::store::WorkerWaitChange,
+        ) {
+        }
         async fn unfinished_files(&self, _job_id: &JobId) -> Vec<DisplayPath> {
             Vec::new()
         }
@@ -373,7 +398,7 @@ mod tests {
 
     #[async_trait]
     impl AudioFileTask for FakeAudioTask {
-        type AttemptOutput = String;
+        type AttemptOutput = crate::pipeline::post_validate::PostValidated;
 
         async fn run_attempt(
             &mut self,
@@ -385,7 +410,10 @@ mod tests {
                     timeout_s: crate::api::PositiveSeconds::literal::<1>(),
                 }))
             } else {
-                Ok("@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n".to_string())
+                Ok(crate::pipeline::post_validate::PostValidated::for_test(
+                    "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n",
+                    ReleasedCommand::Transcribe,
+                ))
             }
         }
 
@@ -393,14 +421,11 @@ mod tests {
             &mut self,
             output: Self::AttemptOutput,
         ) -> Result<FileOutput, ServerError> {
-            Ok(FileOutput::Chat {
-                document: crate::runner::dispatch::audio_output::gate_built_chat_output(
-                    &output,
-                    ReleasedCommand::Transcribe,
-                )
-                .map_err(|failure| ServerError::Validation(failure.to_string()))?,
+            Ok(FileOutput::Chat(ChatOutput {
+                document: output.into(),
+                shortfalls: Vec::new(),
                 merge_abbreviations: MergeAbbreviations::Leave,
-            })
+            }))
         }
 
         async fn on_retryable_worker_failure(
@@ -507,5 +532,109 @@ mod tests {
                 .expect("written output")
                 .contains("*PAR:\thello .")
         );
+    }
+
+    /// A task whose producer generated output that fails admission.
+    struct DiagnosedAudioTask {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AudioFileTask for DiagnosedAudioTask {
+        type AttemptOutput = crate::pipeline::post_validate::ProducedOutput;
+
+        async fn run_attempt(
+            &mut self,
+            _progress_tx: crate::runner::util::ProgressSender,
+        ) -> Result<Self::AttemptOutput, ServerError> {
+            use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};
+
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n";
+            let mut file =
+                batchalign_transform::parse::parse_lenient(&crate::chat_parser(), chat).0;
+            for line in &mut file.lines {
+                if let Line::Utterance(utt) = line {
+                    utt.main.content.content = TierContentItems::new(vec![
+                        UtteranceContent::Word(Box::new(Word::simple("hello"))),
+                        UtteranceContent::Word(Box::new(Word::simple("b2"))),
+                    ]);
+                }
+            }
+            Ok(crate::pipeline::post_validate::PostValidated::produced(
+                file,
+                ReleasedCommand::Transcribe,
+            ))
+        }
+
+        async fn finalize_success(
+            &mut self,
+            output: Self::AttemptOutput,
+        ) -> Result<FileOutput, ServerError> {
+            Ok(FileOutput::Chat(ChatOutput {
+                document: output,
+                shortfalls: Vec::new(),
+                merge_abbreviations: MergeAbbreviations::Leave,
+            }))
+        }
+    }
+
+    /// RED FIRST (2026-10-06): the runner shell writes a diagnosed transcript
+    /// and records the file as diagnosed with its findings: not done, not an
+    /// error, and not retried.
+    #[tokio::test]
+    async fn audio_shell_writes_a_diagnosed_transcript_and_records_it_diagnosed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let job = fake_job(&tmp);
+        let file = job.pending_files[0].clone();
+        let (sink_impl, state) = RecordingSink::new();
+        let lifecycle = FileRunTracker::new(
+            sink_impl.as_ref(),
+            &job.identity.job_id,
+            file.filename.as_ref(),
+        );
+        lifecycle
+            .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
+            .await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut task = DiagnosedAudioTask {
+            attempts: attempts.clone(),
+        };
+
+        let outcome = run_audio_file_task(
+            &job,
+            sink_impl.clone(),
+            &file,
+            &lifecycle,
+            AudioTaskReporting {
+                work_unit_kind: WorkUnitKind::FileInfer,
+                running_stage: FileStage::Transcribing,
+                command_label: "Transcription",
+            },
+            &mut task,
+        )
+        .await;
+
+        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "never retried");
+        let state = state.lock().unwrap();
+        assert_eq!((state.done, state.errors, state.retries), (0, 0, 0));
+        assert_eq!(state.diagnosed.len(), 1);
+        assert!(
+            state.diagnosed[0]
+                .first_findings()
+                .iter()
+                .any(|finding| finding.code.as_deref() == Some("E220")),
+            "{:?}",
+            state.diagnosed[0]
+        );
+        assert_eq!(
+            state.finished_attempts,
+            vec![AttemptOutcome::Succeeded],
+            "the attempt produced and wrote its output"
+        );
+        let written = std::fs::read_to_string(tmp.path().join("requested/test.cha"))
+            .expect("the diagnosed transcript is on disk");
+        assert!(written.contains("*PAR:\thello b2 ."), "{written}");
     }
 }

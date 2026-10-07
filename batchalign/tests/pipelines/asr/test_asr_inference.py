@@ -412,7 +412,7 @@ class TestWhisperLoader:
                     "stride_length_s": 3,
                     "device": torch.device("cuda"),
                     "torch_dtype": torch.float16,
-                    "return_timestamps": True,
+                    "return_timestamps": "word",
                 },
             )
         ]

@@ -37,13 +37,101 @@ pub(crate) struct SidecarPolicy {
 
 /// Output policy for a released command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OutputPolicy {
-    /// Primary output naming policy.
-    pub primary: FileNamingPolicy,
-    /// Primary output content type.
-    pub primary_content_type: ContentType,
-    /// Additional sidecars generated per work unit.
-    pub sidecars: &'static [SidecarPolicy],
+pub(crate) enum OutputPolicy {
+    /// Source-independent output contract.
+    Fixed {
+        /// Primary output naming policy.
+        primary: FileNamingPolicy,
+        /// Primary output content type.
+        primary_content_type: ContentType,
+        /// Additional sidecars generated per work unit.
+        sidecars: &'static [SidecarPolicy],
+    },
+    /// Admitted CHAT sources retain their name; media sources produce turns JSON.
+    /// Submission checks the source against the explicit diarization mode first.
+    Diarize,
+}
+
+/// Catalog declaration: fixed/source-selected outputs or required encoding.
+/// A declaration is not an output plan until command options are admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputDeclaration {
+    /// Existing source-aware text/analysis policy.
+    Source(OutputPolicy),
+    /// Native export must select its format from submitted typed options.
+    AudioExport,
+}
+
+impl OutputDeclaration {
+    pub(super) fn select(
+        self,
+        options: &crate::options::CommandOptions,
+    ) -> Result<OutputPolicy, super::planner::PlanningError> {
+        match self {
+            Self::Source(policy) => Ok(policy),
+            Self::AudioExport => {
+                let crate::options::CommandOptions::Convert(options) = options else {
+                    return Err(super::planner::PlanningError::OutputOptionsMismatch {
+                        expected: crate::ReleasedCommand::Convert,
+                        observed: options.command(),
+                    });
+                };
+                let content_type = match options.format {
+                    crate::media::export::AudioExportFormat::Wav => ContentType::Wav,
+                    crate::media::export::AudioExportFormat::Mp3 => ContentType::Mp3,
+                };
+                Ok(OutputPolicy::Fixed {
+                    primary: FileNamingPolicy::RewriteStem(StemRewrite {
+                        strip_suffix: None,
+                        append_suffix: ".converted",
+                        extension: options.format.extension(),
+                    }),
+                    primary_content_type: content_type,
+                    sidecars: &[],
+                })
+            }
+        }
+    }
+}
+
+impl OutputPolicy {
+    pub(crate) fn primary_for_source(self, source: &DisplayPath) -> SidecarPolicy {
+        match self {
+            Self::Fixed {
+                primary,
+                primary_content_type,
+                ..
+            } => SidecarPolicy {
+                naming: primary,
+                content_type: primary_content_type,
+            },
+            Self::Diarize => {
+                let chat = crate::types::request::is_chat_source_name(source.as_ref());
+                if chat {
+                    SidecarPolicy {
+                        naming: FileNamingPolicy::PreserveInput,
+                        content_type: ContentType::Chat,
+                    }
+                } else {
+                    SidecarPolicy {
+                        naming: FileNamingPolicy::RewriteStem(StemRewrite {
+                            strip_suffix: None,
+                            append_suffix: ".turns",
+                            extension: "json",
+                        }),
+                        content_type: ContentType::Json,
+                    }
+                }
+            }
+        }
+    }
+
+    fn sidecars(self) -> &'static [SidecarPolicy] {
+        match self {
+            Self::Fixed { sidecars, .. } => sidecars,
+            Self::Diarize => &[],
+        }
+    }
 }
 
 /// Role of one materialized output artifact.
@@ -71,15 +159,16 @@ pub(crate) fn plan_materialized_files(
     source_path: &DisplayPath,
     policy: OutputPolicy,
 ) -> Vec<PlannedMaterializedFile> {
-    let mut planned = Vec::with_capacity(policy.sidecars.len() + 1);
+    let primary = policy.primary_for_source(source_path);
+    let mut planned = Vec::with_capacity(policy.sidecars().len() + 1);
     planned.push(PlannedMaterializedFile {
-        display_path: apply_file_naming_policy(source_path, policy.primary),
-        content_type: policy.primary_content_type,
+        display_path: apply_file_naming_policy(source_path, primary.naming),
+        content_type: primary.content_type,
         role: MaterializedArtifactRole::Primary,
     });
     planned.extend(
         policy
-            .sidecars
+            .sidecars()
             .iter()
             .map(|sidecar| PlannedMaterializedFile {
                 display_path: apply_file_naming_policy(source_path, sidecar.naming),
@@ -129,6 +218,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn diarize_names_and_content_types_follow_the_admitted_source_kind_together() {
+        for (source, name, content_type) in [
+            (
+                "nested/session.wav",
+                "nested/session.turns.json",
+                ContentType::Json,
+            ),
+            (
+                "nested/session.cha",
+                "nested/session.cha",
+                ContentType::Chat,
+            ),
+            (
+                "nested/session.CHA",
+                "nested/session.CHA",
+                ContentType::Chat,
+            ),
+        ] {
+            let outputs = plan_materialized_files(&source.into(), OutputPolicy::Diarize);
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].display_path.as_ref(), name);
+            assert_eq!(outputs[0].content_type, content_type);
+        }
+    }
+
+    #[test]
     fn compare_policy_preserves_chat_name_and_adds_csv_sidecar() {
         const SIDECARS: &[SidecarPolicy] = &[SidecarPolicy {
             naming: FileNamingPolicy::ReplaceExtension("compare.csv"),
@@ -136,7 +251,7 @@ mod tests {
         }];
         let outputs = plan_materialized_files(
             &DisplayPath::from("nested/sample.cha"),
-            OutputPolicy {
+            OutputPolicy::Fixed {
                 primary: FileNamingPolicy::PreserveInput,
                 primary_content_type: ContentType::Chat,
                 sidecars: SIDECARS,

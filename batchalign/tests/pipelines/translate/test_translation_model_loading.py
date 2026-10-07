@@ -210,6 +210,43 @@ class TestLoadAliyunTranslate:
     upstream batch-infer layer picks up the new engine.
     """
 
+    @pytest.mark.parametrize(
+        "source,target,source_code,target_code",
+        [
+            ("spa", "fra", "es", "fr"),
+            ("fra", "vie", "fr", "vi"),
+        ],
+    )
+    def test_documented_source_and_non_english_target_codes(
+        self, monkeypatch, source, target, source_code, target_code
+    ):
+        from batchalign.worker._model_loading import translation as loader
+        from batchalign.worker._types import _state
+
+        monkeypatch.setattr(_state, "translation", None)
+        captured = _patch_aliyun_sdk(
+            monkeypatch,
+            do_action=lambda _req: b'{"Code":"200","Data":{"Translated":"result"}}',
+        )
+        loader._load_aliyun_translate()
+        assert _state.translation.translate("text", source, target) == "result"
+        assert captured["SourceLanguage"] == source_code
+        assert captured["TargetLanguage"] == target_code
+
+    def test_unmapped_target_makes_no_provider_call(self, monkeypatch):
+        from batchalign.worker._model_loading import translation as loader
+        from batchalign.worker._types import _state
+
+        monkeypatch.setattr(_state, "translation", None)
+        captured = _patch_aliyun_sdk(
+            monkeypatch,
+            do_action=lambda _req: pytest.fail("unsupported route was sent"),
+        )
+        loader._load_aliyun_translate()
+        with pytest.raises(ValueError, match="target language"):
+            _state.translation.translate("text", "eng", "xyz")
+        assert captured == {}
+
     def test_loader_wires_state_and_request_shape(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

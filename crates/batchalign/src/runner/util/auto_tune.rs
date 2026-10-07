@@ -51,7 +51,7 @@ pub(in crate::runner) fn compute_job_workers(
     // `compute_workers_force_cpu_treats_gpu_commands_as_cpu_bound` in
     // `runner::util` pins the planner-level invariant.
     let is_gpu_heavy = batchalign_types::command_spec::command_spec_for(command).profile
-        == batchalign_types::worker_profile::WorkerProfile::Gpu
+        == Some(batchalign_types::worker_profile::WorkerProfile::Gpu)
         && !effective.force_cpu;
 
     let by_cpu = std::thread::available_parallelism()

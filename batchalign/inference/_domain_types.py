@@ -99,6 +99,18 @@ def parse_choice(kind: type[_Choice], choice: str, label: str) -> _Choice:
         ) from exc
 
 
+class WhisperTimestampMode(Enum):
+    """Producer timing granularity, not a promise that every word is timed.
+
+    Stock Whisper supplies acoustic word timestamps for UTR anchors. Fine-tunes
+    retain segment timestamps until their alignment-head capability is known.
+    Missing model spans remain missing in either mode.
+    """
+
+    WORD = "word"
+    SEGMENT = True
+
+
 class WhisperCpuPrecision(Enum):
     """The dtype stock Whisper loads with on a CPU device.
 

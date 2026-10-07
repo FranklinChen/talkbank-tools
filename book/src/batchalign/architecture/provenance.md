@@ -1,7 +1,7 @@
 # Processing Provenance System
 
 **Status:** Current
-**Last updated:** 2026-09-16 10:19 EDT
+**Last updated:** 2026-10-06 22:37 EDT
 
 ## Overview
 
@@ -58,10 +58,25 @@ The module provides:
 [fc-ba3 <command> | key=val ; key=val | ISO-8601-timestamp]
 ```
 
+Fields are written in `StampField` order, which is alphabetical by key, so
+`build=` sits among them (after `asr` and `asr_model` when those are present),
+not necessarily first.
+
 The `[fc-ba3 ` opening is the machine-parseable discriminator. The
 bracketed format is visually distinct from user-authored comments and
-greppable with `grep -E '\[(fc-)?ba3 '`. A stamp with no fields is
-`[fc-ba3 <command> | <timestamp>]`.
+greppable with `grep -E '\[(fc-)?ba3 '`.
+
+Every stamp this build writes carries `build=`, the producing build identity
+(`crate::build_hash()`, the `git describe` string `build.rs` embeds), so a
+defective run can be identified by build from its output. It is an ordinary
+field of the grammar (`StampField::Build`), added by the one constructor
+`ProvenanceComment::new`, and its value is admitted at compile time
+(`StampSafeText::from_static`), so an identity that could change the stamp's
+structure fails the build rather than damaging a stamp. Stamps written before
+the field existed lack it and read back unchanged; `extract_provenance`
+reports it among the entry's `fields` when present. A stamp with no other
+field is `[fc-ba3 <command> | build=<build identity> | <timestamp>]`; an older
+one may be `[ba3 <command> | <timestamp>]`.
 
 ### Grammar owner: `StampCodec`
 
@@ -216,7 +231,10 @@ finish:
 
 - Set-aside stamps are compared per command, by their fields. Two stamps
   count as the same only when they differ in the stamp **name** (`fc-ba3` or
-  `ba3`) and the **timestamp**. Any other field difference, an engine, a
+  `ba3`), the **timestamp** and the **`build=` field** (another build's, or
+  none on a stamp older than the field). A rebuild that reproduces the same
+  output therefore does not rewrite the file; its stamp keeps naming the build
+  that first wrote those bytes. Any other field difference, an engine, a
   language or a flag, is meaningful, and the file is written.
 - A set-aside stamp present on one side only is meaningful.
 - Our warnings are compared by the ASR engine they name. Their shape (current
@@ -288,7 +306,7 @@ Each pipeline injects provenance right before serialization:
 |---------|------|---------------|
 | morphotag | `pipeline/morphosyntax/states.rs` | `Analysis::<Applied>::postcheck()`: before the post-validation gate |
 | morphotag (incremental, `--before`) | `morphosyntax/mod.rs` | `process_morphosyntax_incremental()`: before its gate, only on the path where utterances were reanalyzed |
-| utseg | `pipeline/text_infer.rs` | `run_text_batch_pipeline()` per file, and `run_text_pipeline()` for the per-file pipeline transcribe uses: after `apply()`, before the gate |
+| utseg | `pipeline/text_infer.rs` | `run_text_batch_pipeline()` per file, and `run_admitted_text_pipeline()` for the checked per-file pipeline transcribe uses: after `apply()`, before the gate |
 | translate | `pipeline/text_infer.rs` | Same as utseg (shared generic pipeline) |
 | coref | `coref.rs` | `run_coref_batch_impl()`: per file, after the annotations are applied and before that file's gate |
 | align | `runner/dispatch/fa_pipeline.rs` | `AlignAudioTask::finalize_success()`: `PostValidated::with_provenance_injected()` on the gated proof |
@@ -492,6 +510,7 @@ test-only comment implementation: tests exercise the production builder and
 AST injection path. The batch text pipeline's own tests pin that a file
 processed in a cross-file batch carries the stamp of what it applied
 (`pipeline/text_infer.rs`), which no batch file carried before 2026-09-15.
-In the ML golden suite, snapshots keep each stamp with its
-timestamp pinned, and BA2 parity comparisons drop stamp lines; both read stamps
+`the_build_field_reads_back_and_older_stamps_still_read` and
+`provenance_only_diff_sets_the_build_aside` pin the build field. In the ML
+golden suite, snapshots keep each stamp with its timestamp and build pinned, and BA2 parity comparisons drop stamp lines; both read stamps
 through `extract_provenance` (see [Testing](../developer/testing.md)).

@@ -13,8 +13,10 @@ use crate::text_batch::{
     TextBatchFileResults, TextWorkflowFileError,
 };
 use crate::worker::pool::WorkerPool;
-use batchalign_transform::parse::{is_dummy, parse_lenient};
-use batchalign_transform::validate::{ValidityLevel, validate_to_level};
+use batchalign_transform::parse::is_dummy;
+use batchalign_transform::{AdmittedSourceChat, parse_source_with_parser};
+use talkbank_model::model::TranscriptName;
+use talkbank_model::validation::ValidChatFile;
 use tracing::{info, warn};
 
 use crate::error::ServerError;
@@ -23,6 +25,18 @@ use crate::pipeline::post_validate::PostValidated;
 
 type IntegrateFn<Item, State, Response> =
     fn(&mut HashMap<usize, State>, &[(usize, Item)], &[Response]);
+
+/// These workflows retain input content: no generated-tier recovery exemption
+/// applies. Only Chatter's complete source admission can produce their input.
+pub(crate) fn admit_retained_text<'source>(
+    parser: &batchalign_transform::parse::TreeSitterParser,
+    source: &'source str,
+    name: TranscriptName<'_>,
+) -> Result<AdmittedSourceChat<'source>, ServerError> {
+    parse_source_with_parser(parser, source)
+        .admit(name, &talkbank_model::NullErrorSink)
+        .map_err(ServerError::ChatAdmission)
+}
 
 /// Where a text command's provenance comment comes from: the responses it
 /// applied, which name the engines that produced them.
@@ -43,30 +57,29 @@ pub(crate) type TextProvenance<Response> =
 /// `collect` extracts payloads from the parsed CHAT; `integrate` merges
 /// responses into the state map; `apply` writes the state back into
 /// the CHAT AST. The inference function itself is a separate argument
-/// to [`run_text_pipeline`] so callers can pass any `async fn` directly.
+/// to [`run_admitted_text_pipeline`] so callers can pass any `async fn` directly.
 pub(crate) struct TextPipelineHooks<Item, State, Response> {
     /// The command this pipeline is running, for validation, error strings
     /// and the proof its gate produces.
     pub command: ReleasedCommand,
-    /// Pre-validation gate required by the command.
-    pub validity: ValidityLevel,
     /// Extract worker payloads from the parsed chat file.
     pub collect: fn(&ChatFile) -> Vec<(usize, Item)>,
     /// Merge inferred responses into the final application map.
     pub integrate: IntegrateFn<Item, State, Response>,
     /// Apply all results to the parsed chat file.
-    pub apply: fn(&mut ChatFile, &HashMap<usize, State>),
+    pub apply: fn(&mut ChatFile, &HashMap<usize, State>) -> Result<(), ServerError>,
     /// Source of the provenance comment stamped on the output.
     pub provenance: TextProvenance<Response>,
 }
 
-/// Run the text-only pipeline for a single CHAT file.
+/// Test-only entry point exercising source refusal before the typed pipeline.
 ///
 /// `infer` runs worker inference for all collected payloads. It is an
 /// `async` callable (stable `AsyncFnOnce` trait, Rust 2024), so native
 /// `async fn` inference routines can be passed without a boxed-future
 /// adapter at the call site.
-pub(crate) async fn run_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
+#[cfg(test)]
+async fn run_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
     chat_text: &str,
     lang: &LanguageCode3,
     services: PipelineServices<'_>,
@@ -84,39 +97,142 @@ where
     Observe: FnOnce(&[(usize, Item)], &[Response]) -> Result<(), ServerError>,
 {
     let parser = crate::chat_parser();
-    let (mut chat_file, parse_errors) = parse_lenient(&parser, chat_text);
-    if !parse_errors.is_empty() {
-        warn!(
-            command = %hooks.command,
-            num_errors = parse_errors.len(),
-            "Parse errors in input (continuing with recovery)"
-        );
-    }
+    let admitted = admit_retained_text(&parser, chat_text, TranscriptName::Anonymous)?;
+    run_admitted_text_pipeline(
+        PostValidated::pass_through(admitted, hooks.command),
+        lang,
+        services,
+        hooks,
+        infer,
+        observe,
+    )
+    .await
+}
 
-    if is_dummy(&chat_file) {
+/// Continue from an already admitted typed document without a CHAT reparse.
+///
+/// Takes and returns a [`PostValidated`]: an admitted document is the
+/// precondition (a diagnosed one, which only a generating producer makes, is
+/// a different type and has no route in), and the strict gate this ends with
+/// is the postcondition, so the result can continue into another stage that
+/// requires admission.
+pub(crate) async fn run_admitted_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
+    admitted: PostValidated,
+    lang: &LanguageCode3,
+    services: PipelineServices<'_>,
+    hooks: TextPipelineHooks<Item, State, Response>,
+    infer: Infer,
+    observe: Observe,
+) -> Result<PostValidated, ServerError>
+where
+    Failure: std::fmt::Display,
+    Infer: AsyncFnOnce(
+        &WorkerPool,
+        &[(usize, Item)],
+        &LanguageCode3,
+    ) -> Result<Vec<Result<Response, ItemFailure<Failure>>>, ServerError>,
+    Observe: FnOnce(&[(usize, Item)], &[Response]) -> Result<(), ServerError>,
+{
+    if is_dummy(admitted.document()) {
         // A dummy file is handed back untouched, so it is a pass-through
         // rather than gated output: see `PostValidated`'s module docs. The
         // INPUT bytes are what "untouched" means, so they are what it carries.
-        return Ok(PostValidated::pass_through(chat_text, hooks.command));
+        return Ok(admitted);
     }
 
-    if let Err(errors) = validate_to_level(&chat_file, &parse_errors, hooks.validity) {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(ServerError::Validation(format!(
-            "{} pre-validation failed: {}",
-            hooks.command,
-            msgs.join("; ")
-        )));
-    }
-
-    let batch_items = (hooks.collect)(&chat_file);
+    let batch_items = (hooks.collect)(admitted.document());
     if batch_items.is_empty() {
-        // Nothing was collected, so nothing was applied: another
-        // pass-through, not a claim about the input's validity.
-        return Ok(PostValidated::pass_through(chat_text, hooks.command));
+        // Nothing was collected, so retain the already admitted input proof
+        // without claiming that any analysis was applied.
+        return Ok(admitted);
     }
 
-    let item_results = infer(services.pool, &batch_items, lang).await?;
+    // Editing consumes the validity proof; the output must earn a new one.
+    let mut chat_file = admitted.into_judged_document();
+    analyze_and_apply(
+        &mut chat_file,
+        &batch_items,
+        lang,
+        services,
+        &hooks,
+        infer,
+        observe,
+    )
+    .await?;
+    // The gate runs LAST, on the model that is about to become the bytes we
+    // return, so the proof covers what is written and not an earlier draft of
+    // it. Failing it fails the command; nothing is serialized.
+    PostValidated::gate_owned(chat_file, hooks.command)
+        .map_err(|failure| failure.into_server_error())
+}
+
+/// Continue from a generated document whose findings are confined to some
+/// utterances: analyze and edit every OTHER utterance, then judge the result
+/// with the producer transition. The held-out utterances are never sent to
+/// the worker and keep their content, so the result is still diagnosed for
+/// them (or admitted, if the edit happened to remove the finding's cause).
+/// Unlike the admitted pipeline, an empty collection still re-judges the
+/// model, because the input carried no proof to hand back.
+pub(crate) async fn run_localized_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
+    localized: crate::pipeline::post_validate::LocalizedDiagnosis,
+    lang: &LanguageCode3,
+    services: PipelineServices<'_>,
+    hooks: TextPipelineHooks<Item, State, Response>,
+    infer: Infer,
+    observe: Observe,
+) -> Result<crate::pipeline::post_validate::ProducedOutput, ServerError>
+where
+    Failure: std::fmt::Display,
+    Infer: AsyncFnOnce(
+        &WorkerPool,
+        &[(usize, Item)],
+        &LanguageCode3,
+    ) -> Result<Vec<Result<Response, ItemFailure<Failure>>>, ServerError>,
+    Observe: FnOnce(&[(usize, Item)], &[Response]) -> Result<(), ServerError>,
+{
+    let (mut chat_file, held_out) = localized.into_model();
+    let batch_items: Vec<(usize, Item)> = (hooks.collect)(&chat_file)
+        .into_iter()
+        .filter(|(utterance, _)| !held_out.contains(*utterance))
+        .collect();
+    if !batch_items.is_empty() {
+        analyze_and_apply(
+            &mut chat_file,
+            &batch_items,
+            lang,
+            services,
+            &hooks,
+            infer,
+            observe,
+        )
+        .await?;
+    }
+    // Judged under the stage's command, as the admitted pipeline's gate is,
+    // so both routes apply the same command checks.
+    Ok(PostValidated::produced(chat_file, hooks.command))
+}
+
+/// Infer the collected items, apply the responses and stamp provenance: the
+/// part of a text stage that is the same whatever the document's standing.
+async fn analyze_and_apply<Item, State, Response, Failure, Infer, Observe>(
+    chat_file: &mut ChatFile,
+    batch_items: &[(usize, Item)],
+    lang: &LanguageCode3,
+    services: PipelineServices<'_>,
+    hooks: &TextPipelineHooks<Item, State, Response>,
+    infer: Infer,
+    observe: Observe,
+) -> Result<(), ServerError>
+where
+    Failure: std::fmt::Display,
+    Infer: AsyncFnOnce(
+        &WorkerPool,
+        &[(usize, Item)],
+        &LanguageCode3,
+    ) -> Result<Vec<Result<Response, ItemFailure<Failure>>>, ServerError>,
+    Observe: FnOnce(&[(usize, Item)], &[Response]) -> Result<(), ServerError>,
+{
+    let item_results = infer(services.pool, batch_items, lang).await?;
     // The typed error's OWN category travels. Rendering it into
     // `ServerError::Validation` retyped every per-item PROVIDER failure as bad
     // input, contradicting `TextWorkflowFileError::ItemErrors`, which
@@ -125,18 +241,18 @@ where
     let responses =
         crate::text_batch::unwrap_per_item_results(hooks.command.as_str(), item_results)
             .map_err(|err| ServerError::from_classified_failure(&err))?;
-    observe(&batch_items, &responses)?;
+    observe(batch_items, &responses)?;
     let mut state_map: HashMap<usize, State> = HashMap::new();
-    (hooks.integrate)(&mut state_map, &batch_items, &responses);
+    (hooks.integrate)(&mut state_map, batch_items, &responses);
 
-    (hooks.apply)(&mut chat_file, &state_map);
+    (hooks.apply)(chat_file, &state_map)?;
 
     // Inject the processing provenance comment, named by the applied
     // responses. A run that applied nothing says so rather than stamping a
     // command with no engine behind it.
     match (hooks.provenance)(lang, &responses)? {
         TextStamp::Stamped(comment) => {
-            crate::provenance::inject_provenance(&mut chat_file, &comment);
+            crate::provenance::inject_provenance(chat_file, &comment);
         }
         TextStamp::NotStamped(reason) => {
             info!(
@@ -146,12 +262,7 @@ where
             );
         }
     }
-
-    // The gate runs LAST, on the model that is about to become the bytes we
-    // return, so the proof covers what is written and not an earlier draft of
-    // it. Failing it fails the command; nothing is serialized.
-    PostValidated::gate_owned(chat_file, hooks.validity, hooks.command)
-        .map_err(|failure| ServerError::Validation(failure.to_string()))
+    Ok(())
 }
 
 /// Hooks for the cross-file text-batch pipeline (pool all files'
@@ -167,14 +278,13 @@ pub(crate) type TextBatchCollect<Item> = fn(&ChatFile) -> Vec<(usize, Item)>;
 
 /// Apply one file's collected items + their worker responses to the chat
 /// file's AST. Called once per file after global inference completes.
-pub(crate) type TextBatchApply<Item, Response> = fn(&mut ChatFile, &[(usize, Item)], &[Response]);
+pub(crate) type TextBatchApply<Item, Response> =
+    fn(&mut ChatFile, &[(usize, Item)], &[Response]) -> Result<(), ServerError>;
 
 pub(crate) struct TextBatchHooks<Item, Response> {
     /// The command this pipeline is running, for validation, log messages
     /// and the proof its gate produces.
     pub command: ReleasedCommand,
-    /// Pre-validation gate required by the command.
-    pub validity: ValidityLevel,
     /// Extract worker payloads from the parsed chat file.
     pub collect: TextBatchCollect<Item>,
     /// Apply one file's items + responses directly to that file's AST.
@@ -223,25 +333,9 @@ where
     let parser = crate::chat_parser();
     let mut results: TextBatchFileResults = Vec::with_capacity(files.len());
 
-    // 1. Parse every input.
-    let mut parsed_files: Vec<ChatFile> = Vec::with_capacity(files.len());
-    let mut parse_error_lists: Vec<Vec<crate::chat_ops::ParseError>> =
-        Vec::with_capacity(files.len());
-    for file in files {
-        let (chat_file, parse_errors) = parse_lenient(&parser, file.chat_text.as_ref());
-        if !parse_errors.is_empty() {
-            warn!(
-                filename = %file.filename.as_ref(),
-                num_errors = parse_errors.len(),
-                "Parse errors (continuing with recovery)"
-            );
-        }
-        parse_error_lists.push(parse_errors);
-        parsed_files.push(chat_file);
-    }
-
-    // 2. Pool payloads across files, remembering each file's slice.
+    // 1. Admit inputs and pool payloads, retaining the proof with its slice.
     struct PerFileBatch {
+        input: ValidChatFile,
         item_count: usize,
         global_start: usize,
     }
@@ -262,50 +356,50 @@ where
         Admitted(PerFileBatch),
         /// Nothing was collected: a dummy file, or one with no payloads. The
         /// command applies nothing, so its own bytes are the output.
-        NothingToDo,
+        NothingToDo(PostValidated),
         /// The file failed pre-validation. It must never be written, on any
         /// path, whatever the batch does.
-        RefusedAtAdmission(String),
+        RefusedAtAdmission(TextWorkflowFileError),
     }
 
     let mut all_items: Vec<(usize, Item)> = Vec::new();
     let mut admissions: Vec<FileAdmission> = Vec::with_capacity(files.len());
 
-    for (file_idx, parsed_file) in parsed_files.iter().enumerate() {
-        if is_dummy(parsed_file) {
-            admissions.push(FileAdmission::NothingToDo);
-            continue;
-        }
-
-        if let Err(errors) =
-            validate_to_level(parsed_file, &parse_error_lists[file_idx], hooks.validity)
-        {
-            let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-            let error_summary = format!(
-                "{} pre-validation failed: {}",
+    for file in files {
+        let admitted = match admit_retained_text(
+            &parser,
+            file.chat_text.as_ref(),
+            TranscriptName::for_path(std::path::Path::new(file.filename.as_ref())),
+        ) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                admissions.push(FileAdmission::RefusedAtAdmission(
+                    TextWorkflowFileError::from_server_error(&error),
+                ));
+                continue;
+            }
+        };
+        if is_dummy(admitted.document()) {
+            admissions.push(FileAdmission::NothingToDo(PostValidated::pass_through(
+                admitted,
                 hooks.command,
-                msgs.join("; ")
-            );
-            warn!(
-                filename = %files[file_idx].filename,
-                errors = %error_summary,
-                chat_text = %files[file_idx].chat_text,
-                command = %hooks.command,
-                "pre-validation failed: dumping CHAT for diagnosis"
-            );
-            admissions.push(FileAdmission::RefusedAtAdmission(error_summary));
+            )));
             continue;
         }
 
-        let batch_items = (hooks.collect)(parsed_file);
+        let batch_items = (hooks.collect)(admitted.document());
         if batch_items.is_empty() {
-            admissions.push(FileAdmission::NothingToDo);
+            admissions.push(FileAdmission::NothingToDo(PostValidated::pass_through(
+                admitted,
+                hooks.command,
+            )));
             continue;
         }
 
         let global_start = all_items.len();
         let item_count = batch_items.len();
         admissions.push(FileAdmission::Admitted(PerFileBatch {
+            input: admitted.into_valid_file(),
             item_count,
             global_start,
         }));
@@ -326,20 +420,17 @@ where
                             file.filename.clone(),
                             crate::text_batch::TextWorkflowFileError::from_server_error(&e),
                         ),
-                        // Refused at admission, and a failed batch does not
-                        // change that: this file is a validation failure here
-                        // exactly as it is on the success path.
-                        FileAdmission::RefusedAtAdmission(message) => TextBatchFileResult::err(
-                            file.filename.clone(),
-                            crate::text_batch::TextWorkflowFileError::validation(message.clone()),
-                        ),
+                        // A failed batch does not change the admission
+                        // failure's own verdict (invalid CHAT or tool fault).
+                        FileAdmission::RefusedAtAdmission(failure) => {
+                            TextBatchFileResult::err(file.filename.clone(), failure.clone())
+                        }
                         // No payloads collected (empty/dummy): the command
                         // applied nothing, so this is a pass-through of the
                         // file's own bytes.
-                        FileAdmission::NothingToDo => TextBatchFileResult::ok(
-                            file.filename.clone(),
-                            PostValidated::pass_through(file.chat_text.as_ref(), hooks.command),
-                        ),
+                        FileAdmission::NothingToDo(output) => {
+                            TextBatchFileResult::ok(file.filename.clone(), output.clone())
+                        }
                     };
                     results.push(outcome);
                 }
@@ -356,29 +447,24 @@ where
     // ``TextWorkflowFileError::ItemErrors``; other files in the same
     // cross-file batch continue normally. This matches BA2's
     // per-file-isolation multi-file failure semantics.
-    for (file_idx, file) in files.iter().enumerate() {
-        let fm = match &admissions[file_idx] {
-            FileAdmission::RefusedAtAdmission(message) => {
-                results.push(TextBatchFileResult::err(
-                    file.filename.clone(),
-                    crate::text_batch::TextWorkflowFileError::validation(message.clone()),
-                ));
+    for (file, admission) in files.iter().zip(admissions) {
+        let fm = match admission {
+            FileAdmission::RefusedAtAdmission(failure) => {
+                results.push(TextBatchFileResult::err(file.filename.clone(), failure));
                 continue;
             }
-            FileAdmission::NothingToDo => {
+            FileAdmission::NothingToDo(output) => {
                 // Nothing was applied, so the file's own bytes are the output
                 // and there is no output to gate. This is the same verdict the
                 // batch-failure branch above reaches for the same state.
-                results.push(TextBatchFileResult::ok(
-                    file.filename.clone(),
-                    PostValidated::pass_through(file.chat_text.as_ref(), hooks.command),
-                ));
+                results.push(TextBatchFileResult::ok(file.filename.clone(), output));
                 continue;
             }
             FileAdmission::Admitted(fm) => fm,
         };
 
-        let chat_file = &mut parsed_files[file_idx];
+        let mut destination = fm.input.into_unchecked();
+        let chat_file = &mut destination;
 
         let end = fm.global_start + fm.item_count;
         let file_items = &all_items[fm.global_start..end];
@@ -417,7 +503,13 @@ where
             .filter_map(|r| r.as_ref().ok())
             .cloned()
             .collect();
-        (hooks.apply)(chat_file, file_items, &file_responses);
+        if let Err(error) = (hooks.apply)(chat_file, file_items, &file_responses) {
+            results.push(TextBatchFileResult::err(
+                file.filename.clone(),
+                TextWorkflowFileError::from_server_error(&error),
+            ));
+            continue;
+        }
 
         // Provenance for THIS file, from the responses this file applied, and
         // before the gate so the proof covers the bytes that are written. The
@@ -461,7 +553,7 @@ where
         // reported as a validation failure and never written; the rest of the
         // cross-file batch is unaffected, which is the same isolation the
         // per-item failure branch above already provides.
-        match PostValidated::gate(chat_file, hooks.validity, hooks.command) {
+        match PostValidated::gate(chat_file, hooks.command) {
             Ok(output) => results.push(TextBatchFileResult::ok_stamped(
                 file.filename.clone(),
                 output,
@@ -496,18 +588,29 @@ mod tests {
     /// A command that corrupts its own output by eating every terminator.
     /// This is the mutation the gate exists to catch; before the gate it
     /// produced a `warn!` and a written file.
-    fn apply_dropping_terminators(file: &mut ChatFile, _items: &[(usize, ())], _r: &[()]) {
+    fn apply_dropping_terminators(
+        file: &mut ChatFile,
+        _items: &[(usize, ())],
+        _r: &[()],
+    ) -> Result<(), ServerError> {
         use talkbank_model::model::Line;
         for line in &mut file.lines {
             if let Line::Utterance(utt) = line {
                 utt.main.content.terminator = None;
             }
         }
+        Ok(())
     }
 
     /// A command that leaves the document alone: the positive control that
     /// proves the refusal below is caused by the mutation, not by the fixture.
-    fn apply_nothing(_file: &mut ChatFile, _items: &[(usize, ())], _r: &[()]) {}
+    fn apply_nothing(
+        _file: &mut ChatFile,
+        _items: &[(usize, ())],
+        _r: &[()],
+    ) -> Result<(), ServerError> {
+        Ok(())
+    }
 
     /// Inference that succeeds for every item, with no payload.
     ///
@@ -520,6 +623,121 @@ mod tests {
         _lang: &LanguageCode3,
     ) -> Result<Vec<Result<(), crate::text_batch::EngineItemFailure>>, ServerError> {
         Ok(items.iter().map(|_| Ok(())).collect())
+    }
+
+    async fn must_not_infer(
+        _pool: &WorkerPool,
+        _items: &[(usize, ())],
+        _lang: &LanguageCode3,
+    ) -> Result<Vec<Result<(), crate::text_batch::EngineItemFailure>>, ServerError> {
+        panic!("refused inputs and no-op files must not reach inference")
+    }
+
+    fn collect_nothing(_file: &ChatFile) -> Vec<(usize, ())> {
+        Vec::new()
+    }
+
+    fn must_not_collect(_file: &ChatFile) -> Vec<(usize, ())> {
+        panic!("invalid retained content must not reach payload collection")
+    }
+
+    /// Full retained-input admission is required even when collection would
+    /// yield no work. In particular, the shared historical L1/L2 checks did
+    /// not detect a retrace without corrected material or retained bad %mor.
+    #[tokio::test]
+    async fn retained_text_refuses_invalid_content_before_collection_or_inference() {
+        let retrace = VALID.replace("hello world .", "<the dog> [///] .");
+        let corrupt_mor = VALID.replace("@End", "%mor:\tnoun| .\n@End");
+        let dummy_bad_header = "@UTF8\n@Begin\n@Options:\tdummy\n*CHI:\thello .\n@End\n";
+        let sources = [retrace.as_str(), corrupt_mor.as_str(), dummy_bad_header];
+        let pool = WorkerPool::new(PoolConfig::default());
+        let files: Vec<_> = sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                TextBatchFileInput::new(
+                    DisplayPath::from(format!("invalid-{index}.cha")),
+                    (*source).to_owned(),
+                )
+            })
+            .collect();
+        let results = run_text_batch_pipeline(
+            &files,
+            &LanguageCode3::eng(),
+            &pool,
+            TextBatchHooks {
+                command: ReleasedCommand::Utseg,
+                collect: must_not_collect,
+                apply: apply_nothing,
+                provenance: test_stamp,
+            },
+            must_not_infer,
+        )
+        .await;
+        assert_eq!(results.len(), sources.len());
+        for result in results {
+            assert_eq!(
+                result
+                    .result
+                    .expect_err("invalid retained content must not pass through")
+                    .category(),
+                FailureCategory::Validation
+            );
+        }
+
+        for source in sources {
+            let cache = crate::cache::UtteranceCache::noop();
+            let result = run_text_pipeline(
+                source,
+                &LanguageCode3::eng(),
+                PipelineServices::new(&pool, &cache),
+                TextPipelineHooks {
+                    command: ReleasedCommand::Utseg,
+                    collect: collect_nothing,
+                    integrate: |_state: &mut HashMap<usize, ()>, _items, _responses| {},
+                    apply: |_file, _state| Ok(()),
+                    provenance: test_stamp,
+                },
+                must_not_infer,
+                |_items, _responses| Ok(()),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ServerError::ChatAdmission(_))),
+                "single-file retained input must be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fully_valid_no_work_file_preserves_its_original_bytes() {
+        let pool = WorkerPool::new(PoolConfig::default());
+        let files = [TextBatchFileInput::new(
+            DisplayPath::from("valid.cha"),
+            VALID.to_owned(),
+        )];
+        let results = run_text_batch_pipeline(
+            &files,
+            &LanguageCode3::eng(),
+            &pool,
+            TextBatchHooks {
+                command: ReleasedCommand::Utseg,
+                collect: collect_nothing,
+                apply: apply_nothing,
+                provenance: test_stamp,
+            },
+            must_not_infer,
+        )
+        .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]
+                .result
+                .as_ref()
+                .expect("valid no-work input")
+                .as_str(),
+            VALID
+        );
     }
 
     /// Inference that fails for the whole batch.
@@ -561,7 +779,6 @@ mod tests {
                 // result-named builder translate uses: the command a pipeline
                 // runs and the command its stamp records are the same thing.
                 command: ReleasedCommand::Translate,
-                validity: ValidityLevel::StructurallyComplete,
                 collect: collect_one,
                 apply,
                 provenance: test_stamp,
@@ -584,6 +801,51 @@ mod tests {
         assert!(output.as_str().contains("*CHI:"));
     }
 
+    #[tokio::test]
+    async fn a_refused_application_cannot_be_admitted_just_because_the_model_is_valid() {
+        fn refuse(
+            _file: &mut ChatFile,
+            _items: &[(usize, ())],
+            _responses: &[()],
+        ) -> Result<(), ServerError> {
+            Err(batchalign_transform::utseg::UtsegApplyRefusal::UnknownUtterance(99).into())
+        }
+        let error = run_with(refuse)
+            .await
+            .expect_err("application refusal is not success");
+        assert_eq!(error.category(), crate::scheduling::FailureCategory::System);
+        assert!(error.to_string().contains("absent utterance 99"));
+    }
+
+    #[tokio::test]
+    async fn per_file_application_refusal_precedes_output_admission() {
+        let pool = WorkerPool::new(PoolConfig::default());
+        let cache = crate::cache::UtteranceCache::noop();
+        let error = run_text_pipeline(
+            VALID,
+            &LanguageCode3::eng(),
+            PipelineServices::new(&pool, &cache),
+            TextPipelineHooks {
+                command: ReleasedCommand::Utseg,
+                collect: collect_one,
+                integrate: |_state: &mut HashMap<usize, ()>, _items, _responses| {},
+                apply: |_file, _state| {
+                    Err(batchalign_transform::utseg::UtsegApplyRefusal::UnknownUtterance(99).into())
+                },
+                provenance: test_stamp,
+            },
+            stub_infer,
+            |_items, _responses| Ok(()),
+        )
+        .await
+        .expect_err("refused application must not issue output proof");
+        assert!(matches!(error, ServerError::UtterancePartition(_)));
+        assert_eq!(
+            crate::runner::util::classify_server_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+    }
+
     /// RED FIRST (W2): the batch path stamps the provenance of what it
     /// applied. It used to write none, so every file of a batch job recorded
     /// nothing about the engines behind it.
@@ -592,9 +854,10 @@ mod tests {
         let result = run_with(apply_nothing).await;
         let output = result.expect("an untouched document must pass its own gate");
         assert!(
-            output
-                .as_str()
-                .contains("[fc-ba3 translate | engine=test-engine ; lang=eng | "),
+            output.as_str().contains(&format!(
+                "{}engine=test-engine ; lang=eng | ",
+                crate::provenance::written_stamp_opening("translate")
+            )),
             "the batch output must carry its own stamp, got:\n{}",
             output.as_str()
         );
@@ -626,7 +889,6 @@ mod tests {
             &pool,
             TextBatchHooks {
                 command: ReleasedCommand::Translate,
-                validity: ValidityLevel::StructurallyComplete,
                 collect: collect_one,
                 apply: apply_nothing,
                 provenance: test_stamp,
@@ -655,7 +917,7 @@ mod tests {
     }
 
     /// The seam test: a command whose output drops a terminator FAILS that
-    /// file, with `FailureCategory::Validation`, and produces no output for
+    /// file, with `FailureCategory::System`, and produces no output for
     /// the writer to write.
     #[tokio::test]
     async fn batch_pipeline_refuses_output_that_dropped_a_terminator() {
@@ -663,13 +925,131 @@ mod tests {
         let failure = result.expect_err("corrupted output must fail the file, not be written");
         assert_eq!(
             failure.category(),
-            FailureCategory::Validation,
-            "a file refused on validity grounds must not be reported as a provider failure"
+            FailureCategory::System,
+            "malformed produced output is a tool failure, not invalid client input"
         );
         let rendered = failure.to_string();
         assert!(
             rendered.contains("lost its terminator"),
             "the failure must name what broke, got: {rendered}"
         );
+    }
+
+    /// Task 6 (a), at the stage boundary, with two speakers (so a rule about
+    /// the participants cannot make every utterance fail on its own): a
+    /// generated transcript diagnosed for
+    /// one invalid word is segmented everywhere but in that word's utterance.
+    /// Before, the whole file went unsegmented. The faulty utterance is never
+    /// sent to the model, keeps its generated form, and the result is judged
+    /// afresh: still diagnosed, for that word alone.
+    #[tokio::test]
+    async fn a_diagnosed_transcript_is_segmented_outside_its_faulty_utterance() {
+        use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};
+        const GENERATED: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tPAR0 Participant, PAR1 Participant\n\
+@ID:\teng|test|PAR0|||||Participant|||\n@ID:\teng|test|PAR1|||||Participant|||\n\
+*PAR0:\tthe red ball rolled far away .\n\
+*PAR1:\twe took it there .\n\
+*PAR0:\tthen we went home again today .\n@End\n";
+        let parser = crate::chat_parser();
+        let (mut file, errors) = batchalign_transform::parse::parse_lenient(&parser, GENERATED);
+        assert!(errors.is_empty(), "{errors:?}");
+        // The generated word CHAT cannot hold, as a producer would have
+        // built it before word forms were written (an invented utterance).
+        let mut ordinal = 0;
+        for line in &mut file.lines {
+            if let Line::Utterance(utterance) = line {
+                if ordinal == 1 {
+                    utterance.main.content.content = TierContentItems::new(
+                        ["we", "took", "b2", "there"]
+                            .into_iter()
+                            .map(|word| UtteranceContent::Word(Box::new(Word::simple(word))))
+                            .collect(),
+                    );
+                }
+                ordinal += 1;
+            }
+        }
+        let crate::pipeline::post_validate::ProducedOutput::Diagnosed(diagnosed) =
+            PostValidated::produced(file, ReleasedCommand::Transcribe)
+        else {
+            panic!("the invalid word must diagnose the transcript");
+        };
+        let localized = diagnosed
+            .localize()
+            .expect("the finding is the second utterance's");
+        assert_eq!(localized.held_out().ordinals().collect::<Vec<_>>(), [1]);
+
+        let pool = WorkerPool::new(PoolConfig::default());
+        let cache = crate::cache::UtteranceCache::noop();
+        let inferred = std::sync::Mutex::new(Vec::new());
+        // Split every utterance it is given after its third word.
+        let infer = async |_pool: &WorkerPool,
+                           items: &[(usize, batchalign_transform::utseg::UtsegBatchItem)],
+                           _lang: &LanguageCode3|
+               -> Result<
+            Vec<Result<Vec<usize>, crate::text_batch::EngineItemFailure>>,
+            ServerError,
+        > {
+            inferred
+                .lock()
+                .expect("test lock")
+                .extend(items.iter().map(|(utterance, _)| *utterance));
+            Ok(items
+                .iter()
+                .map(|(_, item)| {
+                    Ok((0..item.words.len())
+                        .map(|word| usize::from(word >= 3))
+                        .collect())
+                })
+                .collect())
+        };
+        let produced = run_localized_text_pipeline(
+            localized,
+            &LanguageCode3::eng(),
+            PipelineServices::new(&pool, &cache),
+            TextPipelineHooks {
+                command: ReleasedCommand::Utseg,
+                collect: crate::utseg::collect_utseg_batch_items,
+                integrate: |state: &mut HashMap<usize, Vec<usize>>,
+                            items,
+                            responses: &[Vec<usize>]| {
+                    for ((utterance, _), assignment) in items.iter().zip(responses) {
+                        state.insert(*utterance, assignment.clone());
+                    }
+                },
+                apply: |file, state| {
+                    crate::utseg::apply_utseg_document(file, state).map_err(ServerError::from)
+                },
+                provenance: |_lang, _responses| {
+                    Ok(TextStamp::NotStamped(
+                        crate::provenance::NoStampReason::NothingApplied,
+                    ))
+                },
+            },
+            infer,
+            |_items, _responses| Ok(()),
+        )
+        .await
+        .expect("the localized stage runs");
+        assert_eq!(
+            *inferred.lock().expect("test lock"),
+            [0, 2],
+            "the faulty utterance is never inferred"
+        );
+        let crate::pipeline::post_validate::ProducedOutput::Diagnosed(still) = &produced else {
+            panic!("the invalid word is still there, so the output is still diagnosed");
+        };
+        assert!(
+            still
+                .findings()
+                .errors()
+                .all(|finding| finding.message.contains("b2")),
+            "{still:?}"
+        );
+        let text = produced.as_str();
+        assert!(text.contains("*PAR0:\tthe red ball .\n"), "{text}");
+        assert!(text.contains("*PAR1:\twe took b2 there .\n"), "{text}");
+        assert!(text.contains("*PAR0:\tthen we went .\n"), "{text}");
     }
 }

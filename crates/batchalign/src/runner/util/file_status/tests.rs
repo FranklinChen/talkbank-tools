@@ -190,7 +190,8 @@ fn make_job(id: &str) -> Job {
 async fn progress_forwarder_routes_updates_through_sink_boundary() {
     let sink = Arc::new(RecordingSink::default());
     let job_id = JobId::from("job-progress");
-    let tx = spawn_progress_forwarder(sink.clone(), job_id.clone(), "a.cha".to_string());
+    let (tx, _observer, _forwarder) =
+        spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), "a.cha".to_string());
 
     tx.send(ProgressUpdate::new(FileStage::Writing, Some(1), Some(3)))
         .expect("send progress update");
@@ -217,6 +218,33 @@ async fn progress_forwarder_routes_updates_through_sink_boundary() {
             current: Some(1),
             total: Some(3),
         }]
+    );
+}
+
+/// The forwarder publishes every wait change it was sent, including an end
+/// still queued when the progress channel closes, before `finished` returns:
+/// a dropped end would leave the file counted as waiting.
+#[tokio::test]
+async fn forwarder_drains_queued_wait_changes_before_finishing() {
+    use crate::store::WorkerWaitChange::{Ended, Started};
+    let sink = Arc::new(RecordingSink::default());
+    let (tx, observer, forwarder) = spawn_observed_progress_forwarder(
+        sink.clone(),
+        JobId::from("job-waits"),
+        "a.cha".to_string(),
+    );
+    let target = crate::worker::WorkerTarget::infer_task(crate::worker::InferTask::Morphosyntax);
+    let lang = crate::api::WorkerLanguage::from(crate::api::LanguageCode3::eng());
+    observer.waiting(&target, &lang);
+    drop(tx);
+    observer.resumed();
+    drop(observer);
+    tokio::time::timeout(Duration::from_secs(1), forwarder.finished())
+        .await
+        .expect("the forwarder finishes once its sender and observer are gone");
+    assert_eq!(
+        sink.worker_waits(),
+        vec![("a.cha".to_owned(), Started), ("a.cha".to_owned(), Ended)]
     );
 }
 

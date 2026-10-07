@@ -117,7 +117,7 @@ def align_tokens(
     original_words: list[str],
     stanza_tokens: list[str],
     alpha2: str = "",
-) -> list[str | tuple[str, bool]]: ...
+) -> list[str | tuple[str, bool | list[str]]]: ...
 
 # ---------------------------------------------------------------------------
 # Cantonese ASR bridges

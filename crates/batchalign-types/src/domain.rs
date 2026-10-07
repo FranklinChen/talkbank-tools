@@ -48,6 +48,8 @@ pub enum ReleasedCommand {
     Avqi,
     Diarize,
     SpeakerIdentify,
+    /// Standalone native WAV/MP3 export.
+    Convert,
 }
 
 /// Error returned when one string is not a released command name.
@@ -57,7 +59,7 @@ pub struct InvalidReleasedCommand(pub String);
 
 impl ReleasedCommand {
     /// All released commands in a stable contributor-facing order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Align,
         Self::Transcribe,
         Self::TranscribeS,
@@ -71,6 +73,7 @@ impl ReleasedCommand {
         Self::Avqi,
         Self::Diarize,
         Self::SpeakerIdentify,
+        Self::Convert,
     ];
 
     /// Parse one untrusted released-command token.
@@ -94,6 +97,7 @@ impl ReleasedCommand {
             Self::Avqi => "avqi",
             Self::Diarize => "diarize",
             Self::SpeakerIdentify => "speaker_identify",
+            Self::Convert => "convert",
         }
     }
 
@@ -139,6 +143,7 @@ impl TryFrom<&str> for ReleasedCommand {
             "avqi" => Ok(Self::Avqi),
             "diarize" => Ok(Self::Diarize),
             "speaker_identify" => Ok(Self::SpeakerIdentify),
+            "convert" => Ok(Self::Convert),
             other => Err(InvalidReleasedCommand(other.to_owned())),
         }
     }
@@ -1848,6 +1853,10 @@ pub enum ContentType {
     Text,
     /// JSON document output (e.g. diarization speaker-turns files).
     Json,
+    /// Binary PCM WAVE recording, never transported as UTF-8 text.
+    Wav,
+    /// Binary MP3 recording, never transported as UTF-8 text.
+    Mp3,
 }
 
 impl std::fmt::Display for ContentType {
@@ -1857,6 +1866,27 @@ impl std::fmt::Display for ContentType {
             Self::Csv => write!(f, "csv"),
             Self::Text => write!(f, "text"),
             Self::Json => write!(f, "json"),
+            Self::Wav => write!(f, "wav"),
+            Self::Mp3 => write!(f, "mp3"),
+        }
+    }
+}
+
+impl ContentType {
+    /// Whether this discriminator requires binary artifact transport.
+    pub const fn is_binary(self) -> bool {
+        match self {
+            Self::Wav | Self::Mp3 => true,
+            Self::Chat | Self::Csv | Self::Text | Self::Json => false,
+        }
+    }
+
+    /// HTTP media type for a binary output, with no text fallback.
+    pub const fn binary_media_type(self) -> Option<&'static str> {
+        match self {
+            Self::Wav => Some("audio/wav"),
+            Self::Mp3 => Some("audio/mpeg"),
+            Self::Chat | Self::Csv | Self::Text | Self::Json => None,
         }
     }
 }

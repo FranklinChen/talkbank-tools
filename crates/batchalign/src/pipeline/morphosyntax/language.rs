@@ -31,38 +31,3 @@ pub(crate) fn resolve_per_file_lang(chat_file: &ChatFile) -> Result<LanguageCode
         ))
     })
 }
-
-/// Returns a per-file error message when the primary `@Languages` code is
-/// not in Stanza's supported set.
-///
-/// Pre-2026-05-10 this function's `Some(...)` return drove a silent
-/// pass-through (the file was returned unchanged with no `%mor`/`%gra`
-/// injected, and the job reported `completed`). That was dishonest UX:
-/// operators submitting a file with a typo'd or unsupported language
-/// got back their input unchanged, with no surface signal that nothing
-/// happened. The dashboard's failure column never lit up.
-///
-/// Post-2026-05-10 the caller (`ParsedFile::parse`) converts a `Some(...)`
-/// return into a `ServerError::Validation`, which propagates up as a
-/// per-file failure with the message visible in the dashboard. The
-/// operator can then fix the `@Languages` header and re-run.
-///
-/// `@Options: CA` files still pass through under the default
-/// [`CaMorphotagPolicy::Honor`](crate::options::CaMorphotagPolicy::Honor);
-/// that is a legitimate "morphotag not applicable to this transcript
-/// convention" case, not a typo to surface. An explicit `Analyze` policy
-/// subjects the file to the same language gate as any other input.
-pub(crate) fn unsupported_primary_language_error(chat_file: &ChatFile) -> Option<String> {
-    if let Some(primary) = chat_file.languages.first()
-        && !crate::chat_ops::morphosyntax_ops::is_stanza_supported(primary)
-    {
-        return Some(format!(
-            "morphotag: primary @Languages '{}' is not supported by Stanza. \
-             Fix the @Languages header to use a supported ISO-639-3 code and re-run. \
-             Supported codes: {}.",
-            primary,
-            batchalign_transform::morphosyntax::supported_iso3_codes().join(", ")
-        ));
-    }
-    None
-}

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::api::{
     ContentType, DisplayPath, FileProvenance, FileResult, FileStatusKind, JobId, JobInfo,
-    JobResultResponse, JobStatus,
+    JobResultResponse, JobStatus, ResultContent,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -88,13 +88,12 @@ pub(crate) async fn get_results(
     let mut files = Vec::new();
     for r in &detail.results {
         let content = if r.error.is_none() {
-            let path = result_content_path(&detail, &r.filename);
-            read_result_content(&path).await?
+            read_result_content(&detail, r).await?
         } else {
-            String::new()
+            ResultContent::default()
         };
         let provenance = match &r.error {
-            None => provenance_of(r.content_type, &content),
+            None => provenance_for_content(r.content_type, &content),
             Some(_) => FileProvenance::NotRead,
         };
         files.push(FileResult {
@@ -163,23 +162,25 @@ pub(crate) async fn get_single_result(
     if fs.status == FileStatusKind::Error {
         return Ok(Json(FileResult {
             filename: DisplayPath::from(filename.as_str()),
-            content: String::new(),
+            content: ResultContent::default(),
             content_type: ContentType::Chat,
             error: fs.error.clone().or(Some("Unknown error".into())),
             provenance: FileProvenance::NotRead,
         }));
     }
 
-    let result_entry = primary_result_entry(&detail, &filename).ok_or_else(|| {
-        ServerError::FileNotFound(format!("Result for {filename} not found in job {job_id}"))
-    })?;
+    let result_entry = primary_result_entry(&detail, &filename)
+        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
+        .ok_or_else(|| {
+            ServerError::FileNotFound(format!("Result for {filename} not found in job {job_id}"))
+        })?;
 
     let content_type = result_entry.content_type;
     let out_filename = result_entry.filename.clone();
 
-    let content = read_result_content(&result_content_path(&detail, &out_filename)).await?;
+    let content = read_result_content(&detail, result_entry).await?;
 
-    let provenance = provenance_of(content_type, &content);
+    let provenance = provenance_for_content(content_type, &content);
     Ok(Json(FileResult {
         filename: out_filename,
         content,
@@ -194,13 +195,17 @@ pub(crate) async fn get_single_result(
 fn primary_result_entry<'a>(
     detail: &'a crate::store::JobDetail,
     input: &str,
-) -> Option<&'a crate::store::FileResultEntry> {
-    let expected =
-        crate::recipe_runner::runtime::result_display_path_for_command(detail.command, input);
-    detail
+) -> Result<Option<&'a crate::store::FileResultEntry>, crate::recipe_runner::planner::PlanningError>
+{
+    let expected = crate::recipe_runner::runtime::result_display_path_for_command(
+        detail.command,
+        &detail.options,
+        input,
+    )?;
+    Ok(detail
         .results
         .iter()
-        .find(|r| r.error.is_none() && r.filename == expected)
+        .find(|r| r.error.is_none() && r.filename == expected))
 }
 
 /// Read one successful result file's provenance stamps as a typed state.
@@ -217,17 +222,39 @@ fn provenance_of(content_type: ContentType, content: &str) -> FileProvenance {
                 reason: unparseable.to_string(),
             },
         },
-        ContentType::Csv | ContentType::Text | ContentType::Json => FileProvenance::NotRead,
+        ContentType::Csv
+        | ContentType::Text
+        | ContentType::Json
+        | ContentType::Wav
+        | ContentType::Mp3 => FileProvenance::NotRead,
     }
 }
 
-async fn read_result_content(path: &std::path::Path) -> Result<String, ServerError> {
-    tokio::fs::read_to_string(path).await.map_err(|error| {
-        ServerError::Io(std::io::Error::new(
-            error.kind(),
-            format!("failed to read result file {}: {error}", path.display()),
-        ))
-    })
+fn provenance_for_content(content_type: ContentType, content: &ResultContent) -> FileProvenance {
+    match content {
+        ResultContent::Text(text) => provenance_of(content_type, text),
+        ResultContent::Binary(_) => FileProvenance::NotRead,
+    }
+}
+
+async fn read_result_content(
+    detail: &crate::store::JobDetail,
+    entry: &crate::store::FileResultEntry,
+) -> Result<ResultContent, ServerError> {
+    if entry.content_type.is_binary() {
+        let mut artifact = super::binary::open_artifact(detail, entry.filename.as_ref()).await?;
+        return Ok(ResultContent::Binary(artifact.descriptor().await?));
+    }
+    let path = result_content_path(detail, &entry.filename);
+    tokio::fs::read_to_string(&path)
+        .await
+        .map(ResultContent::Text)
+        .map_err(|error| {
+            ServerError::Io(std::io::Error::new(
+                error.kind(),
+                format!("failed to read result file {}: {error}", path.display()),
+            ))
+        })
 }
 
 fn result_content_path(
@@ -254,6 +281,7 @@ mod tests {
     fn job_detail(paths_mode: bool) -> JobDetail {
         JobDetail {
             command: crate::ReleasedCommand::Align,
+            options: crate::recipe_runner::runtime::test_options(crate::ReleasedCommand::Align),
             status: JobStatus::Completed,
             paths_mode,
             staging_dir: batchalign_types::paths::ServerPath::new("/tmp/jobs/job-1"),
@@ -267,6 +295,7 @@ mod tests {
                 status: FileStatusKind::Done,
                 error: None,
                 error_category: None,
+                diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
@@ -317,24 +346,48 @@ mod tests {
     fn runtime_regression_speaker_result_preserves_directory_identity() {
         let mut detail = job_detail(true);
         detail.command = crate::ReleasedCommand::SpeakerIdentify;
+        detail.options = crate::recipe_runner::runtime::test_options(detail.command);
         detail.results[0].filename = "nested/sample_speaker_identity.json".into();
         detail.results[0].content_type = ContentType::Json;
-        let result = super::primary_result_entry(&detail, "nested/sample.cha").unwrap();
+        let result = super::primary_result_entry(&detail, "nested/sample.cha")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             result.filename.as_ref(),
             "nested/sample_speaker_identity.json"
         );
-        assert!(super::primary_result_entry(&detail, "other/sample.cha").is_none());
+        assert!(
+            super::primary_result_entry(&detail, "other/sample.cha")
+                .unwrap()
+                .is_none()
+        );
         detail.results[0].error = Some("failed".into());
-        assert!(super::primary_result_entry(&detail, "nested/sample.cha").is_none());
+        assert!(
+            super::primary_result_entry(&detail, "nested/sample.cha")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn runtime_regression_result_preserves_chat_and_media_input_mapping() {
         let mut detail = job_detail(false);
-        assert!(super::primary_result_entry(&detail, "nested/sample.cha").is_some());
+        assert!(
+            super::primary_result_entry(&detail, "nested/sample.cha")
+                .unwrap()
+                .is_some()
+        );
         detail.command = crate::ReleasedCommand::Transcribe;
-        assert!(super::primary_result_entry(&detail, "nested/sample.wav").is_some());
-        assert!(super::primary_result_entry(&detail, "other/sample.wav").is_none());
+        detail.options = crate::recipe_runner::runtime::test_options(detail.command);
+        assert!(
+            super::primary_result_entry(&detail, "nested/sample.wav")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            super::primary_result_entry(&detail, "other/sample.wav")
+                .unwrap()
+                .is_none()
+        );
     }
 }

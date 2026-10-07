@@ -495,13 +495,18 @@ pub async fn require_live_direct_warmed_many(
 }
 
 async fn collect_direct_content_results(detail: &batchalign::store::JobDetail) -> Vec<FileResult> {
-    if detail.paths_mode {
+    if detail.paths_mode
+        && detail
+            .results
+            .iter()
+            .all(|result| !result.content_type.is_binary())
+    {
         return detail
             .results
             .iter()
             .map(|result| FileResult {
                 filename: result.filename.clone(),
-                content: String::new(),
+                content: String::new().into(),
                 content_type: result.content_type,
                 error: result.error.clone(),
                 // The harness reads no stamps: it hands back output bytes only.
@@ -515,11 +520,25 @@ async fn collect_direct_content_results(detail: &batchalign::store::JobDetail) -
     for result in &detail.results {
         let content = if result.error.is_none() {
             let path = output_dir.join(&*result.filename);
-            tokio::fs::read_to_string(&path)
-                .await
-                .unwrap_or_else(|error| panic!("read direct result {}: {error}", path.display()))
+            if result.content_type.is_binary() {
+                let mut file = tokio::fs::File::open(&path)
+                    .await
+                    .expect("open binary test result");
+                batchalign::api::ResultContent::Binary(
+                    batchalign::api::BinaryResultDescriptor::inspect(&mut file)
+                        .await
+                        .expect("inspect binary test result"),
+                )
+            } else {
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("read direct result {}: {error}", path.display())
+                    })
+                    .into()
+            }
         } else {
-            String::new()
+            batchalign::api::ResultContent::default()
         };
         files.push(FileResult {
             filename: result.filename.clone(),

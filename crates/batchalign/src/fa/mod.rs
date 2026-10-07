@@ -34,9 +34,15 @@
 //!   REQUEST (dispatch unit), so a single group keys exactly as it always did
 //!   and each piece of an anchored group keys its own words and window.
 
+mod completion;
+mod input;
 mod raw_evidence;
 mod transport;
 mod units;
+use input::FaAdmission;
+#[cfg(test)]
+pub(crate) use input::read_fa_source;
+pub(crate) use input::{FaWorkingDocument, ReconciledOutput, read_fa_source_named};
 
 use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
@@ -51,8 +57,7 @@ use crate::engine_reports::FaCacheNamespace;
 use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
-use batchalign_transform::parse::{is_ca, is_dummy, is_no_align};
-use batchalign_transform::validate::{ValidityLevel, validate_to_level};
+use batchalign_transform::parse::is_ca;
 use tracing::info;
 
 use crate::chat_ops::fa::Grouping;
@@ -78,118 +83,27 @@ pub(crate) struct FaServices<'a> {
     pub(crate) cache_namespace: &'a FaCacheNamespace,
 }
 
-/// The validity level forced alignment admits an input at.
-///
-/// Stated ONCE. Its output gate reads the level off the [`FaAdmission`] the
-/// admission check produced, so there is no second place for a bar to be
-/// written down and no way for the two to disagree.
-const FA_ADMISSION_LEVEL: ValidityLevel = ValidityLevel::MainTierValid;
-
-/// Proof that an FA input cleared pre-validation, carrying the level it
-/// cleared and the exclusive route to a returned [`FaResult`].
-///
-/// # Why this is a type
-///
-/// Two defects lived in the gap this closes, and both were invisible in
-/// review because the correct-looking code was spread over three functions.
-///
-/// 1. The gate ran at ONE of the four `Ok(FaResult ...)` returns. The
-///    `%wor`-reuse fast path, the no-groups path and the incremental
-///    no-groups path each finalized a model (bullet repair, monotonicity
-///    stripping, decision retention) and returned it having judged nothing.
-///    That fast path is the ordinary rerun route, so the gate was absent from
-///    the commonest way FA output reaches disk. This type is now the only way
-///    to build the returned value, so a new early return cannot skip it: it
-///    has nothing to return. There are exactly two routes, [`Self::finish`]
-///    for a document FA processed and [`Self::pass_through`] for a declared
-///    `@Options: dummy` / `NoAlign` document, and both hand back an
-///    [`AdmittedFaResult`] whose fields are private to this module.
-/// 2. Where the gate did run it restated its level as
-///    `ValidityLevel::StructurallyComplete`, while admission demanded
-///    `MainTierValid`. `ValidityLevel` is `Ord`, so that is strictly lower:
-///    output degraded from L2 to L1 by the run itself passed. The level is
-///    [`FA_ADMISSION_LEVEL`] on both sides now, read from the constant by both
-///    [`Self::admit`] and [`Self::finish`], so restating it is not something a
-///    caller can do.
-///
-/// # Why it carries nothing
-///
-/// It held a `level: ValidityLevel` field that was assigned
-/// `FA_ADMISSION_LEVEL` at its one construction and read back in `finish`: a
-/// copy of a constant, kept in step by hand, and a value a future caller could
-/// have set to something else. The proof is the EXISTENCE of the value, not
-/// anything inside it, so the type is zero-sized and `finish` reads the
-/// constant directly.
-///
-/// The private `()` field is what keeps it unforgeable. A unit struct
-/// `FaAdmission;` would be constructible anywhere the name is visible, which
-/// is the whole crate, and this type's entire job is to be obtainable only by
-/// passing the gate.
-pub(super) struct FaAdmission(());
-
+/// Source admission carried only by the owning active working document.
+/// Every processed output nevertheless requires complete construction
+/// admission in finish; the caller cannot choose its output validity level.
+/// A no-op instead consumes strict, source-bound unchanged-byte admission.
 impl FaAdmission {
-    /// Run FA's pre-validation gate. The only constructor.
-    pub(super) fn admit(
-        file: &crate::chat_ops::ChatFile,
-        parse_errors: &[crate::chat_ops::ParseError],
-    ) -> Result<Self, ServerError> {
-        match validate_to_level(file, parse_errors, FA_ADMISSION_LEVEL) {
-            Ok(()) => Ok(Self(())),
-            Err(errors) => {
-                let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-                Err(ServerError::Validation(format!(
-                    "align pre-validation failed: {}",
-                    msgs.join("; ")
-                )))
-            }
-        }
-    }
-
-    /// Admit a `@Options: dummy` / `NoAlign` document the command refuses to
-    /// touch, and hand back the value the caller returns.
-    ///
-    /// The second and last route to an [`AdmittedFaResult`]. It exists because
-    /// `FaResult::pass_through` used to be a `pub(crate)` constructor that
-    /// built the returned `Ok` value directly at three sites, which made this
-    /// type's own claim to be the only route false. The proof it carries is
-    /// `PostValidated::pass_through`: NOT gated, because gating a dummy file
-    /// re-judges the INPUT against a bar the input never had to meet (it has
-    /// no `@Participants`, so it fails L1) and would refuse a document the
-    /// researcher asked us to leave alone. That refusal is not hypothetical:
-    /// it is what the writer's own second gate did until this proof started
-    /// travelling to it.
-    ///
-    /// # It takes the input TEXT, and that is the point
-    ///
-    /// `align` promises a `@Options: dummy` or `NoAlign` document back
-    /// UNCHANGED, and the book says `NoAlign` is a strict pass-through with
-    /// zero modifications. Until 2026-09-07 the proof was built with
-    /// `PostValidated::declined_stripping_decision_tiers` (then named
-    /// `declined_document`), which SERIALIZES THE MODEL, so the
-    /// bytes written were a round trip through the parser and the serializer
-    /// and every difference that round trip makes reached disk unexamined:
-    /// `@Comment:\tkept   ` came back without its trailing spaces. Nothing was
-    /// gating those bytes, because this is the one route that judges nothing,
-    /// so it is the one route where a silent rewrite could not be caught.
-    ///
-    /// The text therefore travels with the model from the seam that READ it:
-    /// the dispatch task carries the bytes it read off disk, and both entry
-    /// points take the same [`FaInputDocument`], so the incremental path hands
-    /// on the very bytes the full path would.
+    /// Return an unchanged, strictly admitted source.
+    /// The source owns its exact bytes and model; neither a caller-selected
+    /// validity level nor an independently supplied model can grant permission.
     pub(super) fn pass_through(
-        chat_file: crate::chat_ops::ChatFile,
-        original_text: &str,
+        source: batchalign_transform::AdmittedSourceChat<'_>,
         gap_healing: crate::chat_ops::fa::WordGapHealing,
         engine: &str,
         cache_namespace: &FaCacheNamespace,
     ) -> AdmittedFaResult {
-        let document =
-            PostValidated::pass_through(original_text, crate::api::ReleasedCommand::Align);
+        let chat_file = source.document().clone();
+        let document = PostValidated::pass_through(source, crate::api::ReleasedCommand::Align);
         AdmittedFaResult {
             // Written out rather than hidden behind a `FaResult::pass_through`
             // constructor: that constructor was the hole this type exists to
             // close, and there is nothing left for it to be reused by.
-            result: FaResult {
+            evidence: AdmittedFaEvidence::Preserved(FaResult {
                 output: FaOutput::PassThrough(chat_file),
                 group_evidence: Vec::new(),
                 engine: engine.to_owned(),
@@ -198,15 +112,23 @@ impl FaAdmission {
                 timing_decisions: Vec::new(),
                 gap_healing,
                 fallback_events: Vec::new(),
-            },
+            }),
             document,
         }
     }
 
     /// Gate a finished FA result and hand back the value the caller returns.
     ///
+    /// Timing completeness is a fact about the result, never a reason to
+    /// discard it: a result whose words are not all timed is admitted as
+    /// [`AdmittedFaEvidence::Partial`], written with the timing it has, and
+    /// reported through [`AdmittedFaResult::shortfalls`] so the file is
+    /// diagnosed rather than clean. Only an output that fails CHAT admission,
+    /// a changed lexical structure, or an unfulfilled source timing obligation
+    /// refuses the file.
+    ///
     /// Fail-closed: a file whose aligned output fails the gate fails THIS file
-    /// (`ServerError::Validation` classifies as `FailureCategory::Validation`),
+    /// (`OutputAdmission` classifies as `FailureCategory::System`),
     /// so `finalize_success` never runs and nothing is written. A refusal is
     /// therefore reported through the file's failure rather than through a
     /// trace nobody would read, which is why an `FaResult` carries no
@@ -218,19 +140,72 @@ impl FaAdmission {
     /// the L2-gated bytes were never the bytes written; the writer then
     /// manufactured a second, weaker proof of its own over text this one had
     /// never seen.
-    /// It CONSUMES the admission, so one admitted input yields at most one
-    /// finished result. Taking `&self` let `admit(&a)` be followed by
-    /// `finish(result_for_b)`, and by a second `finish` after that; nothing is
-    /// deleted by the change, but the mismatched pair stops type-checking.
-    pub(super) fn finish(self, result: FaResult) -> Result<AdmittedFaResult, ServerError> {
+    /// It consumes this attempt's admission. Retry attempts clone the working
+    /// state's obligation; each finished result still requires its own complete
+    /// output proof. This token alone does not prove input/output identity.
+    ///
+    /// It takes the DRAFT: the media/timing transition runs here, against
+    /// the declaration this source was admitted with, and nowhere else.
+    pub(super) fn finish(
+        self,
+        draft: FaResult<crate::chat_ops::ChatFile>,
+    ) -> Result<AdmittedFaResult, ServerError> {
+        let result = self.reconcile_output(draft)?;
+        self.require_output_timing(result.output.as_chat_file())?;
         let document = PostValidated::gate(
             result.output.as_chat_file(),
-            FA_ADMISSION_LEVEL,
             crate::api::ReleasedCommand::Align,
         )
-        .map_err(|failure| ServerError::Validation(failure.to_string()))?;
-        Ok(AdmittedFaResult { result, document })
+        .map_err(|failure| explain_gate_refusal(result.output.as_chat_file(), failure))?;
+        let evidence = match self.complete_result(result)? {
+            completion::FaCompletion::Complete(complete) => AdmittedFaEvidence::Complete(complete),
+            completion::FaCompletion::Partial(partial) => {
+                // The complete account, once; the record keeps a bounded copy.
+                tracing::warn!(account = %partial.account(), "forced alignment left words untimed; writing the partial result");
+                AdmittedFaEvidence::Partial(partial)
+            }
+        };
+        let document = self.discharge(document);
+        Ok(AdmittedFaResult { evidence, document })
     }
+}
+
+/// Name the cause of an output refusal when it is a kept bullet on an
+/// utterance not in the recording.
+///
+/// Under `--main-bullets keep` or `exact` such a bullet is written back
+/// exactly as given, but it is never an anchor: nothing ordered the timing
+/// aligned around it against it. If it then conflicts with that timing
+/// (start order, or a same-speaker overlap), the output fails its gate. The
+/// gate is the judge: the output is judged again without those bullets, and
+/// only if THAT passes is the refusal theirs, reported as the input-and-policy
+/// conflict it is, with the remedy, instead of as an internal fault.
+fn explain_gate_refusal(
+    output: &crate::chat_ops::ChatFile,
+    failure: crate::pipeline::post_validate::PostValidationFailure,
+) -> ServerError {
+    let mut without = output.clone();
+    let mut utterances = Vec::new();
+    let mut ordinal = 0;
+    for line in &mut without.lines {
+        if let talkbank_model::model::Line::Utterance(utterance) = line {
+            ordinal += 1;
+            match crate::chat_ops::fa::RecordingPresence::of(utterance) {
+                crate::chat_ops::fa::RecordingPresence::InRecording => {}
+                crate::chat_ops::fa::RecordingPresence::NotInRecording(_) => {
+                    if utterance.main.content.bullet.take().is_some() {
+                        utterances.push(ordinal);
+                    }
+                }
+            }
+        }
+    }
+    if utterances.is_empty()
+        || PostValidated::gate_owned(without, crate::api::ReleasedCommand::Align).is_err()
+    {
+        return failure.into_server_error();
+    }
+    ServerError::KeptOffRecordBulletConflict { utterances }
 }
 
 /// A finished FA run whose CHAT bytes are already proven writable.
@@ -242,26 +217,73 @@ impl FaAdmission {
 /// this type in the program are the ones those two functions returned.
 pub(crate) struct AdmittedFaResult {
     /// The run's evidence, for the dashboard timeline.
-    result: FaResult,
+    evidence: AdmittedFaEvidence,
     /// The bytes the writer may persist, and the proof that it may.
     document: PostValidated,
 }
 
+/// Declined alignment retains source evidence; actual timing work must retain
+/// its producer-issued completion payload, not a caller-selected success flag.
+enum AdmittedFaEvidence {
+    Preserved(FaResult),
+    Complete(completion::CompleteFaResult),
+    /// Written with the timing it has; the account is the file's shortfall.
+    Partial(completion::PartialFaResult),
+}
+
+impl AdmittedFaEvidence {
+    fn into_timeline_trace(self) -> crate::types::traces::FaTimelineTrace {
+        match self {
+            Self::Preserved(result) => result.into_timeline_trace(),
+            Self::Complete(complete) => complete.into_timeline_trace(),
+            Self::Partial(partial) => partial.into_timeline_trace(),
+        }
+    }
+}
+
+impl AdmittedFaEvidence {
+    /// Requested work the written document does not carry: the untimed
+    /// words of a partial result, bounded.
+    fn shortfalls(&self) -> Vec<crate::pipeline::post_validate::Shortfall> {
+        match self {
+            Self::Preserved(_) | Self::Complete(_) => Vec::new(),
+            Self::Partial(partial) => vec![partial.account().record()],
+        }
+    }
+}
+
 impl AdmittedFaResult {
-    /// Take the proven bytes, discarding the evidence timeline.
-    pub(crate) fn into_document(self) -> PostValidated {
-        self.document
+    /// Take the proven bytes with their shortfalls, discarding the evidence
+    /// timeline. The shortfalls leave WITH the bytes, so a partial result
+    /// cannot reach the writer without saying what it lacks.
+    pub(crate) fn into_document(
+        self,
+    ) -> (
+        PostValidated,
+        Vec<crate::pipeline::post_validate::Shortfall>,
+    ) {
+        let shortfalls = self.evidence.shortfalls();
+        (self.document, shortfalls)
     }
 
-    /// Split the proven bytes from the evidence timeline.
+    /// Split the proven bytes and their shortfalls from the evidence timeline.
     ///
-    /// Both halves leave together because a caller that wants the timeline
+    /// All three leave together because a caller that wants the timeline
     /// still has to write the document, and handing out the timeline alone
     /// would leave the bytes with no route to disk.
     pub(crate) fn into_document_and_timeline(
         self,
-    ) -> (PostValidated, crate::types::traces::FaTimelineTrace) {
-        (self.document, self.result.into_timeline_trace())
+    ) -> (
+        PostValidated,
+        Vec<crate::pipeline::post_validate::Shortfall>,
+        crate::types::traces::FaTimelineTrace,
+    ) {
+        let shortfalls = self.evidence.shortfalls();
+        (
+            self.document,
+            shortfalls,
+            self.evidence.into_timeline_trace(),
+        )
     }
 }
 
@@ -512,29 +534,17 @@ impl<'a> FaCacheUnitAdmission<'a> {
 // Per-file FA processing
 // ---------------------------------------------------------------------------
 
-/// A CHAT document as forced alignment received it.
-///
-/// The model, the parse errors that came with it, and the BYTES it was read
-/// as, in one value, because the three are only ever right together: the
-/// errors describe that parse and no other, and the text is the only thing
-/// that can keep align's promise to hand a `@Options: dummy` or `NoAlign`
-/// document back byte-identical. As three parameters, nothing stopped a
-/// caller pairing one file's model with another file's text, and the text was
-/// simply absent, which is how the pass-through came to be a re-serialization.
-pub(crate) struct FaInputDocument<'a> {
-    /// The parsed document FA works on.
+/// An attempt produced only by the source-admitted working document.
+pub(crate) enum FaInputDocument<'a> {
+    Preserved(batchalign_transform::AdmittedSourceChat<'static>),
+    Active(ActiveFaInput<'a>),
+}
+
+/// Active attempt: the producer's admission travels with its mutation target.
+/// There is no free constructor accepting unrelated model and parse evidence.
+pub(crate) struct ActiveFaInput<'a> {
     chat_file: crate::chat_ops::ChatFile,
-    /// The errors that parse reported, carried so admission judges the same
-    /// parse the model came from.
-    parse_errors: Vec<crate::chat_ops::ParseError>,
-    /// The bytes the document was read as.
-    ///
-    /// NOT a serialization of `chat_file`, and not required to still describe
-    /// it: the dispatch path runs the UTR pre-pass over the model between the
-    /// read and this call, so the two legitimately diverge. What it is for is
-    /// the one route that applies NOTHING, where the input's own bytes are the
-    /// correct output.
-    text: &'a str,
+    admission: FaAdmission,
     /// The run's main-bullet policy, bound to the input's bullets at the same
     /// parse, before the UTR pre-pass could write any (see
     /// `chat_ops::fa::main_bullets`).
@@ -546,29 +556,6 @@ pub(crate) struct FaInputDocument<'a> {
     /// word was heard ending. Borrowed: every attempt at the file reads the
     /// same anchors.
     anchors: &'a crate::chat_ops::fa::AnchorIndex,
-}
-
-impl<'a> FaInputDocument<'a> {
-    /// Bundle a parsed document with the bytes it was read as.
-    ///
-    /// Deliberately not `parse(text)`: the dispatch path hands over a model
-    /// the UTR pre-pass has already edited, so deriving one from the other
-    /// here would either undo that work or make a false claim about it.
-    pub(crate) fn new(
-        chat_file: crate::chat_ops::ChatFile,
-        parse_errors: Vec<crate::chat_ops::ParseError>,
-        text: &'a str,
-        main_bullets: crate::chat_ops::fa::MainBulletAuthority,
-        anchors: &'a crate::chat_ops::fa::AnchorIndex,
-    ) -> Self {
-        Self {
-            chat_file,
-            parse_errors,
-            text,
-            main_bullets,
-            anchors,
-        }
-    }
 }
 
 /// Lower a kept-bullet failure to the error that fails this file.
@@ -592,13 +579,14 @@ pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -
 /// sole serialization boundary and decides which evidence to persist.
 ///
 /// Algorithm outline:
-/// 1. Pre-validate the document it was handed (`MainTierValid`).
+/// 1. Consume the already source-admitted active or preserved disposition.
 /// 2. Group utterances into FA windows.
 /// 3. Resolve cache hits/misses per group.
 /// 4. Send miss groups through the FA worker transport adapter.
 /// 5. Parse responses and align to transcript words in Rust.
 /// 6. Apply timings + postprocessing (`apply_fa_results`).
-/// 7. Reconcile media/timing typestate and run full post-validation.
+/// 7. Hand the draft to `FaAdmission::finish`: media/timing transition, then
+///    full post-validation.
 pub(crate) async fn run_fa_from_ast(
     document: FaInputDocument<'_>,
     audio: &AudioContext<'_>,
@@ -607,13 +595,23 @@ pub(crate) async fn run_fa_from_ast(
     fa_params: &FaParams,
     progress: Option<&ProgressSender>,
 ) -> Result<AdmittedFaResult, ServerError> {
-    let FaInputDocument {
+    let active = match document {
+        FaInputDocument::Preserved(source) => {
+            return Ok(FaAdmission::pass_through(
+                source,
+                fa_params.gap_healing,
+                fa_params.engine.as_wire_name(),
+                services.cache_namespace,
+            ));
+        }
+        FaInputDocument::Active(active) => active,
+    };
+    let ActiveFaInput {
         mut chat_file,
-        parse_errors,
-        text: chat_text,
+        admission,
         main_bullets,
         anchors,
-    } = document;
+    } = active;
     // 1a′. Suppress %wor for Conversation Analysis transcripts.
     // CA transcripts (@Options: CA) use prosodic notation (⌈⌉⌊⌋, arrows,
     // lengthening marks) that %wor cannot represent. Generating %wor for
@@ -624,41 +622,6 @@ pub(crate) async fn run_fa_from_ast(
     } else {
         fa_params.wor_tier.should_write()
     };
-
-    // 1b. Skip dummy files
-    if is_dummy(&chat_file) {
-        return Ok(FaAdmission::pass_through(
-            chat_file,
-            chat_text,
-            fa_params.gap_healing,
-            fa_params.engine.as_wire_name(),
-            services.cache_namespace,
-        ));
-    }
-
-    // 1c. @Options: NoAlign: strict pass-through, zero modifications.
-    //
-    // A researcher who sets this option has opted the file out of all
-    // alignment processing.  The file is returned EXACTLY as parsed:
-    // no timestamps added, removed, or adjusted, no %wor generated,
-    // no decision tiers written.  This includes cleanup passes that
-    // might seem safe (e.g., monotonicity enforcement); those are
-    // the researcher's responsibility.
-    //
-    // See book/src/batchalign/developer/commands/align.md: "NoAlign: strict pass-through".
-    if is_no_align(&chat_file) {
-        return Ok(FaAdmission::pass_through(
-            chat_file,
-            chat_text,
-            fa_params.gap_healing,
-            fa_params.engine.as_wire_name(),
-            services.cache_namespace,
-        ));
-    }
-
-    // 1d. Pre-validation gate. The level lives on `FaAdmission`, and the
-    // proof it returns is what the output gate later reads its bar from.
-    let admission = FaAdmission::admit(&chat_file, &parse_errors)?;
 
     // 1d'. Pair the projection policy with the main bullets bound at the
     // parse. Every finalization route below takes this one value.
@@ -708,7 +671,7 @@ pub(crate) async fn run_fa_from_ast(
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
                 services.cache_namespace,
-            )?
+            )
             .with_written_decisions(written),
         );
     }
@@ -771,11 +734,15 @@ pub(crate) async fn run_fa_from_ast(
     let recording = audio.recording().await?;
     // 2c. Group utterances. An utterance over the engine budget is split at
     // the UTR anchors when they allow it; see `chat_ops::fa::split`.
+    let (admission, grouping) = admission.admit_grouping(
+        group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors),
+        &chat_file,
+    )?;
     let Grouping {
         groups,
         decisions: grouping_decisions,
         windows_clamped,
-    } = group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors);
+    } = grouping;
 
     if groups.is_empty() {
         // `partially_reused_touched` may be non-empty here too (1f refreshed
@@ -820,7 +787,7 @@ pub(crate) async fn run_fa_from_ast(
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
                 services.cache_namespace,
-            )?
+            )
             .with_written_decisions(written),
         );
     }
@@ -907,12 +874,11 @@ pub(crate) async fn run_fa_from_ast(
     let decision_traces = decision_records.into_iter().map(Into::into).collect();
     let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
-    // 10. Post-validation runs in `FaAdmission::finish`, below, at the level
-    //    this file was ADMITTED at, together with every other `Ok` return.
-    let output = FaOutput::processed(chat_file)?;
-
+    // 10. Every processed return requires complete typed construction
+    // admission; `finish` also takes the draft through the media/timing
+    // transition its source was admitted for.
     admission.finish(FaResult {
-        output,
+        output: chat_file,
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
         cache_namespace: services.cache_namespace.clone(),
@@ -924,16 +890,17 @@ pub(crate) async fn run_fa_from_ast(
 }
 
 mod incremental;
-pub(crate) use incremental::process_fa_incremental;
+pub(crate) use incremental::{RetainedFaPrior, process_fa_incremental};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat_ops::fa::WordGapHealing;
+    use batchalign_transform::validate::ValidityLevel;
     use talkbank_model::model::Line;
 
     /// An L2-valid file: participants, languages, terminator, main-tier
-    /// content, and a `@Media` line so `FaOutput::processed` can reconcile.
+    /// content, and a `@Media` line so the media/timing transition admits it.
     const ALIGNED: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tCHI Target_Child\n\
 @ID:\teng|test|CHI|||||Target_Child|||\n\
@@ -948,55 +915,60 @@ mod tests {
         file
     }
 
+    fn source_admission() -> FaAdmission {
+        let source = read_fa_source(ALIGNED).expect("the source is completely valid");
+        match source.attempt() {
+            FaInputDocument::Active(active) => active.admission,
+            FaInputDocument::Preserved(_) => panic!("fixture must use active alignment"),
+        }
+    }
+
     /// A fast-path-shaped result: no groups, built exactly as the `%wor`-reuse
     /// rerun route builds one.
-    fn fast_path_result(file: crate::chat_ops::ChatFile) -> FaResult {
+    fn fast_path_result(file: crate::chat_ops::ChatFile) -> FaResult<crate::chat_ops::ChatFile> {
         FaResult::without_groups(
             file,
             WordGapHealing::PreserveMeasured,
             "test_engine",
             &FaCacheNamespace::for_test("test-build"),
         )
-        .expect("the fixture has one usable @Media declaration")
     }
 
     /// RED FIRST (2026-09-07 review, item 1): a document `align` declares it
     /// will not touch must be written back BYTE-IDENTICAL.
     ///
-    /// The pass-through proof was built with the constructor now called
-    /// `PostValidated::declined_stripping_decision_tiers`, which serializes
-    /// the MODEL, so the
-    /// bytes written were a parse-and-serialize round trip of the input rather
-    /// than the input. This route judges nothing by design, so nothing was
-    /// looking, and the trailing spaces on the `@Comment` line here were gone
-    /// from the file the researcher got back after asking us to leave it alone.
+    /// Complete source admission retains original bytes alongside its parsed
+    /// document. Serializing the model instead would lose the trailing spaces
+    /// on the comment, despite the command promising unchanged output.
     ///
     /// The `assert_ne!` is the precondition and it is what makes this test
     /// worth having: without a construct the round trip actually changes, the
     /// assertion below would hold under both behaviours.
     #[test]
     fn a_declared_pass_through_carries_the_input_bytes_not_a_reserialization() {
-        const DUMMY: &str = "@UTF8\n@Begin\n@Options:\tdummy\n@Comment:\tkept   \n\
-*PAR:\thello .\n@End\n";
-        let parser = crate::chat_parser();
-        let (chat_file, _errors) = batchalign_transform::parse::parse_lenient(&parser, DUMMY);
+        const DUMMY: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Child\n@Options:\tNoAlign\n\
+@ID:\teng|test|CHI|||||Child|||\n@Comment:\tkept   \n\
+*CHI:\thello .\n@End\n";
+        let read = read_fa_source(DUMMY).expect("the NoAlign source is valid");
         assert_ne!(
-            batchalign_transform::serialize::to_chat_string(&chat_file),
+            batchalign_transform::serialize::to_chat_string(read.document()),
             DUMMY,
             "precondition: re-serializing this model is NOT the identity, so a \
              proof built from the model cannot be the input's bytes"
         );
 
         let admitted = FaAdmission::pass_through(
-            chat_file,
-            DUMMY,
+            read.unchanged()
+                .expect("NoAlign carries source admission")
+                .clone(),
             WordGapHealing::PreserveMeasured,
             "test_engine",
             &FaCacheNamespace::for_test("test-build"),
         );
 
         assert_eq!(
-            admitted.into_document().as_str(),
+            admitted.into_document().0.as_str(),
             DUMMY,
             "a document align declines to touch must be written back unchanged"
         );
@@ -1008,8 +980,7 @@ mod tests {
     /// that fails `validate_output("align")` must be REFUSED, not returned.
     #[test]
     fn a_fast_path_result_failing_the_align_output_check_is_refused() {
-        let admitted = parse_aligned(ALIGNED);
-        let admission = FaAdmission::admit(&admitted, &[]).expect("the fixture is L2-valid");
+        let admission = source_admission();
 
         let mut degraded = parse_aligned(ALIGNED);
         for line in &mut degraded.lines {
@@ -1028,14 +999,11 @@ mod tests {
         );
     }
 
-    /// RED FIRST (review item 2): the gate used to restate its level as
-    /// `StructurallyComplete` while admission demanded `MainTierValid`, so a
-    /// run that degraded its own input from L2 to L1 passed. The level now
-    /// comes from the admission, so this output is refused.
+    /// Complete construction refuses an empty main tier even when the legacy
+    /// structural-only workflow check would accept it.
     #[test]
     fn output_degraded_from_l2_to_l1_is_refused() {
-        let admitted = parse_aligned(ALIGNED);
-        let admission = FaAdmission::admit(&admitted, &[]).expect("the fixture is L2-valid");
+        let admission = source_admission();
 
         let mut degraded = parse_aligned(ALIGNED);
         for line in &mut degraded.lines {
@@ -1053,28 +1021,270 @@ mod tests {
             )
             .is_ok(),
             "precondition: the degraded output still satisfies L1, so only a \
-             gate at the ADMITTED level can catch it"
+             complete construction must not rely on this partial check"
         );
 
         let Err(failure) = admission.finish(fast_path_result(degraded)) else {
             panic!("output degraded below its admission level must be refused");
         };
         assert!(
-            failure.to_string().contains("empty main tier"),
-            "the refusal must name the L2 failure, got: {failure}"
+            failure.to_string().contains("E306"),
+            "the refusal must retain Chatter's empty-utterance diagnostic, got: {failure}"
         );
     }
 
     /// An output that still meets the bar its input was admitted at passes.
     #[test]
     fn an_undegraded_fast_path_result_is_admitted() {
-        let admitted = parse_aligned(ALIGNED);
-        let admission = FaAdmission::admit(&admitted, &[]).expect("the fixture is L2-valid");
+        let admission = source_admission();
+        const COMPLETE: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}0_500\u{15}\n\
+%wor:\thello \u{15}0_250\u{15} world \u{15}250_500\u{15} .\n\
+@End\n";
         assert!(
             admission
-                .finish(fast_path_result(parse_aligned(ALIGNED)))
+                .finish(fast_path_result(parse_aligned(COMPLETE)))
                 .is_ok(),
-            "an unchanged output must still pass its own gate"
+            "complete retained timing must still pass its own gate"
+        );
+    }
+
+    /// THE BOUNDARY (align recovery step 2): a file where part of the
+    /// transcript cannot be aligned runs through the real FA entry point and
+    /// comes back admitted and partial. The timed utterance keeps its timing
+    /// (reused from its `%wor`, so no worker is needed), the untimed one stays
+    /// in the transcript without bullets, and the shortfall names it with the
+    /// window grouping refused. The writer's report is diagnosed, not clean.
+    #[tokio::test]
+    async fn a_partly_alignable_file_is_written_with_its_untimed_account() {
+        use crate::pipeline::post_validate::{OutputReport, ProducedOutput};
+
+        const PARTLY: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}0_500\u{15}\n\
+%wor:\thello \u{15}0_200\u{15} world \u{15}200_500\u{15} .\n\
+*CHI:\tmore words here .\n\
+@End\n";
+        let admitted = run_on_a_long_recording(PARTLY)
+            .await
+            .expect("a partly alignable file is written, not refused");
+
+        let (document, shortfalls) = admitted.into_document();
+        insta::assert_json_snapshot!(shortfalls, @r#"
+        [
+          {
+            "kind": "timing_incomplete",
+            "required_words": 5,
+            "untimed_words": 3,
+            "untimed_utterances": 1,
+            "first_untimed": [
+              {
+                "utterance": 2,
+                "words": 3,
+                "untimed_words": 3,
+                "cause": {
+                  "kind": "window_refused",
+                  "window": {
+                    "cause": "over_budget",
+                    "start_ms": 0,
+                    "end_ms": 300017,
+                    "budget_ms": 15000
+                  }
+                }
+              }
+            ]
+          }
+        ]
+        "#);
+        let text = document.as_str();
+        assert!(
+            text.contains("%wor:\thello \u{15}0_200\u{15} world \u{15}200_500\u{15} ."),
+            "{text}"
+        );
+        assert!(text.contains("*CHI:\tmore words here .\n"), "{text}");
+        assert!(matches!(
+            OutputReport::of(&ProducedOutput::from(document), &shortfalls),
+            OutputReport::Diagnosed(_)
+        ));
+    }
+
+    /// Run the real FA entry point on `source` against a real 300 s
+    /// recording, with a pool that has no workers: every case using it is
+    /// decided without inference. An untimed utterance's estimated window
+    /// spans the whole recording, far over the 15 s budget, so grouping
+    /// refuses it.
+    async fn run_on_a_long_recording(source: &str) -> Result<AdmittedFaResult, ServerError> {
+        use crate::cache::UtteranceCache;
+        use crate::worker::pool::{PoolConfig, WorkerPool};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audio_path = dir.path().join("sample.mp3");
+        crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
+        let identity = crate::chat_ops::fa::AudioIdentity::from_metadata("sample.mp3", 0, 0);
+        let audio = AudioContext {
+            audio_path: &audio_path,
+            audio_identity: &identity,
+            audio_duration: None,
+        };
+        let pool = WorkerPool::new(PoolConfig::default());
+        let cache = UtteranceCache::sqlite(Some(dir.path().join("cache")))
+            .await
+            .expect("cache");
+        let namespace = FaCacheNamespace::for_test("test-fa-wave-v1");
+        let services = FaServices {
+            pipeline: PipelineServices::new(&pool, &cache),
+            cache_namespace: &namespace,
+        };
+        let params = FaParams {
+            gap_healing: WordGapHealing::Heal,
+            existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy::Preserve,
+            end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy::ClampAllAdjacent,
+            main_bullets: crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
+            engine: crate::types::engines::FaEngineName::Wave2Vec,
+            cache_policy: crate::types::params::CachePolicy::UseCache,
+            wor_tier: crate::types::params::WorTierPolicy::Include,
+            bullet_repair: true,
+            review_level: crate::chat_ops::fa::ReviewLevel::None,
+        };
+        let source = read_fa_source_named(
+            source,
+            talkbank_model::model::TranscriptName::for_path(std::path::Path::new("sample.cha")),
+            crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
+        )?;
+        run_fa_from_ast(
+            source.attempt(),
+            &audio,
+            &crate::api::LanguageCode3::eng(),
+            services,
+            &params,
+            None,
+        )
+        .await
+    }
+
+    /// A never-aligned transcript of `sample.cha`, two untimed utterances,
+    /// with the case's `@Media` line.
+    fn never_aligned(media_line: &str) -> String {
+        format!(
+            "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+{media_line}*CHI:\thello world .\n\
+*CHI:\tmore words .\n@End\n"
+        )
+    }
+
+    /// THE BOUNDARY for a never-aligned transcript, through the real entry
+    /// point. Neither declaration is refused at input any more; what each
+    /// one owes decides the outcome when alignment finds no admissible
+    /// window. `unlinked` is written untimed, still `unlinked`, diagnosed.
+    /// Linked owes timing (E544), so it is refused, as unavailable evidence
+    /// with the header change named, never as an internal error.
+    #[tokio::test]
+    async fn a_never_aligned_transcript_reaches_alignment_under_either_declaration() {
+        let unlinked =
+            run_on_a_long_recording(&never_aligned("@Media:\tsample, audio, unlinked\n"))
+                .await
+                .expect("an unlinked never-aligned transcript is written");
+        let (document, shortfalls) = unlinked.into_document();
+        assert!(
+            document
+                .as_str()
+                .contains("@Media:\tsample, audio, unlinked\n"),
+            "untimed output stays unlinked: {}",
+            document.as_str()
+        );
+        assert_eq!(shortfalls.len(), 1, "its untimed words are its shortfall");
+
+        let Err(linked) = run_on_a_long_recording(&never_aligned("@Media:\tsample, audio\n")).await
+        else {
+            panic!("a linked transcript that gains no timing cannot be written");
+        };
+        let category = crate::runner::util::classify_server_error(&linked);
+        assert_eq!(
+            category,
+            crate::scheduling::FailureCategory::EvidenceUnavailable
+        );
+        let message = linked.to_string();
+        assert!(message.contains("add `, unlinked`"), "{message}");
+        assert!(message.contains("no output was written"), "{message}");
+        assert!(!message.contains("regeneration"), "{message}");
+
+        let Err(undeclared) = run_on_a_long_recording(&never_aligned("")).await else {
+            panic!("no @Media is refused");
+        };
+        assert!(
+            matches!(undeclared, ServerError::AlignmentMedia(_)),
+            "refused at admission, not after alignment: {undeclared}"
+        );
+    }
+
+    /// Timing written into a never-aligned source takes the media transition
+    /// its admission proved: `unlinked` is consumed, a plain declaration
+    /// stays, and the written document is valid CHAT. The same untimed
+    /// output from a linked source is refused, because E544 forbids writing it.
+    #[test]
+    fn timing_written_into_a_never_aligned_source_links_its_media() {
+        const TIMED: &str = "*CHI:\thello world . \u{15}0_500\u{15}\n\
+%wor:\thello \u{15}0_200\u{15} world \u{15}200_500\u{15} .\n\
+*CHI:\tmore words . \u{15}600_900\u{15}\n\
+%wor:\tmore \u{15}600_700\u{15} words \u{15}700_900\u{15} .\n@End\n";
+        let untimed_body = "*CHI:\thello world .\n*CHI:\tmore words .\n@End\n";
+        let attempt = |source: &str| {
+            let working = read_fa_source_named(
+                source,
+                talkbank_model::model::TranscriptName::for_path(std::path::Path::new("sample.cha")),
+                crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
+            )
+            .expect("a never-aligned source is admitted");
+            match working.attempt() {
+                FaInputDocument::Active(active) => active.admission,
+                FaInputDocument::Preserved(_) => panic!("a never-aligned source is aligned"),
+            }
+        };
+        for (declared, written) in [
+            ("sample, audio, unlinked", "sample, audio"),
+            ("sample, audio", "sample, audio"),
+            ("sample, video, unlinked", "sample, video"),
+        ] {
+            let source = never_aligned(&format!("@Media:\t{declared}\n"));
+            let output = source.replace(untimed_body, TIMED);
+            let admitted = attempt(&source)
+                .finish(fast_path_result(parse_aligned(&output)))
+                .expect("timed output of an admitted source is written");
+            let (document, _) = admitted.into_document();
+            let text = document.as_str();
+            assert!(text.contains(&format!("@Media:\t{written}\n")), "{text}");
+            assert!(!text.contains("unlinked"), "{text}");
+            batchalign_transform::parse_and_validate(
+                text,
+                talkbank_model::ParseValidateOptions::default().with_validation(),
+            )
+            .expect("aligned output is valid CHAT");
+        }
+
+        let linked = never_aligned("@Media:\tsample, audio\n");
+        let Err(refused) = attempt(&linked).finish(fast_path_result(parse_aligned(&linked))) else {
+            panic!("an untimed output of a linked source cannot be written");
+        };
+        assert!(
+            matches!(
+                refused,
+                ServerError::RequiredEvidenceUnavailable(
+                    crate::error::MissingRequiredEvidence::TimingRegeneration(_)
+                )
+            ),
+            "{refused}"
+        );
+        assert!(
+            refused
+                .to_string()
+                .starts_with("alignment produced no timing"),
+            "{refused}"
         );
     }
 

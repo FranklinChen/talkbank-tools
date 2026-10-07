@@ -51,9 +51,12 @@ pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguage
     match command {
         // No `--lang` on the CLI. Morphotag and translate resolve per file
         // from `@Languages:`; coref is English-only and owns the constant.
-        ReleasedCommand::Morphotag | ReleasedCommand::Translate | ReleasedCommand::Coref => {
-            CommandLanguageSource::PerFile
-        }
+        // Native export carries the existing no-job-language wire value but
+        // never invokes linguistic resolution or reads a CHAT header.
+        ReleasedCommand::Morphotag
+        | ReleasedCommand::Translate
+        | ReleasedCommand::Coref
+        | ReleasedCommand::Convert => CommandLanguageSource::PerFile,
         // Everything else carries a real job-level language (or `auto`, which
         // ASR resolves before any language-bearing stage runs, or, for
         // transcription, a pair; see `language_pair_support`).
@@ -127,7 +130,8 @@ pub(crate) const fn language_pair_support(command: ReleasedCommand) -> LanguageP
         | ReleasedCommand::Compare
         | ReleasedCommand::Avqi
         | ReleasedCommand::Diarize
-        | ReleasedCommand::SpeakerIdentify => LanguagePairSupport::Refused,
+        | ReleasedCommand::SpeakerIdentify
+        | ReleasedCommand::Convert => LanguagePairSupport::Refused,
     }
 }
 
@@ -275,15 +279,16 @@ mod tests {
         assert!(error.to_string().contains("per file"), "{error}");
     }
 
-    /// Every released command states its shape, and the three per-file
-    /// commands are exactly the three with no `--lang` on the CLI.
+    /// Every released command states its shape. Native export uses the
+    /// no-job-language wire value without requesting linguistic resolution.
     #[test]
     fn exactly_the_no_lang_commands_are_per_file() {
         for command in ReleasedCommand::ALL {
             let expected = match command {
                 ReleasedCommand::Morphotag
                 | ReleasedCommand::Translate
-                | ReleasedCommand::Coref => CommandLanguageSource::PerFile,
+                | ReleasedCommand::Coref
+                | ReleasedCommand::Convert => CommandLanguageSource::PerFile,
                 ReleasedCommand::Align
                 | ReleasedCommand::Transcribe
                 | ReleasedCommand::TranscribeS

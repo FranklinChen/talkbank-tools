@@ -4,7 +4,7 @@
 @Participants:	PAR Participant, INV Investigator
 @ID:	eng|test|PAR|||||Participant|||
 @ID:	eng|test|INV|||||Investigator|||
-@Media:	test, audio
+@Media:	utr_lazy_overlap_backchannel, audio, unlinked
 *PAR:	I went to the store yesterday .
 *INV:	+< mhm .
 *PAR:	and I bought some groceries .

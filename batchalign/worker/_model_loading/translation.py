@@ -40,6 +40,8 @@ import logging
 import typing
 from typing import NewType
 
+from pydantic import BaseModel, StrictStr
+
 from batchalign.inference._domain_types import (
     LanguageCode,
     TranslationBackend,
@@ -69,6 +71,15 @@ TencentLanguageCode = NewType("TencentLanguageCode", str)
 # language). Distinct from ``LanguageCode`` (ISO-639-3) so a
 # misplaced ISO-639-3 code at the Aliyun API boundary won't typecheck.
 AliyunLanguageCode = NewType("AliyunLanguageCode", str)
+
+
+class _TencentTranslation(BaseModel):
+    TargetText: StrictStr
+
+
+class _TencentTranslationResponse(BaseModel):
+    Response: _TencentTranslation
+
 
 L = logging.getLogger("batchalign.worker")
 
@@ -151,11 +162,13 @@ class _GoogleTranslateSession:
         self._translator.client.event_hooks["response"].append(self._seen.record)
         self._loop = asyncio.new_event_loop()
 
-    async def _translate(self, text: str) -> str:
-        result = await self._translator.translate(text)
+    async def _translate(self, text: str, src_lang: str, target_lang: str) -> str:
+        result = await self._translator.translate(text, src=src_lang, dest=target_lang)
         return str(getattr(result, "text", result))
 
-    def __call__(self, text: str, src_lang: LanguageCode) -> str:
+    def __call__(
+        self, text: str, src_lang: LanguageCode, target_lang: LanguageCode = "eng"
+    ) -> str:
         """Run the async translator behind the worker's synchronous IPC seam.
 
         What the failure means depends on what the endpoint answered:
@@ -165,8 +178,10 @@ class _GoogleTranslateSession:
         use a reply it got, which is final and reported as an engine failure.
         """
         self._seen.clear()
+        source = _google_language(src_lang)
+        target = _google_language(target_lang)
         try:
-            return self._loop.run_until_complete(self._translate(text))
+            return self._loop.run_until_complete(self._translate(text, source, target))
         except Exception as error:
             response = self._seen.take()
             if response is not None and response.status < 400:
@@ -175,6 +190,19 @@ class _GoogleTranslateSession:
                     f"library could not use the reply: {error}"
                 ) from error
             raise ProviderRefusal(response, error) from error
+
+
+def _google_language(code: LanguageCode) -> str:
+    """ISO 639-3 to a supported Google code, with no English fallback."""
+    import pycountry
+    from googletrans.constants import LANGUAGES
+
+    special = {"cmn": "zh-cn", "zho": "zh-cn", "yue": "yue"}
+    language = pycountry.languages.get(alpha_3=code)
+    mapped = special.get(code) or getattr(language, "alpha_2", None) or code
+    if mapped not in LANGUAGES:
+        raise ValueError(f"Google Translate does not support language {code!r}")
+    return str(mapped)
 
 
 def _load_google_translate() -> None:
@@ -215,10 +243,12 @@ def _load_seamless_translate() -> None:
     if hasattr(model, "eval"):
         model.eval()  # type: ignore[no-untyped-call]
 
-    def seamless_fn(text: str, src_lang: LanguageCode) -> str:
+    def seamless_fn(
+        text: str, src_lang: LanguageCode, target_lang: LanguageCode = "eng"
+    ) -> str:
         """Translate one text payload through SeamlessM4T."""
         inputs = processor(text=text, src_lang=src_lang, return_tensors="pt")
-        output = model.generate(**inputs, tgt_lang="eng", generate_speech=False)
+        output = model.generate(**inputs, tgt_lang=target_lang, generate_speech=False)
         return str(processor.decode(output[0].tolist()[0], skip_special_tokens=True))
 
     _state.translation = LoadedTranslation(
@@ -278,11 +308,17 @@ def _load_nllb_translate() -> None:
     # non-deterministic + lower quality.
     if hasattr(model, "eval"):
         model.eval()
-    eng_token_id = tokenizer.convert_tokens_to_ids("eng_Latn")
 
-    def nllb_fn(text: str, src_lang: LanguageCode) -> str:
+    def nllb_fn(
+        text: str, src_lang: LanguageCode, target_lang: LanguageCode = "eng"
+    ) -> str:
         """Translate one text payload through NLLB-200."""
         flores_src = _ISO_639_3_TO_FLORES_200.get(src_lang)
+        flores_target = _ISO_639_3_TO_FLORES_200.get(target_lang)
+        if flores_target is None:
+            raise ValueError(
+                f"NLLB backend has no FLORES-200 mapping for target language {target_lang!r}"
+            )
         if flores_src is None:
             raise ValueError(
                 f"NLLB backend has no FLORES-200 mapping for source "
@@ -295,7 +331,7 @@ def _load_nllb_translate() -> None:
         inputs = tokenizer(text, return_tensors="pt")
         translated = model.generate(
             **inputs,
-            forced_bos_token_id=eng_token_id,
+            forced_bos_token_id=tokenizer.convert_tokens_to_ids(flores_target),
             max_length=256,
         )
         return str(tokenizer.decode(translated[0], skip_special_tokens=True))
@@ -362,21 +398,25 @@ def _load_tencent_translate() -> None:
     region = creds["engine.tencent.region"]
 
     from tencentcloud.common import credential
+    from tencentcloud.common.common_client import CommonClient
     from tencentcloud.common.exception.tencent_cloud_sdk_exception import (
         TencentCloudSDKException,
     )
     from tencentcloud.common.profile.client_profile import ClientProfile
     from tencentcloud.common.profile.http_profile import HttpProfile
-    from tencentcloud.tmt.v20180321 import models, tmt_client
 
     cred = credential.Credential(secret_id, secret_key)
     http_profile = HttpProfile()
     http_profile.endpoint = "tmt.tencentcloudapi.com"
     client_profile = ClientProfile()
     client_profile.httpProfile = http_profile
-    client = tmt_client.TmtClient(cred, region, client_profile)
+    # The generated TMT package no longer contains TextTranslate. The SDK's
+    # supported general client preserves the same signed API and endpoint.
+    client = CommonClient("tmt", "2018-03-21", cred, region, client_profile)
 
-    def tencent_fn(text: str, src_lang: LanguageCode) -> str:
+    def tencent_fn(
+        text: str, src_lang: LanguageCode, target_lang: LanguageCode = "eng"
+    ) -> str:
         """Translate one text payload through Tencent TMT."""
         if not text:
             # Defense in depth: upstream batch infer skips empties,
@@ -384,6 +424,11 @@ def _load_tencent_translate() -> None:
             # that looks like a credential failure.
             return ""
         tencent_src = _ISO_639_3_TO_TENCENT_LANG.get(src_lang)
+        tencent_target = _ISO_639_3_TO_TENCENT_LANG.get(target_lang)
+        if tencent_target is None:
+            raise ValueError(
+                f"Tencent TMT does not support target language {target_lang!r}"
+            )
         if tencent_src is None:
             # Cantonese (``yue``) is the prototypical case that lands
             # here: Tencent TMT does not list it as a source language.
@@ -396,16 +441,17 @@ def _load_tencent_translate() -> None:
                 f"(cloud, supports Cantonese) or --translate-engine nllb "
                 f"(self-hosted local model) for this language"
             )
-        req = models.TextTranslateRequest()
-        req.SourceText = text
-        req.Source = tencent_src
-        req.Target = "en"
-        req.ProjectId = 0
+        req = {
+            "SourceText": text,
+            "Source": tencent_src,
+            "Target": tencent_target,
+            "ProjectId": 0,
+        }
         try:
-            resp = client.TextTranslate(req)
+            resp = client.call_json("TextTranslate", req)
         except TencentCloudSDKException as exc:
             raise RuntimeError(f"Tencent TMT translation failed: {exc}") from exc
-        return str(resp.TargetText)
+        return _TencentTranslationResponse.model_validate(resp).Response.TargetText
 
     _state.translation = LoadedTranslation(
         engine="tencent-tmt",
@@ -422,8 +468,8 @@ def _load_tencent_translate() -> None:
 # nllb`` for that language.
 _ISO_639_3_TO_ALIYUN_LANG: dict[LanguageCode, AliyunLanguageCode] = {
     LanguageCode("eng"): AliyunLanguageCode("en"),
-    LanguageCode("spa"): AliyunLanguageCode("spa"),
-    LanguageCode("fra"): AliyunLanguageCode("fra"),
+    LanguageCode("spa"): AliyunLanguageCode("es"),
+    LanguageCode("fra"): AliyunLanguageCode("fr"),
     LanguageCode("deu"): AliyunLanguageCode("de"),
     LanguageCode("ita"): AliyunLanguageCode("it"),
     LanguageCode("por"): AliyunLanguageCode("pt"),
@@ -435,7 +481,7 @@ _ISO_639_3_TO_ALIYUN_LANG: dict[LanguageCode, AliyunLanguageCode] = {
     LanguageCode("kor"): AliyunLanguageCode("ko"),
     LanguageCode("ara"): AliyunLanguageCode("ar"),
     LanguageCode("tha"): AliyunLanguageCode("th"),
-    LanguageCode("vie"): AliyunLanguageCode("vie"),
+    LanguageCode("vie"): AliyunLanguageCode("vi"),
     LanguageCode("tur"): AliyunLanguageCode("tr"),
     LanguageCode("ind"): AliyunLanguageCode("id"),
     LanguageCode("msa"): AliyunLanguageCode("ms"),
@@ -502,7 +548,9 @@ def _load_aliyun_translate() -> None:
 
     client = AcsClient(access_key_id, access_key_secret, _ALIYUN_MT_REGION)
 
-    def aliyun_fn(text: str, src_lang: LanguageCode) -> str:
+    def aliyun_fn(
+        text: str, src_lang: LanguageCode, target_lang: LanguageCode = "eng"
+    ) -> str:
         """Translate one text payload through Aliyun MT."""
         if not text:
             # Defense in depth: upstream batch infer skips empties,
@@ -510,6 +558,11 @@ def _load_aliyun_translate() -> None:
             # that looks like a credential failure.
             return ""
         aliyun_src = _ISO_639_3_TO_ALIYUN_LANG.get(src_lang)
+        aliyun_target = _ISO_639_3_TO_ALIYUN_LANG.get(target_lang)
+        if aliyun_target is None:
+            raise ValueError(
+                f"Aliyun MT does not have a mapped target language {target_lang!r}"
+            )
         if aliyun_src is None:
             raise ValueError(
                 f"Aliyun MT does not have a mapped source language "
@@ -519,7 +572,7 @@ def _load_aliyun_translate() -> None:
         req = TranslateGeneralRequest()
         req.set_FormatType(_ALIYUN_MT_FORMAT_TYPE)
         req.set_SourceLanguage(aliyun_src)
-        req.set_TargetLanguage("en")
+        req.set_TargetLanguage(aliyun_target)
         req.set_SourceText(text)
         req.set_Scene(_ALIYUN_MT_SCENE)
         try:

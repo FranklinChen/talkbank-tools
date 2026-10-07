@@ -27,7 +27,6 @@ pub use commands::*;
 pub use global_opts::{GlobalOpts, MediaCacheOpts};
 pub use options::*;
 
-use crate::api::ReleasedCommand;
 use clap::{Args, Parser, Subcommand};
 
 /// batchalign3: process .cha and/or audio files.
@@ -82,6 +81,8 @@ pub struct IncrementalOpts {
 /// Top-level command enum.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Export recordings as new WAV or MP3 files, without loading ML models.
+    Convert(ConvertArgs),
     /// Align transcripts against corresponding media files.
     Align(AlignArgs),
     /// Create a transcript from audio files.
@@ -170,9 +171,11 @@ pub enum Commands {
 
 /// Stable processing-command metadata derived from parsed CLI args.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It carries no command: the command is the one the typed options name
+/// (`CommandOptions::command`), so the transcribe/diarize choice is made in
+/// one place, `build_typed_options`, and nothing can disagree with it.
 pub struct CommandProfile<'a> {
-    /// Typed released command sent to the server/runtime.
-    pub command: ReleasedCommand,
     /// Primary language argument for this command.
     pub lang: &'a str,
     /// Requested speaker count for this command.
@@ -226,34 +229,22 @@ impl CommonOpts {
     /// Extract the stable processing profile for one command.
     pub fn command_profile(cmd: &Commands) -> CommandProfile<'_> {
         match cmd {
+            Commands::Convert(_) => CommandProfile {
+                lang: "per-file",
+                num_speakers: 1,
+                input_kind: InputKind::Media,
+            },
             Commands::Align(_) => CommandProfile {
-                command: ReleasedCommand::Align,
                 lang: "eng",
                 num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
-            Commands::Transcribe(a) => {
-                let diarize = if a.diarize {
-                    true
-                } else if a.nodiarize {
-                    false
-                } else {
-                    a.diarization == DiarizationMode::Enabled
-                };
-                let command = if diarize {
-                    ReleasedCommand::TranscribeS
-                } else {
-                    ReleasedCommand::Transcribe
-                };
-                CommandProfile {
-                    command,
-                    lang: &a.lang,
-                    num_speakers: a.num_speakers,
-                    input_kind: InputKind::Media,
-                }
-            }
+            Commands::Transcribe(a) => CommandProfile {
+                lang: &a.lang,
+                num_speakers: a.num_speakers,
+                input_kind: InputKind::Media,
+            },
             Commands::Translate(_a) => CommandProfile {
-                command: ReleasedCommand::Translate,
                 // Translate has no `--lang`. Source language for each file is
                 // read from the file's `@Languages:` header by
                 // `dispatch_translate_job`. The translation target is fixed
@@ -270,7 +261,6 @@ impl CommonOpts {
                 input_kind: InputKind::Chat,
             },
             Commands::Morphotag(_a) => CommandProfile {
-                command: ReleasedCommand::Morphotag,
                 // Morphotag has no `--lang`. Per-file inference and provenance
                 // come from each file's `@Languages:` header, resolved in
                 // `pipeline/morphosyntax.rs::stage_parse` via
@@ -290,7 +280,6 @@ impl CommonOpts {
                 input_kind: InputKind::Chat,
             },
             Commands::Coref(_a) => CommandProfile {
-                command: ReleasedCommand::Coref,
                 // Coref is English-only and takes no `--lang`. The coref
                 // pipeline reads English-ness from each file's `@Languages:`
                 // header (see `coref.rs::file_has_english`) and hardcodes
@@ -305,37 +294,31 @@ impl CommonOpts {
                 input_kind: InputKind::Chat,
             },
             Commands::Compare(a) => CommandProfile {
-                command: ReleasedCommand::Compare,
                 lang: &a.lang,
                 num_speakers: a.num_speakers,
                 input_kind: InputKind::Chat,
             },
             Commands::Utseg(a) => CommandProfile {
-                command: ReleasedCommand::Utseg,
                 lang: &a.lang,
                 num_speakers: a.num_speakers,
                 input_kind: InputKind::Chat,
             },
             Commands::Benchmark(a) => CommandProfile {
-                command: ReleasedCommand::Benchmark,
                 lang: &a.lang,
                 num_speakers: a.num_speakers,
                 input_kind: InputKind::Media,
             },
             Commands::Opensmile(a) => CommandProfile {
-                command: ReleasedCommand::Opensmile,
                 lang: &a.lang,
                 num_speakers: 1,
                 input_kind: InputKind::Media,
             },
             Commands::Avqi(a) => CommandProfile {
-                command: ReleasedCommand::Avqi,
                 lang: &a.lang,
                 num_speakers: 1,
                 input_kind: InputKind::Media,
             },
             Commands::SpeakerIdentify(a) => CommandProfile {
-                command: ReleasedCommand::SpeakerIdentify,
                 lang: &a.lang,
                 // Display-only in the job record. The real speaker facts are
                 // the enrolled spans, carried through the typed options.
@@ -343,7 +326,6 @@ impl CommonOpts {
                 input_kind: InputKind::Chat,
             },
             Commands::Diarize(a) => CommandProfile {
-                command: ReleasedCommand::Diarize,
                 lang: &a.lang,
                 // Display-only in the job record; the real auto-detect
                 // signal is `DiarizeOptions::expected_speakers` (None =
@@ -355,7 +337,11 @@ impl CommonOpts {
                 // (`DiarizationSpeakerCount`), and this field is not the
                 // channel that reaches the backend.
                 num_speakers: a.num_speakers.map_or(1, |count| count.get()),
-                input_kind: InputKind::Media,
+                input_kind: if a.speaker_map.is_some() {
+                    InputKind::Chat
+                } else {
+                    InputKind::Media
+                },
             },
             // Caller-contract invariant: this method is only called
             // for processing commands (Align, Transcribe, Translate,

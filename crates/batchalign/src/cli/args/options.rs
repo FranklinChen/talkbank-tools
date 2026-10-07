@@ -7,6 +7,7 @@ use crate::chat_ops::CacheTaskName;
 use crate::chat_ops::cache_key::CacheOverrideTaskName;
 use crate::chat_ops::fa::CaMarkerPolicy as AppCaMarkerPolicy;
 use crate::chat_ops::speaker_identity::InvalidEnrollmentSet;
+use crate::options::{AbsoluteMediaRoot, MediaRootRefusal};
 use crate::options::{
     AlignOptions, AvqiOptions, BenchmarkOptions, CommandOptions, CommonOptions, CompareOptions,
     CorefOptions, DiarizeOptions, EngineOverrides, MorphotagOptions, OpensmileOptions,
@@ -19,6 +20,10 @@ use super::{
     CaMarkerPolicy as CliCaMarkerPolicy, Commands, CommonOpts, DiarizationMode, GlobalOpts,
     UtrOverlapStrategy as CliUtrOverlapStrategy,
 };
+
+#[cfg(test)]
+#[path = "options/media_root_tests.rs"]
+mod media_root_tests;
 
 /// What the user typed for `--engine-overrides`, before any JSON parse.
 ///
@@ -185,10 +190,34 @@ fn canonicalize_debug_dir(p: &std::path::Path) -> std::path::PathBuf {
 /// processing command". A failing validation and an absent command were the
 /// same value. They are different types now, so the confusion has no
 /// representation and the check cannot be skipped.
+/// A failed option transition cannot be confused with absent command options.
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidCommandOptions {
+    /// Speaker enrollment relationships were refused.
+    #[error(transparent)]
+    Enrollment(#[from] InvalidEnrollmentSet),
+    /// An explicit media root could not be admitted losslessly.
+    #[error(transparent)]
+    MediaRoot(#[from] MediaRootRefusal),
+    /// A relative CLI root requires a readable submission working directory.
+    #[error("cannot resolve --media-dir against the submission working directory: {0}")]
+    WorkingDirectory(#[source] std::io::Error),
+}
+
+/// Resolve parsed options, checking enrollment and anchoring explicit CLI
+/// media roots before any job can cross the daemon working-directory boundary.
 pub fn build_typed_options(
     cmd: &Commands,
     global: &GlobalOpts,
-) -> Result<Option<CommandOptions>, InvalidEnrollmentSet> {
+) -> Result<Option<CommandOptions>, InvalidCommandOptions> {
+    build_typed_options_with_cwd(cmd, global, std::env::current_dir)
+}
+
+fn build_typed_options_with_cwd(
+    cmd: &Commands,
+    global: &GlobalOpts,
+    cwd: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Result<Option<CommandOptions>, InvalidCommandOptions> {
     let common = CommonOptions {
         override_media_cache: global.media_cache.override_media_cache,
         require_media_cache: global.media_cache.require_media_cache,
@@ -202,7 +231,21 @@ pub fn build_typed_options(
     };
 
     Ok(match cmd {
+        Commands::Convert(a) => Some(CommandOptions::Convert(crate::options::ConvertOptions {
+            common,
+            format: a.format,
+        })),
         Commands::Align(a) => {
+            let media_dir = match a.media_dir.as_deref() {
+                None => None,
+                Some(root) if root.is_empty() || std::path::Path::new(root).is_absolute() => {
+                    Some(AbsoluteMediaRoot::admit(root)?.into())
+                }
+                Some(root) => {
+                    let base = cwd().map_err(InvalidCommandOptions::WorkingDirectory)?;
+                    Some(AbsoluteMediaRoot::resolve_cli(std::path::Path::new(root), &base)?.into())
+                }
+            };
             // Resolution lives on `AlignArgs`, with the flags whose invariants
             // it depends on, and is infallible. It used to live here as two
             // inline ladders ending in `from_wire_name(..).ok()?`, which turned
@@ -248,7 +291,7 @@ pub fn build_typed_options(
                 merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
                 bullet_repair: a.bullet_repair,
                 review_level: resolve_review_level(a.review_level),
-                media_dir: a.media_dir.clone(),
+                media_dir,
             }))
         }
         Commands::Transcribe(a) => {
@@ -302,6 +345,7 @@ pub fn build_typed_options(
             // No mapping: the flag parses straight into the domain enum, so
             // there is no match here to be exhaustive over the wrong type.
             translate_engine: a.translate_engine.clone(),
+            target: a.target.clone(),
             merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
         })),
         Commands::Morphotag(a) => Some(CommandOptions::Morphotag(MorphotagOptions {
@@ -374,6 +418,12 @@ pub fn build_typed_options(
             common,
             speaker_engine: a.speaker_engine,
             expected_speakers: a.num_speakers,
+            output_mode: match &a.speaker_map {
+                Some(mapping) => crate::options::DiarizeOutputMode::MappedChat {
+                    mapping: mapping.clone(),
+                },
+                None => crate::options::DiarizeOutputMode::TurnsJson,
+            },
         })),
         _ => None,
     })
@@ -382,6 +432,7 @@ pub fn build_typed_options(
 /// Extract `CommonOpts` from a processing command, if present.
 pub fn common_opts(cmd: &Commands) -> Option<&CommonOpts> {
     match cmd {
+        Commands::Convert(a) => Some(&a.common),
         Commands::Align(a) => Some(&a.common),
         Commands::Transcribe(a) => Some(&a.common),
         Commands::Translate(a) => Some(&a.common),

@@ -17,6 +17,7 @@ mod orchestrate;
 pub mod origin;
 pub mod outcome;
 mod postprocess;
+mod presence;
 pub mod repair;
 mod rescue_narrow_bullets;
 pub mod speech_rate;
@@ -74,6 +75,8 @@ pub use self::orchestrate::{
 pub use self::postprocess::{
     postprocess_utterance_timings, postprocess_utterance_timings_with_boundary_policy,
 };
+pub use self::presence::RecordingPresence;
+pub(crate) use self::presence::strip_off_record_timing;
 #[cfg(test)]
 pub use self::repair::repair_bullets;
 pub use self::repair::{BulletRepairPolicy, RepairDecision, RepairResult, RepairStats};
@@ -967,8 +970,13 @@ pub fn has_reusable_wor_timing(chat_file: &ChatFile) -> bool {
             continue;
         };
 
-        let main_word_count = count_alignable_main_words(utterance);
-        if main_word_count == 0 {
+        // An utterance not in the recording owes no timing, so it is no
+        // reason to leave the fast path; neither is one with no word.
+        let owes_timing = match RecordingPresence::of(utterance) {
+            RecordingPresence::NotInRecording(_) => false,
+            RecordingPresence::InRecording => count_alignable_main_words(utterance) > 0,
+        };
+        if !owes_timing {
             utt_idx += 1;
             continue;
         }

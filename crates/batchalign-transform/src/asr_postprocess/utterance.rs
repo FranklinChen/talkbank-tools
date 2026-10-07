@@ -1,8 +1,8 @@
 use super::cantonese::NormalizationChangedLength;
 use super::{
     AsrNormalizedText, AsrOutput, AsrTextLanguage, AsrWord, ENDING_PUNCT, MOR_PUNCT, RTL_PUNCT,
-    SpeakerIndex, Utterance, cleanup, expand_numbers_in_words, finalize_words_to_chunks,
-    prepare_words_pre_expansion,
+    SpeakerIndex, Utterance, cleanup, finalize_words_to_chunks, prepare_words_pre_expansion,
+    write_word_forms,
 };
 
 /// Run the full ASR post-processing pipeline on raw ASR output.
@@ -41,8 +41,9 @@ pub fn prepare_asr_chunks<'a>(
 
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, language)?;
-        // Stage 4: number expansion (Rust fallback tables + CJK + currency)
-        let words = expand_numbers_in_words(words, language);
+        // Stage 4: CHAT word forms (number words, alphanumeric linkages,
+        // letter strings)
+        let words = write_word_forms(words, language);
         prepared.extend(finalize_words_to_chunks(
             words,
             monologue.speaker,

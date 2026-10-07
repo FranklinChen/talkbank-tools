@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-03 08:50 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -43,7 +43,7 @@ flowchart TD
 
     group --> before_check{--before path\nprovided?}
     before_check -->|Yes| incremental[process_fa_incremental\nDiff old vs new, copy stable %wor,\nreuse preserved groups]
-    before_check -->|No| full[process_fa\nProcess all groups]
+    before_check -->|No| full[run_fa_from_ast\nProcess all groups]
 
     incremental --> engine_select
     full --> engine_select
@@ -471,12 +471,14 @@ concurrently (bounded by `num_workers`).
 
 ```mermaid
 flowchart TD
-    start([morphotag invoked]) --> parse[Parse file → AST]
-    parse --> ca_check{"@Options: CA\nin header?"}
-    ca_check -->|Yes| ca_passthrough[Serialize parsed file as-is\nNo %mor/%gra added\nNo provenance injected]
+    start([morphotag invoked]) --> parse[One source-bound parse and header plan\nValidate all retained CHAT]
+    parse --> ca_check{"CA policy selects\npass-through?"}
+    ca_check -->|Yes: every tier valid| ca_passthrough[Strip legacy decision tiers\nNo %mor/%gra added\nNo provenance injected]
     ca_passthrough --> done
-    ca_check -->|No| clear[Clear existing %mor/%gra tiers]
-    clear --> collect[collect_payloads\nPer-utterance word lists with language metadata]
+    ca_check -->|No: MOR/GRA removed| before_check{--before path?}
+    before_check -->|Yes| incremental[Admit prior CHAT completely\nCopy valid unchanged morphology]
+    before_check -->|No| collect
+    incremental --> collect[collect_payloads\nOnly utterances requiring analysis]
     collect --> retok_check{--retokenize?}
     retok_check -->|Yes: --retokenize| stanza_retok[TokenizationMode::StanzaRetokenize\nStanza may split/merge words]
     retok_check -->|No: --keeptokens| preserve[TokenizationMode::Preserve\nKeep original tokenization]
@@ -488,20 +490,11 @@ flowchart TD
     lang_check -->|Yes| skip_non_primary[MultilingualPolicy::SkipNonPrimary\nSkip utterances in non-primary language]
     lang_check -->|No: --multilang| process_all[MultilingualPolicy::ProcessAll\nProcess all utterances regardless of language]
 
-    skip_non_primary --> cache
-    process_all --> cache
-
-    cache[Cache lookup: BLAKE3 keys\nwords + lang + terminator + special forms + engine version]
-    cache --> inject_hits[Inject cache hits immediately]
-    inject_hits --> worker[execute_v2(task="morphosyntax") misses\nprepared_text batch → Stanza NLP pipeline]
+    skip_non_primary --> worker
+    process_all --> worker[execute_v2(task="morphosyntax")\nprepared_text batch → Stanza NLP pipeline]
     worker --> inject_results[inject_results → insert %mor/%gra tiers]
 
-    inject_results --> before_check{--before path?}
-    before_check -->|Yes| incremental[process_morphosyntax_incremental\nSkip NLP for unchanged utterances]
-    before_check -->|No| full_inject[Process all utterances]
-
-    incremental --> merge_check
-    full_inject --> merge_check
+    inject_results --> merge_check
 
     merge_check{--merge-abbrev?}
     merge_check -->|Yes| merge[merge_abbreviations]
@@ -511,11 +504,12 @@ flowchart TD
     validate --> done([Output .cha file])
 ```
 
-**`@Options: CA` pass-through:** When the file's header declares
-`@Options: CA`, the pipeline skips morphotagging entirely and serializes
-the parsed file unchanged (mirroring `@Options: NoAlign` for `align`).
-The decision is made once per file from the option header; no
-per-utterance content scan is involved.
+**`@Options: CA` pass-through:** The default policy declines analysis and
+preserves morphology, after complete input admission, while stripping legacy
+decision tiers. `--ca-policy analyze` instead removes and regenerates morphology.
+The policy is selected once from all typed headers; no text scan or second
+parse is involved. See [admission ownership](morphotag-invariants.md#input-admission-and-replacement-ownership).
+Morphotag does not use the persistent audio-task inference cache.
 
 ---
 

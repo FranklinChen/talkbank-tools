@@ -321,7 +321,7 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
         Commands::MergeVerify(a) => {
             let summary = crate::merge_verify::run(&a.draft, &a.verdicts, &a.out, &a.flag_prefix)
                 .map_err(|e| {
-                error::CliError::Server(crate::error::ServerError::Validation(e.to_string()))
+                error::CliError::Server(crate::error::ServerError::MergeVerification(Box::new(e)))
             })?;
             eprintln!(
                 "merge-verify: {} session(s): {} auto-trusted, {} queued for review, {} held, {} demoted",
@@ -388,6 +388,12 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
                     // which carry `CommonOpts` from clap.
                     #[allow(clippy::expect_used)]
                     let c = common.expect("processing command must have CommonOpts");
+                    if matches!(cmd, Commands::Convert(_)) && c.in_place {
+                        return Err(error::CliError::InvalidArgument(
+                            "convert always creates a new recording; --in-place is not supported"
+                                .into(),
+                        ));
+                    }
                     // clap rejects `--file-list` together with positional
                     // paths, so choosing one variant here discards nothing.
                     let source = match c.file_list.as_deref() {
@@ -400,7 +406,9 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
                 }
             };
 
-            if let Some(ref od) = out_dir {
+            if !matches!(cmd, Commands::Convert(_))
+                && let Some(ref od) = out_dir
+            {
                 std::fs::create_dir_all(od)?;
             }
 
@@ -409,7 +417,15 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
             // as an absent value. There is no separate pre-check to keep in
             // step with it, and no ordering for a later caller to get wrong.
             let options = args::build_typed_options(cmd, &cli.global)
-                .map_err(|error| error::CliError::InvalidArgument(error.to_string()))?;
+                .map_err(|error| error::CliError::InvalidArgument(error.to_string()))?
+                // Every command reaching this arm is a processing command,
+                // and each has typed options. A None is a routing defect
+                // above, reported as an error rather than defaulted.
+                .ok_or_else(|| {
+                    error::CliError::InvalidArgument(
+                        "internal error: a processing command produced no typed options".into(),
+                    )
+                })?;
             let bank = args::extract_bank(cmd);
             let subdir = args::extract_subdir(cmd);
             let lexicon = args::extract_lexicon(cmd);
@@ -418,7 +434,6 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
 
             dispatch::dispatch(
                 dispatch::DispatchRequest {
-                    command: profile.command,
                     lang: profile.lang,
                     num_speakers: profile.num_speakers,
                     input_kind: profile.input_kind,

@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use async_trait::async_trait;
-use tracing::warn;
 
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::compare::{
@@ -12,16 +11,15 @@ use crate::compare::{
 };
 use crate::dispatch_language::JobLanguage;
 use crate::planning::{self, JobPlan};
-use crate::recipe_runner::materialize::MaterializedArtifactRole;
 use crate::recipe_runner::recipe::RecipeStageId;
-use crate::recipe_runner::runtime::{
-    ChatOutputTarget, output_write_path, write_text_output_artifact,
-};
 use crate::recipe_runner::work_unit::{CompareWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage, classify_server_error};
+
+mod outputs;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::RunnerJobSnapshot;
+use outputs::{ConsolidatedCompareMetricsRow, format_consolidated_csv, write_outputs};
 
 use super::worker_gateway::WorkerGateway;
 
@@ -189,7 +187,7 @@ struct CompareExecutionState {
     unit: CompareWorkUnit,
     file_index: usize,
     main_text: Option<String>,
-    gold_text: Option<String>,
+    reference: Option<crate::compare::AdmittedComparisonReference>,
     /// Morphotag's PROOF of the main transcript, carried between the two
     /// stages rather than its bytes, so the comparison stage continues in the
     /// document the gate judged and has no text to re-parse.
@@ -204,7 +202,7 @@ impl CompareExecutionState {
             unit,
             file_index,
             main_text: None,
-            gold_text: None,
+            reference: None,
             morphotagged_main: None,
             outputs: None,
             consolidated_metrics: None,
@@ -221,12 +219,6 @@ impl CompareExecutionState {
 }
 
 struct CompareStageExecutor;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ConsolidatedCompareMetricsRow {
-    file: String,
-    metrics: Vec<(String, String)>,
-}
 
 #[async_trait]
 impl StageExecutor for CompareStageExecutor {
@@ -260,9 +252,9 @@ impl StageExecutor for CompareStageExecutor {
                     .main
                     .source_path
                     .with_file_name("template.gold.cha");
-                state.gold_text = Some(match tokio::fs::read_to_string(&state.unit.gold.source_path).await {
+                let gold_text = match tokio::fs::read_to_string(&state.unit.gold.source_path).await {
                     Ok(text) => text,
-                    Err(_) => tokio::fs::read_to_string(&template_gold_source)
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => tokio::fs::read_to_string(&template_gold_source)
                         .await
                         .map_err(|_| {
                             crate::error::ServerError::Validation(format!(
@@ -272,10 +264,26 @@ impl StageExecutor for CompareStageExecutor {
                                 template_gold_path_for(state.unit.main.display_path.as_ref()),
                             ))
                         })?,
-                });
+                    Err(error) => return Err(crate::error::ServerError::Validation(format!(
+                        "failed to read compare reference {}: {error}", state.unit.gold.display_path
+                    ))),
+                };
+                state.reference = Some(crate::compare::AdmittedComparisonReference::admit(
+                    &gold_text,
+                )?);
                 Ok(())
             }
             RecipeStageId::Morphosyntax => {
+                // A dynamic recipe cannot dispatch comparison inference until
+                // its reference stage has produced complete admission.
+                if state.reference.is_none() {
+                    return Err(crate::error::ServerError::OutputAdmission {
+                        command: ReleasedCommand::Compare,
+                        details: crate::error::OutputAdmissionRefusal::unestablished(
+                            "compare morphosyntax stage ran before reference admission",
+                        ),
+                    });
+                }
                 state
                     .lifecycle(ctx)
                     .stage(FileStage::AnalyzingMorphosyntax)
@@ -320,14 +328,14 @@ impl StageExecutor for CompareStageExecutor {
                         "compare alignment stage ran before morphosyntax".into(),
                     )
                 })?;
-                let gold_text = state.gold_text.as_deref().ok_or_else(|| {
+                let reference = state.reference.take().ok_or_else(|| {
                     crate::error::ServerError::Validation(
                         "compare alignment stage ran before reference read".into(),
                     )
                 })?;
                 state.outputs = Some(process_compare_morphotagged_main(
                     morphotagged_main,
-                    gold_text,
+                    reference,
                 )?);
                 Ok(())
             }
@@ -340,7 +348,7 @@ impl StageExecutor for CompareStageExecutor {
                 state.lifecycle(ctx).stage(FileStage::Writing).await;
                 let CompareMaterializedOutputs {
                     chat_output,
-                    metrics_csv,
+                    metrics,
                 } = state.outputs.take().ok_or_else(|| {
                     crate::error::ServerError::Validation(
                         "compare output materialization ran before compare outputs existed".into(),
@@ -378,46 +386,17 @@ impl StageExecutor for CompareStageExecutor {
                         state.unit.main.display_path
                     )));
                 };
-                for artifact in &artifacts.files {
-                    match artifact.role {
-                        MaterializedArtifactRole::Primary => {
-                            let target = ChatOutputTarget::new(
-                                &ctx.job.filesystem,
-                                state.file_index,
-                                &artifact.display_path,
-                            );
-                            if let Err(error) =
-                                write_text_output_artifact(&target, chat_output.as_str()).await
-                            {
-                                warn!(
-                                    error = %error,
-                                    "Failed to write compare output"
-                                );
-                            }
-                            state
-                                .lifecycle(ctx)
-                                .complete_with_result(
-                                    artifact.display_path.clone(),
-                                    artifact.content_type,
-                                )
-                                .await;
-                        }
-                        MaterializedArtifactRole::Sidecar => {
-                            let csv_path = output_write_path(
-                                &ctx.job.filesystem,
-                                state.file_index,
-                                &artifact.display_path,
-                            );
-                            if let Err(error) = tokio::fs::write(&csv_path, &metrics_csv).await {
-                                warn!(error = %error, "Failed to write compare CSV");
-                            }
-                            state.consolidated_metrics = Some(parse_consolidated_metrics_row(
-                                &artifact.display_path,
-                                &metrics_csv,
-                            )?);
-                        }
-                    }
-                }
+                let written = write_outputs(
+                    &ctx.job.filesystem,
+                    state.file_index,
+                    artifacts,
+                    CompareMaterializedOutputs {
+                        chat_output,
+                        metrics,
+                    },
+                )
+                .await?;
+                state.consolidated_metrics = Some(written.complete(state.lifecycle(ctx)).await);
                 Ok(())
             }
             other => Err(crate::error::ServerError::Validation(format!(
@@ -425,52 +404,6 @@ impl StageExecutor for CompareStageExecutor {
             ))),
         }
     }
-}
-
-fn parse_consolidated_metrics_row(
-    artifact_display_path: &DisplayPath,
-    metrics_csv: &str,
-) -> Result<ConsolidatedCompareMetricsRow, crate::error::ServerError> {
-    let file = Path::new(artifact_display_path.as_ref())
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            crate::error::ServerError::Validation(format!(
-                "compare metrics artifact had invalid display path {}",
-                artifact_display_path
-            ))
-        })?
-        .replace(".compare.csv", ".cha");
-    let mut metrics = Vec::new();
-    for line in metrics_csv.lines().skip(1) {
-        let Some((key, value)) = line.split_once(',') else {
-            continue;
-        };
-        let key = key.trim().to_string();
-        let value = normalize_compare_csv_value(&key, value.trim());
-        if !key.is_empty() {
-            metrics.push((key, value));
-        }
-    }
-    Ok(ConsolidatedCompareMetricsRow { file, metrics })
-}
-
-fn normalize_compare_csv_value(key: &str, value: &str) -> String {
-    if key != "wer" && key != "accuracy" {
-        return value.to_string();
-    }
-
-    let Ok(parsed) = value.parse::<f64>() else {
-        return value.to_string();
-    };
-    let mut normalized = format!("{parsed:.4}");
-    while normalized.contains('.') && normalized.ends_with('0') {
-        normalized.pop();
-    }
-    if normalized.ends_with('.') {
-        normalized.push('0');
-    }
-    normalized
 }
 
 async fn write_compare_text_file(path: &Path, content: &str) -> std::io::Result<()> {
@@ -496,33 +429,7 @@ async fn write_consolidated_compare_csv(
     filesystem: &crate::store::RunnerFilesystemConfig,
     rows: &[ConsolidatedCompareMetricsRow],
 ) -> Result<(), crate::error::ServerError> {
-    let mut header_keys = Vec::new();
-    for row in rows {
-        for (key, _) in &row.metrics {
-            if !header_keys.contains(key) {
-                header_keys.push(key.clone());
-            }
-        }
-    }
-
-    let mut output = String::from("file");
-    for key in &header_keys {
-        output.push(',');
-        output.push_str(key);
-    }
-    output.push('\n');
-
-    for row in rows {
-        let values: BTreeMap<_, _> = row.metrics.iter().cloned().collect();
-        output.push_str(&row.file);
-        for key in &header_keys {
-            output.push(',');
-            if let Some(value) = values.get(key) {
-                output.push_str(value);
-            }
-        }
-        output.push('\n');
-    }
+    let output = format_consolidated_csv(rows)?;
 
     let primary_path = compare_output_root(filesystem).join("compare.csv");
     write_compare_text_file(&primary_path, &output)
@@ -564,7 +471,9 @@ mod tests {
     };
 
     #[derive(Default)]
-    struct FakeGateway;
+    struct FakeGateway {
+        calls: std::sync::atomic::AtomicUsize,
+    }
 
     #[async_trait]
     impl WorkerGateway for FakeGateway {
@@ -576,6 +485,7 @@ mod tests {
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
         {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // A GATED proof over the double's own text, which is what the real
             // gateway returns: the production implementation runs the gate, so
             // a double standing in for it upstream must carry the same kind of
@@ -591,7 +501,6 @@ mod tests {
             &self,
             _chat_text: &str,
             _before_text: Option<&str>,
-            _lang: &crate::api::LanguageCode3,
             _options: crate::execution::MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
@@ -613,8 +522,7 @@ mod tests {
         async fn translate_file(
             &self,
             _file: &crate::text_batch::TextBatchFileInput,
-            _lang: &crate::api::LanguageCode3,
-            _engine: &crate::types::engines::TranslateEngineName,
+            _route: &crate::translate::TranslationRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> crate::text_batch::TextBatchFileResults {
             unreachable!("compare tests do not call translate_file")
@@ -666,27 +574,95 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn compare_kernel_writes_primary_and_sidecar_outputs() {
+    const VALID_CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n\
+*PAR:\thello there .\n@End\n";
+
+    enum ReferenceFixture<'a> {
+        Companion(&'a str),
+        TemplateOnly(&'a str),
+        Both {
+            companion: &'a str,
+            template: &'a str,
+        },
+        UnreadableCompanion {
+            template: &'a str,
+        },
+    }
+
+    enum OutputFixture {
+        Staged,
+        BlockedChat,
+        BlockedSidecar,
+        Paths,
+    }
+
+    async fn run_compare_fixture(
+        reference: ReferenceFixture<'_>,
+        output: OutputFixture,
+    ) -> (tempfile::TempDir, usize) {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let input_dir = tempdir.path().join("input");
         tokio::fs::create_dir_all(&input_dir)
             .await
             .expect("input dir");
-        tokio::fs::write(
-            input_dir.join("sample.cha"),
-            "@UTF8\n@Begin\n*PAR:\thello there .\n@End\n",
-        )
-        .await
-        .expect("main");
-        tokio::fs::write(
-            input_dir.join("sample.gold.cha"),
-            "@UTF8\n@Begin\n*PAR:\thello there .\n@End\n",
-        )
-        .await
-        .expect("gold");
-
-        let snapshot = compare_snapshot(tempdir.path());
+        tokio::fs::write(input_dir.join("sample.cha"), VALID_CHAT)
+            .await
+            .expect("main");
+        match reference {
+            ReferenceFixture::Companion(text) => {
+                tokio::fs::write(input_dir.join("sample.gold.cha"), text)
+                    .await
+                    .unwrap()
+            }
+            ReferenceFixture::TemplateOnly(text) => {
+                tokio::fs::write(input_dir.join("template.gold.cha"), text)
+                    .await
+                    .unwrap()
+            }
+            ReferenceFixture::Both {
+                companion,
+                template,
+            } => {
+                tokio::fs::write(input_dir.join("sample.gold.cha"), companion)
+                    .await
+                    .unwrap();
+                tokio::fs::write(input_dir.join("template.gold.cha"), template)
+                    .await
+                    .unwrap();
+            }
+            ReferenceFixture::UnreadableCompanion { template } => {
+                tokio::fs::create_dir(input_dir.join("sample.gold.cha"))
+                    .await
+                    .unwrap();
+                tokio::fs::write(input_dir.join("template.gold.cha"), template)
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut snapshot = compare_snapshot(tempdir.path());
+        match output {
+            OutputFixture::Staged => {}
+            OutputFixture::BlockedChat | OutputFixture::BlockedSidecar => {
+                let name = match output {
+                    OutputFixture::BlockedChat => "sample.cha",
+                    _ => "sample.compare.csv",
+                };
+                tokio::fs::create_dir_all(tempdir.path().join("output").join(name))
+                    .await
+                    .unwrap();
+            }
+            OutputFixture::Paths => {
+                let destination = tempdir.path().join("requested").join("sample.cha");
+                snapshot.filesystem.paths_mode = true;
+                snapshot.filesystem.source_paths = vec![batchalign_types::paths::ClientPath::new(
+                    input_dir.join("sample.cha").to_str().unwrap(),
+                )];
+                snapshot.filesystem.output_paths = vec![batchalign_types::paths::ClientPath::new(
+                    destination.to_str().unwrap(),
+                )];
+            }
+        }
         let plan = build_job_plan(&snapshot).expect("plan");
         let (_tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
         let store = std::sync::Arc::new(crate::store::JobStore::new(
@@ -708,10 +684,11 @@ mod tests {
         let crate::dispatch_language::DispatchLanguage::Job(job_language) = resolved else {
             panic!("compare is a job-level command")
         };
+        let gateway = FakeGateway::default();
         let ctx = ExecutionContext {
             job: &snapshot,
             host: &host,
-            gateway: &FakeGateway,
+            gateway: &gateway,
             mwt: &MwtDict::default(),
             should_merge_abbrev: false,
             job_language: &job_language,
@@ -722,11 +699,119 @@ mod tests {
             .await
             .expect("run compare kernel");
 
+        (
+            tempdir,
+            gateway.calls.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    async fn run_compare_reference(reference: &str) -> (tempfile::TempDir, usize) {
+        run_compare_fixture(
+            ReferenceFixture::Companion(reference),
+            OutputFixture::Staged,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn compare_kernel_writes_primary_and_sidecar_outputs() {
+        let (tempdir, calls) = run_compare_reference(VALID_CHAT).await;
+        assert_eq!(calls, 1);
+
         let primary = tempdir.path().join("output").join("sample.cha");
         let csv = tempdir.path().join("output").join("sample.compare.csv");
         let consolidated = tempdir.path().join("output").join("compare.csv");
         assert!(primary.exists());
         assert!(csv.exists());
         assert!(consolidated.exists());
+    }
+
+    #[tokio::test]
+    async fn compare_invalid_reference_cannot_dispatch_inference_or_write_outputs() {
+        for invalid in [
+            VALID_CHAT.replace("hello there .", "hello there"),
+            VALID_CHAT.replace("@End", "%mor:\tnoun|hello\n@End"),
+            VALID_CHAT.replace("@End", "%pho:\thəloʊ\n@End"),
+        ] {
+            let (tempdir, calls) = run_compare_reference(&invalid).await;
+            assert_eq!(calls, 0, "invalid reference reached the inference gateway");
+            for artifact in ["sample.cha", "sample.compare.csv", "compare.csv"] {
+                assert!(!tempdir.path().join("output").join(artifact).exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compare_reference_selection_uses_template_only_when_companion_is_absent() {
+        let different = VALID_CHAT.replace("hello there .", "goodbye there .");
+        let (fallback, calls) = run_compare_fixture(
+            ReferenceFixture::TemplateOnly(&different),
+            OutputFixture::Staged,
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert!(
+            tokio::fs::read_to_string(fallback.path().join("output/sample.cha"))
+                .await
+                .unwrap()
+                .contains("*PAR:\tgoodbye there .")
+        );
+        let (preferred, calls) = run_compare_fixture(
+            ReferenceFixture::Both {
+                companion: VALID_CHAT,
+                template: &different,
+            },
+            OutputFixture::Staged,
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert!(
+            tokio::fs::read_to_string(preferred.path().join("output/sample.cha"))
+                .await
+                .unwrap()
+                .contains("*PAR:\thello there .")
+        );
+        let (blocked, calls) = run_compare_fixture(
+            ReferenceFixture::UnreadableCompanion {
+                template: VALID_CHAT,
+            },
+            OutputFixture::Staged,
+        )
+        .await;
+        assert_eq!(
+            calls, 0,
+            "an unreadable companion must not silently select a different reference"
+        );
+        assert!(!blocked.path().join("output/compare.csv").exists());
+    }
+
+    #[tokio::test]
+    async fn compare_failed_required_write_cannot_supply_a_successful_metric_row() {
+        for output in [OutputFixture::BlockedChat, OutputFixture::BlockedSidecar] {
+            let (directory, calls) =
+                run_compare_fixture(ReferenceFixture::Companion(VALID_CHAT), output).await;
+            assert_eq!(calls, 1);
+            assert!(!directory.path().join("output/compare.csv").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn compare_paths_mode_keeps_both_required_artifacts_in_staging() {
+        let (directory, calls) = run_compare_fixture(
+            ReferenceFixture::Companion(VALID_CHAT),
+            OutputFixture::Paths,
+        )
+        .await;
+        assert_eq!(calls, 1);
+        for file in ["sample.cha", "sample.compare.csv", "compare.csv"] {
+            assert_eq!(
+                tokio::fs::read(directory.path().join("requested").join(file))
+                    .await
+                    .unwrap(),
+                tokio::fs::read(directory.path().join("output").join(file))
+                    .await
+                    .unwrap(),
+            );
+        }
     }
 }

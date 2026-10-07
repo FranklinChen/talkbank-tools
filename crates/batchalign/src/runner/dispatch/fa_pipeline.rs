@@ -1,13 +1,13 @@
 //! Forced alignment dispatch and per-file FA pipeline.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::{DisplayPath, LanguageCode3, NumWorkers};
 use crate::cache::UtteranceCache;
 use crate::engine_reports::FaCacheNamespace;
 use crate::fa::{AdmittedFaResult, FaServices};
-use crate::options::{CommandOptions, EngineBackend as _};
+use crate::options::EngineBackend as _;
 use crate::params::{AudioContext, CachePolicy, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::provenance::UtrContribution;
@@ -26,11 +26,11 @@ use crate::types::request::{
 
 use super::super::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, compute_audio_identity,
-    drain_supervised_file_tasks, probe_audio_duration, spawn_progress_forwarder,
+    drain_supervised_file_tasks, probe_audio_duration, spawn_observed_progress_forwarder,
     spawn_supervised_file_task,
 };
 use super::FaDispatchPlan;
-use super::audio_output::{FileOutput, MergeAbbreviations};
+use super::audio_output::{ChatOutput, FileOutput, MergeAbbreviations};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
 use super::utr::{UtrPassContext, run_utr_pass};
 
@@ -145,7 +145,7 @@ struct FaFileContext<'a> {
     /// Debug artifact writer for offline replay.
     dumper: DebugDumper,
     /// Custom media directory from `--media-dir`.
-    media_dir: Option<&'a str>,
+    media_dir: Option<&'a crate::options::AbsoluteMediaRoot>,
 }
 
 #[cfg(test)]
@@ -175,71 +175,6 @@ mod tests {
     }
 }
 
-/// Everything about one input file that is fixed at the read, before the UTR
-/// pre-pass edits the model: the bytes, the parse errors, and the main
-/// bullets the run's `--main-bullets` policy bound at that same parse.
-///
-/// Grouped because all three are facts about the input as read, and every
-/// one of them is wrong if taken from the model after UTR has run.
-struct AlignFileAsRead {
-    /// The bytes this file was read as, kept beside the model they were
-    /// parsed into.
-    ///
-    /// Align promises a `@Options: dummy` or `NoAlign` document back
-    /// byte-identical, and only the ORIGINAL bytes can keep that promise: a
-    /// re-serialization of the model is a parse-and-serialize round trip, and
-    /// the pass-through route judges nothing, so any difference it makes
-    /// reaches disk unexamined. Carried rather than re-read because the file
-    /// on disk is the file this run is about to overwrite.
-    text: String,
-    /// The errors the parse reported.
-    parse_errors: Vec<crate::chat_ops::ParseError>,
-    /// The main-bullet policy bound to the bullets this parse found. Bound
-    /// here, not later, because two-pass UTR writes ordinary bullets onto
-    /// unbulleted utterances and nothing afterwards can tell them apart.
-    main_bullets: crate::chat_ops::fa::MainBulletAuthority,
-}
-
-/// The model forced alignment runs on, and the word anchors a UTR pass
-/// observed on it.
-///
-/// One value because the anchors address THIS model's words: a UTR pass
-/// edits the model and yields the anchors together, through
-/// [`AlignWorkingModel::recover_timing`], so a task cannot hold the anchors of
-/// one pass beside the model of another.
-struct AlignWorkingModel {
-    /// The parsed document, edited in place by UTR.
-    chat_file: crate::chat_ops::ChatFile,
-    /// Anchors of the latest UTR pass that ran, or empty.
-    utr_anchors: crate::chat_ops::fa::AnchorIndex,
-}
-
-impl AlignWorkingModel {
-    /// A freshly parsed model, before any UTR pass: nothing anchored yet.
-    fn parsed(chat_file: crate::chat_ops::ChatFile) -> Self {
-        Self {
-            chat_file,
-            utr_anchors: crate::chat_ops::fa::AnchorIndex::not_observed(),
-        }
-    }
-
-    /// Run one UTR pass over the model and keep its anchors.
-    ///
-    /// A pass that matched no token stream (it did not run, or ran with no
-    /// tokens) leaves the earlier anchors in place: it heard nothing and
-    /// changed no word, so they still describe the words. A failed pass
-    /// leaves both the model's words and the anchors as they were.
-    async fn recover_timing(
-        &mut self,
-        context: UtrPassContext<'_>,
-        progress: Option<&crate::runner::util::ProgressSender>,
-    ) -> Result<crate::chat_ops::fa::utr::UtrResult, crate::error::ServerError> {
-        let mut result = run_utr_pass(&mut self.chat_file, context, progress).await?;
-        self.utr_anchors.superseded_by(result.take_anchors());
-        Ok(result)
-    }
-}
-
 struct AlignAudioTask<'a> {
     host: DispatchHostContext,
     job_id: crate::api::JobId,
@@ -255,16 +190,14 @@ struct AlignAudioTask<'a> {
     /// compared. The only way to obtain this value is to pass the check.
     admitted: AdmittedFaParams,
     utr_cache_policy: CachePolicy,
-    before_path: Option<PathBuf>,
+    before: Option<crate::fa::RetainedFaPrior>,
     audio_path: PathBuf,
     audio_identity: crate::chat_ops::fa::AudioIdentity,
     /// The probe's measurement of `audio_path`, taken once per file and handed
     /// to both the UTR pass and FA so neither probes again.
     audio_duration: Option<crate::media::probe::AudioDuration>,
     /// The model FA runs on, with the anchors UTR observed on it.
-    model: AlignWorkingModel,
-    /// What the file was AS READ, before the UTR pre-pass edited the model.
-    read: AlignFileAsRead,
+    model: crate::fa::FaWorkingDocument,
     had_unrecovered_untimed: bool,
     utr_fallback_attempted: bool,
     /// Whether a timing-recovery pass ran for this file, and with which
@@ -304,15 +237,6 @@ impl AudioFileTask for AlignAudioTask<'_> {
         &mut self,
         progress_tx: crate::runner::util::ProgressSender,
     ) -> Result<Self::AttemptOutput, crate::error::ServerError> {
-        let before_text = if let Some(bp) = self.before_path.as_deref() {
-            tokio::fs::read_to_string(bp)
-                .await
-                .map_err(|e| tracing::warn!(path = %bp.display(), error = %e, "failed to read before-file for incremental FA"))
-                .ok()
-        } else {
-            None
-        };
-
         let audio = AudioContext {
             audio_path: &self.audio_path,
             audio_identity: &self.audio_identity,
@@ -323,16 +247,10 @@ impl AudioFileTask for AlignAudioTask<'_> {
         // to serialize `chat_file` into a string that it then parsed back
         // twice, so this task paid a serialization and two parses to give the
         // callee a model it was already holding.
-        let document = crate::fa::FaInputDocument::new(
-            self.model.chat_file.clone(),
-            self.read.parse_errors.clone(),
-            &self.read.text,
-            self.read.main_bullets.clone(),
-            &self.model.utr_anchors,
-        );
-        if let Some(ref bt) = before_text {
+        let document = self.model.attempt();
+        if let Some(ref before) = self.before {
             crate::fa::process_fa_incremental(
-                bt,
+                before,
                 document,
                 &audio,
                 self.admitted.primary_language(),
@@ -363,8 +281,10 @@ impl AudioFileTask for AlignAudioTask<'_> {
         // fresh serialization of the model beside it: that second
         // serialization is what made the L2-gated bytes and the written bytes
         // two different things.
-        let document = if retention.requires_timeline() {
-            let (document, timeline) = fa_result.into_document_and_timeline();
+        // The shortfalls (untimed words make the file diagnosed) leave with
+        // the bytes, whichever way they leave.
+        let (document, shortfalls) = if retention.requires_timeline() {
+            let (document, shortfalls, timeline) = fa_result.into_document_and_timeline();
             self.dumper
                 .dump_fa_evidence(&self.filename, &timeline)
                 .map_err(|error| {
@@ -386,7 +306,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                     .upsert_file(&self.job_id, self.file_index, file_traces)
                     .await;
             }
-            document
+            (document, shortfalls)
         } else {
             fa_result.into_document()
         };
@@ -416,11 +336,12 @@ impl AudioFileTask for AlignAudioTask<'_> {
         // with zero modifications; a pass-through is now returned untouched.
         let document = document
             .with_provenance_injected(&provenance)
-            .map_err(|failure| crate::error::ServerError::Validation(failure.to_string()))?;
-        Ok(FileOutput::Chat {
-            document,
+            .map_err(|failure| failure.into_server_error())?;
+        Ok(FileOutput::Chat(ChatOutput {
+            document: document.into(),
+            shortfalls,
             merge_abbreviations: self.output.merge_abbreviations,
-        })
+        }))
     }
 
     async fn on_retryable_worker_failure(
@@ -431,6 +352,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
         if self.had_unrecovered_untimed
             && !self.utr_fallback_attempted
             && let Some(utr_engine) = self.utr_engine.as_ref()
+            && let Some(active) = self.model.active_mut()
         {
             self.utr_fallback_attempted = true;
             info!(
@@ -439,24 +361,27 @@ impl AudioFileTask for AlignAudioTask<'_> {
             );
             lifecycle.stage(FileStage::RecoveringTimingFallback).await;
 
-            match self
-                .model
-                .recover_timing(
-                    UtrPassContext {
-                        audio_path: self.audio_path.as_path(),
-                        lang: self.admitted.primary_language(),
-                        services: self.services.pipeline,
-                        audio_identity: &self.audio_identity,
-                        cache_policy: self.utr_cache_policy,
-                        audio_duration: self.audio_duration,
-                        max_group_ms: Some(self.admitted.params().max_group_ms()),
-                        filename: &self.filename,
-                        engine: utr_engine,
-                        strategy: &self.utr_strategy,
-                        dumper: self.dumper,
-                    },
-                    None,
-                )
+            match active
+                .recover_timing(async |file| {
+                    run_utr_pass(
+                        file,
+                        UtrPassContext {
+                            audio_path: self.audio_path.as_path(),
+                            lang: self.admitted.primary_language(),
+                            services: self.services.pipeline,
+                            audio_identity: &self.audio_identity,
+                            cache_policy: self.utr_cache_policy,
+                            audio_duration: self.audio_duration,
+                            max_group_ms: Some(self.admitted.params().max_group_ms()),
+                            filename: &self.filename,
+                            engine: utr_engine,
+                            strategy: &self.utr_strategy,
+                            dumper: self.dumper,
+                        },
+                        None,
+                    )
+                    .await
+                })
                 .await
             {
                 Ok(utr_result) => {
@@ -518,6 +443,7 @@ pub(crate) async fn dispatch_fa_infer(
     let should_merge_abbrev = plan.options.merge_abbrev.should_merge();
     let utr_engine = plan.options.utr_engine;
     let utr_strategy = plan.options.utr_strategy;
+    let media_dir = plan.media_dir;
     let file_parallelism = runtime
         .num_workers
         .0
@@ -546,6 +472,7 @@ pub(crate) async fn dispatch_fa_infer(
         let pool = runtime.pool.clone();
         let cache = runtime.cache.clone();
         let job = job.clone();
+        let media_dir = media_dir.clone();
         let cache_namespace = runtime.cache_namespace.clone();
         let file = file.clone();
         let file_index = file.file_index;
@@ -569,13 +496,6 @@ pub(crate) async fn dispatch_fa_infer(
                     cache_namespace: &cache_namespace,
                 };
                 let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
-                let media_dir_str;
-                let media_dir_ref = if let CommandOptions::Align(ref opts) = job.dispatch.options {
-                    media_dir_str = opts.media_dir.clone();
-                    media_dir_str.as_deref()
-                } else {
-                    None
-                };
                 let context = FaFileContext {
                     job: &job,
                     host,
@@ -589,7 +509,7 @@ pub(crate) async fn dispatch_fa_infer(
                     utr_strategy,
                     lang_fallback: job_lang_fallback.as_ref(),
                     dumper,
-                    media_dir: media_dir_ref,
+                    media_dir: media_dir.as_ref(),
                 };
                 process_one_fa_file(&file, context).await
             },
@@ -674,6 +594,56 @@ async fn process_one_fa_file(
             return FileTaskOutcome::TerminalStateRecorded;
         }
     };
+
+    // Preserve one source parse and admit every reused prior tier before any
+    // media preparation or timing-recovery inference. A declared no-op does
+    // not consume the optional prior file.
+    let mut model = match crate::fa::read_fa_source_named(
+        &chat_text,
+        talkbank_model::model::TranscriptName::for_path(std::path::Path::new(filename)),
+        fa_params.main_bullets,
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            lifecycle
+                .fail(
+                    &error.to_string(),
+                    crate::runner::util::classify_server_error(&error),
+                )
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+    let before = if model.unchanged().is_some() {
+        None
+    } else if let Some(path) = before_path {
+        let prior_text = match tokio::fs::read_to_string(path).await {
+            Ok(text) => text,
+            Err(error) => {
+                lifecycle
+                    .fail(
+                        &format!("Failed to read declared before-file: {error}"),
+                        FailureCategory::InputMissing,
+                    )
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        };
+        match crate::fa::RetainedFaPrior::admit(&prior_text) {
+            Ok(prior) => Some(prior),
+            Err(error) => {
+                lifecycle
+                    .fail(
+                        &error.to_string(),
+                        crate::runner::util::classify_server_error(&error),
+                    )
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        }
+    } else {
+        None
+    };
     lifecycle.stage(FileStage::ResolvingAudio).await;
 
     // The six-rung media search, shared with `speaker-identify` since
@@ -684,7 +654,7 @@ async fn process_one_fa_file(
         &host,
         filename,
         read_path.as_path(),
-        &chat_text,
+        || crate::media::DeclaredMedia::from_document(model.document()),
         media_dir,
     )
     .await
@@ -728,27 +698,6 @@ async fn process_one_fa_file(
         audio_path.as_path()
     };
 
-    // Single parse: parse CHAT text into AST once. This ChatFile flows through
-    // UTR (in-place mutation) and then directly to FA, no serialize/re-parse.
-    let fa_parser = crate::chat_parser();
-    let (chat_file, parse_errors) =
-        batchalign_transform::parse::parse_lenient(&fa_parser, &chat_text);
-
-    // Bind `--main-bullets` to the bullets THIS parse found, before the UTR
-    // pre-pass below can write any: two-pass UTR writes ordinary bullets onto
-    // unbulleted utterances, and nothing downstream could tell those from the
-    // input's own. The default binds nothing; `keep` refuses a backward bullet.
-    let main_bullets =
-        match crate::chat_ops::fa::MainBulletAuthority::bind(fa_params.main_bullets, &chat_file) {
-            Ok(main_bullets) => main_bullets,
-            Err(backward) => {
-                lifecycle
-                    .fail(&backward.to_string(), FailureCategory::Validation)
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
-            }
-        };
-
     // Resolve the WHOLE `@Languages:` header against the job's `--lang` in one
     // step. The resolution lives on `DeclaredLanguages` rather than here
     // because doing it here is what made header ORDER decide admission: the
@@ -761,7 +710,7 @@ async fn process_one_fa_file(
     // through `[- deu]` precodes and `word@s:deu` markers, and those words
     // travel to the aligner in the same groups as the primary language's.
     let declared_languages = match DeclaredLanguages::from_header(
-        chat_file.languages.iter().map(|code| code.as_str()),
+        model.document().languages.iter().map(|code| code.as_str()),
         lang_fallback,
     ) {
         Ok(declared) => declared,
@@ -814,10 +763,9 @@ async fn process_one_fa_file(
     // UTR pre-pass: if untimed utterances exist and a UTR engine is configured,
     // run ASR to recover utterance-level timing before FA grouping. The model
     // and the anchors the pass observes on it travel together from here.
-    let mut model = AlignWorkingModel::parsed(chat_file);
     let mut utr_contribution = UtrContribution::NotRun;
-    let had_unrecovered_untimed = {
-        let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(&model.chat_file);
+    let had_unrecovered_untimed = if let Some(active) = model.active_mut() {
+        let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(active.document());
 
         match plan_align_utr_stage(untimed, &file_lang, utr_engine) {
             Ok(AlignUtrDecision::SkipAllTimed) => {
@@ -827,11 +775,18 @@ async fn process_one_fa_file(
             Ok(AlignUtrDecision::Run(utr_engine)) => {
                 lifecycle.stage(FileStage::RecoveringUtteranceTiming).await;
 
-                let utr_progress =
-                    spawn_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
+                // Observed: the pre-pass runs before the audio-file shell, so
+                // it installs its own observer, and the file shows "waiting
+                // for a worker" while one of its checkouts waits.
+                let (utr_progress, utr_waits, utr_forwarder) = spawn_observed_progress_forwarder(
+                    sink.clone(),
+                    job_id.clone(),
+                    filename.to_string(),
+                );
 
-                match model
-                    .recover_timing(
+                let recovered = active.recover_timing(async |file| {
+                    run_utr_pass(
+                        file,
                         UtrPassContext {
                             audio_path: utr_audio_path,
                             lang: &file_lang,
@@ -848,7 +803,16 @@ async fn process_one_fa_file(
                         Some(&utr_progress),
                     )
                     .await
-                {
+                });
+                let recovered = crate::worker::pool::checkout_wait::observing_checkout_waits(
+                    utr_waits, recovered,
+                )
+                .await;
+                // Every update the pre-pass sent is published before the next
+                // stage.
+                drop(utr_progress);
+                utr_forwarder.finished().await;
+                match recovered {
                     Ok(utr_result) => {
                         utr_contribution.record_pass(utr_engine, &utr_result);
                         utr_result.unmatched() > 0
@@ -871,6 +835,8 @@ async fn process_one_fa_file(
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         }
+    } else {
+        false
     };
 
     // Provenance comments embed the language for auditability. Use the
@@ -887,16 +853,11 @@ async fn process_one_fa_file(
         services,
         admitted,
         utr_cache_policy,
-        before_path: before_path.map(Path::to_path_buf),
+        before,
         audio_path,
         audio_identity,
         audio_duration,
         model,
-        read: AlignFileAsRead {
-            text: chat_text,
-            parse_errors,
-            main_bullets,
-        },
         had_unrecovered_untimed,
         utr_fallback_attempted: false,
         utr_contribution,

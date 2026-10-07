@@ -149,8 +149,11 @@ batchalign-build-pyo3:
 	@echo "==> Building imported standalone PyO3 crate..."
 	cargo build --manifest-path crates/batchalign-pyo3/Cargo.toml -q
 
+BATCHALIGN_BUILD_PROFILE ?= release
+
 batchalign-build-wheel:
 	@echo "==> Building imported Batchalign wheel..."
+	@case "$(BATCHALIGN_BUILD_PROFILE)" in release|dev) ;; *) echo "ERROR: BATCHALIGN_BUILD_PROFILE must be release or dev" >&2; exit 1 ;; esac
 	@# Default: always rebuild the native binary so the wheel never
 	@# bundles a stale one. The 2026-04-29 deploy postmortem (cancel-
 	@# cascade) was caused by a previous guard that silently reused
@@ -167,25 +170,30 @@ batchalign-build-wheel:
 	@#
 	@# Local invocations (no env var, no .exe) fall through to the safe
 	@# always-rebuild path.
-	@if [ -f batchalign/_bin/batchalign3.exe ]; then \
+	@if [ "$(BATCHALIGN_BUILD_PROFILE)" = "release" ] && [ -f batchalign/_bin/batchalign3.exe ]; then \
 	  echo "==> Using pre-staged Windows binary (.exe)"; \
-	elif [ "$$BATCHALIGN_PRESTAGED_BIN" = "1" ] && [ -x batchalign/_bin/batchalign3 ]; then \
+	elif [ "$(BATCHALIGN_BUILD_PROFILE)" = "release" ] && [ "$$BATCHALIGN_PRESTAGED_BIN" = "1" ] && [ -x batchalign/_bin/batchalign3 ]; then \
 	  echo "==> Using pre-staged Linux binary from CI build-cli artifact"; \
 	else \
 	  echo "==> Building native batchalign3 binary..."; \
-	  cargo build --release -p batchalign; \
+	  cargo build --profile "$(BATCHALIGN_BUILD_PROFILE)" -p batchalign || exit $$?; \
 	  mkdir -p batchalign/_bin; \
-	  cp target/release/batchalign3 batchalign/_bin/batchalign3; \
+	  if [ "$(BATCHALIGN_BUILD_PROFILE)" = "dev" ]; then batchalign_profile_dir=debug; else batchalign_profile_dir=release; fi; \
+	  cp target/$$batchalign_profile_dir/batchalign3 batchalign/_bin/batchalign3; \
 	fi
 	rm -rf dist
 	mkdir -p dist
 	@# `pyproject.toml` deliberately keeps Maturin's dev profile for the fast
-	@# `maturin develop` loop. Deployment wheels must override it explicitly;
+	@# `maturin develop` loop. Optimized wheels must override it explicitly;
 	@# PEP 517's `uv build` used that dev profile and shipped an unoptimized
 	@# batchalign_core extension even though the bundled CLI above was release.
 	@# `--only-dev` provisions Maturin from the frozen lock even in a fresh CI
 	@# checkout; `--no-sync` is invalid there because no tool exists to spawn.
-	uv run --frozen --only-dev maturin build --release --out dist/
+	@if [ "$(BATCHALIGN_BUILD_PROFILE)" = "dev" ]; then \
+	  uv run --frozen --only-dev maturin build --profile dev --out dist/; \
+	else \
+	  uv run --frozen --only-dev maturin build --release --out dist/; \
+	fi
 
 # Push CI proves packaging and behavior with a development-profile extension.
 # The tag release workflow separately builds and smoke-tests the optimized

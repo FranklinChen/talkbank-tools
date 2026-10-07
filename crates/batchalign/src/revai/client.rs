@@ -9,7 +9,8 @@ use batchalign_types::interval::AdmittedInterval;
 use std::thread;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::blocking::multipart::{Form, Part};
+use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 
 use crate::api::AudioPositionSeconds;
@@ -67,6 +68,107 @@ impl RevAiEndpoints {
             speech_to_text: PRODUCTION_BASE_URL.to_owned(),
             language_id: PRODUCTION_LANGID_BASE_URL.to_owned(),
         }
+    }
+}
+
+/// How long one Rev.AI request may take, decided by what it carries.
+///
+/// reqwest's blocking `Client::new()` gives EVERY request a 30 s total
+/// timeout. A media upload that shares the uplink with others takes longer
+/// than that, and the timeout then drops the request while its body is still
+/// being written, which reqwest reports as "request or response body error
+/// ... send failed because receiver is gone". Every upload of a 48-recording
+/// fold-in failed that way at exactly 30 s. No single total fits both a
+/// status poll and an 80 MB upload, so the deadline is a property of the
+/// request kind, and an upload's grows with its body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestDeadline {
+    /// A small exchange: a status poll, a transcript or result download.
+    Exchange,
+    /// A media upload: a fixed allowance plus the body at a floor rate.
+    Upload { body_bytes: usize },
+}
+
+impl RequestDeadline {
+    /// Bound on a small exchange; a long recording's transcript JSON is a
+    /// few megabytes at most.
+    const EXCHANGE: Duration = Duration::from_secs(120);
+    /// Fixed part of an upload's allowance (connection, TLS, Rev's reply).
+    const UPLOAD_BASE: Duration = Duration::from_secs(120);
+    /// The slowest sustained upload rate still treated as progress. Uploads
+    /// run concurrently (one per busy worker, 48 in a six-job fold-in) and
+    /// share one uplink, so the floor is set well below a per-stream share:
+    /// at 16 KiB/s an 80 MB recording is allowed about 83 minutes. The bound
+    /// exists so a stalled connection cannot hang a worker forever, not to
+    /// race a healthy one.
+    const UPLOAD_FLOOR_BYTES_PER_SECOND: u64 = 16 * 1024;
+
+    fn duration(self) -> Duration {
+        match self {
+            Self::Exchange => Self::EXCHANGE,
+            Self::Upload { body_bytes } => {
+                let bytes = u64::try_from(body_bytes).unwrap_or(u64::MAX);
+                Self::UPLOAD_BASE
+                    + Duration::from_secs(bytes.div_ceil(Self::UPLOAD_FLOOR_BYTES_PER_SECOND))
+            }
+        }
+    }
+}
+
+/// The HTTP client, reachable only through requests that carry a deadline.
+///
+/// The inner client has a connect timeout and NO total timeout; each request
+/// gets its own from [`RequestDeadline`], and these two methods are the only
+/// way to build one, so a request without a deadline has no route. An upload
+/// builds its own form from the media bytes, so the deadline is computed from
+/// the body actually sent.
+struct DeadlineClient(Client);
+
+impl DeadlineClient {
+    const CONNECT: Duration = Duration::from_secs(30);
+
+    fn new() -> Result<Self> {
+        Client::builder()
+            .connect_timeout(Self::CONNECT)
+            .timeout(None)
+            .build()
+            .map(Self)
+            .map_err(RevAiError::Http)
+    }
+
+    fn get(&self, url: String) -> RequestBuilder {
+        self.0
+            .get(url)
+            .timeout(RequestDeadline::Exchange.duration())
+    }
+
+    /// A multipart POST whose `media` part is `media`, plus an optional
+    /// second named part (the transcription options).
+    fn upload(
+        &self,
+        url: String,
+        media: &[u8],
+        file_name: &str,
+        mime: &str,
+        extra: Option<(&'static str, Part)>,
+    ) -> Result<RequestBuilder> {
+        let mut form = Form::new().part(
+            "media",
+            Part::bytes(media.to_vec())
+                .file_name(file_name.to_owned())
+                .mime_str(mime)?,
+        );
+        if let Some((name, part)) = extra {
+            form = form.part(name, part);
+        }
+        let deadline = RequestDeadline::Upload {
+            body_bytes: media.len(),
+        };
+        Ok(self
+            .0
+            .post(url)
+            .timeout(deadline.duration())
+            .multipart(form))
     }
 }
 
@@ -245,20 +347,23 @@ pub type Result<T> = std::result::Result<T, RevAiError>;
 /// Blocking Rev.AI HTTP client.
 pub struct RevAiClient {
     api_key: String,
-    client: Client,
+    client: DeadlineClient,
     endpoints: RevAiEndpoints,
     upload_retry_backoff: UploadRetryBackoff,
 }
 
 impl RevAiClient {
     /// Create a new client bound to one API key, talking to the live service.
-    pub fn new(api_key: &str) -> Self {
-        Self {
+    ///
+    /// Fails only if the HTTP client cannot be built (its TLS backend cannot
+    /// initialize), which `Client::new()` used to turn into a panic.
+    pub fn new(api_key: &str) -> Result<Self> {
+        Ok(Self {
             api_key: api_key.to_owned(),
-            client: Client::new(),
+            client: DeadlineClient::new()?,
             endpoints: RevAiEndpoints::production(),
             upload_retry_backoff: UploadRetryBackoff::Exponential,
-        }
+        })
     }
 
     /// A client pointed at a local test server, with the backoff removed.
@@ -270,7 +375,7 @@ impl RevAiClient {
     pub(super) fn for_test(speech_to_text_base: &str) -> Self {
         Self {
             api_key: "test-key".to_owned(),
-            client: Client::new(),
+            client: DeadlineClient::new().expect("test: HTTP client builds"),
             endpoints: RevAiEndpoints {
                 speech_to_text: speech_to_text_base.to_owned(),
                 language_id: format!("{speech_to_text_base}/languageid"),
@@ -304,20 +409,17 @@ impl RevAiClient {
                 thread::sleep(delay);
             }
 
-            let file_part = reqwest::blocking::multipart::Part::bytes(file_bytes.to_vec())
-                .file_name(file_name.to_owned())
-                .mime_str(mime)?;
-            let options_part = reqwest::blocking::multipart::Part::text(options_json.clone())
-                .mime_str("application/json")?;
-            let form = reqwest::blocking::multipart::Form::new()
-                .part("media", file_part)
-                .part("options", options_part);
-
+            let options_part = Part::text(options_json.clone()).mime_str("application/json")?;
             match self
                 .client
-                .post(format!("{}/jobs", self.endpoints.speech_to_text))
+                .upload(
+                    format!("{}/jobs", self.endpoints.speech_to_text),
+                    file_bytes,
+                    file_name,
+                    mime,
+                    Some(("options", options_part)),
+                )?
                 .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-                .multipart(form)
                 .send()
             {
                 Ok(resp) => {
@@ -446,16 +548,16 @@ impl RevAiClient {
         file_name: &str,
         mime: &str,
     ) -> Result<LangIdJob> {
-        let file_part = reqwest::blocking::multipart::Part::bytes(file_bytes.to_vec())
-            .file_name(file_name.to_owned())
-            .mime_str(mime)?;
-        let form = reqwest::blocking::multipart::Form::new().part("media", file_part);
-
         let resp = self
             .client
-            .post(format!("{}/jobs", self.endpoints.language_id))
+            .upload(
+                format!("{}/jobs", self.endpoints.language_id),
+                file_bytes,
+                file_name,
+                mime,
+                None,
+            )?
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .multipart(form)
             .send()?;
 
         if !resp.status().is_success() {
@@ -771,6 +873,32 @@ mod transport_failure_tests {
     use crate::scheduling::FailureCategory;
     use std::io::Read;
     use std::net::TcpListener;
+
+    /// The deadline is a property of the request: an upload's grows with its
+    /// body, so a large recording is never held to an exchange's bound (the
+    /// old fixed 30 s total killed every fold-in upload), and the floor rate
+    /// is what the allowance is computed from.
+    #[test]
+    fn upload_deadlines_grow_with_the_body_and_exchanges_stay_fixed() {
+        let small = RequestDeadline::Upload { body_bytes: 0 }.duration();
+        let large = RequestDeadline::Upload {
+            body_bytes: 80_000_000,
+        }
+        .duration();
+        assert_eq!(small, RequestDeadline::UPLOAD_BASE);
+        assert_eq!(
+            large,
+            RequestDeadline::UPLOAD_BASE + Duration::from_secs(80_000_000u64.div_ceil(16 * 1024))
+        );
+        assert!(
+            large > Duration::from_secs(60 * 60),
+            "an 80 MB upload gets an hour or more, not seconds"
+        );
+        assert_eq!(
+            RequestDeadline::Exchange.duration(),
+            RequestDeadline::EXCHANGE
+        );
+    }
 
     /// A Rev.AI endpoint that accepts the connection and drops it without
     /// answering, reproducing the transport fault the fleet met on

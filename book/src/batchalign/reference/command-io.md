@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:10 EDT
+**Last updated:** 2026-10-04 08:44 EDT
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -87,7 +87,8 @@ CHAT transcripts by running forced alignment against the corresponding audio.
 | Aspect | Local CLI | Explicit remote `--server` |
 |--------|-----------|---------------------|
 | **Input files** | `.cha` files in `IN_DIR` | `.cha` content sent over HTTP |
-| **Input media** | Audio referenced by `@Media:` header, found adjacent to `.cha` or via `--media-dir` | Server resolves audio from `@Media:` against its own visible filesystem (`media_roots`, `media_mappings`, or `--media-dir`) |
+| **Input media** | The recording named like the transcript (which CHAT requires its `@Media:` name to equal), found adjacent to `.cha` or via `--media-dir` | Server resolves the same name against its own visible filesystem (`media_roots`, `media_mappings`, or `--media-dir`) |
+| **Accepted input** | A `@Media:` header is required: `name, audio` or `name, video`, timed or not, or with `, unlinked` and untimed; see [What align accepts](forced-alignment.md#what-align-accepts) | Same |
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with `%wor` timing line, word `time` fields populated | Same `.cha` returned to the client, which writes it to the requested output path |
 | **Mutation** | If `OUT_DIR = IN_DIR`: overwrites original `.cha` in place. Media files untouched. | Same |
@@ -95,7 +96,12 @@ CHAT transcripts by running forced alignment against the corresponding audio.
 
 **What changes in the `.cha`:** `%wor` tier added/updated with word-level
 timestamps. Utterance-level bullet times (`\x15start_end\x15`) updated.
-Existing `%mor`, `%gra` tiers preserved. Media file is read but never modified.
+`, unlinked` is removed from `@Media:` once the file carries timing; align
+never writes a `@Media:` header that was not there. Existing `%mor`, `%gra` tiers preserved. An
+utterance marked `[+ diary]` is not speech in the recording: it gets no bullet
+and no word timing, and is reported untimed with the cause `not_in_recording`
+(see [Utterances not in the recording](forced-alignment.md#utterances-not-in-the-recording)). Media
+file is read but never modified.
 
 **Non-matching files:** For directory inputs, the current Rust CLI copies
 non-`.cha` files and dummy CHAT files from `IN_DIR` to `OUT_DIR` before
@@ -126,7 +132,10 @@ unavailable.
 
 **What gets created:** A new `.cha` file per audio file. Contains `@Comment`
 line with Batchalign version and ASR engine name, `@Languages`, `@Participants`,
-`@ID`, and utterance lines with timing. No `%mor`/`%gra` tiers.
+`@ID`, and utterance lines with timing. No `%mor`/`%gra` tiers unless
+`--morphotag` is given; then every utterance carries them, except that in a
+transcript written `diagnosed` the utterances its findings are confined to are
+left untagged (and unsegmented), and the file lists them as `stage_held_out`.
 
 When both `--diarization enabled` and `--debug-dir PATH` are supplied, BA3
 also writes `<audio-stem>.turns.json` under that server-side debug
@@ -532,11 +541,25 @@ entry [`server returned 413: length limit exceeded`](../user-guide/troubleshooti
 
 ### Mode-by-mode detail
 
+Before submission, the CLI admits one `ServerInputPlan` binding each canonical
+source, its server identity and its output anchor. Command-owned output policies
+derive the exact primary and sidecar destinations for both transports. Duplicate
+server identities or colliding destinations (including media extension swaps
+and existing symlink aliases) are usage errors; no job is submitted. Discovery
+is read-only, and dummy/pass-through copies follow processing-plan admission.
+
+The plan transfers its `ResultDestinations` capability to copy-back. A successful
+result must match an admitted filename and content type; unknown results are
+refused rather than placed by a fallback. Explicit `-o` roots every result once;
+without `-o`, each source keeps its own parent, including mixed input roots.
+Containment is rechecked against the filesystem when writing. This is a CLI
+destination contract, not a substitute for command-specific CHAT admission.
+
 | Direction | `paths_mode=true` (local daemon) | `paths_mode=false` (remote `--server`) |
 |-----------|----------------------------------|----------------------------------------|
 | **Request body** | `JobSubmission { paths_mode: true, source_paths, output_paths, before_paths, display_names, ... }`: path lists only (~KB) | `JobSubmission { paths_mode: false, files: [FilePayload { filename, content }], ... }`: full file bytes inline (can be 100+ MB) |
 | **Server read** | Runner opens each `source_paths[i]` directly via `tokio::fs::read_to_string` (see `crates/batchalign/src/runner/dispatch/infer_batched.rs:112-141`) | Runner reads the staged copy from `staging_dir/input/<filename>` that the POST handler wrote before returning 202 |
-| **Server write** | Runner writes outputs directly to `output_paths[i]` on the shared filesystem | Runner writes to `staging_dir/output/`; the CLI polls `/jobs/{id}/results/<filename>` and saves each file locally |
+| **Server write** | Runner writes command-named artifacts under the admitted `output_paths[i]` parent; CLI copy-back uses those same destinations | Runner writes to `staging_dir/output/`; CLI copy-back uses the source-bound destination plan |
 | **Body limit (`max_body_bytes_mb`)** | Not a factor, body is a path list | Structural ceiling; operators raise `max_body_bytes_mb` for large remote payloads |
 | **Where `DirectHost` fits in** | `DirectHost` is a further optimization used when the CLI falls back to inline in-process execution (no HTTP). It uses the same `source_paths` / `output_paths` convention the local daemon uses, just without the HTTP hop | n/a |
 
@@ -562,7 +585,9 @@ sequenceDiagram
         Srv->>Runner: dispatch job
         Runner->>Runner: read_to_string(source_paths[i])
         Runner->>Runner: write outputs to output_paths[i]
-        Note over CLI,Runner: CLI does not download results;<br/>outputs land directly on shared FS.
+        CLI->>Srv: GET /jobs/{id}/results/<filename>
+        Srv-->>CLI: result bytes (per file)
+        Note over CLI,Runner: Copy-back uses the same admitted destinations;<br/>no second filename-derived layout.
     else Remote --server, transcript-sourced command
         Gate-->>CLI: paths_mode = false
         CLI->>Content: classify_files + FilePayload {filename, content}

@@ -77,37 +77,77 @@ pub fn detect_utterance_language(text: &str) -> Option<String> {
     Some(whatlang_to_iso639_3(info.lang()))
 }
 
-/// Collect all unique detected languages from utterance texts, ordered by
-/// frequency (most common first).
+/// The language of every utterance, decided together with the header list
+/// that declares them, so no utterance can carry a language the header omits.
 ///
-/// `primary_lang` is always included as the first element. Secondary
-/// languages must appear in at least [`MIN_UTTERANCES_FOR_SECONDARY`]
-/// utterances to be included (prevents false positives from trigram
-/// confusion on short text).
-pub fn collect_detected_languages(utterance_texts: &[&str], primary_lang: &str) -> Vec<String> {
-    let mut lang_counts: Vec<(String, usize)> = Vec::new();
+/// Built once from all utterance texts. A secondary language is admitted only
+/// when at least [`MIN_UTTERANCES_FOR_SECONDARY`] utterances detect it
+/// (trigram detection on short text produces stray guesses), and an utterance
+/// is tagged only with an admitted secondary language. A detection below the
+/// threshold leaves its utterance in the primary language, untagged: a single
+/// stray guess is neither declared nor tagged.
+///
+/// This used to be two decisions: every utterance was tagged with whatever
+/// was detected, and the header was collected separately under the
+/// threshold. One stray detection then produced an utterance tagged with an
+/// undeclared language, which is invalid CHAT (E755).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtteranceLanguages {
+    /// Primary first, then admitted secondary languages, most frequent first.
+    declared: Vec<String>,
+    /// One per utterance, in order; `Some` only for an admitted secondary
+    /// language, never for the primary.
+    tags: Vec<Option<String>>,
+}
 
-    for text in utterance_texts {
-        if let Some(lang) = detect_utterance_language(text) {
-            if let Some(entry) = lang_counts.iter_mut().find(|(l, _)| l == &lang) {
-                entry.1 += 1;
-            } else {
-                lang_counts.push((lang, 1));
+impl UtteranceLanguages {
+    /// Detect each utterance once and admit the languages the header declares.
+    pub fn detect(utterance_texts: &[&str], primary_lang: &str) -> Self {
+        let detected: Vec<Option<String>> = utterance_texts
+            .iter()
+            .map(|text| detect_utterance_language(text))
+            .collect();
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for lang in detected.iter().flatten() {
+            match counts.iter_mut().find(|(seen, _)| *seen == lang.as_str()) {
+                Some(entry) => entry.1 += 1,
+                None => counts.push((lang.as_str(), 1)),
             }
         }
+        // Stable sort keeps first-appearance order among equal counts.
+        counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+        let mut declared = vec![primary_lang.to_owned()];
+        declared.extend(
+            counts
+                .iter()
+                .filter(|&&(lang, count)| {
+                    lang != primary_lang && count >= MIN_UTTERANCES_FOR_SECONDARY
+                })
+                .map(|&(lang, _)| lang.to_owned()),
+        );
+        let tags = detected
+            .into_iter()
+            .map(|lang| {
+                lang.filter(|lang| lang != primary_lang && declared.iter().any(|d| d == lang))
+            })
+            .collect();
+        Self { declared, tags }
     }
 
-    lang_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-    let mut result: Vec<String> = Vec::new();
-    result.push(primary_lang.to_string());
-    for (lang, count) in &lang_counts {
-        if lang != primary_lang && !result.contains(lang) && *count >= MIN_UTTERANCES_FOR_SECONDARY
-        {
-            result.push(lang.clone());
-        }
+    /// The `@Languages` list: primary first, then admitted secondaries.
+    pub fn declared(&self) -> &[String] {
+        &self.declared
     }
-    result
+
+    /// The per-utterance tags, one per input text, in order.
+    pub fn tags(&self) -> &[Option<String>] {
+        &self.tags
+    }
+
+    /// Hand over the header list and the tags together.
+    pub fn into_parts(self) -> (Vec<String>, Vec<Option<String>>) {
+        (self.declared, self.tags)
+    }
 }
 
 /// Map `whatlang::Lang` to ISO 639-3 codes used by CHAT.
@@ -289,7 +329,8 @@ mod tests {
             "I went to the store yesterday and bought some groceries for the week",
             "The weather has been really nice lately and I enjoy going for walks",
         ];
-        let langs = collect_detected_languages(&texts, "spa");
+        let detected = UtteranceLanguages::detect(&texts, "spa");
+        let langs = detected.declared();
         assert_eq!(langs[0], "spa", "Primary must be first");
         // English appears 3 times, above threshold
         assert!(
@@ -316,8 +357,8 @@ mod tests {
             "I went to the store yesterday and bought some groceries for the week",
             "The weather has been really nice lately and I enjoy going for walks",
         ];
-        let langs = collect_detected_languages(&texts, "spa");
-        assert_eq!(langs[0], "spa");
+        let detected = UtteranceLanguages::detect(&texts, "spa");
+        assert_eq!(detected.declared()[0], "spa");
     }
 
     #[test]
@@ -330,11 +371,44 @@ mod tests {
             "Estoy bien gracias por preguntar y por venir a visitarme hoy aquí",
             "Hello my name is John and I live in the city of New York with my family",
         ];
-        let langs = collect_detected_languages(&texts, "spa");
+        let detected = UtteranceLanguages::detect(&texts, "spa");
         assert_eq!(
-            langs,
-            vec!["spa"],
+            detected.declared(),
+            ["spa"],
             "Single English utterance should be excluded from @Languages"
+        );
+        // ...and therefore not tagged either: a tag the header does not
+        // declare is invalid CHAT (E755).
+        assert_eq!(detected.tags(), [None, None, None, None]);
+    }
+
+    /// Every tag is a declared, non-primary language, whatever the input.
+    #[test]
+    fn every_tag_is_declared_and_never_the_primary() {
+        let texts = vec![
+            "Hola me llamo María y vivo en la ciudad de Madrid con mi familia",
+            "Hello my name is John and I live in the city of New York with my family",
+            "I went to the store yesterday and bought some groceries for the week",
+            "The weather has been really nice lately and I enjoy going for walks",
+            "Bonjour je m'appelle Marie et j'habite dans la ville de Paris avec ma famille",
+            "short",
+        ];
+        let detected = UtteranceLanguages::detect(&texts, "spa");
+        assert_eq!(detected.tags().len(), texts.len());
+        for tag in detected.tags().iter().flatten() {
+            assert_ne!(tag, "spa");
+            assert!(
+                detected.declared().contains(tag),
+                "{tag} tagged but not declared"
+            );
+        }
+        assert_eq!(
+            detected
+                .tags()
+                .iter()
+                .filter(|tag| tag.as_deref() == Some("eng"))
+                .count(),
+            3
         );
     }
 

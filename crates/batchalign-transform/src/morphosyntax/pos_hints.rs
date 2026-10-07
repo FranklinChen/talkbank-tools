@@ -11,8 +11,9 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use talkbank_model::alignment::helpers::{TierDomain, WordItem, walk_words};
-use talkbank_model::model::Line;
+use talkbank_model::alignment::helpers::visit_mor_positions;
+use talkbank_model::alignment::{MainWordIndex, MorItemIndex};
+use talkbank_model::model::{Line, Utterance};
 
 use super::ud_types::UniversalPos;
 
@@ -41,38 +42,39 @@ pub struct PosHintEvidence {
 struct PosHintLineEvidence {
     line_idx: usize,
     utterance_ordinal: usize,
-    hints: Vec<(usize, String)>,
+    hints: Vec<PosHint>,
+}
+
+/// A hint attached to a position admitted by Chatter's morphology traversal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PosHint {
+    source: MainWordIndex,
+    clan_tag: String,
+}
+
+impl PosHint {
+    fn target_item(&self, trace: Option<&super::RetokenizationInfo>) -> Option<MorItemIndex> {
+        match trace {
+            Some(trace) => trace
+                .mapping
+                .get(self.source.as_usize())
+                .and_then(|items| items.first())
+                .copied()
+                .map(MorItemIndex::new),
+            None => Some(MorItemIndex::new(self.source.as_usize())),
+        }
+    }
 }
 
 /// Capture `$POS` hints before any retokenization can rewrite main-tier words.
 pub fn collect_pos_hints(chat_file: &talkbank_model::model::ChatFile) -> PosHintEvidence {
-    use talkbank_model::model::content::word::Word;
-
     let mut by_line = Vec::new();
     let mut utterance_ordinal = 0usize;
     for (line_idx, line) in chat_file.lines.iter().enumerate() {
         let Line::Utterance(utt) = line else {
             continue;
         };
-        let mut hints = Vec::new();
-        let mut idx: usize = 0;
-        walk_words(
-            &utt.main.content.content,
-            Some(TierDomain::Mor),
-            &mut |leaf: WordItem| {
-                let word: Option<&Word> = match leaf {
-                    WordItem::Word(w) => Some(w),
-                    WordItem::ReplacedWord(rw) => Some(&rw.word),
-                    WordItem::Separator(_) => None,
-                };
-                if let Some(w) = word
-                    && let Some(pos) = &w.part_of_speech
-                {
-                    hints.push((idx, pos.to_string()));
-                }
-                idx += 1;
-            },
-        );
+        let hints = utterance_pos_hints(utt);
         if !hints.is_empty() {
             by_line.push(PosHintLineEvidence {
                 line_idx,
@@ -83,6 +85,22 @@ pub fn collect_pos_hints(chat_file: &talkbank_model::model::ChatFile) -> PosHint
         utterance_ordinal += 1;
     }
     PosHintEvidence { by_line }
+}
+
+/// One owner for the typed hint inputs to application and reuse compatibility.
+pub(crate) fn utterance_pos_hints(utt: &Utterance) -> Vec<PosHint> {
+    let mut hints = Vec::new();
+    visit_mor_positions(&utt.main.content.content, &mut |position| {
+        if let Some(word) = position.word()
+            && let Some(pos) = &word.part_of_speech
+        {
+            hints.push(PosHint {
+                source: position.index(),
+                clan_tag: pos.to_string(),
+            });
+        }
+    });
+    hints
 }
 
 /// Apply previously captured hint evidence to injected `%mor` tiers.
@@ -110,14 +128,14 @@ pub fn apply_pos_hint_evidence(
         NoMorItem,
     }
 
-    fn resolve_hint(clan_tag: &str, mor: &mut MorTier, word_idx: usize) -> HintResolution {
+    fn resolve_hint(clan_tag: &str, mor: &mut MorTier, item_idx: MorItemIndex) -> HintResolution {
         let Some(upos_name) = clan_to_ud_upos(clan_tag) else {
             return HintResolution::Unmapped;
         };
         let Some(hinted) = UniversalPos::from_pos_name(upos_name) else {
             return HintResolution::Unmapped;
         };
-        let Some(mor_item) = mor.items_mut().get_mut(word_idx) else {
+        let Some(mor_item) = mor.items_mut().get_mut(item_idx.as_usize()) else {
             return HintResolution::NoMorItem;
         };
 
@@ -152,21 +170,13 @@ pub fn apply_pos_hint_evidence(
             continue;
         };
 
-        for (word_idx, clan_tag) in line_evidence.hints {
+        for hint in line_evidence.hints {
             outcome.hints_considered += 1;
-            let target_idx = match retokenization {
-                Some(trace) => trace
-                    .mapping
-                    .get(word_idx)
-                    .and_then(|token_indices| token_indices.first())
-                    .copied(),
-                None => Some(word_idx),
-            };
-            let Some(target_idx) = target_idx else {
+            let Some(target_idx) = hint.target_item(retokenization) else {
                 outcome.hints_skipped_no_mor += 1;
                 continue;
             };
-            match resolve_hint(&clan_tag, mor, target_idx) {
+            match resolve_hint(&hint.clan_tag, mor, target_idx) {
                 HintResolution::Agreed => outcome.hints_agreed += 1,
                 HintResolution::Overridden => outcome.hints_overridden += 1,
                 HintResolution::Unmapped => outcome.hints_unmapped += 1,

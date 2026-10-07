@@ -7,7 +7,7 @@ expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestam
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
-@Comment:	[fc-ba3 morphotag | engine=stanza-1.14.0:eng:standard ; lang=eng | <timestamp>]
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.14.0:eng:standard ; lang=eng | <timestamp>]
 *PAR:	the dog is running .
 %mor:	det|the-Def-Art noun|dog aux|be-Fin-Ind-Pres-S3 verb|run-Part-Pres-S .
 %gra:	1|2|DET 2|4|NSUBJ 3|4|AUX 4|0|ROOT 5|4|PUNCT

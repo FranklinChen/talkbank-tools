@@ -1,7 +1,7 @@
 //! Typed CLI errors with stable exit codes for scripting.
 //!
 //! Every error the CLI can encounter is represented as a [`CliError`] variant.
-//! Each variant maps to one of six exit code categories (2--6) via
+//! Each variant maps to one of five failure exit code categories (2--6) via
 //! [`CliError::exit_code()`], providing a stable contract that shell scripts
 //! and CI pipelines can match on without parsing stderr text.
 //!
@@ -10,6 +10,11 @@
 //! the retained artifact ([`CliError::ReplayDiffers`]). Keeping it distinct from
 //! the structured categories (2--6) also leaves an unexpected panic or
 //! catch-all distinguishable from a known failure category.
+//!
+//! Exit code 7 (`EXIT_DIAGNOSED`) is a job that completed with every output
+//! written, some of it with diagnostics ([`CliError::WrittenWithDiagnostics`]):
+//! nothing failed, but the output is not certified complete, so a script must
+//! not read it as a clean success (exit 0).
 
 use std::path::PathBuf;
 
@@ -21,6 +26,26 @@ use crate::api::{JobId, ReleasedCommand};
 /// Scripts should match on exit codes, not error messages.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
+    /// A binary result did not match its admitted encoding/identity or could
+    /// not be published new-only. A bad producer is not a CLI argument error.
+    #[error("binary result {filename} refused: {refusal}")]
+    BinaryResult {
+        /// Exact result identity returned by the server.
+        filename: crate::api::DisplayPath,
+        /// Structured admission/publication refusal.
+        #[source]
+        refusal: crate::cli::output::BinaryResultRefusal,
+    },
+    /// Complete named CHAT admission failed before offline analysis. Invalid
+    /// input exits 2; an internal producer failure exits 6, never bad input.
+    #[error(transparent)]
+    ChatAdmission(#[from] batchalign_transform::ValidatedParseError),
+
+    /// The local CHAT grammar could not be initialized. This is a runtime
+    /// failure, not an invalid command argument or invalid submitted CHAT.
+    #[error(transparent)]
+    ParserInitialization(#[from] talkbank_parser::ParserInitError),
+
     /// ASR backend/count admission failed before inference. Exit code 2.
     #[error(transparent)]
     AsrPlan(#[from] crate::transcribe::TranscribeAsrPlanError),
@@ -62,6 +87,38 @@ pub enum CliError {
     /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
     #[error("{0}")]
     InvalidArgument(String),
+
+    /// Distinct sources cannot share a submission identity. Exit code 2.
+    #[error(
+        "inputs {first} and {second} share server name {name}; submit separately or use one common input root"
+    )]
+    InputNameCollision {
+        /// Colliding source-relative identity.
+        name: String,
+        /// First source.
+        first: PathBuf,
+        /// Second source.
+        second: PathBuf,
+    },
+
+    /// Distinct artifacts cannot share a write destination. Exit code 2.
+    #[error("outputs for {first} and {second} collide at {destination}; nothing was submitted")]
+    OutputCollision {
+        /// Admitted filesystem identity of the destination.
+        destination: PathBuf,
+        /// First owning source.
+        first: PathBuf,
+        /// Second owning source.
+        second: PathBuf,
+    },
+
+    /// The server returned an artifact absent from the admitted plan. Exit code 5.
+    #[error("server returned unplanned result {0}; refusing to choose a destination")]
+    UnplannedResult(crate::api::DisplayPath),
+
+    /// The server result contradicts its planned content type. Exit code 5.
+    #[error("server returned unexpected content type for {0}; refusing to write")]
+    ResultTypeMismatch(crate::api::DisplayPath),
 
     /// The server at `url` did not respond to a health check or connection
     /// attempt. This covers DNS failures, refused connections, and TLS errors.
@@ -155,6 +212,22 @@ pub enum CliError {
         status: String,
         /// Best available human-readable failure detail.
         detail: String,
+    },
+
+    /// The job completed and every output was written, but some files were
+    /// written with diagnostics: on disk, not certified complete. Exit code:
+    /// [`EXIT_DIAGNOSED`](Self::EXIT_DIAGNOSED) (7).
+    #[error(
+        "job {job_id} completed, but {diagnosed} of {total} file(s) were written with \
+         diagnostics; review them before use"
+    )]
+    WrittenWithDiagnostics {
+        /// ID of the completed job.
+        job_id: JobId,
+        /// Files written with diagnostics.
+        diagnosed: std::num::NonZeroUsize,
+        /// Files in the job.
+        total: u64,
     },
 
     /// A server-returned filename would resolve to a path outside the output
@@ -272,15 +345,29 @@ impl CliError {
     /// broken or misconfigured.
     pub const EXIT_LOCAL_RUNTIME: i32 = 6;
 
+    /// The job completed with every output written, but some of it was
+    /// written with diagnostics: not a failure, and not a clean success.
+    pub const EXIT_DIAGNOSED: i32 = 7;
+
     /// Stable process exit code for this error category.
     pub fn exit_code(&self) -> i32 {
         match self {
+            Self::ChatAdmission(error) => {
+                if crate::error::chat_admission_is_internal(error) {
+                    Self::EXIT_LOCAL_RUNTIME
+                } else {
+                    Self::EXIT_USAGE
+                }
+            }
+            Self::ParserInitialization(_) => Self::EXIT_LOCAL_RUNTIME,
             Self::NoInputPaths
             | Self::InputMissing(_)
             | Self::FileListMissing(_)
             | Self::FileListEmpty
             | Self::FileListEntryMissing { .. }
             | Self::InvalidArgument(_)
+            | Self::InputNameCollision { .. }
+            | Self::OutputCollision { .. }
             | Self::AsrPlan(_)
             | Self::PathTraversal(_) => Self::EXIT_USAGE,
             Self::Config(_) | Self::DaemonStartFailed => Self::EXIT_CONFIG,
@@ -288,6 +375,9 @@ impl CliError {
             Self::UnsupportedCommand { .. }
             | Self::ServerBuildMismatch { .. }
             | Self::ServerHttp { .. }
+            | Self::UnplannedResult(_)
+            | Self::ResultTypeMismatch(_)
+            | Self::BinaryResult { .. }
             | Self::PollExhausted { .. }
             | Self::JobLost { .. }
             | Self::JobFailed { .. }
@@ -298,6 +388,8 @@ impl CliError {
             // Nothing failed: the replay ran and its answer was "this does not
             // reproduce". That is neither a usage error nor a broken machine.
             Self::ReplayDiffers(_) => Self::EXIT_GENERAL,
+            // Nothing failed either, but the output is not certified.
+            Self::WrittenWithDiagnostics { .. } => Self::EXIT_DIAGNOSED,
             Self::Io(err) => match err.kind() {
                 std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
                     Self::EXIT_USAGE

@@ -181,6 +181,10 @@ pub struct DirGroup {
     /// Number of files with status `Done`. Invariant: `done_count <= files.len()`.
     pub done_count: usize,
 
+    /// Number of files with status `Diagnosed`: output written, with the
+    /// diagnostics its admission found. Neither done-clean nor failed.
+    pub diagnosed_count: usize,
+
     /// Number of files with status `Processing`. These are the files
     /// currently being worked on by a server worker.
     pub active_count: usize,
@@ -236,6 +240,10 @@ pub struct FileState {
     /// Error message if the file failed. `None` for successful or
     /// in-progress files.
     pub error_msg: Option<String>,
+
+    /// How many admission findings a diagnosed file's written output carries.
+    /// `None` for every status but `Diagnosed`, following `error_msg`.
+    pub diagnostic_count: Option<u64>,
 }
 
 /// An error entry displayed in the collapsible error summary panel.
@@ -304,6 +312,13 @@ impl AppState {
                 progress_label: entry.progress_label.clone(),
                 progress_stage: entry.progress_stage,
                 error_msg: entry.error.clone(),
+                diagnostic_count: entry.diagnostics.as_ref().map(|diagnostics| {
+                    // The finding count plus each shortfall: everything
+                    // the file reports beyond a clean write.
+                    diagnostics
+                        .finding_count()
+                        .saturating_add(diagnostics.shortfalls.len() as u64)
+                }),
             };
 
             dir_map.entry(dir.to_string()).or_default().push(file_state);
@@ -317,6 +332,10 @@ impl AppState {
                 let done_count = files
                     .iter()
                     .filter(|f| f.status == FileStatusKind::Done)
+                    .count();
+                let diagnosed_count = files
+                    .iter()
+                    .filter(|f| f.status == FileStatusKind::Diagnosed)
                     .count();
                 let active_count = files
                     .iter()
@@ -337,6 +356,7 @@ impl AppState {
                     dir,
                     files,
                     done_count,
+                    diagnosed_count,
                     active_count,
                     error_count,
                     queued_count,
@@ -509,6 +529,7 @@ mod tests {
             status,
             error: None,
             error_category: None,
+            diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,

@@ -1,7 +1,7 @@
 //! Per-file status mutation methods.
 //!
 //! These methods move individual file entries between [`FilePhase`]s:
-//! `Queued`, `Processing`, `RetryPending`, `Done`, `Error`. Each builds the
+//! `Queued`, `Processing`, `RetryPending`, `Done`, `Diagnosed`, `Error`. Each builds the
 //! whole phase it moves to, so no field from the previous phase can survive
 //! by being forgotten. Each returns `false` if the filename is not found in
 //! the job's file status map.
@@ -10,7 +10,7 @@ use crate::api::{ContentType, DisplayPath, FileProgressStage, MachineTime};
 use crate::store::{FileFailure, FilePhase, FileProgress, FileResultEntry};
 
 use super::Job;
-use super::types::{CompletedFileOutput, FileFailureRecord, FileProgressRecord, FileRetryRecord};
+use super::types::{FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord};
 
 impl Job {
     /// Mark one file as actively processing.
@@ -29,20 +29,46 @@ impl Job {
         true
     }
 
-    /// Mark one file as complete and optionally attach a result record.
+    /// Mark one file as finished without failing, `Done` or `Diagnosed` as
+    /// the completion says, and attach its result record if it has one.
     pub(crate) fn mark_file_done(
         &mut self,
         filename: &str,
         finished_at: MachineTime,
-        result: Option<CompletedFileOutput>,
+        completion: FileCompletion,
     ) -> bool {
         let Some(file_status) = self.execution.file_statuses.get_mut(filename) else {
             return false;
         };
-        file_status.phase = FilePhase::Done {
-            started_at: file_status.phase.started_at(),
-            finished_at: Some(finished_at),
+        let started_at = file_status.phase.started_at();
+        let (phase, result) = match completion {
+            FileCompletion::WithoutResult => (
+                FilePhase::Done {
+                    started_at,
+                    finished_at: Some(finished_at),
+                },
+                None,
+            ),
+            FileCompletion::Clean(result) => (
+                FilePhase::Done {
+                    started_at,
+                    finished_at: Some(finished_at),
+                },
+                Some(result),
+            ),
+            FileCompletion::Diagnosed {
+                result,
+                diagnostics,
+            } => (
+                FilePhase::Diagnosed {
+                    started_at,
+                    finished_at: Some(finished_at),
+                    diagnostics: Some(diagnostics),
+                },
+                Some(result),
+            ),
         };
+        file_status.phase = phase;
         file_status.progress = FileProgress::default();
         if let Some(result) = result {
             // The stamp decision belongs to the FILE, not to one of its
@@ -156,6 +182,21 @@ impl Job {
             current: progress.current,
             total: progress.total,
         };
+        true
+    }
+
+    /// Apply a change in how many of one file's checkouts wait on a
+    /// saturated pool. Applied whatever the file's phase, so the count stays
+    /// paired; a terminal file does not show it.
+    pub(crate) fn set_file_worker_wait(
+        &mut self,
+        filename: &str,
+        change: crate::store::WorkerWaitChange,
+    ) -> bool {
+        let Some(file_status) = self.execution.file_statuses.get_mut(filename) else {
+            return false;
+        };
+        file_status.worker_waits.apply(change);
         true
     }
 

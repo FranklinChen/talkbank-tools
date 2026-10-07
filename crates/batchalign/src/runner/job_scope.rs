@@ -99,10 +99,10 @@ impl FileTaskScope {
     /// The future a supervised file task actually runs: the command's own
     /// future, registered against the job, and dropped the moment the job is
     /// cancelled.
-    pub(crate) async fn supervise<F>(self, future: F) -> FileTaskOutcome
-    where
-        F: Future<Output = FileTaskOutcome>,
-    {
+    pub(crate) async fn supervise(
+        self,
+        future: crate::owned_future::OwnedFuture<'static, FileTaskOutcome>,
+    ) -> FileTaskOutcome {
         let Self {
             job_id,
             cancel_token,

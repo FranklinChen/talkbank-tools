@@ -47,7 +47,6 @@ pub(crate) async fn dispatch_translate_job(
             job.dispatch.options.command_name()
         )));
     };
-    let engine = options.effective_translate_engine();
     let sink = host.sink().clone();
 
     for file in &job.pending_files {
@@ -76,17 +75,22 @@ pub(crate) async fn dispatch_translate_job(
             batchalign_transform::parse::parse_lenient(&parser, file_input.chat_text.as_ref());
         match crate::pipeline::morphosyntax::resolve_per_file_lang(&chat_file) {
             Ok(src_lang) => {
+                let route = crate::translate::TranslationRoute::for_file(src_lang, options);
                 // Single-file batch at the gateway boundary. This loses
                 // cross-file pooling on purpose: per-file lang correctness
                 // > batching speedup.
-                let mut results = gateway
-                    .translate_file(
+                // A saturated checkout shows on this file's progress.
+                let mut results = crate::runner::util::observing_file_waits(
+                    host.sink(),
+                    &job.identity.job_id,
+                    [file_input.filename.to_string()],
+                    gateway.translate_file(
                         &file_input,
-                        &src_lang,
-                        &engine,
+                        &route,
                         crate::infer_retry::Cancellation::Token(&job.cancel_token),
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 all_results.append(&mut results);
             }
             Err(err) => {
@@ -145,6 +149,7 @@ mod tests {
     #[derive(Default)]
     struct FakeTranslateState {
         calls: usize,
+        routes: Vec<crate::translate::TranslationRoute>,
     }
 
     #[async_trait]
@@ -164,7 +169,6 @@ mod tests {
             &self,
             _chat_text: &str,
             _before_text: Option<&str>,
-            _lang: &LanguageCode3,
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
@@ -186,12 +190,12 @@ mod tests {
         async fn translate_file(
             &self,
             file: &TextBatchFileInput,
-            _lang: &LanguageCode3,
-            _engine: &crate::types::engines::TranslateEngineName,
+            route: &crate::translate::TranslationRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             let mut state = self.state.lock().unwrap();
             state.calls += 1;
+            state.routes.push(route.clone());
             let translated = file.chat_text.replace("@End", "%xtra:\ttranslated\n@End");
             vec![TextBatchFileResult::ok(
                 file.filename.clone(),
@@ -305,6 +309,44 @@ mod tests {
         assert_eq!(
             state.calls, 2,
             "one gateway call per file (BA2 parity); the gateway takes one file by signature"
+        );
+    }
+
+    #[tokio::test]
+    async fn translate_routes_each_source_to_the_selected_target_and_engine() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = host();
+        let gateway = FakeTranslateGateway::default();
+        let mut job = translate_snapshot(temp.path());
+        let path = temp.path().join("input/b.cha");
+        let spanish = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("eng", "spa");
+        std::fs::write(path, spanish).unwrap();
+        let CommandOptions::Translate(options) = &mut job.dispatch.options else {
+            panic!("translate fixture")
+        };
+        options.target = LanguageCode3::fra();
+        options.common.engine_overrides.translate =
+            Some(crate::types::engines::TranslateEngineName::Nllb);
+        dispatch_translate_job(&job, &host, &gateway, false)
+            .await
+            .unwrap();
+        let state = gateway.state.lock().unwrap();
+        assert_eq!(
+            state
+                .routes
+                .iter()
+                .map(|route| route.source().as_ref())
+                .collect::<Vec<_>>(),
+            ["eng", "spa"]
+        );
+        assert!(
+            state
+                .routes
+                .iter()
+                .all(|route| route.target() == &LanguageCode3::fra()
+                    && route.engine() == &crate::types::engines::TranslateEngineName::Nllb)
         );
     }
 

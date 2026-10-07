@@ -131,6 +131,18 @@ impl WordTiming {
         }
     }
 
+    /// The positive interval this timing proves, or why there is none.
+    ///
+    /// Total: a `Timed` interval that is somehow empty (the variant is public,
+    /// so only the constructors above demote) answers `ZeroLengthSpan` rather
+    /// than a bullet that locates nothing.
+    pub fn positive(self) -> Result<PositiveInterval, UntimedCause> {
+        match self {
+            Self::Timed(interval) => PositiveInterval::of(interval),
+            Self::Untimed(cause) => Err(cause),
+        }
+    }
+
     /// Lower to the `(Option<i64>, Option<i64>)` pair the post-processing
     /// word type still stores.
     ///
@@ -144,10 +156,95 @@ impl WordTiming {
     }
 }
 
+/// An interval that covers real time: admitted, with its end after its start.
+///
+/// The one input a generated CHAT bullet is built from ([`Self::bullet`]).
+/// Its fields are private and its only constructor is [`Self::of`] over an
+/// [`AdmittedInterval`], so a value is a proof that its bounds were admitted
+/// once, are non-negative, and enclose a positive duration. Two such intervals
+/// cover a third ([`Self::covering`]), which is how an utterance's span is
+/// formed from its words' without a second check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositiveInterval {
+    start_ms: u64,
+    end_ms: u64,
+}
+
+impl PositiveInterval {
+    /// Admit a non-empty admitted interval. An empty one is the zero-width
+    /// span that locates nothing. Admission already proved both bounds
+    /// non-negative, so the unsigned conversion cannot refuse; if it ever did,
+    /// the cause is named rather than a bound invented.
+    pub fn of(interval: AdmittedInterval) -> Result<Self, UntimedCause> {
+        let (Ok(start_ms), Ok(end_ms)) = (
+            u64::try_from(interval.start_ms()),
+            u64::try_from(interval.end_ms()),
+        ) else {
+            return Err(UntimedCause::RefusedByAdmission);
+        };
+        if end_ms > start_ms {
+            Ok(Self { start_ms, end_ms })
+        } else {
+            Err(UntimedCause::ZeroLengthSpan)
+        }
+    }
+
+    /// Start, in recording milliseconds.
+    pub const fn start_ms(self) -> u64 {
+        self.start_ms
+    }
+
+    /// End, in recording milliseconds; always after the start.
+    pub const fn end_ms(self) -> u64 {
+        self.end_ms
+    }
+
+    /// The smallest interval covering both. Positive because both are.
+    pub fn covering(self, other: Self) -> Self {
+        Self {
+            start_ms: self.start_ms.min(other.start_ms),
+            end_ms: self.end_ms.max(other.end_ms),
+        }
+    }
+
+    /// THE construction of a generated bullet: from a positive interval only.
+    pub fn bullet(self) -> talkbank_model::model::Bullet {
+        talkbank_model::model::Bullet::new(self.start_ms, self.end_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_positive_interval_is_only_built_from_real_duration() {
+        let admit = |start, end| AdmittedInterval::admit_millis(start, end).expect("admitted");
+        let interval = PositiveInterval::of(admit(100, 250)).expect("positive");
+        assert_eq!((interval.start_ms(), interval.end_ms()), (100, 250));
+        assert_eq!(
+            PositiveInterval::of(admit(100, 100)),
+            Err(UntimedCause::ZeroLengthSpan)
+        );
+        assert_eq!(
+            WordTiming::from_millis(Some(5), Some(5))
+                .expect("admitted")
+                .positive(),
+            Err(UntimedCause::ZeroLengthSpan)
+        );
+        assert_eq!(
+            WordTiming::from_millis(None, Some(5))
+                .expect("admitted")
+                .positive(),
+            Err(UntimedCause::ProviderReportedNoStart)
+        );
+        let later = PositiveInterval::of(admit(400, 500)).expect("positive");
+        let hull = interval.covering(later);
+        assert_eq!((hull.start_ms(), hull.end_ms()), (100, 500));
+        let bullet = hull.bullet();
+        assert_eq!((bullet.timing.start_ms, bullet.timing.end_ms), (100, 500));
+    }
 
     #[test]
     fn a_zero_length_span_is_admitted_but_is_not_a_timed_word() {

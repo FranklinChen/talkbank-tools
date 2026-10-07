@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-10-01 09:52 EDT
+**Last updated:** 2026-10-06 15:09 EDT
 
 ## Overview
 
@@ -13,6 +13,83 @@ engine. Container formats that downstream audio libraries cannot read,
 primarily **MP4**: must first be converted to WAV via ffmpeg.
 
 This conversion is automatic, cached, and transparent to the user.
+
+## Export is not model preparation
+
+The preservation-oriented Rust export operation (`media::export`) is separate
+from `ensure_wav` and model-facing `Transcode`. A model's 16 kHz mono input is
+not an appropriate substitute for an exported recording.
+
+`AudioExportPlan` owns the source, destination and selected WAV/MP3 encoding.
+It refuses an existing destination, including a dangling symlink, before
+encoding. Encoding happens in an owned adjacent temporary file. Successful
+encoding and independent stream/duration inspection produce
+`VerifiedAudioExport`; only that capability can publish to the bound
+destination, with atomic no-clobber semantics. A competing writer appearing
+after admission cannot be overwritten. Cancellation kills the owned async
+media subprocess and drops its temporary artifact.
+
+WAV export is PCM16 and retains sample rate and channel count. MP3 export uses
+the encoder's VBR quality setting 2 and retains MP3-compatible sample rates
+and mono/stereo channels. A single fixed bitrate is not requested across
+different MPEG sample-rate families.
+The preservation operation refuses implicit resampling or downmixing when
+MP3 cannot represent the source layout; WAV remains available. Multiple audio
+streams require an explicit selection policy and are currently refused rather
+than silently selecting one. Neither encoding preserves video, subtitle,
+container metadata or the source's original compressed bytes. PCM16 WAV is
+not lossless preservation of higher-bit-depth PCM or floating-point samples;
+MP3 is lossy. Nonempty duration is a media fact, not acoustic-quality proof.
+
+The standalone [convert command](../user-guide/commands/convert.md) requires
+`--format wav|mp3`. Its native managed lane retains that selection in typed job
+options and catalog-derived output plans. It uses no Python inference task or
+ML model. Source-stem collisions and existing output destinations refuse before
+encoding; neither the CLI nor the producer offers an overwrite mode.
+
+An optional staged-copy role is bound before encoding. Verified bytes are
+copied into an owned temporary artifact, and publication requires both roles.
+The staged download copy publishes first and the user destination last, each
+with no-clobber semantics. This is not a transaction spanning directories: if
+the second publication fails, the job may retain an internal staged artifact,
+but the file does not report success or overwrite the competing destination.
+
+The command catalog now distinguishes `CapabilityPlan::Inference` from
+`NativeMedia`. Only the catalog can construct the opaque
+`InferenceRequirement` consumed by worker-key and target derivation. The same
+admitted task drives engine selection, model loading and capability probing;
+native operations cannot be assigned a fallback inference task. Native work
+does not pre-scale Python workers or claim an idle model as memory-admission
+evidence, and a misplaced worker probe returns a typed orchestration failure
+before inspecting or starting a worker. This is the execution-admission
+foundation. The native command retains the managed scheduler, memory budget,
+file supervision, progress and cancellation while bypassing worker probing.
+
+### Binary result transport
+
+`FileResult.content` is `ResultContent`: inline text or a binary descriptor.
+Text still serializes as the existing JSON string; Rust consumers must use
+`as_text()` or explicitly match the payload rather than treating every result
+as text. A descriptor contains a nonzero byte count and a canonical BLAKE3
+digest. It is untrusted wire data, not output permission or acoustic evidence.
+
+`GET /jobs/{id}/artifacts/{filename}` streams only a recorded successful binary
+artifact inside that job's staged output directory. Metadata and streaming use
+the same held-file admission. Binary bytes are not decoded as UTF-8, embedded
+as base64 in JSON, or loaded wholesale into memory.
+
+Managed CLI writeback checks the admitted destination and content discriminator,
+HTTP media type, full byte count and digest. It receives into a private adjacent
+temporary file; only the resulting `VerifiedBinaryDelivery` can consume
+no-clobber publication to the original destination. A shared-filesystem result
+already present locally is accepted only if its observed byte identity matches;
+an unrelated existing file or symlink is never overwritten. Live containment
+is rechecked during delivery and before publication. Cancellation drops the
+owned temporary artifact. These checks do not assert that an external actor
+cannot subsequently mutate a published file.
+
+Protocol and producer controls are not substitutes for actual managed-command
+acceptance runs; runtime freshness and end-to-end evidence remain separate.
 
 ## Formats
 

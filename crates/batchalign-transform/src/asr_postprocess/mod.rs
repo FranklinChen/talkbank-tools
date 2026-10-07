@@ -12,7 +12,9 @@
 //! 2. **Cantonese normalization**: simplified→HK traditional + domain
 //!    replacements (lang=yue only), once per monologue, before any splitting
 //! 3. **Multi-word splitting**: split tokens containing spaces, interpolate timestamps
-//! 4. **Number expansion**: convert digit strings to word form
+//! 4. **Word forms**: spell digits as number words, link letter-led
+//!    alphanumerics (`b2` to `b_two`), mark reserved-marker spellings as letter
+//!    strings (`www` to `www@k`); see `write_word_forms`
 //! 5. **Long turn splitting**, chunk monologues >300 words
 //! 6. **Retokenization**: split into utterances by punctuation
 //! 7. **Disfluency replacement**: mark filled pauses ("um" → "&-um") and orthographic
@@ -52,15 +54,16 @@ pub use chunking::{
     split_prepared_chunk_by_assignments,
 };
 pub use compounds::merge_compounds;
-pub use expand::split_words_with_whitespace;
+pub use expand::write_word_forms;
 pub use num2text::expand_number;
 pub use snapshot::AsrPipelineSnapshot;
-pub use timing::{AdmittedInterval, IntervalBound, IntervalRefusal, UntimedCause, WordTiming};
+pub use timing::{
+    AdmittedInterval, IntervalBound, IntervalRefusal, PositiveInterval, UntimedCause, WordTiming,
+};
 pub use utterance::{
     finalize_utterances, prepare_asr_chunks, process_raw_asr, utterances_from_prepared_chunks,
 };
 
-use expand::expand_numbers_in_words;
 use prepare::trim_word_boundaries;
 pub use prepare::{
     is_cjk_ideograph, prepare_words_pre_expansion, prepare_words_pre_expansion_with_snapshot,

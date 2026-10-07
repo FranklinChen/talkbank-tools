@@ -17,9 +17,7 @@ use crate::store::{
 use crate::ws::BROADCAST_CAPACITY;
 
 use super::util::StoreRunnerEventSink;
-use super::{
-    command_requires_chat_infer, record_preflight_media_failures, result_filename_for_command,
-};
+use super::{command_requires_chat_infer, record_preflight_media_failures};
 
 /// Build a minimal paths-mode media job for prevalidation tests.
 fn make_media_job(job_id: &str, source_path: &str) -> Job {
@@ -112,26 +110,6 @@ fn audio_or_composed_commands_do_not_require_chat_infer() {
     assert!(!command_requires_chat_infer(ReleasedCommand::Avqi));
     assert!(!command_requires_chat_infer(ReleasedCommand::Transcribe));
     assert!(!command_requires_chat_infer(ReleasedCommand::Benchmark));
-}
-
-#[test]
-fn transcribe_result_filename_preserves_relative_path() {
-    assert_eq!(
-        result_filename_for_command(ReleasedCommand::Transcribe, "sub/nested.wav"),
-        "sub/nested.cha"
-    );
-    assert_eq!(
-        result_filename_for_command(ReleasedCommand::TranscribeS, "nested.mp3"),
-        "nested.cha"
-    );
-}
-
-#[test]
-fn non_transcribe_result_filename_is_unchanged() {
-    assert_eq!(
-        result_filename_for_command(ReleasedCommand::Morphotag, "sub/nested.cha"),
-        "sub/nested.cha"
-    );
 }
 
 /// Preflight media validation should still leave a durable setup attempt so

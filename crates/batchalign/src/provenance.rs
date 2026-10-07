@@ -1,7 +1,10 @@
 //! Processing provenance: injects `@Comment` headers recording what
 //! batchalign3 did to a CHAT file, when, and with what engines.
 //!
-//! Format written: `[fc-ba3 <command> | key=val ; key=val | ISO-8601]`
+//! Format written: `[fc-ba3 <command> | key=val ; key=val | ISO-8601]`, the
+//! fields in `StampField` order (alphabetical), always including `build=<id>`,
+//! the producing build identity ([`crate::build_hash`]). Stamps written before
+//! that field existed lack it and still read back.
 //!
 //! Each command run adds one comment. Re-running the same command
 //! replaces the previous comment for that command, preserving comments
@@ -60,8 +63,8 @@
 //! the recipe catalog (`crate::command_model::commands_stamped_by`): a
 //! `transcribe` run also writes `utseg` and `morphotag` stamps, and all three
 //! are compared, not only its own. Two stamps for one command count as the
-//! same only when they differ in the stamp NAME (`fc-ba3` or the legacy `ba3`)
-//! and the TIMESTAMP. Any field difference (an engine, a language, a flag) is
+//! same only when they differ in the stamp NAME (`fc-ba3` or the legacy `ba3`),
+//! the TIMESTAMP and the `build=` field. Any field difference (an engine, a language, a flag) is
 //! meaningful, so the file is written and the stamp names what actually
 //! produced it now. Our unchecked-ASR warning is compared the same way: only
 //! its form (current or legacy) and the build identity it names may differ; a
@@ -168,6 +171,12 @@ macro_rules! command_end {
 enum StampField {
     Asr,
     AsrModel,
+    /// The producing build identity ([`crate::build_hash`]). Every stamp this
+    /// build writes carries it, so a defective run can be identified by build
+    /// from its output; stamps written before the field existed lack it and
+    /// still read back. Like the timestamp, it changes on every rebuild, so the
+    /// no-op write gate sets it aside.
+    Build,
     Diarize,
     Engine,
     Fa,
@@ -185,6 +194,7 @@ impl StampField {
         match self {
             Self::Asr => "asr",
             Self::AsrModel => "asr_model",
+            Self::Build => "build",
             Self::Diarize => "diarize",
             Self::Engine => "engine",
             Self::Fa => "fa",
@@ -226,6 +236,10 @@ pub(crate) struct StampFieldValue(StampSafeText);
 impl StampFieldValue {
     /// The value a flag field is written with.
     const TRUE: Self = Self(StampSafeText::from_static("true"));
+
+    /// This build's identity, admitted at compile time: an identity that could
+    /// change a stamp's structure is a compile error, not a damaged stamp.
+    const BUILD: Self = Self(StampSafeText::from_static(crate::build_hash()));
 
     fn as_str(&self) -> &str {
         self.0.as_str()
@@ -338,11 +352,14 @@ pub struct ProvenanceComment {
 }
 
 impl ProvenanceComment {
-    /// A comment for `command` with no fields yet.
+    /// A comment for `command`, carrying only the producing build so far.
+    ///
+    /// The build field is added here, at the one constructor, so no stamp this
+    /// build writes can omit it.
     fn new(command: ReleasedCommand) -> Self {
         Self {
             command,
-            fields: BTreeMap::new(),
+            fields: BTreeMap::from([(StampField::Build, StampFieldValue::BUILD)]),
         }
     }
 
@@ -401,6 +418,18 @@ impl ProvenanceComment {
             &timestamp,
         )
     }
+}
+
+/// How every stamp this build writes for `command` opens, through its build
+/// field: for tests that pin a written stamp's fields.
+#[cfg(test)]
+pub(crate) fn written_stamp_opening(command: &str) -> String {
+    format!(
+        "{}{command}{SECTION_SEPARATOR}{}{KEY_VALUE_SEPARATOR}{}{FIELD_SEPARATOR}",
+        StampName::WRITTEN.opening(),
+        StampField::Build.as_str(),
+        crate::build_hash()
+    )
 }
 
 /// Between the command, the fields, and the timestamp.
@@ -743,7 +772,7 @@ fn comment_body(line: &str) -> Option<&str> {
 /// the `@ID` block. Inserting after the last `@ID` *only* (ignoring the
 /// constant headers) displaces `@Birth of` and produces CLAN CHECK error 127,
 /// so we scan for the last of all four header kinds.
-fn insert_pos_after_constant_headers(file: &ChatFile) -> usize {
+pub(crate) fn insert_pos_after_constant_headers(file: &ChatFile) -> usize {
     file.lines
         .iter()
         .enumerate()
@@ -1323,7 +1352,8 @@ struct ProvenanceSeen<'a> {
 ///
 /// - the stamp of every command the job's recipe composes
 ///   (`crate::command_model::commands_stamped_by`), in its NAME (`fc-ba3` or
-///   the legacy `ba3`) and its TIMESTAMP. A `transcribe` job writes
+///   the legacy `ba3`), its TIMESTAMP and its `build=` field (present or
+///   not). A `transcribe` job writes
 ///   `transcribe`, `utseg` and `morphotag` stamps, so all three are set aside
 ///   and compared; setting aside only the command's own would make every
 ///   re-run on a new build a write; and
@@ -1394,11 +1424,18 @@ fn next_content_line<'a>(
         match RecognizedComment::classify(body) {
             RecognizedComment::Stamp(stamp) => match stamp.recorded_among(stamped) {
                 Some(command) => match stamp.parse() {
-                    Ok(parsed) => seen
-                        .stamps
-                        .entry(command.as_str())
-                        .or_default()
-                        .push(parsed.fields),
+                    Ok(parsed) => {
+                        // The producing build is set aside like the timestamp:
+                        // a rebuild that reproduces the same output is not a
+                        // reason to rewrite the file. A stamp written before
+                        // the field existed compares the same way.
+                        let mut fields = parsed.fields;
+                        fields.remove(StampField::Build.as_str());
+                        seen.stamps
+                            .entry(command.as_str())
+                            .or_default()
+                            .push(fields);
+                    }
                     // A stamp this job writes that does not parse: the write
                     // goes through and replaces it with one that does.
                     Err(_) => seen.unparseable_stamp = true,
@@ -1619,15 +1656,71 @@ mod tests {
             .field(StampField::Engine, value("stanza-1.11.1"))
             .field(StampField::Lang, value("eng"));
         let formatted = comment.format();
-        assert!(formatted.starts_with("[fc-ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | "));
+        assert!(formatted.starts_with(&format!(
+            "[fc-ba3 morphotag | build={} ; engine=stanza-1.11.1 ; lang=eng | ",
+            crate::build_hash()
+        )));
         assert!(formatted.ends_with(']'));
     }
 
+    /// Every stamp names the build that wrote it, even with no other field.
     #[test]
     fn format_empty_fields() {
         let formatted = ProvenanceComment::new(ReleasedCommand::Utseg).format();
-        assert!(formatted.starts_with("[fc-ba3 utseg | "));
+        assert!(
+            formatted.starts_with(&format!("[fc-ba3 utseg | build={} | ", crate::build_hash()))
+        );
         assert!(formatted.ends_with(']'));
+    }
+
+    /// The build field reads back through the same codec, and a stamp written
+    /// before the field existed still reads back, with no build.
+    #[test]
+    fn the_build_field_reads_back_and_older_stamps_still_read() {
+        let written = ProvenanceComment::new(ReleasedCommand::Align)
+            .field(StampField::Fa, value("wave2vec-fa-v1"))
+            .format();
+        let current = named(&written).parse().expect("reads back");
+        assert_eq!(current.fields.get("build"), Some(&crate::build_hash()));
+        assert_eq!(current.fields.get("fa"), Some(&"wave2vec-fa-v1"));
+        let older =
+            named("[ba3 align | fa=whisper-fa-large-v2 ; lang=deu | 2026-07-28T11:58:00-04:00]");
+        let older = older.parse().expect("an older stamp still reads back");
+        assert_eq!(older.fields.get("build"), None);
+        let entries = extract_provenance(&format!("@UTF8\n@Begin\n@Comment:\t{written}\n@End\n"))
+            .expect("extracts");
+        assert_eq!(
+            entries[0].fields.get("build").map(String::as_str),
+            Some(crate::build_hash())
+        );
+    }
+
+    /// A rebuild that reproduces the same output is not a reason to rewrite:
+    /// the build field is set aside like the timestamp, whether the on-disk
+    /// stamp names another build or predates the field.
+    #[test]
+    fn provenance_only_diff_sets_the_build_aside() {
+        let body = "*PAR:\thello .\n@End\n";
+        let file = |stamp: &str| format!("@UTF8\n@Begin\n@Comment:\t{stamp}\n{body}");
+        let new = file(&format!(
+            "[fc-ba3 align | build={} ; fa=wave2vec-fa-v1 | 2026-10-06T21:00:00-04:00]",
+            crate::build_hash()
+        ));
+        for old in [
+            "[fc-ba3 align | build=0.0.0-older ; fa=wave2vec-fa-v1 | 2026-10-01T09:00:00-04:00]",
+            "[ba3 align | fa=wave2vec-fa-v1 | 2026-07-28T11:58:00-04:00]",
+        ] {
+            assert!(
+                is_provenance_only_difference(&file(old), &new, ReleasedCommand::Align),
+                "{old}"
+            );
+        }
+        let other_engine = file("[ba3 align | fa=whisper-fa-large-v2 | 2026-07-28T11:58:00-04:00]");
+        assert!(!is_provenance_only_difference(
+            &other_engine,
+            &new,
+            ReleasedCommand::Align
+        ));
     }
 
     /// The one stamp `text` opens as, which must name a command.
@@ -2218,7 +2311,10 @@ mod tests {
         };
         let coref = coref.format();
         assert!(
-            coref.starts_with("[fc-ba3 coref | engine=stanza-1.11.1 ; lang=eng | "),
+            coref.starts_with(&format!(
+                "{}engine=stanza-1.11.1 ; lang=eng | ",
+                written_stamp_opening("coref")
+            )),
             "{coref}"
         );
         let TextStamp::Stamped(translate) = result_named_provenance(
@@ -2230,9 +2326,10 @@ mod tests {
         };
         let translate = translate.format();
         assert!(
-            translate.starts_with(
-                "[fc-ba3 translate | engine=googletrans-v1+stanza-1.11.1 ; lang=eng | "
-            ),
+            translate.starts_with(&format!(
+                "{}engine=googletrans-v1+stanza-1.11.1 ; lang=eng | ",
+                written_stamp_opening("translate")
+            )),
             "{translate}"
         );
         // Nothing applied is a state with a reason, not an absent stamp.
@@ -2257,15 +2354,19 @@ mod tests {
         ]);
         let comment = morphotag_provenance(&LanguageCode3::eng(), &applied, true).format();
         assert!(
-            comment.starts_with(
-                "[fc-ba3 morphotag | engine=stanza-1.11.1:eng:standard ; lang=eng ; retokenize=true | "
-            ),
+            comment.starts_with(&format!(
+                "{}engine=stanza-1.11.1:eng:standard ; lang=eng ; retokenize=true | ",
+                written_stamp_opening("morphotag")
+            )),
             "{comment}"
         );
         let nothing =
             morphotag_provenance(&LanguageCode3::eng(), &AppliedAnalyses::none(), false).format();
         assert!(
-            nothing.starts_with("[fc-ba3 morphotag | lang=eng | "),
+            nothing.starts_with(&format!(
+                "{}lang=eng | ",
+                written_stamp_opening("morphotag")
+            )),
             "{nothing}"
         );
     }
@@ -2300,9 +2401,10 @@ mod tests {
         ]);
         let comment = morphotag_provenance(&LanguageCode3::eng(), &applied, false).format();
         assert!(
-            comment.starts_with(
-                "[fc-ba3 morphotag | engine=stanza-1.11.1:eng:standard ; lang=eng ; ud_repairs=2 | "
-            ),
+            comment.starts_with(&format!(
+                "{}engine=stanza-1.11.1:eng:standard ; lang=eng ; ud_repairs=2 | ",
+                written_stamp_opening("morphotag")
+            )),
             "{comment}"
         );
 
@@ -2425,8 +2527,10 @@ mod tests {
     /// ran now. Reading its own stamp back on the next run changes nothing.
     #[test]
     fn incremental_morphotag_names_prior_and_new_models() {
-        let expected = "[fc-ba3 morphotag | engine=stanza-1.10.0+stanza-1.11.1:eng:standard ; \
-                        incremental=true ; lang=eng | ";
+        let expected = format!(
+            "{}engine=stanza-1.10.0+stanza-1.11.1:eng:standard ; incremental=true ; lang=eng | ",
+            written_stamp_opening("morphotag")
+        );
         for prior_engines in [
             "engine=stanza-1.10.0",
             "engine=stanza-1.10.0+stanza-1.11.1:eng:standard",
@@ -2440,7 +2544,7 @@ mod tests {
             .expect("the prior stamp reads back")
             .expect("a model ran")
             .format();
-            assert!(stamp.starts_with(expected), "{prior_engines}: {stamp}");
+            assert!(stamp.starts_with(&expected), "{prior_engines}: {stamp}");
         }
     }
 
@@ -2485,9 +2589,10 @@ mod tests {
         )
         .format();
         assert!(
-            ran.starts_with(
-                "[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng ; main_bullets=derive ; utr=whisper | "
-            ),
+            ran.starts_with(&format!(
+                "{}fa=wave2vec-fa-v1 ; lang=eng ; main_bullets=derive ; utr=whisper | ",
+                written_stamp_opening("align")
+            )),
             "{ran}"
         );
 
@@ -2504,9 +2609,10 @@ mod tests {
         )
         .format();
         assert!(
-            not_run.starts_with(
-                "[fc-ba3 align | fa=wave2vec-fa-v1 ; lang=eng ; main_bullets=derive | "
-            ),
+            not_run.starts_with(&format!(
+                "{}fa=wave2vec-fa-v1 ; lang=eng ; main_bullets=derive | ",
+                written_stamp_opening("align")
+            )),
             "{not_run}"
         );
     }
@@ -2878,8 +2984,10 @@ mod tests {
                 .collect();
             assert_eq!(stamp_lines.len(), 1, "{text}");
             assert!(
-                stamp_lines[0].starts_with("@Comment:\t[fc-ba3 translate | engine=long model ")
-                    && stamp_lines[0].ends_with(']'),
+                stamp_lines[0].starts_with(&format!(
+                    "@Comment:\t{}engine=long model ",
+                    written_stamp_opening("translate")
+                )) && stamp_lines[0].ends_with(']'),
                 "{text}"
             );
             let entries = extract_provenance(text).expect("the stamp parses");

@@ -455,6 +455,24 @@ impl DebugDumper {
         filename: &str,
         trace: &SpeakerEvidenceTrace,
     ) -> Result<SpeakerEvidenceDumpOutcome, SpeakerEvidenceDumpError> {
+        self.dump_speaker_artifact(filename, "speaker_evidence", trace)
+    }
+
+    /// Retain admitted word assignments separately from model/cache evidence.
+    pub(crate) fn dump_speaker_projection(
+        &self,
+        filename: &str,
+        evidence: &crate::chat_ops::speaker::AdmittedSpeakerProjectionEvidence,
+    ) -> Result<SpeakerEvidenceDumpOutcome, SpeakerEvidenceDumpError> {
+        self.dump_speaker_artifact(filename, "speaker_projection", evidence)
+    }
+
+    fn dump_speaker_artifact(
+        &self,
+        filename: &str,
+        suffix: &str,
+        trace: &impl serde::Serialize,
+    ) -> Result<SpeakerEvidenceDumpOutcome, SpeakerEvidenceDumpError> {
         let Some(dir) = self.dir.as_deref() else {
             return Ok(SpeakerEvidenceDumpOutcome::Disabled);
         };
@@ -464,17 +482,14 @@ impl DebugDumper {
                 source,
             }
         })?;
-        let path = dir.join(format!(
-            "{}_speaker_evidence.json",
-            Self::evidence_stem(filename)
-        ));
+        let path = dir.join(format!("{}_{suffix}.json", Self::evidence_stem(filename)));
         SerializedArtifact::json(trace)?
             .persist(&path)
             .map_err(|source| SpeakerEvidenceDumpError::Write {
                 path: path.clone(),
                 source,
             })?;
-        info!(%filename, evidence = %path.display(), "Speaker evidence trace dumped");
+        info!(%filename, %suffix, evidence = %path.display(), "Speaker evidence artifact dumped");
         Ok(SpeakerEvidenceDumpOutcome::Written(path))
     }
 

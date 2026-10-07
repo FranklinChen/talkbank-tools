@@ -21,9 +21,10 @@ pub(crate) use file_status::{
     FileRunTracker, FileStage, FileTaskOutcome, ProgressSender, ProgressUpdate, RunnerEventSink,
     StoreRunnerEventSink, set_file_progress,
 };
-pub(super) use file_status::{
-    drain_supervised_file_tasks, force_terminal_file_states, record_file_cancelled_before_dispatch,
-    spawn_progress_forwarder, spawn_supervised_file_task,
+pub(crate) use file_status::{
+    drain_supervised_file_tasks, force_terminal_file_states, observing_file_waits,
+    record_file_cancelled_before_dispatch, spawn_observed_progress_forwarder,
+    spawn_supervised_file_task,
 };
 
 #[cfg(test)]
@@ -282,6 +283,11 @@ mod tests {
 
     #[test]
     fn worker_error_classification_is_stable() {
+        let native = classify_worker_error(&WorkerError::NativeCommand {
+            command: crate::api::ReleasedCommand::Align,
+        });
+        assert_eq!(native, FailureCategory::System);
+        assert!(!is_retryable_worker_failure(native));
         assert_eq!(
             classify_worker_error(&WorkerError::ProcessExited {
                 code: Some(9),
@@ -346,6 +352,8 @@ mod tests {
         assert!(message.contains("--require-media-cache"));
         assert!(message.contains("requests [1, 3]"));
         assert!(!message.contains("internal error"));
+        assert!(message.contains("could not complete"));
+        assert!(!message.contains("did not run"));
     }
 
     /// Regression: bootstrap-class errors must NOT be retried.

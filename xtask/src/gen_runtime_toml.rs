@@ -59,7 +59,7 @@ pub fn generate_runtime_toml() -> String {
 
     // [cmd2task]
     out.push_str("\n[cmd2task]\n");
-    for spec in COMMAND_SPECS {
+    for spec in COMMAND_SPECS.iter().filter(|spec| spec.profile.is_some()) {
         out.push_str(&format!(
             "{} = \"{}\"\n",
             spec.name.as_str(),
@@ -73,7 +73,7 @@ pub fn generate_runtime_toml() -> String {
     out.push_str("\n[gpu_heavy_commands]\n");
     let gpu_heavy: Vec<String> = COMMAND_SPECS
         .iter()
-        .filter(|s| s.profile == WorkerProfile::Gpu)
+        .filter(|s| s.profile == Some(WorkerProfile::Gpu))
         .map(|s| format!("\"{}\"", s.name.as_str()))
         .collect();
     out.push_str(&format!("commands = [{}]\n", gpu_heavy.join(", ")));

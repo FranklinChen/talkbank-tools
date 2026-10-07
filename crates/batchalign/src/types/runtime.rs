@@ -239,7 +239,7 @@ mod tests {
         assert!(
             COMMAND_SPECS
                 .iter()
-                .any(|s| s.profile == WorkerProfile::Gpu)
+                .any(|s| s.profile == Some(WorkerProfile::Gpu))
         );
     }
 
@@ -395,7 +395,11 @@ mod tests {
         let worst_case = batchalign_types::api::MemoryMb(
             (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
         );
-        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        let budget = estimate_per_worker_peak_mb_with_profile(
+            worst_case,
+            spec.profile.expect("inference command profile"),
+            &tier,
+        );
         assert!(
             budget.0 <= tier.stanza_startup_mb.0,
             "Small-tier morphotag budget must clamp to stanza_startup_mb \
@@ -422,7 +426,11 @@ mod tests {
         let worst_case = batchalign_types::api::MemoryMb(
             (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
         );
-        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        let budget = estimate_per_worker_peak_mb_with_profile(
+            worst_case,
+            spec.profile.expect("inference command profile"),
+            &tier,
+        );
         assert_eq!(
             budget,
             command_execution_budget_mb("morphotag"),
@@ -441,7 +449,11 @@ mod tests {
         let worst_case = batchalign_types::api::MemoryMb(
             (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
         );
-        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        let budget = estimate_per_worker_peak_mb_with_profile(
+            worst_case,
+            spec.profile.expect("inference command profile"),
+            &tier,
+        );
         assert!(
             budget.0 <= tier.gpu_startup_mb.0,
             "Small-tier align budget must clamp to gpu_startup_mb \
@@ -465,7 +477,11 @@ mod tests {
         let worst_case = batchalign_types::api::MemoryMb(
             (spec.base_mb_for_runtime(false).0 as f64 * spec.loading_overhead.0) as u64,
         );
-        let budget = estimate_per_worker_peak_mb_with_profile(worst_case, spec.profile, &tier);
+        let budget = estimate_per_worker_peak_mb_with_profile(
+            worst_case,
+            spec.profile.expect("inference command profile"),
+            &tier,
+        );
         // plan_job_reservation lives in host_memory.rs; reproduce its
         // math here so the test is self-contained without
         // cross-module wiring. The bug we're fixing is upstream of

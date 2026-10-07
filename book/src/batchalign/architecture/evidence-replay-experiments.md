@@ -1,7 +1,7 @@
 # Evidence, Replay, and Experiment Topology
 
 **Status:** Current
-**Last updated:** 2026-09-23 23:31 EDT
+**Last updated:** 2026-10-06 19:09 EDT
 
 This chapter is the visual map for BA3's evidence architecture. Version 0.3.0
 has raw-evidence caching and FA evidence schema 2. Version 0.4.0 additionally
@@ -171,12 +171,18 @@ header-only rewrite succeeds, while an utterance insertion, deletion, reorder,
 or lexical drift refuses.
 
 Global UTR has a third, narrower offline replay seam. The
-`eval utr-alignment` action consumes an exact clean CHAT document and retained
+`eval utr-alignment` action consumes an exact, completely admitted named CHAT document and retained
 UTR timing tokens, then emits the typed global word-to-token plan without
 inference or CHAT mutation. The plan keeps proposals for already timed lines
 even though current production projection preserves their bullets. This makes
 joint-boundary and word-prior research possible without confusing observed
 alignment evidence with a production policy.
+The tool retains all tiers and offers no invalid-tier regeneration exemption.
+Its chosen match path does not certify uniqueness or acoustic correctness.
+Schema 3 records the checked source-name stem and whether it came from the
+input path or an explicit `--source-name` declaration for a renamed snapshot.
+That declaration is not independent provenance proof; filename checks remain
+enabled and names are never guessed from debug suffixes or `@Media`.
 
 ```mermaid
 flowchart LR
@@ -276,7 +282,7 @@ segmentation, diarization, Rev-media, and `%wor` studies. A system-level claim
 requires the whole chain; a few plausible transcripts do not establish
 universal superiority.
 
-## Boundary with IISRP and MichiganChild merge work
+## Boundary with manual-transcript merge work
 
 The following is the intended downstream research topology, not a feature the
 BA3 v0.3 CLI currently performs:

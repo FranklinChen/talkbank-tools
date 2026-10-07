@@ -1,7 +1,7 @@
 # morphotag
 
 **Status:** Current
-**Last updated:** 2026-09-05 04:22 EDT
+**Last updated:** 2026-10-04 11:29 EDT
 
 Add morphosyntactic analysis (`%mor` POS/lemma tiers and `%gra` dependency
 tiers) to existing CHAT transcripts. Text-only, no audio involved.
@@ -23,7 +23,11 @@ as `"per-file"`. No English placeholder is ever stored.
 If a file's `@Languages:` header is missing, malformed, or names a
 language that Stanza does not support, morphotag does **not** silently
 fall back to English. The file is reported in the job's status with a
-typed error and returned unchanged.
+typed error; no new output is written for that file. Other invalid retained
+CHAT also refuses the file before inference. Corrupt `%mor` or `%gra` may be
+accepted only when the selected plan removes and regenerates them. Default CA
+pass-through preserves those tiers and therefore requires them to be valid.
+See [the complete admission contract](../../architecture/morphotag-invariants.md#input-admission-and-replacement-ownership).
 
 ---
 
@@ -46,6 +50,11 @@ batchalign3 --server http://your-server:8001 morphotag corpus/ -o out/
 batchalign3 morphotag corpus/ -o out/ --ca-policy analyze
 ```
 
+Retokenization retains an explanation over the full expanded word:
+`can't [= cannot]` becomes `<ca n't> [= cannot]`. Unsafe scope or evidence
+rewrites refuse the file instead of writing incomplete morphology. See
+[the retokenization contract](../../reference/morphotag-retokenization.md#scoped-annotations-and-complete-expansion).
+
 To "override" the language, edit the file's `@Languages:` line. There is
 no CLI shortcut, and there cannot be, because a single command may span
 many languages.
@@ -54,23 +63,23 @@ many languages.
 
 ## Pipeline
 
-All files are batched together through the batched-text-infer pool
-(`crates/batchalign/src/runner/dispatch/infer_batched.rs` handles the
-recipe-driven dispatch family; `ReleasedCommand::Morphotag` is the
-discriminant used by the planner at
-`crates/batchalign/src/runner/dispatch/plan.rs`).
-Utterances are pooled across all files, grouped by language, and
-dispatched to a Stanza worker per language group with semaphore-bounded
-concurrency. Repeated `morphotag` runs on the same input run the full
+Files are processed independently under the managed worker limit; each file's
+admitted utterances are batched and grouped by language for Stanza inference.
+Completed files are written independently. Repeated `morphotag` runs on the same input run the full
 Stanza pipeline again, text-NLP results are not cached
 (`CacheTaskName` at `crates/batchalign/src/chat_ops/cache_key.rs:58`
 covers only `ForcedAlignment` and `UtrAsr`).
 
 ```mermaid
 flowchart TD
-    start([morphotag invoked]) --> parse[Parse all files → ASTs]
-    parse --> clear[Clear existing %mor/%gra tiers]
-    clear --> collect[collect_payloads\nPer-utterance word lists with language metadata]
+    start([morphotag invoked]) --> admit[One source-bound parse\nHeader-aware admission]
+    admit --> ca{Honor CA pass-through?}
+    ca -->|Yes: all tiers valid| decline[Strip legacy decision tiers\nPreserve ordinary comments and morphology]
+    decline --> done
+    ca -->|No: MOR/GRA replaced| before_check{--before path?}
+    before_check -->|Yes| incremental[Admit before-file completely\nDiff and copy valid unchanged morphology]
+    before_check -->|No| collect
+    incremental --> collect[collect_payloads\nOnly material requiring analysis]
 
     collect --> retok_check{--retokenize?}
     retok_check -->|Yes: --retokenize| stanza_retok[TokenizationMode::StanzaRetokenize\nStanza may split/merge words]
@@ -87,15 +96,8 @@ flowchart TD
     process_all --> worker
 
     worker[execute_v2(task='morphosyntax')\nprepared_text batch → Stanza NLP pipeline\nper-language semaphore-bounded dispatch]
-    worker --> repartition[Repartition responses by file]
-    repartition --> inject_results[inject_results → insert %mor/%gra tiers]
-
-    inject_results --> before_check{--before path?}
-    before_check -->|Yes| incremental[process_morphosyntax_incremental\nSkip NLP for unchanged utterances]
-    before_check -->|No| full_inject[Process all utterances]
-
-    incremental --> merge_check
-    full_inject --> merge_check
+    worker --> inject_results[inject_results → insert %mor/%gra tiers]
+    inject_results --> merge_check
 
     merge_check{--merge-abbrev?}
     merge_check -->|Yes| merge[merge_abbreviations]

@@ -11,6 +11,7 @@
 
 use talkbank_model::WriteChat;
 use talkbank_model::alignment::helpers::PositionalDomain;
+use talkbank_model::model::SemanticEq;
 use talkbank_model::model::{Line, SpeakerCode};
 
 use crate::decisions::LineIdx;
@@ -327,6 +328,101 @@ pub struct PayloadCollection {
     pub total_utterances: usize,
 }
 
+/// Canonical morphology inputs bound to the utterance they were extracted from.
+/// This is not CHAT admission or completed analysis. Collection and incremental
+/// compatibility share this producer, including language roles and transcriber
+/// evidence, rather than independent text fingerprints.
+pub struct MorphologyInput<'source> {
+    utterance: &'source talkbank_model::model::Utterance,
+    words: Vec<ExtractedWord>,
+    item: MorphosyntaxBatchItem,
+}
+
+impl<'source> MorphologyInput<'source> {
+    /// Prepare one analyzable utterance, irrespective of its existing tiers.
+    pub fn from_utterance(
+        utterance: &'source talkbank_model::model::Utterance,
+        primary_lang: &talkbank_model::model::LanguageCode,
+        declared_languages: &[talkbank_model::model::LanguageCode],
+    ) -> Option<Self> {
+        let lang = utterance
+            .main
+            .content
+            .language_code
+            .clone()
+            .unwrap_or_else(|| {
+                declared_languages
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| primary_lang.clone())
+            });
+        let mut words = Vec::new();
+        extract::collect_utterance_content(
+            &utterance.main.content.content,
+            PositionalDomain::Mor,
+            &mut words,
+        );
+        if words.is_empty() {
+            return None;
+        }
+        let batch_words = words
+            .iter()
+            .map(|word| {
+                // Dispatch and governing-mark resolution share exactly one language.
+                // Own and span marks override utterance language; utterance marks do
+                // not turn all words into secondary-language placeholders.
+                let language = match word.language_kind() {
+                    GoverningMarkKind::Utterance => None,
+                    GoverningMarkKind::Own | GoverningMarkKind::Span => {
+                        let outcome = word.resolve_language(Some(&lang), declared_languages);
+                        for error in &outcome.diagnostics {
+                            tracing::warn!(error = %error, "word language resolution issue");
+                        }
+                        Some(outcome.resolution)
+                    }
+                };
+                BatchWord::new(
+                    word.text.clone(),
+                    WordRole::of(word.form_type.clone(), language),
+                )
+            })
+            .collect();
+        Some(Self {
+            utterance,
+            words,
+            item: MorphosyntaxBatchItem::new(batch_words, stanza_input_terminator(utterance), lang),
+        })
+    }
+
+    /// Compare semantic inputs, not source offsets, speaker identity or timing.
+    /// A matching word list alone is insufficient to transfer prior analysis.
+    pub fn equivalent_to(&self, other: &Self) -> bool {
+        self.item.lang == other.item.lang
+            && self
+                .utterance
+                .main
+                .content
+                .terminator
+                .semantic_eq(&other.utterance.main.content.terminator)
+            && self.item.words.len() == other.item.words.len()
+            && self
+                .item
+                .words
+                .iter()
+                .zip(&other.item.words)
+                .all(|(left, right)| left.text() == right.text() && left.role() == right.role())
+            && super::pos_hints::utterance_pos_hints(self.utterance)
+                == super::pos_hints::utterance_pos_hints(other.utterance)
+            && super::evidence::UtteranceEvidence::from_utterance(
+                &self.utterance.main.content.content,
+                &self.words,
+            ) == super::evidence::UtteranceEvidence::from_utterance(
+                &other.utterance.main.content.content,
+                &other.words,
+            )
+    }
+}
+
 /// Walk utterances, build typed payloads, and classify every utterance that had
 /// zero Mor-alignable content into a `MorOutcome`.
 pub fn collect_payloads(
@@ -351,13 +447,6 @@ pub fn collect_payloads(
             _ => continue,
         };
 
-        let utterance_lang = utt.main.content.language_code.clone().unwrap_or_else(|| {
-            declared_languages
-                .first()
-                .cloned()
-                .unwrap_or_else(|| primary_lang.clone())
-        });
-
         let skip = multilingual_policy.should_skip_non_primary()
             && utt.main.content.language_code.is_some()
             && utt.main.content.language_code.as_ref() != Some(primary_lang);
@@ -368,76 +457,14 @@ pub fn collect_payloads(
         });
 
         if !skip && !has_mor {
-            let mut words = Vec::new();
-            extract::collect_utterance_content(
-                &utt.main.content.content,
-                PositionalDomain::Mor,
-                &mut words,
-            );
-
-            if !words.is_empty() {
-                let terminator_typed = stanza_input_terminator(utt);
-
-                // Resolution must use the same language as dispatch.
-                // Pre-2026-05-02 this had a separate `or(Some(primary_lang))`
-                // fallback that skipped the `declared_languages.first()`
-                // step used by `utterance_lang` above. For a Catalan/Spanish
-                // file with no per-utterance precoding and a job-level
-                // `primary_lang="eng"` (fabricated by the dispatch layer
-                // when `WorkerLanguage::Unspecified`), the two paths
-                // disagreed: dispatch ran as `cat`, resolution ran as
-                // `eng`. The mismatch produced an `Unresolved` (after
-                // today's resolver rule-6d fix) for every `@s` position
-                // and a fabricated `Single("eng")` before the fix
-                // which is the dona@s observed bug.
-                let tier_language = Some(&utterance_lang);
-
-                let batch_words: Vec<BatchWord> = words
-                    .iter()
-                    .map(|w| {
-                        // The GOVERNING mark, which is the word's own `@s` if it
-                        // has one and otherwise any enclosing `<...> [@s:hin]`
-                        // span. Reading `w.lang` alone (a word's own marker) was
-                        // the bug: every unmarked word inside a Hindi span looked
-                        // unlanguaged, so it fell out of L2 dispatch and was
-                        // morphotagged against the tier language instead.
-                        //
-                        // No throwaway `Word` any more either. This used to build
-                        // a `Word::new_unchecked` purely to satisfy a resolver
-                        // signature that wanted a `&Word` for its span. As of
-                        // chatter 0.16.0 the mark CARRIES the word's span, so
-                        // there is no span to pass and no way to pair a mark
-                        // with a different word's position: `resolve_language`
-                        // takes only the language context.
-                        let resolved_lang = match w.language_kind() {
-                            GoverningMarkKind::Utterance => None,
-                            // Explicit arms, not a catch-all binding: a fourth
-                            // variant added in chatter must fail to compile here
-                            // rather than silently routing into this branch.
-                            GoverningMarkKind::Own | GoverningMarkKind::Span => {
-                                let outcome = w.resolve_language(tier_language, declared_languages);
-                                for err in &outcome.diagnostics {
-                                    tracing::warn!(
-                                        error = %err,
-                                        "word language resolution issue"
-                                    );
-                                }
-                                Some(outcome.resolution)
-                            }
-                        };
-
-                        BatchWord::new(
-                            w.text.clone(),
-                            WordRole::of(w.form_type.clone(), resolved_lang),
-                        )
-                    })
-                    .collect();
-
+            if let Some(input) =
+                MorphologyInput::from_utterance(utt, primary_lang, declared_languages)
+            {
                 batch_items.push(CollectedUtterance {
                     line: LineIdx::new(line_idx),
                     utt_ordinal: utt_idx,
-                    item: MorphosyntaxBatchItem::new(batch_words, terminator_typed, utterance_lang),
-                    words,
+                    item: input.item,
+                    words: input.words,
                 });
             } else {
                 not_applicable.push(MorOutcome {

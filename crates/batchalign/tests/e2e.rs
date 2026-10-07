@@ -203,7 +203,7 @@ async fn e2e_output_is_valid_chat() {
     .await;
 
     assert_eq!(results.len(), 1);
-    let content = &results[0].content;
+    let content = &results[0].content.as_text().expect("text command result");
     // Test-echo returns input unchanged; verify it contains key CHAT markers.
     assert!(content.contains("@Begin"), "Output should contain @Begin");
     assert!(content.contains("@End"), "Output should contain @End");
@@ -245,7 +245,13 @@ async fn e2e_dummy_file_passthrough() {
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_none());
     // Dummy file should be returned (test-echo returns input unchanged)
-    assert!(results[0].content.contains("dummy"));
+    assert!(
+        results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("dummy")
+    );
 }
 
 /// NoAlign file is returned unchanged for transcribe command.
@@ -275,7 +281,13 @@ async fn e2e_noalign_file_passthrough() {
     assert_eq!(info.status, JobStatus::Completed);
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_none());
-    assert!(results[0].content.contains("NoAlign"));
+    assert!(
+        results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("NoAlign")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +503,13 @@ async fn e2e_malformed_chat_still_completes() {
     // Test-echo doesn't parse, just echoes content, so it should complete.
     assert_eq!(info.status, JobStatus::Completed);
     assert_eq!(results.len(), 1);
-    assert!(results[0].content.contains("not valid CHAT"));
+    assert!(
+        results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("not valid CHAT")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +579,8 @@ async fn e2e_content_fidelity() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(
-        results[0].content, original,
+        results[0].content.as_text().expect("text command result"),
+        original,
         "Test-echo should return content unchanged"
     );
 }

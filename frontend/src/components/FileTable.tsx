@@ -1,6 +1,11 @@
 import { useState, useCallback } from "react";
 import type { FileStatusEntry } from "../types";
-import { displayProgressLabel, statusDotColor } from "../utils";
+import {
+  diagnosedSummary,
+  diagnosticLines,
+  displayProgressLabel,
+  statusDotColor,
+} from "../utils";
 import { PipelineStageBar } from "./PipelineStageBar";
 
 type SortCol = "file" | "status" | "duration";
@@ -10,8 +15,9 @@ const STATUS_RANK: Record<string, number> = {
   processing: 0,
   queued: 1,
   error: 2,
-  done: 3,
-  interrupted: 4,
+  diagnosed: 3,
+  done: 4,
+  interrupted: 5,
 };
 
 function fileDuration(f: FileStatusEntry): number {
@@ -93,6 +99,7 @@ function groupByDirectory(
 
 function DirStats({ files }: { files: FileStatusEntry[] }) {
   const done = files.filter((f) => f.status === "done").length;
+  const diagnosed = files.filter((f) => f.status === "diagnosed").length;
   const errs = files.filter((f) => f.status === "error").length;
   const active = files.filter(
     (f) => f.status === "processing" || f.status === "queued",
@@ -100,8 +107,13 @@ function DirStats({ files }: { files: FileStatusEntry[] }) {
   return (
     <span className="text-[11px] text-zinc-400 font-mono ml-2">
       {done > 0 && <span className="text-emerald-500">{done} done</span>}
+      {diagnosed > 0 && (
+        <span className={done > 0 ? "ml-2 text-yellow-600" : "text-yellow-600"}>
+          {diagnosed} diagnosed
+        </span>
+      )}
       {errs > 0 && (
-        <span className={done > 0 ? "ml-2 text-red-500" : "text-red-500"}>
+        <span className={done > 0 || diagnosed > 0 ? "ml-2 text-red-500" : "text-red-500"}>
           {errs} err
         </span>
       )}
@@ -261,6 +273,10 @@ function FileRow({
   const dur = f.duration_s != null ? `${f.duration_s.toFixed(1)}s` : "";
   const hasErr = f.status === "error";
   const isLongError = hasErr && f.error != null && f.error.length > 80;
+  // A diagnosed file's findings expand like a long error does, but are
+  // styled as written output with diagnostics, never as a failure.
+  const isDiagnosed = f.status === "diagnosed";
+  const canExpand = (hasErr && isLongError) || (isDiagnosed && f.diagnostics != null);
   const isExpanded = expandedErr === f.filename;
   const isProcessing = f.status === "processing";
   const progressLabel = displayProgressLabel(f.progress_stage, f.progress_label);
@@ -269,13 +285,9 @@ function FileRow({
     <>
       <tr
         className={`border-b border-zinc-50 ${
-          hasErr && isLongError ? "cursor-pointer hover:bg-zinc-50" : ""
+          canExpand ? "cursor-pointer hover:bg-zinc-50" : ""
         }`}
-        onClick={() =>
-          hasErr &&
-          isLongError &&
-          setExpandedErr(isExpanded ? null : f.filename)
-        }
+        onClick={() => canExpand && setExpandedErr(isExpanded ? null : f.filename)}
       >
         <td className={`py-1.5 pr-4 font-mono text-xs ${indent ? "pl-5" : ""}`}>
           {basename}
@@ -300,6 +312,11 @@ function FileRow({
             {hasErr && (
               <span className="text-[11px] text-red-500 truncate max-w-xs">
                 {errorSnippet(f.error)}
+              </span>
+            )}
+            {isDiagnosed && (
+              <span className="text-[11px] text-yellow-700 truncate max-w-xs">
+                {diagnosedSummary(f.diagnostics)}
               </span>
             )}
             {/* Pipeline phase indicator */}
@@ -348,6 +365,16 @@ function FileRow({
             className="py-2 px-4 bg-red-50 text-[11px] text-red-700 font-mono whitespace-pre-wrap"
           >
             {f.error ?? "Unknown error"}
+          </td>
+        </tr>
+      )}
+      {isDiagnosed && isExpanded && f.diagnostics != null && (
+        <tr>
+          <td
+            colSpan={3}
+            className="py-2 px-4 bg-yellow-50 text-[11px] text-yellow-800 font-mono whitespace-pre-wrap"
+          >
+            {diagnosticLines(f.diagnostics).join("\n")}
           </td>
         </tr>
       )}

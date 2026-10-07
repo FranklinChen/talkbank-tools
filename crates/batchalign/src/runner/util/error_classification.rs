@@ -17,7 +17,10 @@ fn truncate_tail(s: &str, max_chars: usize) -> &str {
         return s;
     }
     // Find a char boundary near the truncation point.
-    let start = s.len() - max_chars;
+    let mut start = s.len() - max_chars;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
     match s[start..].find('\n') {
         Some(offset) => &s[start + offset + 1..],
         None => &s[start..],
@@ -66,8 +69,12 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         // defect where a status the caller ASKED for outranked the job's real
         // one and left a row recovery never revisits.
         WorkerError::PoolShuttingDown => FailureCategory::System,
+        // A count the pool cannot reconcile is our defect; a retry would
+        // wait on the same count.
+        WorkerError::PoolAccountingBroken { .. } => FailureCategory::System,
         WorkerError::SpawnFailed(_)
         | WorkerError::ReadyParseFailed(_)
+        | WorkerError::NativeCommand { .. }
         | WorkerError::NoWorker { .. } => FailureCategory::System,
     }
 }
@@ -86,14 +93,62 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
             }
         }
         ServerError::Worker(worker_error) => classify_worker_error(worker_error),
+        ServerError::SpeakerIdentity(error) => {
+            use crate::chat_ops::speaker_identity::{
+                EmbeddingInferenceFailure, SpeakerIdentityFailure,
+            };
+            match error {
+                SpeakerIdentityFailure::Inference(EmbeddingInferenceFailure::Dispatch(worker)) => {
+                    classify_worker_error(worker)
+                }
+                SpeakerIdentityFailure::Inference(EmbeddingInferenceFailure::InvalidResponse(
+                    _,
+                ))
+                | SpeakerIdentityFailure::MissingOutcome { .. } => FailureCategory::WorkerProtocol,
+                SpeakerIdentityFailure::EnrollmentOutsideRecording { .. }
+                | SpeakerIdentityFailure::EnrollmentTooShort { .. } => FailureCategory::Validation,
+                SpeakerIdentityFailure::EmptySpeakerCode { .. }
+                | SpeakerIdentityFailure::Tracks(_) => FailureCategory::System,
+            }
+        }
+        ServerError::SpeakerModelManifest(_) | ServerError::SpeakerAudioPreparation(_) => {
+            FailureCategory::System
+        }
         // Native-engine failures (model resolution, build config, internal
         // invariants) are infrastructure: deterministic per attempt, so the
         // orchestrator must not retry them as if transient.
         ServerError::WhisperEngine(_) => FailureCategory::System,
         ServerError::Validation(_) => FailureCategory::Validation,
+        // The transcript's own `@Media` header, decided before any work: the
+        // message names the header change, and a restart cannot help.
+        ServerError::AlignmentMedia(_) | ServerError::KeptOffRecordBulletConflict { .. } => {
+            FailureCategory::Validation
+        }
+        ServerError::MergeVerification(error) => {
+            if error.is_internal() {
+                FailureCategory::System
+            } else {
+                FailureCategory::Validation
+            }
+        }
+        ServerError::ChatAdmission(error) => {
+            if crate::error::chat_admission_is_internal(error) {
+                FailureCategory::System
+            } else {
+                FailureCategory::Validation
+            }
+        }
+        ServerError::ChatReplacementAdmission(error) => {
+            if error.has_internal_failure() {
+                FailureCategory::System
+            } else {
+                FailureCategory::Validation
+            }
+        }
         // A retained provider response needs an explicit language decision,
         // not another automatic attempt or a claim of malformed client input.
         ServerError::UnresolvedAsrLanguage(_) => FailureCategory::ProviderTerminal,
+        ServerError::OutputAdmission { .. } => FailureCategory::System,
         // The producing workflow already classified this one; its verdict is
         // carried, never re-derived. Re-deriving is what turned a per-item
         // PROVIDER failure into `Validation` (and so killed its retry) when
@@ -101,22 +156,34 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         ServerError::ClassifiedFailure { category, .. } => *category,
         ServerError::MemoryPressure(_) => FailureCategory::MemoryPressure,
         ServerError::RequiredEvidenceUnavailable(_) => FailureCategory::EvidenceUnavailable,
+        ServerError::AlignmentCompletion(failure) => match failure {
+            crate::error::AlignmentCompletionFailure::SourceChanged { .. }
+            | crate::error::AlignmentCompletionFailure::OffRecordUtteranceTimed { .. } => {
+                FailureCategory::System
+            }
+        },
+        ServerError::AnalysisUnavailable(_) => FailureCategory::AnalysisUnavailable,
         // Deterministic across retries: the same recording yields the same
         // silence, so this must never be retried. `Validation` is chosen for
         // what it RENDERS as rather than as a claim that the request was
         // malformed. `user_facing_error` passes a validation message through
         // with light framing, so the typed text reaches the operator verbatim,
-        // naming which stage came up empty and what to check. The two
-        // alternatives both destroy that: `ProviderTerminal` replaces it with
-        // boilerplate about API keys, and `System` with "contact your
-        // administrator".
+        // naming which stage came up empty and what to check.
+        // `System` would replace that with "contact your administrator".
         ServerError::EmptyTranscription(_) => FailureCategory::Validation,
         ServerError::Io(_) => FailureCategory::System,
-        ServerError::Database(_)
+        // `MediaTiming` is internal by construction: input admission decides
+        // every declaration its transition refuses (`AlignmentMedia`, above),
+        // so only an alignment that changed the header can reach it.
+        ServerError::AdmissionDisagreement
+        | ServerError::ReplacementPlanContradicted { .. }
+        | ServerError::Database(_)
         | ServerError::Migration(_)
         | ServerError::Persistence(_)
         | ServerError::StoredLease(_)
         | ServerError::MediaTiming(_)
+        | ServerError::MorphosyntaxInjection(_)
+        | ServerError::UtterancePartition(_)
         | ServerError::OutputParse(_) => FailureCategory::System,
         ServerError::JobNotFound(_)
         | ServerError::JobConflict { .. }
@@ -222,10 +289,12 @@ pub(crate) fn user_facing_error(
             "{command_label} failed for {filename}: the external service returned a \
              temporary error. Try restarting the job."
         ),
-        FailureCategory::ProviderTerminal => format!(
-            "{command_label} failed for {filename}: the external service rejected the \
-             request. Check that your API keys are valid and the input is supported."
-        ),
+        FailureCategory::ProviderTerminal => {
+            // A provider may be local (Praat, for example). The typed category
+            // establishes terminality, not a network or credential diagnosis.
+            let detail = truncate_tail(raw_error, 1000);
+            format!("{command_label} failed for {filename}: {detail}")
+        }
         FailureCategory::MemoryPressure => format!(
             "{command_label} was deferred for {filename}: the server does not have \
              enough free memory. Try again later or process fewer files at once."
@@ -235,7 +304,10 @@ pub(crate) fn user_facing_error(
              found. Check that all referenced media files exist."
         ),
         FailureCategory::EvidenceUnavailable => {
-            format!("{command_label} did not run for {filename}: {raw_error}")
+            format!("{command_label} could not complete for {filename}: {raw_error}")
+        }
+        FailureCategory::AnalysisUnavailable => {
+            format!("{command_label} could not complete for {filename}: {raw_error}")
         }
         // Validation, ParseError, and System categories typically already have
         // well-formed messages from the validation/parse layer, so we pass
@@ -264,6 +336,46 @@ pub(crate) fn user_facing_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_provider_message_keeps_local_failure_without_authentication_guess() {
+        let message = user_facing_error(
+            FailureCategory::ProviderTerminal,
+            "Analysis",
+            "silent.cs.wav",
+            "Praat could not extract voiced intervals",
+        );
+        assert_eq!(
+            message,
+            "Analysis failed for silent.cs.wav: Praat could not extract voiced intervals"
+        );
+        assert!(!message.contains("API keys") && !message.contains("external service"));
+        assert!(!is_retryable_worker_failure(
+            FailureCategory::ProviderTerminal
+        ));
+    }
+
+    #[test]
+    fn long_unicode_provider_detail_truncates_at_a_character_boundary() {
+        let raw = "é".repeat(600);
+        let detail = truncate_tail(&raw, 999);
+        assert_eq!(detail.len(), 998);
+        assert_eq!(detail, "é".repeat(499));
+    }
+
+    #[test]
+    fn morphosyntax_capability_refusal_preserves_actionable_source_language() {
+        let language = crate::api::LanguageCode3::try_new("que").unwrap();
+        let error = ServerError::from(
+            crate::morphosyntax::AnalysisUnavailable::admit_primary(&language).unwrap_err(),
+        );
+        let category = classify_server_error(&error);
+        assert_eq!(category, FailureCategory::AnalysisUnavailable);
+        assert!(!is_retryable_worker_failure(category));
+        let message = user_facing_error(category, "Morphology", "sample.cha", &error.to_string());
+        assert!(message.contains("que") && message.contains("Keep truthful language declarations"));
+        assert!(!message.contains("internal error") && !message.contains("Fix the @Languages"));
+    }
 
     /// The regression this module exists for (2026-09-02): a Hugging Face
     /// Hub access failure (gated repo, missing token) must classify as its
@@ -325,6 +437,43 @@ mod tests {
             },
         ));
         assert_eq!(classify_server_error(&missing), FailureCategory::System);
+    }
+
+    /// A transcript's own `@Media` header is the user's to change: input,
+    /// never "internal error, try restarting the job", and not retried. The
+    /// media/timing transition after alignment is internal by construction,
+    /// because admission decides every declaration it would refuse.
+    ///
+    /// The regression (2026-10-07): a transcript with no `@Media` ran all of
+    /// UTR and FA, then failed with `MediaTiming(MissingMedia)`, classified
+    /// `System`, and the user was told to restart the job.
+    #[test]
+    fn a_media_declaration_refusal_is_input_and_the_transition_is_internal() {
+        use crate::error::{AlignmentMediaRefusal, SuggestedMediaName};
+        let refused = ServerError::from(AlignmentMediaRefusal::Undeclared {
+            suggested: SuggestedMediaName::Transcript("sample".to_owned()),
+        });
+        let category = classify_server_error(&refused);
+        assert_eq!(category, FailureCategory::Validation);
+        assert!(!is_retryable_worker_failure(category));
+        let message = user_facing_error(category, "Alignment", "sample.cha", &refused.to_string());
+        assert!(
+            message.contains("@Media:\tsample, audio, unlinked"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("internal error") && !message.contains("restarting"),
+            "{message}"
+        );
+
+        let transition = ServerError::MediaTiming(
+            batchalign_transform::media_timing::MediaTimingError::MissingMedia,
+        );
+        assert_eq!(classify_server_error(&transition), FailureCategory::System);
+        assert!(
+            transition.to_string().starts_with("internal fault"),
+            "{transition}"
+        );
     }
 
     /// A deterministic, credential-class failure must not be auto-retried:

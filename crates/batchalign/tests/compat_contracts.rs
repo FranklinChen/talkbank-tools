@@ -17,7 +17,7 @@
 
 use crate::cli_common;
 
-use batchalign::cli::args::{Cli, CommonOpts, build_typed_options};
+use batchalign::cli::args::{Cli, build_typed_options};
 use batchalign::options::{
     AsrEngineName, CommandOptions, FaEngineName, UtrEngine as AppUtrEngine,
     UtrOverlapStrategy as AppUtrOverlapStrategy,
@@ -43,10 +43,10 @@ fn typed_options(args: &[&str]) -> CommandOptions {
         .expect("processing command should build options")
 }
 
-/// Extract the dispatch command name chosen for a processing invocation.
+/// Extract the dispatch command name chosen for a processing invocation:
+/// the one its typed options name, as dispatch reads it.
 fn dispatch_command(args: &[&str]) -> &'static str {
-    let cli = parse_cli(args);
-    CommonOpts::command_profile(&cli.command).command.as_str()
+    typed_options(args).command().as_str()
 }
 
 /// Assert that a compat path reaches the normal missing-input validation path.

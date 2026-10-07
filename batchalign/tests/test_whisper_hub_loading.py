@@ -69,11 +69,14 @@ class TestWhisperHubLoaderDispatch:
             def __init__(self) -> None:
                 self.skip_language_force = False
 
-        def fake_load_whisper_asr(*, model, base, language, device_policy):
+        def fake_load_whisper_asr(
+            *, model, base, language, device_policy, timestamp_mode
+        ):
             captured["model"] = model
             captured["base"] = base
             captured["language"] = language
             captured["device_policy"] = device_policy
+            captured["timestamp_mode"] = timestamp_mode
             return FakeHandle()
 
         monkeypatch.setattr(
@@ -97,6 +100,9 @@ class TestWhisperHubLoaderDispatch:
         # V2 path doesn't consult ``self.lang``.
         assert captured["language"] == "auto"
         assert captured["device_policy"] == DevicePolicy(force_cpu=True)
+        from batchalign.inference._domain_types import WhisperTimestampMode
+
+        assert captured["timestamp_mode"] is WhisperTimestampMode.SEGMENT
         # Primary invariant: the V2 path calls ``gen_kwargs(request_lang)``
         # where request_lang is a concrete language like ``"malayalam"``.
         # Without this flag, ``gen_kwargs`` would pass task/language to

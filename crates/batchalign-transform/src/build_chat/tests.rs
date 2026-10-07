@@ -10,11 +10,20 @@ fn wd(text: &str, start_ms: Option<u64>, end_ms: Option<u64>) -> WordDesc {
     WordDesc {
         text: asr_postprocess::ChatWordText::try_from(text)
             .expect("test: word text must be CHAT-legal"),
-        start_ms,
-        end_ms,
+        timing: described(start_ms, end_ms),
         kind: asr_postprocess::WordKind::Regular,
     }
 }
+
+/// Helper: admit test bounds exactly as the ASR bridge does.
+fn described(start_ms: Option<u64>, end_ms: Option<u64>) -> DescribedTiming {
+    let signed = |bound: Option<u64>| bound.map(|ms| i64::try_from(ms).expect("test bound"));
+    DescribedTiming::admit_millis(signed(start_ms), signed(end_ms))
+}
+
+/// Helper: an utterance described without timing of its own.
+const NO_UTTERANCE_TIMING: DescribedTiming =
+    DescribedTiming::Untimed(asr_postprocess::UntimedCause::ProviderReportedNoTiming);
 
 #[test]
 fn test_build_chat_minimal() {
@@ -37,8 +46,7 @@ fn test_build_chat_minimal() {
                 wd(".", None, None),
             ]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -105,8 +113,7 @@ fn test_build_chat_with_timing() {
                 wd(".", None, None),
             ]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: true,
@@ -149,8 +156,7 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
                     wd(".", None, None),
                 ]),
                 text: None,
-                start_ms: None,
-                end_ms: None,
+                timing: NO_UTTERANCE_TIMING,
                 lang: None,
             },
             UtteranceDesc {
@@ -161,8 +167,7 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
                     wd(".", None, None),
                 ]),
                 text: None,
-                start_ms: None,
-                end_ms: None,
+                timing: NO_UTTERANCE_TIMING,
                 lang: None,
             },
         ],
@@ -216,8 +221,7 @@ fn test_build_chat_text_utterance() {
             speaker: "PAR".to_string(),
             words: None,
             text: Some("hello world .".to_string()),
-            start_ms: Some(0),
-            end_ms: Some(1000),
+            timing: described(Some(0), Some(1000)),
             lang: None,
         }],
         write_wor: false,
@@ -245,8 +249,7 @@ fn test_build_chat_question_terminator() {
             speaker: "PAR".to_string(),
             words: Some(vec![wd("how", None, None), wd("?", None, None)]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -278,8 +281,7 @@ fn test_write_wor_false_suppresses_wor_tier() {
                 wd(".", None, None),
             ]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -545,8 +547,7 @@ fn wd_retrace(text: &str, start_ms: Option<u64>, end_ms: Option<u64>) -> WordDes
     WordDesc {
         text: asr_postprocess::ChatWordText::try_from(text)
             .expect("test: word text must be CHAT-legal"),
-        start_ms,
-        end_ms,
+        timing: described(start_ms, end_ms),
         kind: asr_postprocess::WordKind::Retrace,
     }
 }
@@ -568,8 +569,7 @@ fn build_single_utterance(words: Vec<WordDesc>) -> String {
             speaker: "PAR".to_string(),
             words: Some(words),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -759,8 +759,7 @@ fn media_header_has_comma_separator() {
             speaker: "PAR".to_string(),
             words: Some(vec![wd("hello", None, None), wd(".", None, None)]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -875,8 +874,7 @@ fn transcribe_comment_includes_do_not_use() {
             speaker: "PAR".to_string(),
             words: Some(vec![wd("hello", None, None), wd(".", None, None)]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -1565,8 +1563,7 @@ fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
             speaker: "PAR".to_string(),
             words: Some(vec![wd("hello", None, None), wd(".", None, None)]),
             text: None,
-            start_ms: None,
-            end_ms: None,
+            timing: NO_UTTERANCE_TIMING,
             lang: None,
         }],
         write_wor: false,
@@ -1588,15 +1585,18 @@ fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
 // A word the language gate refuses is REPORTED, never only logged
 // ---------------------------------------------------------------------------
 //
-// The verbatim-for-review policy above is unchanged and deliberately so: an
-// ASR surface is the provider's observation, and the pipeline does not invent
-// what a human is meant to adjudicate. What was missing is the other half.
-// The gate knew the token was language-invalid, said so to `tracing::warn!`,
-// and returned a value indistinguishable from a token that had PASSED. A log
-// line is not a return value: nothing downstream, no operator report, no test
-// double could tell the two apart, so 2026-09-03 shipped `Www` (E241) and
-// `b2` (E220) into a corpus with no record anywhere that the pipeline had
-// already spotted them.
+// The verbatim-for-review policy above holds for every token whose CHAT form
+// the surface does not determine: an ASR surface is the provider's
+// observation, and the pipeline does not invent what a human is meant to
+// adjudicate. Tokens whose form the CHAT manual DOES determine are written in
+// that form before they get here (`asr_postprocess::write_word_forms`): a
+// single digit inside a letter-led token (`b2` to `b_two`, after the manual's
+// R_two_D_two) and a reserved-marker spelling (`Www` to `www@k`, a string of
+// letters). What was missing first was reporting: the gate knew a token was
+// language-invalid, said so to `tracing::warn!`, and returned a value
+// indistinguishable from one that had PASSED, so 2026-09-03 shipped `Www`
+// (E241) and `b2` (E220) into a corpus with no record anywhere that the
+// pipeline had spotted them.
 
 /// Collect the codes reported for one token's admission failure.
 fn language_invalid_codes(result: &AsrTranscript, text: &str) -> Vec<String> {
@@ -1609,19 +1609,14 @@ fn language_invalid_codes(result: &AsrTranscript, text: &str) -> Vec<String> {
         .collect()
 }
 
-/// E241. Rev.AI returned the surface `Www`, whose case-folded form is a
-/// reserved untranscribed marker, so CHAT reads it as `www` spelled wrongly.
+/// Rev.AI returned the surface `Www`, whose case-folded form is the reserved
+/// untranscribed marker. It is something spoken, a string of letters, and is
+/// written as one (`www@k`), which the gate admits: neither CHAT's
+/// untranscribed marker nor a mis-cased one (E241).
 #[test]
-fn a_reserved_marker_collision_is_reported_by_the_gate() {
+fn a_reserved_marker_spelling_is_written_as_a_letter_string() {
     let result = run_transcribe_to_description(&[("Www", 0.0, 0.5), (".", 0.5, 0.5)], "eng")
-        .expect("test: the token is structurally legal, so the file still builds");
-
-    assert_eq!(
-        language_invalid_codes(&result, "Www"),
-        vec!["E241"],
-        "the gate must hand back what it refused: {:?}",
-        result.language_invalid,
-    );
+        .expect("test: the file builds");
 
     let words: Vec<&str> = result
         .description
@@ -1630,20 +1625,28 @@ fn a_reserved_marker_collision_is_reported_by_the_gate() {
         .flat_map(|u| u.words.as_deref().unwrap_or(&[]))
         .map(|w| w.text.as_str())
         .collect();
+    assert_eq!(
+        words,
+        ["www@k", "."],
+        "one word, as recognized, marked as letters"
+    );
     assert!(
-        words.contains(&"Www"),
-        "the provider's surface still ships verbatim for review: {words:?}",
+        result.language_invalid.is_empty(),
+        "{:?}",
+        result.language_invalid
     );
 }
 
-/// E220. Rev.AI returned `b2`; English words may not contain digits.
+/// E220. Rev.AI returned `abc123`: English words may not contain digits, and
+/// a run of several digits has no reading the surface gives, so the token is
+/// kept for review and reported.
 #[test]
 fn a_digit_bearing_token_is_reported_by_the_gate() {
     let result = run_transcribe_to_description(
         &[
             ("we", 0.0, 0.2),
             ("took", 0.2, 0.4),
-            ("b2", 0.4, 0.7),
+            ("abc123", 0.4, 0.7),
             (".", 0.7, 0.7),
         ],
         "eng",
@@ -1651,7 +1654,7 @@ fn a_digit_bearing_token_is_reported_by_the_gate() {
     .expect("test: the token is structurally legal, so the file still builds");
 
     assert_eq!(
-        language_invalid_codes(&result, "b2"),
+        language_invalid_codes(&result, "abc123"),
         vec!["E220"],
         "the gate must hand back what it refused: {:?}",
         result.language_invalid,
@@ -1671,5 +1674,92 @@ fn a_clean_transcript_reports_no_language_invalid_words() {
         result.language_invalid.is_empty(),
         "unexpected report: {:?}",
         result.language_invalid,
+    );
+}
+
+/// Every generated bullet comes from a positive interval. A zero-width or
+/// inverted pair keeps its word but writes no word bullet and does not widen
+/// the utterance bullet, which covers exactly the positive words (in any
+/// order). JSON keeps its flat fields and is admitted the same way.
+#[test]
+fn generated_bullets_come_only_from_positive_intervals() {
+    let wire = serde_json::json!({
+        "langs": ["eng"],
+        "participants": [{"id": "PAR"}],
+        "media_name": "sample.mp3",
+        "write_wor": true,
+        "utterances": [{"speaker": "PAR", "words": [
+            {"text": "zero", "start_ms": 100, "end_ms": 100},
+            {"text": "later", "start_ms": 900, "end_ms": 1200},
+            {"text": "earlier", "start_ms": 300, "end_ms": 600},
+            {"text": "backwards", "start_ms": 2000, "end_ms": 1500},
+            {"text": "untimed"},
+            {"text": "."}
+        ]}]
+    });
+    let desc: TranscriptDescription = serde_json::from_value(wire).expect("wire decoding");
+    let words = desc.utterances[0].words.as_ref().expect("words");
+    assert_eq!(
+        words[0].timing,
+        DescribedTiming::Untimed(asr_postprocess::UntimedCause::ZeroLengthSpan)
+    );
+    assert_eq!(
+        words[3].timing,
+        DescribedTiming::Untimed(asr_postprocess::UntimedCause::RefusedByAdmission)
+    );
+    assert_eq!(
+        words[4].timing,
+        DescribedTiming::Untimed(asr_postprocess::UntimedCause::ProviderReportedNoTiming)
+    );
+    let output = to_chat_string(&build_chat(&desc).expect("build"));
+    assert!(
+        output.contains("\u{15}300_1200\u{15}"),
+        "utterance bullet is the hull of its positive words: {output}"
+    );
+    assert!(
+        !output.contains("100_100") && !output.contains("2000_1500"),
+        "no bullet from a zero-width or inverted pair: {output}"
+    );
+    let parser = TreeSitterParser::new().expect("parser");
+    let (_parsed, errors) = parse_lenient(&parser, &output);
+    assert!(
+        errors.is_empty(),
+        "generated CHAT reparses cleanly: {errors:?}"
+    );
+}
+
+/// A transcript whose every word lacks usable timing has no bullet at all.
+#[test]
+fn an_utterance_with_no_positive_word_has_no_bullet() {
+    let desc = TranscriptDescription {
+        langs: vec!["eng".to_string()],
+        participants: vec![ParticipantDesc {
+            id: "PAR".to_string(),
+            name: None,
+            role: "Participant".to_string(),
+            corpus: String::new(),
+        }],
+        media_name: None,
+        media_type: None,
+        media_status: None,
+        utterances: vec![UtteranceDesc {
+            speaker: "PAR".to_string(),
+            words: Some(vec![
+                wd("zero", Some(500), Some(500)),
+                wd("none", None, None),
+                wd(".", None, None),
+            ]),
+            text: None,
+            timing: NO_UTTERANCE_TIMING,
+            lang: None,
+        }],
+        write_wor: true,
+    };
+    let chat_file = build_chat(&desc).expect("build");
+    let output = to_chat_string(&chat_file);
+    assert!(!output.contains('\u{15}'), "no bullet anywhere: {output}");
+    assert!(
+        !output.contains("%wor:"),
+        "no timed word, no %wor: {output}"
     );
 }

@@ -69,6 +69,8 @@ where
     F: Future<Output = FileTaskOutcome> + Send + 'static,
 {
     let scope = FileTaskScope::current();
+    // Heap-owned before it enters any wrapper (see `crate::owned_future`).
+    let future: crate::owned_future::OwnedFuture<'static, FileTaskOutcome> = Box::pin(future);
     // Every event the task emits carries its file and job (see
     // `SpawnScope::file_span`); `tokio::spawn` would otherwise start it with
     // no span at all.
@@ -155,27 +157,148 @@ pub(crate) async fn drain_supervised_file_tasks(
 /// Create a progress channel and spawn a forwarder task that routes updates
 /// to the store for a specific `(job_id, filename)`.
 ///
-/// Returns the sender half. The forwarder runs until the sender is dropped.
-pub(crate) fn spawn_progress_forwarder(
+/// Also returns the observer that records each of the file's checkouts
+/// starting and stopping a wait on a saturated pool (install it around the
+/// attempt with `worker::pool::checkout_wait::observing_checkout_waits`),
+/// and the forwarder itself. The store keeps the reported stage and the open
+/// waits as two facts and shows "waiting for a worker" while any wait is
+/// open, so the forwarder publishes each as it comes, in order, and nothing
+/// here restores a stage.
+///
+/// The forwarder runs until both the sender and the observer are dropped and
+/// it has published everything they sent; await
+/// [`FileProgressForwarder::finished`] after the attempt, before the file's
+/// next stage is published, so no late update lands after it.
+pub(crate) fn spawn_observed_progress_forwarder(
     sink: Arc<dyn RunnerEventSink>,
     job_id: JobId,
     filename: String,
-) -> super::ProgressSender {
+) -> (
+    super::ProgressSender,
+    Arc<dyn crate::worker::pool::checkout_wait::CheckoutWaitObserver>,
+    FileProgressForwarder,
+) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<super::ProgressUpdate>();
-    tokio::spawn(async move {
-        while let Some(update) = rx.recv().await {
-            set_file_progress(
-                sink.as_ref(),
-                &job_id,
-                &filename,
-                update.label,
-                update.current,
-                update.total,
-            )
-            .await;
+    let (wait_tx, mut wait_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::store::WorkerWaitChange>();
+    let handle = tokio::spawn(async move {
+        let mut progress_open = true;
+        let mut waits_open = true;
+        // Until both channels are closed and drained: a closed progress
+        // channel must not drop a wait's end still queued, which would leave
+        // the file counted as waiting.
+        while progress_open || waits_open {
+            tokio::select! {
+                update = rx.recv(), if progress_open => match update {
+                    Some(update) => {
+                        set_file_progress(
+                            sink.as_ref(),
+                            &job_id,
+                            &filename,
+                            update.label,
+                            update.current,
+                            update.total,
+                        )
+                        .await;
+                    }
+                    None => progress_open = false,
+                },
+                change = wait_rx.recv(), if waits_open => match change {
+                    Some(change) => sink.set_file_worker_wait(&job_id, &filename, change).await,
+                    None => waits_open = false,
+                },
+            }
         }
     });
-    tx
+    (
+        tx,
+        Arc::new(ForwardedWaits { events: wait_tx }),
+        FileProgressForwarder { handle },
+    )
+}
+
+/// A running progress forwarder, to be awaited once its sender and observer
+/// are gone.
+#[must_use = "await `finished` after the attempt so no late update lands after its next stage"]
+pub(crate) struct FileProgressForwarder {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl FileProgressForwarder {
+    /// Wait until everything sent to the forwarder is published. Its sender
+    /// and observer must already be dropped, or this waits for them.
+    pub(crate) async fn finished(self) {
+        if let Err(error) = self.handle.await {
+            tracing::warn!(%error, "a file progress forwarder ended abnormally");
+        }
+    }
+}
+
+/// Run `work` with every checkout wait inside it recorded on these files, so
+/// each shows "waiting for a worker" while any checkout of the work waits.
+/// For work that is not an audio-file attempt: a text batch over one file or
+/// several, or align's utterance-timing pre-pass. Returns once every wait is
+/// recorded as ended.
+pub(crate) async fn observing_file_waits<F: std::future::Future>(
+    sink: &Arc<dyn RunnerEventSink>,
+    job_id: &JobId,
+    filenames: impl IntoIterator<Item = String>,
+    work: F,
+) -> F::Output {
+    let (observers, forwarders): (Vec<_>, Vec<_>) = filenames
+        .into_iter()
+        .map(|filename| {
+            // The work reports its own progress; only waits go through here.
+            let (_progress, observer, forwarder) =
+                spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename);
+            (observer, forwarder)
+        })
+        .unzip();
+    let output = crate::worker::pool::checkout_wait::observing_checkout_waits(
+        Arc::new(FannedOutWaits(observers)),
+        work,
+    )
+    .await;
+    for forwarder in forwarders {
+        forwarder.finished().await;
+    }
+    output
+}
+
+/// One wait, shown on several files.
+struct FannedOutWaits(Vec<Arc<dyn crate::worker::pool::checkout_wait::CheckoutWaitObserver>>);
+
+impl crate::worker::pool::checkout_wait::CheckoutWaitObserver for FannedOutWaits {
+    fn waiting(&self, target: &crate::worker::WorkerTarget, lang: &crate::api::WorkerLanguage) {
+        for observer in &self.0 {
+            observer.waiting(target, lang);
+        }
+    }
+
+    fn resumed(&self) {
+        for observer in &self.0 {
+            observer.resumed();
+        }
+    }
+}
+
+/// The observer half of an observed forwarder.
+struct ForwardedWaits {
+    events: tokio::sync::mpsc::UnboundedSender<crate::store::WorkerWaitChange>,
+}
+
+impl crate::worker::pool::checkout_wait::CheckoutWaitObserver for ForwardedWaits {
+    fn waiting(&self, _target: &crate::worker::WorkerTarget, _lang: &crate::api::WorkerLanguage) {
+        // A send fails only when the forwarder has stopped, which it does
+        // only after this observer is dropped: unreachable while it is
+        // called. The pool logs the wait regardless.
+        let _ = self.events.send(crate::store::WorkerWaitChange::Started);
+    }
+
+    fn resumed(&self) {
+        // As for `waiting`.
+        let _ = self.events.send(crate::store::WorkerWaitChange::Ended);
+    }
 }
 
 // ---------------------------------------------------------------------------

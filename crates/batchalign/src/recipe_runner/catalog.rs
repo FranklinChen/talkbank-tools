@@ -9,12 +9,14 @@ use crate::worker::InferTask;
 
 use super::command_spec::{
     CapabilityPlan, CapabilitySurface, CatalogEntry, CommandCapabilityKind, CommandFamily,
-    CommandIoProfile, PlannerKind, RunnerDispatchKind,
+    CommandIoProfile, NativeMediaCapability, PlannerKind, RunnerDispatchKind,
 };
-use super::materialize::{FileNamingPolicy, OutputPolicy, SidecarPolicy, StemRewrite};
+use super::materialize::{
+    FileNamingPolicy, OutputDeclaration, OutputPolicy, SidecarPolicy, StemRewrite,
+};
 use super::recipes::{
-    ALIGN_RECIPE, AVQI_RECIPE, BENCHMARK_RECIPE, COMPARE_RECIPE, COREF_RECIPE, DIARIZE_RECIPE,
-    MORPHOTAG_RECIPE, OPENSMILE_RECIPE, SPEAKER_IDENTIFY_RECIPE, TRANSCRIBE_RECIPE,
+    ALIGN_RECIPE, AVQI_RECIPE, BENCHMARK_RECIPE, COMPARE_RECIPE, CONVERT_RECIPE, COREF_RECIPE,
+    DIARIZE_RECIPE, MORPHOTAG_RECIPE, OPENSMILE_RECIPE, SPEAKER_IDENTIFY_RECIPE, TRANSCRIBE_RECIPE,
     TRANSCRIBE_S_RECIPE, TRANSLATE_RECIPE, UTSEG_RECIPE,
 };
 
@@ -40,15 +42,15 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::Text,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Morphosyntax,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(
+            InferTask::Morphosyntax,
+            CapabilitySurface::RecipeOwned,
+        ),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &MORPHOTAG_RECIPE,
     },
     CatalogEntry {
@@ -58,15 +60,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::Text,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Utseg,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Utseg, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &UTSEG_RECIPE,
     },
     CatalogEntry {
@@ -76,15 +75,15 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::Text,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Translate,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(
+            InferTask::Translate,
+            CapabilitySurface::RecipeOwned,
+        ),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &TRANSLATE_RECIPE,
     },
     CatalogEntry {
@@ -94,15 +93,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::Text,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Coref,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Coref, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &COREF_RECIPE,
     },
     CatalogEntry {
@@ -112,15 +108,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::ResolvedAudio,
         runner_dispatch_kind: RunnerDispatchKind::ForcedAlignment,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Fa,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Fa, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &ALIGN_RECIPE,
     },
     CatalogEntry {
@@ -130,15 +123,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Asr,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Asr, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::ReplaceExtension("cha"),
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &TRANSCRIBE_RECIPE,
     },
     CatalogEntry {
@@ -148,15 +138,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::TranscribeAudioInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Asr,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Asr, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::ReplaceExtension("cha"),
             primary_content_type: ContentType::Chat,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &TRANSCRIBE_S_RECIPE,
     },
     CatalogEntry {
@@ -166,15 +153,15 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::Text,
         runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Morphosyntax,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(
+            InferTask::Morphosyntax,
+            CapabilitySurface::RecipeOwned,
+        ),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
             sidecars: COMPARE_SIDECARS,
-        },
+        }),
         recipe: &COMPARE_RECIPE,
     },
     CatalogEntry {
@@ -186,15 +173,12 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::ServerComposed,
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::BenchmarkAudioInfer,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Asr,
-            surface: CapabilitySurface::Composite,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Asr, CapabilitySurface::Composite),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::ReplaceExtension("cha"),
             primary_content_type: ContentType::Chat,
             sidecars: COMPARE_SIDECARS,
-        },
+        }),
         recipe: &BENCHMARK_RECIPE,
     },
     CatalogEntry {
@@ -204,11 +188,11 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Opensmile,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(
+            InferTask::Opensmile,
+            CapabilitySurface::RecipeOwned,
+        ),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::RewriteStem(StemRewrite {
                 strip_suffix: None,
                 append_suffix: ".opensmile",
@@ -216,7 +200,7 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
             }),
             primary_content_type: ContentType::Csv,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &OPENSMILE_RECIPE,
     },
     CatalogEntry {
@@ -226,11 +210,8 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Avqi,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Avqi, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::RewriteStem(StemRewrite {
                 strip_suffix: Some(".cs"),
                 append_suffix: ".avqi",
@@ -238,7 +219,7 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
             }),
             primary_content_type: ContentType::Text,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &AVQI_RECIPE,
     },
     CatalogEntry {
@@ -248,21 +229,8 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::MediaAnalysisV2,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Speaker,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
-            // `CWS-032-1.mp3` -> `CWS-032-1.turns.json`, the artifact
-            // name `chatter rediarize --turns-dir` conventions expect.
-            primary: FileNamingPolicy::RewriteStem(StemRewrite {
-                strip_suffix: None,
-                append_suffix: ".turns",
-                extension: "json",
-            }),
-            primary_content_type: ContentType::Json,
-            sidecars: NO_SIDECARS,
-        },
+        capabilities: CapabilityPlan::inference(InferTask::Speaker, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Diarize),
         recipe: &DIARIZE_RECIPE,
     },
     CatalogEntry {
@@ -276,11 +244,8 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         capability_kind: CommandCapabilityKind::DirectInfer,
         io_profile: CommandIoProfile::ResolvedAudio,
         runner_dispatch_kind: RunnerDispatchKind::SpeakerIdentity,
-        capabilities: CapabilityPlan {
-            primary_infer_task: InferTask::Speaker,
-            surface: CapabilitySurface::RecipeOwned,
-        },
-        output_policy: OutputPolicy {
+        capabilities: CapabilityPlan::inference(InferTask::Speaker, CapabilitySurface::RecipeOwned),
+        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             // `session.cha` -> `session_speaker_identity.json`. The transcript
             // is NOT rewritten: mapping a verdict onto a CHAT speaker code is
             // a corpus's own decision, and it is reversible only while the
@@ -292,8 +257,19 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
             }),
             primary_content_type: ContentType::Json,
             sidecars: NO_SIDECARS,
-        },
+        }),
         recipe: &SPEAKER_IDENTIFY_RECIPE,
+    },
+    CatalogEntry {
+        command: ReleasedCommand::Convert,
+        family: CommandFamily::NativeMedia,
+        planner: PlannerKind::MediaAnalysisInputs,
+        capability_kind: CommandCapabilityKind::NativeMedia,
+        io_profile: CommandIoProfile::MediaInput,
+        runner_dispatch_kind: RunnerDispatchKind::NativeAudioExport,
+        capabilities: CapabilityPlan::NativeMedia(NativeMediaCapability::AudioExport),
+        output_policy: OutputDeclaration::AudioExport,
+        recipe: &CONVERT_RECIPE,
     },
 ];
 
@@ -368,7 +344,11 @@ mod tests {
         let spec = command_spec(ReleasedCommand::Compare);
         assert_eq!(spec.family, CommandFamily::ReferenceProjection);
         assert_eq!(spec.recipe.mode, ExecutionMode::ReferenceProjection);
-        let outputs = plan_materialized_files(&"sample.cha".into(), spec.output_policy);
+        let outputs = plan_materialized_files(
+            &"sample.cha".into(),
+            spec.selected_output_policy(&crate::recipe_runner::runtime::test_options(spec.command))
+                .unwrap(),
+        );
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].display_path, DisplayPath::from("sample.cha"));
         assert_eq!(
@@ -413,9 +393,19 @@ mod tests {
     fn media_analysis_specs_match_current_output_filenames() {
         let opensmile = command_spec(ReleasedCommand::Opensmile);
         let avqi = command_spec(ReleasedCommand::Avqi);
-        let opensmile_outputs =
-            plan_materialized_files(&"sample.wav".into(), opensmile.output_policy);
-        let avqi_outputs = plan_materialized_files(&"sample.cs.wav".into(), avqi.output_policy);
+        let opensmile_outputs = plan_materialized_files(
+            &"sample.wav".into(),
+            opensmile
+                .selected_output_policy(&crate::recipe_runner::runtime::test_options(
+                    opensmile.command,
+                ))
+                .unwrap(),
+        );
+        let avqi_outputs = plan_materialized_files(
+            &"sample.cs.wav".into(),
+            avqi.selected_output_policy(&crate::recipe_runner::runtime::test_options(avqi.command))
+                .unwrap(),
+        );
         assert_eq!(
             opensmile_outputs[0].display_path,
             DisplayPath::from("sample.opensmile.csv")

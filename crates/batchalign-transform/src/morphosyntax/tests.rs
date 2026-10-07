@@ -13,6 +13,9 @@ use talkbank_parser::TreeSitterParser;
 use crate::inject::{MisalignmentClass, MisalignmentDiagnostic};
 use crate::parse::parse_lenient;
 
+mod response_admission;
+mod retokenization_annotations;
+
 pub(crate) fn parse_chat(text: &str) -> ChatFile {
     let parser = TreeSitterParser::new().expect("parser init");
     parser.parse_chat_file(text).expect_built()
@@ -547,7 +550,7 @@ fn inject_one(
 /// so it rewrote chunk 2, the clitic `'s`, from `COP` to `DEP`.
 #[test]
 fn a_special_form_after_a_contraction_is_relabelled_at_its_own_chunk() {
-    let (mor, gra, injection) = inject_one(
+    let (mor, gra, _injection) = inject_one(
         "eng",
         "it's gumma@c .",
         "1-2 it's _ X _ 0 dep
@@ -555,9 +558,72 @@ fn a_special_form_after_a_contraction_is_relabelled_at_its_own_chunk() {
          2 's be AUX Mood=Ind|Number=Sing|Person=3|Tense=Pres|VerbForm=Fin 3 cop
          3 xbxxx xbxxx NOUN Number=Sing 0 root",
     );
-    assert!(injection.decisions.is_empty(), "{:?}", injection.decisions);
     assert!(mor.contains("~aux|be"), "{mor}");
     assert_eq!(gra, "%gra:\t1|3|NSUBJ 2|3|COP 3|0|ROOT 4|3|PUNCT");
+}
+
+/// Placeholder spelling is not evidence of a special form. The same model
+/// surface can represent a literal lexical word or a masked typed form;
+/// source-bound roles, including replacement/retrace selection, decide which.
+#[test]
+fn morphosyntax_placeholder_spelling_does_not_choose_a_word_role() {
+    use talkbank_model::model::{MorStem, PosCategory};
+
+    let ordinary = "1 xbxxx xbxxx NOUN Number=Sing 0 root
+                    2 xbxxxness xbxxxness NOUN Number=Sing 1 dep";
+    let mixed = "1 xbxxx xbxxx NOUN Number=Sing 0 root
+                 2 xbxxx xbxxx NOUN Number=Sing 1 dep
+                 3 xbxxxness xbxxxness NOUN Number=Sing 1 dep";
+    let ordinary_items = [("noun", "xbxxx"), ("noun", "xbxxxness")];
+    let mixed_items = [("noun", "xbxxx"), ("on", "boom"), ("noun", "xbxxxness")];
+    let retraced_items = [("on", "boom"), ("noun", "xbxxxness")];
+    type CollisionCase<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+    let cases: [CollisionCase<'_>; 4] = [
+        ("xbxxx xbxxxness .", ordinary, &ordinary_items),
+        ("xbxxx boom@o xbxxxness .", mixed, &mixed_items),
+        ("nam [: xbxxx] boom@o xbxxxness .", mixed, &mixed_items),
+        ("xbxxx [/] boom@o xbxxxness .", ordinary, &retraced_items),
+    ];
+    let parser = TreeSitterParser::new().expect("parser");
+    let eng = LanguageCode::new("eng").expect("fixture language");
+    for (main, rows, expected) in cases {
+        for mode in [
+            TokenizationMode::Preserve,
+            TokenizationMode::StanzaRetokenize,
+        ] {
+            let mut chat = parse_chat(&one_utterance(main));
+            validate_morphosyntax(&mut chat);
+            let collection = payload::collect_payloads(
+                &chat,
+                &eng,
+                std::slice::from_ref(&eng),
+                types::MultilingualPolicy::ProcessAll,
+            );
+            assert_eq!(collection.batch_items.len(), 1, "{main}");
+            let result = inject_results(
+                &parser,
+                &mut chat,
+                collection.batch_items,
+                vec![UdResponse {
+                    sentences: vec![l2::pipeline_tests::ud_sentence(rows)],
+                }],
+                &eng,
+                mode,
+                &std::collections::BTreeMap::new(),
+            )
+            .expect("role-bound injection must complete");
+            assert!(result.l2().positions().is_empty(), "{main}");
+            validate_morphosyntax(&mut chat);
+            let utt = first_utterance(&chat);
+            let mor = utt.mor_tier().expect("complete morphology");
+            assert!(utt.gra_tier().is_some(), "{main}");
+            assert_eq!(mor.items().len(), expected.len(), "{main}");
+            for (item, (pos, lemma)) in mor.items().iter().zip(expected) {
+                assert_eq!(item.main.pos, PosCategory::new(*pos), "{main}");
+                assert_eq!(item.main.lemma, MorStem::new(*lemma), "{main}");
+            }
+        }
+    }
 }
 
 /// The `@s` positions are read from the analysis the `%mor` mapping reads:
@@ -578,12 +644,15 @@ fn at_s_positions_read_the_analysis_the_mapping_reads() {
          2 hafta hafta AUX Mood=Ind|Number=Sing|Person=2|Tense=Pres|VerbForm=Fin 3 aux
          3 put put VERB VerbForm=Inf 0 root",
     );
-    assert!(injection.decisions.is_empty(), "{:?}", injection.decisions);
     assert_eq!(
         gra,
         "%gra:\t1|2|NSUBJ 2|0|ROOT 3|4|MARK 4|2|XCOMP 5|2|PUNCT"
     );
-    let position = injection.l2.positions().first().expect("put@s is deferred");
+    let position = injection
+        .l2()
+        .positions()
+        .first()
+        .expect("put@s is deferred");
     assert_eq!(position.word_idx().as_usize(), 2);
     assert_eq!(position.primary().deprel().base(), "xcomp");
     assert_eq!(

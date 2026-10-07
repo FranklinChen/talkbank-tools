@@ -121,6 +121,7 @@ pub mod options;
 pub mod params;
 pub mod request;
 pub mod response;
+pub mod result_content;
 pub mod results;
 pub mod revai_language;
 pub mod runtime;

@@ -43,13 +43,19 @@ async fn golden_coref_eng() {
         "coref_eng: job should complete; error={:?}",
         info.error
     );
-    let file = parse_output(&results[0].content, "coref_eng");
+    let file = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "coref_eng",
+    );
     if has_user_defined_tier(&file, "xcoref") {
         eprintln!("Coref model detected chains: snapshotting with %xcoref");
     } else {
         eprintln!("Coref model found no chains (valid for short input)");
     }
-    assert_golden_snapshot!("coref_eng", &results[0].content);
+    assert_golden_snapshot!(
+        "coref_eng",
+        &results[0].content.as_text().expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -89,10 +95,16 @@ async fn golden_coref_spa_passthrough() {
         "coref_spa_passthrough: job should complete; error={:?}",
         info.error
     );
-    let file = parse_output(&results[0].content, "coref_spa_passthrough");
+    let file = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "coref_spa_passthrough",
+    );
     assert!(
         !has_user_defined_tier(&file, "xcoref"),
         "non-English coref input should pass through without %xcoref"
     );
-    assert_golden_snapshot!("coref_spa_passthrough", &results[0].content);
+    assert_golden_snapshot!(
+        "coref_spa_passthrough",
+        &results[0].content.as_text().expect("text command result")
+    );
 }

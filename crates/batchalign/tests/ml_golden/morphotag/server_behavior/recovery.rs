@@ -82,7 +82,14 @@ async fn morphotag_server_missing_language_group_only_fails_affected_file() {
             .find(|file| file.filename.as_ref() == format!("probe_{lang}.cha"))
             .expect("candidate probe file result");
 
-        if eng.error.is_none() && eng.content.contains("%mor:") && candidate.error.is_some() {
+        if eng.error.is_none()
+            && eng
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("%mor:")
+            && candidate.error.is_some()
+        {
             let candidate_error = candidate.error.as_deref().unwrap_or_default();
             assert!(
                 candidate_error.contains("dispatch failed")
@@ -91,7 +98,10 @@ async fn morphotag_server_missing_language_group_only_fails_affected_file() {
                 "candidate failure should be a dispatch/runtime failure, got: {candidate_error}"
             );
             assert!(
-                !eng.content.contains("L2|xxx"),
+                !eng.content
+                    .as_text()
+                    .expect("text command result")
+                    .contains("L2|xxx"),
                 "successful English neighbor should not inherit failure fallback"
             );
             return;
@@ -183,7 +193,11 @@ async fn morphotag_server_restart_preserves_successful_neighbors_after_language_
 
         let candidate_error = candidate_before.error.as_deref().unwrap_or_default();
         if eng_before.error.is_some()
-            || !eng_before.content.contains("%mor:")
+            || !eng_before
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("%mor:")
             || candidate_before.error.is_none()
             || !(candidate_error.contains("dispatch failed")
                 || candidate_error.contains("timed out")
@@ -265,7 +279,8 @@ async fn morphotag_server_restart_preserves_successful_neighbors_after_language_
             "successful neighbor should stay successful after restart"
         );
         assert_eq!(
-            eng_before.content, eng_after.content,
+            eng_before.content.as_text().expect("text command result"),
+            eng_after.content.as_text().expect("text command result"),
             "restart should preserve successful English output exactly across rerun"
         );
         return;

@@ -20,8 +20,8 @@ mod registry;
 pub use event_time::EventTime;
 pub use job::*;
 pub(crate) use job::{
-    CompletedFileOutput, FileFailureRecord, FileProgressRecord, FileRetryRecord, JobStatusColumns,
-    Stop,
+    CompletedFileOutput, FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord,
+    JobStatusColumns, Stop,
 };
 pub(crate) use queries::LeaseRenewalOutcome;
 pub(crate) use queries::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
@@ -30,8 +30,8 @@ pub(crate) use registry::JobCompletionSnapshot;
 use std::sync::Arc;
 
 use crate::api::{
-    ContentType, DisplayPath, FileProgressStage, FileStatusEntry, FileStatusKind, JobStatus,
-    MachineTime, NodeId, NonNegativeSeconds,
+    ContentType, DisplayPath, FileOutputDiagnostics, FileProgressStage, FileStatusEntry,
+    FileStatusKind, JobStatus, MachineTime, NodeId, NonNegativeSeconds,
 };
 use crate::config::ServerConfig;
 use crate::host_policy::HostExecutionPolicy;
@@ -132,9 +132,10 @@ impl FileFailure {
 /// Where a file is in its lifecycle, carrying only the times and the failure
 /// that phase has.
 ///
-/// A finish time exists only on `Done` and `Error`, a retry deadline only on
-/// `RetryPending`, a failure only where one happened, and a queued file has
-/// no times at all.
+/// A finish time exists only on `Done`, `Diagnosed` and `Error`, a retry
+/// deadline only on `RetryPending`, a failure only where one happened,
+/// admission diagnostics only on `Diagnosed`, and a queued file has no times
+/// at all.
 ///
 /// The times are `Option` only for rows recovered from storage written by a
 /// build that did not record them; every transition this build makes records
@@ -169,6 +170,20 @@ pub enum FilePhase {
         /// When it finished.
         finished_at: Option<MachineTime>,
     },
+    /// Finished, with the output written together with the diagnostics its
+    /// admission found. Terminal, never retried, and not a failure: the
+    /// command's own producer generated the document, so the written CHAT is
+    /// the evidence a reviewer needs, not a reason to discard the file.
+    Diagnosed {
+        /// When the attempt started.
+        started_at: Option<MachineTime>,
+        /// When the output was written.
+        finished_at: Option<MachineTime>,
+        /// What admission found. `Option` only for a row recovered from
+        /// storage that did not record it, like the times; every transition
+        /// this build makes records it.
+        diagnostics: Option<FileOutputDiagnostics>,
+    },
     /// Finished with an error. Terminal.
     Error {
         /// When the failed attempt started (absent for a setup refusal that
@@ -195,6 +210,7 @@ impl FilePhase {
             Self::Queued => FileStatusKind::Queued,
             Self::Processing { .. } | Self::RetryPending { .. } => FileStatusKind::Processing,
             Self::Done { .. } => FileStatusKind::Done,
+            Self::Diagnosed { .. } => FileStatusKind::Diagnosed,
             Self::Error { .. } => FileStatusKind::Error,
             Self::Interrupted { .. } => FileStatusKind::Interrupted,
         }
@@ -207,6 +223,7 @@ impl FilePhase {
             Self::Processing { started_at }
             | Self::RetryPending { started_at, .. }
             | Self::Done { started_at, .. }
+            | Self::Diagnosed { started_at, .. }
             | Self::Error { started_at, .. }
             | Self::Interrupted { started_at, .. } => *started_at,
         }
@@ -215,7 +232,9 @@ impl FilePhase {
     /// When the file finished: only a terminal file has finished.
     pub fn finished_at(&self) -> Option<MachineTime> {
         match self {
-            Self::Done { finished_at, .. } | Self::Error { finished_at, .. } => *finished_at,
+            Self::Done { finished_at, .. }
+            | Self::Diagnosed { finished_at, .. }
+            | Self::Error { finished_at, .. } => *finished_at,
             Self::Queued
             | Self::Processing { .. }
             | Self::RetryPending { .. }
@@ -228,7 +247,22 @@ impl FilePhase {
         match self {
             Self::RetryPending { failure, .. } | Self::Error { failure, .. } => Some(failure),
             Self::Interrupted { last_failure, .. } => last_failure.as_ref(),
-            Self::Queued | Self::Processing { .. } | Self::Done { .. } => None,
+            Self::Queued | Self::Processing { .. } | Self::Done { .. } | Self::Diagnosed { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The admission diagnostics of a file written with them.
+    pub fn diagnostics(&self) -> Option<&FileOutputDiagnostics> {
+        match self {
+            Self::Diagnosed { diagnostics, .. } => diagnostics.as_ref(),
+            Self::Queued
+            | Self::Processing { .. }
+            | Self::RetryPending { .. }
+            | Self::Done { .. }
+            | Self::Error { .. }
+            | Self::Interrupted { .. } => None,
         }
     }
 
@@ -254,9 +288,10 @@ impl FilePhase {
                 started_at,
                 last_failure: Some(failure),
             },
-            unchanged @ (Self::Done { .. } | Self::Error { .. } | Self::Interrupted { .. }) => {
-                unchanged
-            }
+            unchanged @ (Self::Done { .. }
+            | Self::Diagnosed { .. }
+            | Self::Error { .. }
+            | Self::Interrupted { .. }) => unchanged,
         }
     }
 
@@ -267,6 +302,7 @@ impl FilePhase {
             Self::Queued
             | Self::Processing { .. }
             | Self::Done { .. }
+            | Self::Diagnosed { .. }
             | Self::Error { .. }
             | Self::Interrupted { .. } => None,
         }
@@ -279,6 +315,7 @@ impl FilePhase {
             Self::Queued
             | Self::Processing { .. }
             | Self::Done { .. }
+            | Self::Diagnosed { .. }
             | Self::Error { .. }
             | Self::Interrupted { .. } => None,
         };
@@ -306,6 +343,7 @@ impl FilePhase {
             status: self.kind(),
             error: failure.and_then(FileFailure::message),
             error_category: failure.and_then(FileFailure::category),
+            diagnostics: self.diagnostics(),
             started_at: None,
             finished_at: None,
             next_eligible_at: None,
@@ -332,6 +370,11 @@ impl FilePhase {
             Self::Done {
                 started_at,
                 finished_at,
+            }
+            | Self::Diagnosed {
+                started_at,
+                finished_at,
+                ..
             } => FilePhaseColumns {
                 started_at: *started_at,
                 finished_at: *finished_at,
@@ -368,6 +411,7 @@ impl FilePhase {
             status: kind,
             error,
             error_category,
+            diagnostics,
             started_at,
             finished_at,
             next_eligible_at,
@@ -378,6 +422,7 @@ impl FilePhase {
             finished_at: finished_at.is_some(),
             next_eligible_at: next_eligible_at.is_some(),
             failure: message.is_some() || error_category.is_some(),
+            diagnostics: diagnostics.is_some(),
         };
         let phase = match (kind, next_eligible_at) {
             (FileStatusKind::Processing, Some(retry_at)) => Self::RetryPending {
@@ -400,6 +445,11 @@ impl FilePhase {
                 started_at,
                 finished_at,
             },
+            (FileStatusKind::Diagnosed, _) => Self::Diagnosed {
+                started_at,
+                finished_at,
+                diagnostics: diagnostics.cloned(),
+            },
             (FileStatusKind::Queued, _) => Self::Queued,
         };
         let dropped = held.not_kept_by(&phase.columns());
@@ -420,6 +470,7 @@ struct RowHeld {
     finished_at: bool,
     next_eligible_at: bool,
     failure: bool,
+    diagnostics: bool,
 }
 
 impl RowHeld {
@@ -438,6 +489,10 @@ impl RowHeld {
                 "next_eligible_at",
             ),
             (self.failure && !kept_failure, "an error"),
+            (
+                self.diagnostics && kept.diagnostics.is_none(),
+                "diagnostics",
+            ),
         ]
         .into_iter()
         .filter_map(|(dropped, column)| dropped.then_some(column))
@@ -459,6 +514,10 @@ pub(crate) struct FilePhaseColumns<'a> {
     pub error: Option<&'a str>,
     /// The `error_category` column.
     pub error_category: Option<FailureCategory>,
+    /// The `diagnostics` column, decoded: a diagnosed file's admission
+    /// findings. Its JSON text is written by `db::update::bind_phase_columns`
+    /// and read back at the database boundary (`recover_file_phase`).
+    pub diagnostics: Option<&'a FileOutputDiagnostics>,
     /// The `started_at` column.
     pub started_at: Option<MachineTime>,
     /// The `finished_at` column: the finish time, or a pending retry's
@@ -480,10 +539,51 @@ pub struct FileProgress {
     pub stage: Option<FileProgressStage>,
 }
 
+/// A change in how many of a file's worker checkouts wait on a saturated
+/// pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerWaitChange {
+    /// A checkout began waiting.
+    Started,
+    /// A checkout stopped waiting.
+    Ended,
+}
+
+/// How many of a file's worker checkouts are waiting on a saturated pool.
+///
+/// Its own fact, beside the stage the pipeline reported ([`FileProgress`]):
+/// two publishers (the pipeline's progress and the pool's wait observer)
+/// each own one, so neither can overwrite the other, and what the file shows
+/// is derived from both ([`FileStatus::to_entry`]). It used to be one shown
+/// stage that each publisher overwrote, with a view in the runner trying to
+/// restore whichever the other had replaced. Ephemeral, like progress.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenWorkerWaits(u32);
+
+impl OpenWorkerWaits {
+    /// Apply one change. An end with no open wait is a pairing defect
+    /// upstream (every end comes from a started wait's drop guard): it is
+    /// logged and changes nothing.
+    pub(crate) fn apply(&mut self, change: WorkerWaitChange) {
+        match change {
+            WorkerWaitChange::Started => self.0 = self.0.saturating_add(1),
+            WorkerWaitChange::Ended => match self.0.checked_sub(1) {
+                Some(remaining) => self.0 = remaining,
+                None => tracing::warn!("a worker wait ended that never started; count unchanged"),
+            },
+        }
+    }
+
+    /// Whether any checkout of the file is waiting.
+    pub(crate) fn any(self) -> bool {
+        self.0 > 0
+    }
+}
+
 /// Tracks the processing state of a single file within a job.
 ///
 /// Each file begins `Queued` and moves through `Processing` (and possibly
-/// `RetryPending`) to `Done` or `Error`; see [`FilePhase`]. Progress is
+/// `RetryPending`) to `Done`, `Diagnosed` or `Error`; see [`FilePhase`]. Progress is
 /// ephemeral (not persisted to SQLite) and is cleared on job restart.
 #[derive(Debug, Clone)]
 pub struct FileStatus {
@@ -502,8 +602,10 @@ pub struct FileStatus {
     /// Ephemeral -- restored as `None` on startup and recreated on the next
     /// dispatch when unfinished files are resumed.
     pub current_attempt_id: Option<String>,
-    /// Live progress. Ephemeral.
+    /// Live progress, as the pipeline reported it. Ephemeral.
     pub progress: FileProgress,
+    /// Checkouts of this file waiting on a saturated pool. Ephemeral.
+    pub worker_waits: OpenWorkerWaits,
 }
 
 impl FileStatus {
@@ -515,6 +617,21 @@ impl FileStatus {
             stamp: crate::api::FileStampOutcome::Unrecorded,
             current_attempt_id: None,
             progress: FileProgress::default(),
+            worker_waits: OpenWorkerWaits::default(),
+        }
+    }
+
+    /// The progress the file shows: "waiting for a worker" while any of its
+    /// checkouts waits on a saturated pool (an in-flight file only), else
+    /// the stage its pipeline last reported, with its counts.
+    fn shown_progress(&self) -> FileProgress {
+        match (self.worker_waits.any(), self.status().is_terminal()) {
+            (true, false) => FileProgress {
+                stage: Some(FileProgressStage::WaitingForWorker),
+                current: None,
+                total: None,
+            },
+            (false, _) | (true, true) => self.progress.clone(),
         }
     }
 
@@ -529,6 +646,7 @@ impl FileStatus {
         self.phase = FilePhase::Queued;
         self.current_attempt_id = None;
         self.progress = FileProgress::default();
+        self.worker_waits = OpenWorkerWaits::default();
     }
 
     /// Convert to the API response type.
@@ -536,11 +654,13 @@ impl FileStatus {
         let started_at = self.phase.started_at();
         let finished_at = self.phase.finished_at();
         let failure = self.phase.failure();
+        let progress = self.shown_progress();
         FileStatusEntry {
             filename: self.filename.clone(),
             status: self.phase.kind(),
             error: failure.and_then(FileFailure::message).map(str::to_owned),
             error_category: failure.and_then(FileFailure::category),
+            diagnostics: self.phase.diagnostics().cloned(),
             stamp: self.stamp.clone(),
             started_at,
             finished_at,
@@ -551,11 +671,10 @@ impl FileStatus {
                 (None, _) | (_, None) => None,
             },
             next_eligible_at: self.phase.next_eligible_at(),
-            progress_current: self.progress.current,
-            progress_total: self.progress.total,
-            progress_stage: self.progress.stage,
-            progress_label: self
-                .progress
+            progress_current: progress.current,
+            progress_total: progress.total,
+            progress_stage: progress.stage,
+            progress_label: progress
                 .stage
                 .map(FileProgressStage::label)
                 .map(str::to_string),
@@ -624,6 +743,8 @@ pub struct FileResultEntry {
 /// enough information for the handler to locate result files on disk and decide
 /// whether to stream content or return paths.
 pub struct JobDetail {
+    /// Submitted typed options, including the required native export format.
+    pub options: crate::options::CommandOptions,
     /// Command whose output policy maps input names to result artifacts.
     pub command: crate::ReleasedCommand,
     /// Current lifecycle state -- the handler uses this to reject downloads for
@@ -743,4 +864,84 @@ impl JobStore {
 #[cfg(test)]
 fn auto_max_concurrent_from(by_cpu: usize, by_memory: usize) -> usize {
     host_auto_max_concurrent_from(by_cpu, by_memory)
+}
+
+#[cfg(test)]
+mod worker_wait_tests {
+    use super::*;
+
+    fn processing(stage: FileProgressStage, current: i64, total: i64) -> FileStatus {
+        let mut file = FileStatus::new(DisplayPath::from("a.cha".to_owned()));
+        file.phase = FilePhase::Processing { started_at: None };
+        file.progress = FileProgress {
+            stage: Some(stage),
+            current: Some(current),
+            total: Some(total),
+        };
+        file
+    }
+
+    fn shown(file: &FileStatus) -> (Option<FileProgressStage>, Option<i64>, Option<i64>) {
+        let entry = file.to_entry();
+        (
+            entry.progress_stage,
+            entry.progress_current,
+            entry.progress_total,
+        )
+    }
+
+    /// The reported stage and the open waits are two facts: a stage
+    /// reported during a wait is kept, not shown, and shown with its counts
+    /// when the last wait ends; neither publisher can overwrite the other.
+    #[test]
+    fn waiting_is_derived_and_never_overwrites_the_reported_stage() {
+        let mut file = processing(FileProgressStage::Analyzing, 3, 10);
+        file.worker_waits.apply(WorkerWaitChange::Started);
+        file.worker_waits.apply(WorkerWaitChange::Started);
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::WaitingForWorker), None, None)
+        );
+
+        // The batch reporter publishes counts mid-wait: kept, not shown.
+        file.progress = FileProgress {
+            stage: Some(FileProgressStage::Analyzing),
+            current: Some(5),
+            total: Some(10),
+        };
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::WaitingForWorker), None, None)
+        );
+
+        file.worker_waits.apply(WorkerWaitChange::Ended);
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::WaitingForWorker), None, None),
+            "one wait still open"
+        );
+        file.worker_waits.apply(WorkerWaitChange::Ended);
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::Analyzing), Some(5), Some(10))
+        );
+
+        file.worker_waits.apply(WorkerWaitChange::Ended);
+        assert!(!file.worker_waits.any(), "an unpaired end changes nothing");
+    }
+
+    /// A finished file never shows a wait, whatever the count.
+    #[test]
+    fn a_terminal_file_does_not_show_a_wait() {
+        let mut file = processing(FileProgressStage::Writing, 1, 1);
+        file.worker_waits.apply(WorkerWaitChange::Started);
+        file.phase = FilePhase::Done {
+            started_at: None,
+            finished_at: None,
+        };
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::Writing), Some(1), Some(1))
+        );
+    }
 }

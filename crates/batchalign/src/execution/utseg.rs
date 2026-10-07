@@ -107,14 +107,19 @@ pub(crate) async fn dispatch_utseg_job(
             async move {
                 let _permit = permit; // released on drop after the task completes
                 let single = vec![file_input];
-                let results = gateway_for_task
-                    .utseg_batch(
+                // A saturated checkout shows on this file's progress.
+                let results = crate::runner::util::observing_file_waits(
+                    host_for_task.sink(),
+                    &job_for_task.identity.job_id,
+                    single.iter().map(|file| file.filename.to_string()),
+                    gateway_for_task.utseg_batch(
                         &single,
                         route.language(),
                         route.fallback().is_allowed(),
                         crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 write_text_results(
                     &job_for_task,
                     &host_for_task,
@@ -196,7 +201,6 @@ mod tests {
             &self,
             _chat_text: &str,
             _before_text: Option<&str>,
-            _lang: &LanguageCode3,
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
@@ -233,8 +237,7 @@ mod tests {
         async fn translate_file(
             &self,
             _file: &TextBatchFileInput,
-            _lang: &LanguageCode3,
-            _engine: &crate::types::engines::TranslateEngineName,
+            _route: &crate::translate::TranslationRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             unreachable!()

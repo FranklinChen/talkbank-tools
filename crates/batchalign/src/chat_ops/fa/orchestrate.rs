@@ -458,7 +458,8 @@ impl FaApplied {
     }
 
     /// Impose kept bullets, apply optional repair, enforce the declared
-    /// monotonicity policy, write `%wor`, and verify every kept bullet held.
+    /// monotonicity policy, write `%wor`, restore the given bullets of
+    /// utterances not in the recording, and verify every kept bullet held.
     ///
     /// Repair must see the raw adjacent overlap in order to average a small
     /// boundary. Enforcing monotonicity first would clamp that evidence away
@@ -467,8 +468,9 @@ impl FaApplied {
     /// The kept-bullet steps are typed rather than ordered by comment:
     /// repair and monotonicity each REQUIRE the [`ImposedBullets`] proof that
     /// only [`MainBulletAuthority::impose`] returns, and the result carries
-    /// the [`KeptBulletsHeld`] proof [`MainBulletAuthority::verify_held`]
-    /// returns after the last phase. Under the default policy both are
+    /// the [`KeptBulletsHeld`] proof
+    /// [`MainBulletAuthority::restore_and_verify`] returns after the last
+    /// phase. Under the default policy both are
     /// trivially obtained and nothing changes. A kept bullet that did not
     /// hold fails the file with a [`KeptBulletError`].
     pub fn then_finalize(
@@ -502,7 +504,10 @@ impl FaApplied {
             wor_plan,
             postprocess,
         )?;
-        let kept_bullets = main_bullets.verify_held(chat_file)?;
+        // Last: bullets on utterances not in the recording return only now,
+        // so no phase above could order or cut a neighbour against one; then
+        // every kept bullet is checked.
+        let kept_bullets = main_bullets.restore_and_verify(chat_file)?;
         Ok(FaFinalized {
             ordered,
             repair,
@@ -1189,7 +1194,7 @@ impl ClampedWordCounts {
                     WordTier::MainTier => self.trimmed_main_tier += 1,
                     WordTier::Wor => self.trimmed_wor += 1,
                 }
-                Some(Bullet::new(timing.start_ms, timing.end_ms))
+                Some(timing.bullet())
             }
             super::postprocess::WordClampOutcome::DroppedPastBound { measured } => {
                 self.dropped.push(DroppedWordTiming {

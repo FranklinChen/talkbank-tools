@@ -1,7 +1,7 @@
 # translate: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-02 23:08 EDT
 
 Implementation guide for the `translate` command. For user-facing
 documentation, see [User Guide: translate](../../user-guide/commands/translate.md).
@@ -12,11 +12,11 @@ documentation, see [User Guide: translate](../../user-guide/commands/translate.m
 
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
-| CLI args | `crates/batchalign/src/cli/args/commands.rs`: `TranslateArgs` | `--translate-engine` flag, parsed straight into `TranslateEngineName` by `engine_selection_parser::<TranslateEngineName>()` |
+| CLI args | `crates/batchalign/src/cli/args/commands.rs`: `TranslateArgs` | Checked `--target ISO3` and `--translate-engine`, parsed into their domain types |
 | CLI → wire | `crates/batchalign/src/cli/args/options.rs`: `Commands::Translate` arm | No mapping: the flag already holds a `TranslateEngineName`. The CLI-private mirror enum and its hand-written match were removed 2026-08-06; see `SelectableEngine` in `types/engines.rs` |
 | Catalog entry | `crates/batchalign/src/recipe_runner/catalog.rs` | the `CatalogEntry` for `translate` |
 | Stage recipe | `crates/batchalign/src/recipe_runner/recipes.rs` | `TRANSLATE_RECIPE` |
-| Translate orchestration | `crates/batchalign/src/translate/mod.rs` | The cross-file text pipeline (the only one; the per-file entry point was deleted with the workflow trait), the `WorkerTransport` that sends one request per utterance, the typed per-item failures, provenance. No result cache |
+| Translate orchestration | `crates/batchalign/src/translate/mod.rs` | Single-file entry into the shared text pipeline, sealed `TranslationRoute`, one request per utterance, typed per-item failures and provenance. No result cache |
 | Per-item loop | `crates/batchalign/src/translate/items.rs` | `translate_items`: one request per utterance through an `ItemTransport`, pacing and cooldowns by the engine's policy, the file stopped at the first failure, echoed translations counted |
 | Provider policy | `crates/batchalign/src/translate/provider.rs` | `TranslateEngineName::provider_policy()`: request spacing, the statuses waited out, the cooldown schedule and ceiling; `Throttle`, the typestate that carries the remaining schedule |
 | Source model and injection | `crates/batchalign-transform/src/translate.rs` | `TranslationSource` (what the speaker produced) and `render()`, its one renderer; `TranslationText` (a translation with something to apply) and `%xtra` injection |
@@ -32,6 +32,37 @@ as of 2026-04-14: the CLI posts source/output path lists instead of CHAT
 bytes. See [Submission Modes](../../reference/command-io.md#submission-modes-paths_modetrue-vs-paths_modefalse).
 
 ---
+
+## Checked translation direction
+
+`--target ISO3` lowers to the validated `TranslateOptions.target`, with `eng`
+as the serde default for older stored jobs. Each file's header-derived source,
+the selected target and effective engine are owned together by the private-field
+`TranslationRoute`. Gateways and transports receive this value, not independently
+replaceable language/engine arguments. Its request builder carries both codes to
+`TranslateRequestV2`.
+
+The PyO3 executor passes source, target and batch to the Python adapter. That
+adapter constructs the frozen, translation-only `TranslateInferenceRequest`;
+both codes are required and checked. Generic NLP requests cannot silently lose
+a V2 target here. The legacy batch IPC's English-only contract is explicitly
+admitted by a separate adapter; it is not registered as a target-aware handler.
+Every loaded callable takes both languages: Google sends explicit
+`src` and `dest`, NLLB resolves both FLORES codes, Seamless receives `tgt_lang`,
+and the cloud SDK requests carry mapped targets. Unmapped routes fail before
+provider/model execution, with no English fallback. Provider language-pair
+restrictions are authoritative even when both individual codes have mappings.
+
+Tencent uses the official SDK `CommonClient` for the unchanged signed
+`TextTranslate` endpoint; recent generated TMT packages no longer contain that
+action. A checked response envelope requires a string `TargetText`, rather than
+coercing missing or malformed provider data into a translation. Alibaba codes
+follow its [documented language table](https://www.alibabacloud.com/help/en/machine-translation/product-overview/general-version-of-machine-translation),
+including `es`, `fr` and `vi`.
+
+Stateless controls cover CLI and stored-job admission, per-file routes, the exact
+Rust request, bridge delivery, engine target switching, unsupported routes and
+malformed provider output. Model doubles do not certify translation fidelity.
 
 ## No result cache
 
@@ -159,7 +190,10 @@ removed.
 
 ## Pre-validation gate
 
-`translate` requires CHAT Level 1.
+`translate` requires complete retained-input Chatter validity before inference.
+It replaces no linguistic analysis tiers and therefore admits no invalid-tier
+exception. The text pipeline performs full admission before collecting payloads,
+including cases with no eligible utterances.
 
 ## Idempotency
 

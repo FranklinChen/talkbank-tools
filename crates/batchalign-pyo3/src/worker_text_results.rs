@@ -149,11 +149,12 @@ pub(crate) fn align_tokens(
     use batchalign_transform::tokenizer_realign::{self, PatchedToken};
     use pyo3::types::{PyBool, PyList, PyString, PyTuple};
 
-    let patched =
-        py.detach(|| tokenizer_realign::align_tokens(&original_words, &stanza_tokens, &alpha2));
+    let patched = py
+        .detach(|| tokenizer_realign::align_tokens(&original_words, &stanza_tokens, &alpha2))
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
     let result = PyList::empty(py);
-    for tok in &patched {
+    for tok in patched.tokens() {
         match tok {
             PatchedToken::Plain(s) => {
                 result.append(PyString::new(py, s))?;
@@ -163,6 +164,11 @@ pub(crate) fn align_tokens(
                 let b_any: Py<PyAny> = PyBool::new(py, *expand).to_owned().unbind().into_any();
                 let tup = PyTuple::new(py, [s_any.bind(py), b_any.bind(py)])?;
                 result.append(tup)?;
+            }
+            PatchedToken::FrenchElision(group) => {
+                let surface = PyString::new(py, group.surface()).into_any();
+                let components = PyList::new(py, group.components())?.into_any();
+                result.append(PyTuple::new(py, [surface, components])?)?;
             }
         }
     }

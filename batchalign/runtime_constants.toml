@@ -56,6 +56,7 @@ compare = 8000
 avqi = 1500
 diarize = 2500
 speaker_identify = 1000
+convert = 256
 
 # Per-command base memory (MB) for thread workers (free-threaded, shared models).
 [command_base_mb.threaded]
@@ -72,6 +73,7 @@ compare = 2000
 avqi = 1500
 diarize = 2500
 speaker_identify = 1000
+convert = 256
 
 [known_engine_keys]
 keys = ["asr", "batch_size", "fa", "feature_set", "utr"]

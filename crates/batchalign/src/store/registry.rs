@@ -20,8 +20,8 @@ use crate::scheduling::LeaseRecord;
 
 use super::JobDetail;
 use super::job::{
-    CompletedFileOutput, FileFailureRecord, FileProgressRecord, FileRetryRecord, Job,
-    RunnerJobSnapshot, find_conflicts,
+    FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord, Job, RunnerJobSnapshot,
+    find_conflicts,
 };
 
 /// One claimed lease that should be mirrored into durable storage.
@@ -631,6 +631,7 @@ impl JobRegistry {
     /// Project the download-facing detail view for one job.
     pub(crate) async fn job_detail(&self, job_id: &JobId) -> Option<JobDetail> {
         self.project_job(job_id.clone(), |job| JobDetail {
+            options: job.dispatch.options.clone(),
             command: job.dispatch.command,
             status: job.execution.status,
             paths_mode: job.filesystem.paths_mode,
@@ -798,11 +799,11 @@ impl JobRegistry {
         job_id: &JobId,
         filename: &str,
         finished_at: MachineTime,
-        result: Option<CompletedFileOutput>,
+        completion: FileCompletion,
     ) -> Option<FileUpdateProjection> {
         let filename = filename.to_string();
         self.update_job(job_id.clone(), move |job| {
-            if job.mark_file_done(&filename, finished_at, result.clone()) {
+            if job.mark_file_done(&filename, finished_at, completion.clone()) {
                 Self::file_update_projection(job, &filename)
             } else {
                 None
@@ -879,6 +880,26 @@ impl JobRegistry {
         })
         .await
         .is_some()
+    }
+
+    /// Apply one worker-wait change and return the projected file-update
+    /// payload.
+    pub(crate) async fn set_file_worker_wait(
+        &self,
+        job_id: &JobId,
+        filename: &str,
+        change: crate::store::WorkerWaitChange,
+    ) -> Option<FileUpdateProjection> {
+        let filename = filename.to_string();
+        self.update_job(job_id.clone(), move |job| {
+            if job.set_file_worker_wait(&filename, change) {
+                Self::file_update_projection(job, &filename)
+            } else {
+                None
+            }
+        })
+        .await
+        .flatten()
     }
 
     /// Apply one progress update and return the projected file-update payload.

@@ -111,33 +111,10 @@ impl WorkerProfile {
     ///
     /// Returns `None` for commands that do not require an infer-task worker.
     ///
-    /// Note: the mapping is embedded here to avoid a dependency on `batchalign`'s command
-    /// catalog.  It mirrors the `primary_infer_task` logic in `batchalign::command_model`
-    /// (`catalog.rs:primary_infer_task`), which selects the first entry from each command's
-    /// `infer_tasks` list.  If the catalog changes, this mapping must be kept in sync.
+    /// The shared resource registry owns this mapping. Native-media commands
+    /// have no worker profile and never borrow an inference task's identity.
     pub fn for_command(command: ReleasedCommand) -> Option<Self> {
-        let task = match command {
-            ReleasedCommand::Morphotag => InferTask::Morphosyntax,
-            ReleasedCommand::Utseg => InferTask::Utseg,
-            ReleasedCommand::Translate => InferTask::Translate,
-            ReleasedCommand::Coref => InferTask::Coref,
-            ReleasedCommand::Align => InferTask::Fa,
-            ReleasedCommand::Transcribe | ReleasedCommand::TranscribeS => InferTask::Asr,
-            ReleasedCommand::Opensmile => InferTask::Opensmile,
-            ReleasedCommand::Avqi => InferTask::Avqi,
-            // Diarize: standalone speaker diarization (pyannote), GPU-profile.
-            ReleasedCommand::Diarize => InferTask::Speaker,
-            // The SAME infer task as diarization: both are served by the
-            // speaker worker, and both models it can host load lazily, so a
-            // worker that only ever embeds never constructs the diarization
-            // pipeline and never reaches that pipeline's gated artifact.
-            ReleasedCommand::SpeakerIdentify => InferTask::Speaker,
-            // Compare: primary infer task is Morphosyntax (MORPHOSYNTAX_TASKS[0]).
-            ReleasedCommand::Compare => InferTask::Morphosyntax,
-            // Benchmark: primary infer task is Asr (BENCHMARK_TASKS[0]).
-            ReleasedCommand::Benchmark => InferTask::Asr,
-        };
-        Some(Self::for_task(task))
+        crate::command_spec::command_spec_for(command).profile
     }
 }
 

@@ -1,7 +1,7 @@
 use super::chunking::{split_long_turns, split_on_long_pauses};
-use super::expand_numbers_in_words;
 use super::prepare::{extract_timed_words, split_multiword_tokens};
 use super::utterance::retokenize;
+use super::write_word_forms;
 use super::*;
 
 fn elem(value: &str, ts: f64, end_ts: f64) -> AsrElement {
@@ -838,7 +838,7 @@ fn split_pipeline_matches_monolithic_simple() {
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, "eng")
             .expect("test: ASR post-processing must not refuse this input");
-        let words = expand_numbers_in_words(words, AsrTextLanguage::One("eng"));
+        let words = write_word_forms(words, AsrTextLanguage::One("eng"));
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "eng"));
     }
 
@@ -909,7 +909,7 @@ fn split_pipeline_matches_monolithic_cantonese() {
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, "yue")
             .expect("test: ASR post-processing must not refuse this input");
-        let words = expand_numbers_in_words(words, AsrTextLanguage::One("yue"));
+        let words = write_word_forms(words, AsrTextLanguage::One("yue"));
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "yue"));
     }
 
@@ -944,7 +944,7 @@ fn split_pipeline_matches_monolithic_multi_monologue() {
     for monologue in &output.monologues {
         let words = prepare_words_pre_expansion(&monologue.elements, "eng")
             .expect("test: ASR post-processing must not refuse this input");
-        let words = expand_numbers_in_words(words, AsrTextLanguage::One("eng"));
+        let words = write_word_forms(words, AsrTextLanguage::One("eng"));
         split_result.extend(finalize_words_to_chunks(words, monologue.speaker, "eng"));
     }
 
@@ -1103,4 +1103,79 @@ fn sanitize_does_not_strip_currency_or_percent_tokens() {
         "raw $12 isn't CHAT-legal; production pipeline must expand \
          it BEFORE this pass runs (see finalize_utterances ordering)"
     );
+}
+
+/// Stage 4 writes each token CHAT cannot hold as recognized, by its shape,
+/// as the CHAT manual says to (see `write_word_forms`), and leaves every
+/// other token alone. One token stays one word unless a number spells to
+/// several, and timing is kept.
+#[test]
+fn tokens_chat_cannot_hold_are_written_by_their_shape() {
+    let written = |tokens: &[&str], language: AsrTextLanguage<'_>| -> Vec<String> {
+        let words = tokens
+            .iter()
+            .map(|text| AsrWord::new(*text, Some(0), Some(100)))
+            .collect();
+        write_word_forms(words, language)
+            .into_iter()
+            .map(|word| word.text.as_str().to_owned())
+            .collect()
+    };
+    let eng = AsrTextLanguage::One("eng");
+    // A letter-led alphanumeric: spelled digits joined by underscores, the
+    // manual's R_two_D_two, letters as recognized.
+    assert_eq!(
+        written(&["b2", "B2", "R2D2", "mp3"], eng),
+        ["b_two", "B_two", "R_two_D_two", "mp_three"]
+    );
+    // Several digits in a run have no reading the surface gives ("one two
+    // three"? "one twenty-three"?): kept as recognized, for review.
+    assert_eq!(written(&["abc123", "covid19"], eng), ["abc123", "covid19"]);
+    // A reserved-marker spelling is something spoken, a string of letters,
+    // never CHAT's untranscribed marker: in any case, in any language.
+    assert_eq!(
+        written(&["Www", "www", "XXX", "yyy"], eng),
+        ["www@k", "www@k", "xxx@k", "yyy@k"]
+    );
+    let switched = AsrTextLanguage::CodeSwitched { primary: "eng" };
+    assert_eq!(written(&["Www", "b2"], switched), ["www@k", "b2"]);
+    // Numbers keep the expander's spelling; ordinary words are untouched.
+    assert_eq!(
+        written(&["1st", "hello", "wwww"], eng),
+        ["first", "hello", "wwww"]
+    );
+    // Shapes no rule here writes stay as recognized, for review: punctuation
+    // inside, or a language with no expander.
+    assert_eq!(
+        written(&["b-2", "a2"], AsrTextLanguage::One("xxx")),
+        ["b-2", "a2"]
+    );
+    // Latin script only: a Han or Cyrillic numeral is never joined to a
+    // Latin letter, and a non-Latin letter never leads a linkage.
+    assert_eq!(written(&["A2"], AsrTextLanguage::One("zho")), ["A2"]);
+    assert_eq!(written(&["b2"], AsrTextLanguage::One("rus")), ["b2"]);
+    assert_eq!(written(&["b2"], AsrTextLanguage::One("spa")), ["b_dos"]);
+}
+
+/// A letter string opening an utterance owns the capitalization slot and
+/// stays lowercase: `Www@k` would be a different letter.
+#[test]
+fn an_utterance_initial_letter_string_is_not_capitalized() {
+    let output = AsrOutput {
+        monologues: vec![AsrMonologue {
+            speaker: SpeakerIndex(0),
+            elements: vec![
+                elem("Www", 0.0, 0.5),
+                elem("is", 1.0, 1.5),
+                elem("here.", 2.0, 2.5),
+            ],
+        }],
+    };
+    let utterances = process_raw_asr(&output, "eng").expect("post-processing");
+    let words: Vec<&str> = utterances[0]
+        .words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect();
+    assert_eq!(words, ["www@k", "is", "here", "."]);
 }

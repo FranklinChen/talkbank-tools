@@ -5,8 +5,9 @@
 //! as `infer:asr` so one small machine does not speculatively hold unrelated
 //! models in memory.
 
+#[cfg(test)]
 use crate::api::ReleasedCommand;
-use crate::command_model::command_spec;
+use crate::command_model::InferenceRequirement;
 
 use super::InferTask;
 
@@ -113,16 +114,22 @@ impl WorkerTarget {
     /// Return the infer-task worker target used for one released command.
     #[cfg(test)]
     pub(crate) fn for_command(command: ReleasedCommand) -> Self {
-        Self::InferTask(command_spec(command).capabilities.primary_infer_task)
+        Self::InferTask(
+            crate::command_model::command_spec(command)
+                .capabilities
+                .require_inference()
+                .expect("test command requires inference")
+                .task(),
+        )
     }
 
-    /// Return the actual bootstrap target used for one released command and host mode.
-    pub(crate) fn for_command_with_mode(
-        command: ReleasedCommand,
+    /// Derive a target only from admitted inference requirements. A native
+    /// command cannot be passed to this constructor.
+    pub(crate) fn for_inference_with_mode(
+        requirement: InferenceRequirement,
         mode: WorkerBootstrapMode,
     ) -> Self {
-        let task = command_spec(command).capabilities.primary_infer_task;
-        Self::from_infer_task(task, mode)
+        Self::from_infer_task(requirement.task(), mode)
     }
 }
 
@@ -185,18 +192,16 @@ mod tests {
 
     #[test]
     fn command_target_respects_bootstrap_mode() {
+        let requirement = crate::command_model::command_spec(ReleasedCommand::Morphotag)
+            .capabilities
+            .require_inference()
+            .expect("morphotag requires inference");
         assert_eq!(
-            WorkerTarget::for_command_with_mode(
-                ReleasedCommand::Morphotag,
-                WorkerBootstrapMode::Profile
-            ),
+            WorkerTarget::for_inference_with_mode(requirement, WorkerBootstrapMode::Profile),
             WorkerTarget::Profile(WorkerProfile::Stanza)
         );
         assert_eq!(
-            WorkerTarget::for_command_with_mode(
-                ReleasedCommand::Morphotag,
-                WorkerBootstrapMode::Task
-            ),
+            WorkerTarget::for_inference_with_mode(requirement, WorkerBootstrapMode::Task),
             WorkerTarget::InferTask(InferTask::Morphosyntax)
         );
     }

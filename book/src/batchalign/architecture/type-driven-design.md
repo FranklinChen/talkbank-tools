@@ -1,11 +1,30 @@
 # Type-Driven Design
 
 **Status:** Current
-**Last updated:** 2026-10-01 21:18 EDT
+**Last updated:** 2026-10-06 11:44 EDT
 
 Batchalign uses Rust's type system to encode domain invariants at compile time. This document catalogs the patterns in use, explains when to reach for each one, and records the serde techniques that keep the wire format stable while the internal types evolve.
 
 ## Patterns
+
+### Source-bound timed-CHAT diarization
+
+`DiarizeOutputMode` separates media-to-turns evidence from mapped CHAT rewrite.
+Its `SpeakerTrackMapping` has one syntax-checked CLI/serde constructor, but is
+not yet participant identity admission. `MappedDiarizeSource` requires immutable
+`ValidChatFile`, checks every mapping target against its declarations and retains
+Chatter's borrowed `WordSpeakerSource` capabilities before inference. The source
+cannot change while these capabilities are held. Model labels use the same
+deterministic coordinates as retained turns; the shared Chatter partition owner
+admits every structural boundary and derives child bullets from actual `%wor`.
+
+Application consumes these source-bound capabilities. Missing/tied acoustic
+ownership cannot yield a writable partial document. Headers remain unchanged;
+analysis invalidation receipts become a typed `@Comment`, preserving contributor
+annotations. `PostValidated::gate_owned` then establishes complete construction
+admission. The shared audio-output writer takes that proof, not raw CHAT bytes.
+The source-aware output policy selects filename and content type together for
+planning, recovery and writing; no separate diarization writer exception exists.
 
 ### 1. Domain Identifier Newtypes (`string_id!` / `numeric_id!`)
 
@@ -396,7 +415,7 @@ let cache_policy = CachePolicy::from(opts.override_media_cache);  // bool → en
 let wor_tier = WorTierPolicy::from(opts.write_wor);
 
 // orchestrator: never sees booleans
-process_fa(chat_text, audio, services, &FaParams {
+run_fa_from_ast(document, audio, lang, services, &FaParams {
     cache_policy,
     wor_tier,
     ..

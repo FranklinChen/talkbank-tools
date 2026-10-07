@@ -99,7 +99,7 @@ async fn golden_l2_morphotag_eng_spa() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_eng_spa", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_has(output, "tienda@s:spa", "noun|tienda");
     assert_mor_has(output, "muy@s:spa", "adv|");
@@ -131,7 +131,7 @@ async fn golden_l2_morphotag_deu_eng() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_deu_eng", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_has(output, "film@s", "noun|film");
     assert_mor_has(output, "drug@s", "noun|drug");
@@ -162,7 +162,7 @@ async fn golden_l2_morphotag_eng_contractions() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_eng_contractions", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_mor_has(output, "it's@s:eng", "~");
     assert_mor_lacks(output, "it's@s:eng", "L2|xxx");
     assert_mor_has(output, "don't@s:eng", "~");
@@ -196,7 +196,7 @@ async fn golden_l2_morphotag_phrasal_verbs() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_phrasal_verbs", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     for (surface, verb) in [
         ("wake@s up@s", "verb|wake"),
@@ -236,7 +236,7 @@ async fn golden_l2_morphotag_off_produces_l2_xxx() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_off", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert!(
         output.contains("L2|xxx"),
         "with L2 morphotag off every @s word keeps L2|xxx; the output is:\n{output}"
@@ -268,7 +268,7 @@ async fn golden_l2_morphotag_cat_spa() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_cat_spa", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_lacks(output, "cole@s", "L2|xxx");
     assert_mor_lacks(output, "bonita@s", "L2|xxx");
@@ -299,7 +299,7 @@ async fn golden_l2_morphotag_dan_eng() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_dan_eng", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_lacks(output, "computer@s", "L2|xxx");
     assert_mor_lacks(output, "happy@s", "L2|xxx");
@@ -330,7 +330,7 @@ async fn golden_l2_morphotag_fra_nld() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_fra_nld", &info, &results);
-    let output = &results[0].content;
+    let output = &results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_lacks(output, "opa@s", "L2|xxx");
     assert_mor_lacks(output, "ja@s:nld", "L2|xxx");

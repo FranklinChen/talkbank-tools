@@ -16,7 +16,7 @@
 //! as a typed `NotApplicable` outcome rather than invisible silent skip, and
 //! making worker-response shape mismatches fail loudly as typed
 //! `MisalignmentBug` diagnostics rather than being absorbed by defensive
-//! index guards in `split_utterance`.
+//! index guards. Chatter owns structural partition admission and rebuilding.
 //!
 //! The utseg invariant is simpler than morphotag's: there is no tokenizer
 //! realignment stage: the Python utseg worker is a per-word classifier
@@ -25,8 +25,8 @@
 //! divergence class.
 
 // Wildcard matches over closed enums are denied in this file, following
-// chatter's per-file ratchet. The reason it is here rather than crate-wide is
-// at `policy_for_tier`, which shipped a defect a `_` arm hid.
+// chatter's per-file ratchet. The generic tier policy now belongs to Chatter's
+// source-bound split API rather than a second BA3-specific owner.
 #![deny(clippy::wildcard_enum_match_arm)]
 // Test code is exempt, matching this crate's existing treatment of the panic
 // lints: `other => panic!("unexpected {other:?}")` is how a test says a variant
@@ -38,20 +38,11 @@ use crate::decisions::LineIdx;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use talkbank_model::Span;
 use talkbank_model::alignment::helpers::PositionalDomain;
-use talkbank_model::alignment::helpers::TierDomain;
-use talkbank_model::alignment::helpers::{WordItem, walk_words};
-use talkbank_model::alignment::{
-    WorSlotMembershipPolicy, WorTimingBinding, WorTimingCorrespondence, WorTimingSequence,
-    assess_wor_timing_sequence, bind_wor_timing, corroborate_wor_timing,
-};
 use talkbank_model::model::ChatFileLines;
-use talkbank_model::model::dependent_tier::wor::WorItem;
-use talkbank_model::model::{
-    Bullet, ChatFile, DependentTier, Line, MainTier, Retrace, Terminator, Utterance,
-    UtteranceContent, WorTier,
-};
+use talkbank_model::model::{ChatFile, Line};
+#[cfg(test)]
+use talkbank_model::model::{Retrace, Utterance, UtteranceContent};
 
 use crate::extract;
 use talkbank_model::SpeakerCode;
@@ -119,8 +110,8 @@ pub enum UtsegOutcomeKind {
         /// Why this utterance was not dispatched.
         reason: UtsegNotApplicableReason,
     },
-    /// Worker returned exactly N assignments for N input words;
-    /// `split_utterance` applied cleanly. Happy path.
+    /// Worker returned exactly N assignments for N input words. This checks
+    /// response shape only; source-bound structural admission is still required.
     Aligned {
         /// The agreed word count on both sides.
         n_words: usize,
@@ -326,434 +317,142 @@ pub fn validate_utseg_response(
 // Result application
 // ---------------------------------------------------------------------------
 
-/// Apply utseg assignments to a ChatFile, splitting utterances as needed.
-///
-/// `assignment_map` maps `utt_ordinal` to assignments (parallel to extracted words).
-/// Utterances whose ordinals are not in the map are left unchanged.
-pub fn apply_utseg_results(chat_file: &mut ChatFile, assignment_map: &HashMap<usize, Vec<usize>>) {
-    if assignment_map.is_empty() {
-        return;
+/// A dependent tier invalidated while applying an admitted utterance partition.
+#[derive(Debug, Clone)]
+pub struct UtsegTierInvalidation {
+    utterance_ordinal: usize,
+    tier_index: usize,
+    tier_kind: String,
+    reason: talkbank_transform::utterance_split::TierInvalidationReason,
+}
+
+impl UtsegTierInvalidation {
+    /// Original utterance ordinal, before any split.
+    pub const fn utterance_ordinal(&self) -> usize {
+        self.utterance_ordinal
     }
+    /// Position of the original dependent tier.
+    pub const fn tier_index(&self) -> usize {
+        self.tier_index
+    }
+    /// Label derived from the original typed tier.
+    pub fn tier_kind(&self) -> &str {
+        &self.tier_kind
+    }
+    /// Why the shared partition owner refused reuse.
+    pub const fn reason(&self) -> talkbank_transform::utterance_split::TierInvalidationReason {
+        self.reason
+    }
+}
 
-    let old_lines = chat_file.lines.take();
-    let mut new_lines: Vec<Line> = Vec::with_capacity(old_lines.len());
-    let mut utt_ordinal = 0usize;
+/// A proposed segmentation that cannot be applied without changing source structure.
+#[derive(Debug, thiserror::Error)]
+pub enum UtsegApplyRefusal {
+    /// A source-bound split could not preserve this utterance.
+    #[error("utterance {utterance_ordinal} partition refused: {source}")]
+    Partition {
+        /// The original source ordinal.
+        utterance_ordinal: usize,
+        /// The shared CHAT partition owner's typed refusal.
+        #[source]
+        source: talkbank_transform::utterance_split::SplitRefusal,
+    },
+    /// The supplied map refers to an utterance not present in the source.
+    #[error("segmentation references absent utterance {0}")]
+    UnknownUtterance(usize),
+}
 
-    for line in old_lines {
-        let utt = match line {
-            Line::Utterance(u) => u,
-            other => {
-                new_lines.push(other);
-                continue;
-            }
+/// Apply all proposed splits atomically, retaining explicit tier invalidations.
+///
+/// No source line changes until every selected utterance has admitted its own
+/// source-bound partition. A refusal therefore cannot leave a partially split
+/// file for the output path to mistake for successful processing.
+pub fn apply_utseg_results(
+    chat_file: &mut ChatFile,
+    assignment_map: &HashMap<usize, Vec<usize>>,
+) -> Result<Vec<UtsegTierInvalidation>, UtsegApplyRefusal> {
+    let mut replacements = HashMap::new();
+    let mut invalidated = Vec::new();
+    let mut ordinal = 0usize;
+    for (line_index, line) in chat_file.lines.iter().enumerate() {
+        let Line::Utterance(source) = line else {
+            continue;
         };
-
-        if let Some(assignments) = assignment_map.get(&utt_ordinal) {
-            let split_utts = split_utterance(*utt, assignments);
-            for split_utt in split_utts {
-                new_lines.push(Line::Utterance(Box::new(split_utt)));
+        if let Some(assignments) = assignment_map.get(&ordinal) {
+            let outcome = talkbank_transform::utterance_split::UtteranceSplitPlan::for_morphology(
+                source,
+                assignments,
+            )
+            .map_err(|source| UtsegApplyRefusal::Partition {
+                utterance_ordinal: ordinal,
+                source,
+            })?
+            .execute();
+            match outcome {
+                // One child: the source stands exactly as it is, with every
+                // dependent tier, so its line is not replaced.
+                talkbank_transform::utterance_split::SplitOutcome::Unchanged => {}
+                talkbank_transform::utterance_split::SplitOutcome::Split(split) => {
+                    let (children, losses) = split.into_parts();
+                    invalidated.extend(losses.into_iter().map(|loss| UtsegTierInvalidation {
+                        utterance_ordinal: ordinal,
+                        tier_index: loss.index(),
+                        tier_kind: loss.tier().kind().to_owned(),
+                        reason: loss.reason(),
+                    }));
+                    replacements.insert(line_index, children);
+                }
             }
-        } else {
-            new_lines.push(Line::Utterance(utt));
         }
-
-        utt_ordinal += 1;
+        ordinal += 1;
     }
-
+    if let Some(&missing) = assignment_map
+        .keys()
+        .filter(|&&index| index >= ordinal)
+        .min()
+    {
+        return Err(UtsegApplyRefusal::UnknownUtterance(missing));
+    }
+    if replacements.is_empty() {
+        return Ok(invalidated);
+    }
+    let old_lines = chat_file.lines.take();
+    let mut new_lines = Vec::with_capacity(old_lines.len());
+    for (index, line) in old_lines.into_iter().enumerate() {
+        match replacements.remove(&index) {
+            Some(children) => new_lines.extend(
+                children
+                    .into_iter()
+                    .map(|child| Line::Utterance(Box::new(child))),
+            ),
+            None => new_lines.push(line),
+        }
+    }
     chat_file.lines = ChatFileLines::new(new_lines);
+    Ok(invalidated)
 }
 
-/// Build a mapping from extracted-word index to top-level content item index.
-pub fn build_word_to_content_map(content: &[UtteranceContent]) -> Vec<usize> {
-    let mut word_to_content = Vec::new();
+/// The shared CHAT owner also provides the morphology-domain content projection.
+pub use talkbank_transform::utterance_split::build_word_to_content_map;
 
-    for (content_idx, item) in content.iter().enumerate() {
-        let mut words = Vec::new();
-        extract::collect_utterance_content(
-            std::slice::from_ref(item),
-            PositionalDomain::Mor,
-            &mut words,
-        );
-        for _ in &words {
-            word_to_content.push(content_idx);
-        }
-    }
-
-    word_to_content
-}
-
-/// Per-tier behavior when an utterance is split into multiple children.
-///
-/// Splitting an utterance is a transformation that invalidates some
-/// dependent-tier data and not others. This enum makes the per-tier
-/// decision explicit and grep-able. `policy_for_tier` is the single
-/// dispatch site; tests cover each variant.
-///
-/// History: BA3 deliberately removed parse-time `%wor` alignment in
-/// commits `3c178f49` / `ca18388f` / `f7d86537` (2026-04-09) because
-/// `chatter validate` was firing `%wor`-count errors on every shift in
-/// token-classification semantics. That rename addressed *validation*
-/// thrash. This policy addresses a separate concern: when `split_utterance`
-/// repartitions words, the per-word data on `%wor` (and similar tiers)
-/// should still travel with its words even though no validator demands
-/// positional alignment. The rename made staleness *legal*; this policy
-/// makes data preservation *useful*. They are independent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TierSplitPolicy {
-    /// Walk the parent's items in lockstep with main-tier words and
-    /// distribute them across children by the existing word→child
-    /// mapping. Falls back to `Drop` if positional counts mismatch
-    /// (stale `%wor` from prior edits, or tokenization drift). The
-    /// fallback is silent: it emits `tracing::debug!`, never a
-    /// validation error, preserving the stale-`%wor`-is-fine stance.
-    Partition,
-    /// Drop the tier from all children. The tier's data is
-    /// semantically invalidated by the split: morphological analysis
-    /// assumed the original utterance boundary; dependency arcs
-    /// reference word indices that no longer match; coreference
-    /// chains span document positions that the split changes. The
-    /// user regenerates via `morphotag` / `coref`.
-    Drop,
-    /// Attach the tier (unchanged) to the first child only. The data
-    /// is utterance-level free-form (`%com` comments, `%xtra`
-    /// translations, user-defined `%x*` annotations) with no
-    /// positional semantics to violate. Stale-on-first-child is
-    /// strictly better than silent loss: the user can re-translate or
-    /// correct manually, and improves on BA2 which dropped these
-    /// unconditionally.
-    AttachFirst,
-}
-
-/// Map a dependent tier to its split policy.
-///
-/// Word-positional, context-free tiers (`%wor`) get [`Partition`]. Word-positional
-/// but context-dependent tiers (`%mor`, `%gra`) get [`Drop`], the data is
-/// invalid in the new context. Document- or analysis-scoped tiers (`%xcoref`)
-/// also `Drop`. Other word-positional tiers we don't yet have a partition
-/// implementation for (`%pho`, `%mod`, `%sin`, etc.) `Drop` rather than
-/// `AttachFirst`, because attaching the parent's full per-word data to one
-/// child would falsely claim the data covers all the original words. Free-form
-/// utterance-level tiers (`%com`, `%xtra`, `%add`, etc., text tiers, user-defined,
-/// unsupported) default to `AttachFirst`, preserve the data on the first child.
-///
-/// [`Partition`]: TierSplitPolicy::Partition
-/// [`Drop`]: TierSplitPolicy::Drop
-/// [`AttachFirst`]: TierSplitPolicy::AttachFirst
-/// The coreference tier `batchalign3 coref` injects.
-///
-/// Named here rather than spelled inline so the policy below and the injector
-/// cannot disagree about which label they mean.
-const XCOREF_LABEL: &str = "xcoref";
-
-fn policy_for_tier(tier: &DependentTier) -> TierSplitPolicy {
-    match tier {
-        // Per-word timing: partitionable by word index.
-        DependentTier::Wor(_) => TierSplitPolicy::Partition,
-
-        // Context-dependent or reference-structured: drop, regenerate downstream.
-        DependentTier::Mor(_) | DependentTier::Gra(_) => TierSplitPolicy::Drop,
-
-        // Word-positional but no partition implementation yet. Dropping is
-        // honest: attaching to first child would claim phonological / sign
-        // data covering all original words, which is wrong. Add to Partition
-        // explicitly when a partition impl lands for each shape.
-        DependentTier::Pho(_)
-        | DependentTier::Mod(_)
-        | DependentTier::Sin(_)
-        | DependentTier::Modsyl(_)
-        | DependentTier::Phosyl(_)
-        | DependentTier::Phoaln(_) => TierSplitPolicy::Drop,
-
-        // `%xphoint` indexes INTO `%pho`: it is per-phone time intervals
-        // segmenting each `%pho` word. `%pho` is dropped two arms above, so
-        // attaching these to the first child leaves interval bullets for
-        // phones that are no longer in that utterance, and nothing on the
-        // rest. It reached `AttachFirst` through the wildcard this match used
-        // to end with, which is the failure the arm above is written to avoid.
-        DependentTier::Xphoint(_) => TierSplitPolicy::Drop,
-
-        // Free-form / loosely-structured utterance-level annotations:
-        // preserve on first child rather than silently lose.
-        //
-        // Enumerated so a tier added to chatter stops compiling here until
-        // someone decides what splitting it does.
-        DependentTier::Act(_)
-        | DependentTier::Add(_)
-        | DependentTier::Alt(_)
-        | DependentTier::Cod(_)
-        | DependentTier::Coh(_)
-        | DependentTier::Com(_)
-        | DependentTier::Def(_)
-        | DependentTier::Eng(_)
-        | DependentTier::Err(_)
-        | DependentTier::Exp(_)
-        | DependentTier::Fac(_)
-        | DependentTier::Flo(_)
-        | DependentTier::Gls(_)
-        | DependentTier::Gpx(_)
-        | DependentTier::Int(_)
-        | DependentTier::Ort(_)
-        | DependentTier::Par(_)
-        | DependentTier::Sit(_)
-        | DependentTier::Spa(_)
-        | DependentTier::Tim(_)
-        | DependentTier::Unsupported(_) => TierSplitPolicy::AttachFirst,
-
-        // `UserDefined` is a FAMILY, not a policy class, and enumerating the
-        // variants gave it one arm. This pipeline emits exactly two labels:
-        // `%xtra` is free-form utterance-level, but `%xcoref` is coreference
-        // chains, whose links span document positions the split changes, which
-        // is the same reason `%mor` and `%gra` are dropped above. The doc for
-        // this function has always said document-scoped tiers drop; before the
-        // variants were enumerated, `%xcoref` reached `AttachFirst` through the
-        // wildcard and contradicted it silently.
-        DependentTier::UserDefined(tier) if tier.label.as_str() == XCOREF_LABEL => {
-            TierSplitPolicy::Drop
-        }
-        DependentTier::UserDefined(_) => TierSplitPolicy::AttachFirst,
-    }
-}
-
-/// Build a per-child `%wor` from the parent tier by walking main-tier words
-/// in lockstep with `%wor` Word-items.
-///
-/// Returns `None` unless chatter proves both equal policy-selected counts and
-/// canonical lexical correspondence. On `None`, the caller drops the tier
-/// from all children, matching the existing stale-`%wor`-is-fine behavior,
-/// never raising a validation error.
-///
-/// `main_word_groups` is the per-main-tier-word child-group assignment, in
-/// main-tier word order, restricted to `%wor`-eligible words (the same
-/// filtering `TierDomain::Wor` uses: untranscribed, fragments, and nonwords
-/// are excluded; fillers are included).
-fn partition_wor_tier(
-    main: &MainTier,
-    parent: &WorTier,
-    main_word_groups: &[usize],
-    num_groups: usize,
-) -> Option<PartitionedWorTiers> {
-    let count_matched = match bind_wor_timing(main, Some(parent)) {
-        WorTimingBinding::CountMatched(count_matched) => count_matched,
-        WorTimingBinding::Drifted(drift) => {
-            tracing::debug!(
-                parent_wor_words = drift.wor_count().get(),
-                main_eligible_words = drift.main_count().get(),
-                "%wor count mismatch on split, dropping tier (stale %wor expected after prior edits)"
-            );
-            return None;
-        }
-        WorTimingBinding::Missing(_) => {
-            tracing::debug!("%wor binding unexpectedly reported a missing tier during split");
-            return None;
+#[cfg(test)]
+fn split_utterance(utterance: Utterance, assignments: &[usize]) -> Vec<Utterance> {
+    let children = match talkbank_transform::utterance_split::UtteranceSplitPlan::for_morphology(
+        &utterance,
+        assignments,
+    )
+    .expect("admitted test partition")
+    .execute()
+    {
+        talkbank_transform::utterance_split::SplitOutcome::Unchanged => None,
+        talkbank_transform::utterance_split::SplitOutcome::Split(split) => {
+            Some(split.into_parts().0)
         }
     };
-    let corroborated = match corroborate_wor_timing(count_matched) {
-        WorTimingCorrespondence::Corroborated(corroborated) => corroborated,
-        WorTimingCorrespondence::Uncorroborated(uncorroborated) => {
-            tracing::debug!(
-                lexical_mismatches = uncorroborated.mismatches().len(),
-                "%wor lexical mismatch on split, dropping stale timing tier"
-            );
-            return None;
-        }
-    };
-    if corroborated.slots().len() != main_word_groups.len() {
-        tracing::debug!(
-            chatter_projection_words = corroborated.slots().len(),
-            batchalign_projection_words = main_word_groups.len(),
-            "%wor membership implementations disagree on split, dropping timing tier"
-        );
-        return None;
-    }
-
-    // Walk parent items, tracking which main-tier word index we're on for
-    // Word items. Separators have no main-tier counterpart; we attach them
-    // to the same child as the most recent Word, falling back to group 0
-    // if we haven't seen any Word yet.
-    let mut per_child: Vec<Vec<WorItem>> = vec![Vec::new(); num_groups];
-    let mut next_word_idx = 0usize;
-    let mut last_seen_group: Option<usize> = None;
-    for item in &parent.items {
-        match item {
-            WorItem::Word(_) => {
-                let group = main_word_groups[next_word_idx];
-                last_seen_group = Some(group);
-                per_child[group].push(item.clone());
-                next_word_idx += 1;
-            }
-            WorItem::Separator { .. } => {
-                let group = last_seen_group.unwrap_or(0);
-                per_child[group].push(item.clone());
-            }
-        }
-    }
-
-    // Build a WorTier for each child. Children with empty item lists get an
-    // empty WorTier; the caller filters those out (we don't emit empty
-    // `%wor:` tiers).
-    Some(PartitionedWorTiers(
-        per_child
-            .into_iter()
-            .map(|items| {
-                WorTier::new(items)
-                    .with_language_code(parent.language_code.clone())
-                    .with_span(Span::DUMMY)
-            })
-            .collect(),
-    ))
+    children.unwrap_or_else(|| vec![utterance])
 }
 
-/// Per-child `%wor` tiers admitted by count and lexical corroboration.
-///
-/// The inner vector stays private so split code cannot accidentally treat an
-/// uncorroborated positional partition as reusable timing evidence.
-struct PartitionedWorTiers(Vec<WorTier>);
-
-impl PartitionedWorTiers {
-    fn get(&self, group_idx: usize) -> Option<&WorTier> {
-        self.0.get(group_idx)
-    }
-}
-
-/// Complete child timing rederived from the partitioned `%wor` evidence.
-///
-/// Construction is private to [`split_main_timing_evidence`], which produces
-/// exactly one bullet for every kept child or refuses this state entirely.
-struct CompletePerChildMainTiming {
-    bullets: Vec<Bullet>,
-}
-
-/// Who the parent's measured span can still describe after a split.
-///
-/// A module of its own, with a private field, so [`SoleChildSpan::claim`] is
-/// the ONLY route to a value: the rule cannot be restated, or forgotten, at the
-/// place the bullet is finally written.
-mod parent_span {
-    use super::{Bullet, Utterance};
-
-    /// The parent's measured span, admitted because one child kept all of it.
-    ///
-    /// Holding a value is a proof that the span still measures the utterance it
-    /// is about to be written onto.
-    pub(super) struct SoleChildSpan(Bullet);
-
-    impl SoleChildSpan {
-        /// Admit the parent's span only when the split kept a SINGLE child.
-        ///
-        /// A parent bullet measures the whole parent utterance: its start is
-        /// where the first child began and its end is where the last one
-        /// finished. Nothing measured the boundary between them. So when
-        /// several children partition the parent, the parent's span is no
-        /// child's span, and writing it onto the last child claims that child
-        /// began when the parent did, which is a time nobody observed and
-        /// which the earlier children are themselves the evidence against.
-        /// An unmeasured span gets no representation here rather than a
-        /// plausible one.
-        ///
-        /// A single child is the remaining case, and there the span is still
-        /// exact: that child holds the parent's whole content, so the parent's
-        /// own start and end are its start and end. It arises when the
-        /// assignment vector names more groups than there are words to fill,
-        /// which [`validate_utseg_response`] reports as a misalignment bug;
-        /// the timing is right either way.
-        ///
-        /// [`validate_utseg_response`]: super::validate_utseg_response
-        pub(super) fn claim(
-            children: &[(usize, Utterance)],
-            parent_bullet: Option<Bullet>,
-        ) -> Option<Self> {
-            match children {
-                [_] => parent_bullet.map(Self),
-                _ => None,
-            }
-        }
-
-        /// The admitted span, consumed so it is written exactly once.
-        pub(super) fn into_bullet(self) -> Bullet {
-            self.0
-        }
-    }
-}
-
-use parent_span::SoleChildSpan;
-
-/// Mutually exclusive timing evidence available after an utterance split.
-enum SplitMainTimingEvidence {
-    /// Every kept child's own `%wor` words were timed, so each child has a
-    /// measured hull of its own.
-    CompletePerChild(CompletePerChildMainTiming),
-    /// No complete per-child evidence. The parent's span travels only while it
-    /// still measures a child, which [`SoleChildSpan`] decides; otherwise no
-    /// child receives a main-tier bullet.
-    ParentOnly(Option<SoleChildSpan>),
-}
-
-/// Derive one enclosing hull only when every `%wor` word is timed.
-///
-/// A partial tier cannot claim the full child span, so one missing word bullet
-/// makes this return `None` and selects the parent-only fallback for the whole
-/// split. Min/max is intentional: it encloses all admitted word spans even if
-/// their serialized order contains a local timing inversion.
-fn complete_wor_timing_hull(main: &MainTier, wor: &WorTier) -> Option<Bullet> {
-    let count_matched = match bind_wor_timing(main, Some(wor)) {
-        WorTimingBinding::CountMatched(count_matched) => count_matched,
-        WorTimingBinding::Missing(_) | WorTimingBinding::Drifted(_) => return None,
-    };
-    let corroborated = match corroborate_wor_timing(count_matched) {
-        WorTimingCorrespondence::Corroborated(corroborated) => corroborated,
-        WorTimingCorrespondence::Uncorroborated(_) => return None,
-    };
-    let complete = match assess_wor_timing_sequence(corroborated) {
-        WorTimingSequence::Complete(complete) => complete,
-        WorTimingSequence::Empty(_) | WorTimingSequence::Rejected(_) => return None,
-    };
-    let hull = complete.hull();
-    Some(Bullet::new(hull.start().get(), hull.end().get()))
-}
-
-fn split_main_timing_evidence(
-    partitioned_wor: Option<&PartitionedWorTiers>,
-    children: &[(usize, Utterance)],
-    parent_bullet: Option<Bullet>,
-) -> SplitMainTimingEvidence {
-    // One route into the complete state: a partitioned tier, a hull for EVERY
-    // kept child, and at least one child. The three refusals used to be three
-    // early returns that each named the fallback, which is how the fallback
-    // came to be spelled out three times over.
-    let complete = partitioned_wor.and_then(|per_group| {
-        children
-            .iter()
-            .map(|(group_idx, child)| {
-                per_group
-                    .get(*group_idx)
-                    .and_then(|wor| complete_wor_timing_hull(&child.main, wor))
-            })
-            .collect::<Option<Vec<_>>>()
-            .filter(|bullets| !bullets.is_empty())
-    });
-    match complete {
-        Some(bullets) => {
-            SplitMainTimingEvidence::CompletePerChild(CompletePerChildMainTiming { bullets })
-        }
-        None => SplitMainTimingEvidence::ParentOnly(SoleChildSpan::claim(children, parent_bullet)),
-    }
-}
-
-/// The retrace this content node is, in EITHER spelling, or `None`.
-///
-/// One owner for the question, because the answer is what decides whether a
-/// node binds forward to its material. It was written inline as
-/// `matches!(item, UtteranceContent::Retrace(_))`, and when chatter v0.10.0
-/// added `AnnotatedRetrace` that expression silently started answering "no"
-/// for every retrace carrying an error code: the crate compiled, and the
-/// stranding regression this module documents came back for exactly the
-/// utterances a transcriber had annotated. A `matches!` is a catch-all wearing
-/// a macro. The exhaustive match below makes a third spelling a compile error.
-///
-/// Returns the NODE rather than a bool: the two spellings differ only in
-/// carrying the annotations that follow the marker, so a caller that later
-/// needs the retraced material has it, and a predicate that answers `true`
-/// and throws the answer away cannot be extended without being rewritten.
+#[cfg(test)]
 fn as_retrace(item: &UtteranceContent) -> Option<&Retrace> {
     match item {
         UtteranceContent::Retrace(retrace) => Some(retrace),
@@ -785,358 +484,6 @@ fn as_retrace(item: &UtteranceContent) -> Option<&Retrace> {
         | UtteranceContent::NonvocalSimple(_)
         | UtteranceContent::OtherSpokenEvent(_) => None,
     }
-}
-
-/// A total assignment of top-level content items to the children of a split.
-mod content_groups {
-    use super::{UtteranceContent, as_retrace};
-
-    /// Which child each top-level content item travels with, for EVERY item.
-    ///
-    /// This replaced a `Vec<Option<usize>>` that stayed partial after its
-    /// fills, so both of its readers ended in `unwrap_or(0)`: an item whose
-    /// group was unknown was quietly handed to the FIRST child, which is a
-    /// measured-looking answer nobody measured. Here the fill IS the
-    /// constructor, its seed is the first word's own group rather than a
-    /// zero, and each stored entry is a plain `usize`, so no unknown survives
-    /// construction for a reader to default.
-    pub(super) struct ContentItemGroups {
-        /// One group index per content item, in content order.
-        by_content: Vec<usize>,
-        /// One past the highest group index `by_content` can name. Every entry
-        /// indexes a collection sized from this, by construction.
-        group_count: usize,
-    }
-
-    impl ContentItemGroups {
-        /// Assign every content item to a child, or report that this
-        /// assignment splits nothing.
-        ///
-        /// `None` is the one answer covering all three ways there is nothing
-        /// to split: no assignments, no extracted words, or every word
-        /// assigned to the same child. A `Some` therefore proves the
-        /// assignment names at least two distinct children, and the caller
-        /// hands back the parent untouched on `None` rather than rebuilding
-        /// it from its own parts.
-        pub(super) fn assign(
-            content_items: &[UtteranceContent],
-            word_to_content: &[usize],
-            assignments: &[usize],
-        ) -> Option<Self> {
-            let (&first_group, rest) = assignments.split_first()?;
-            if word_to_content.is_empty() || rest.iter().all(|&group| group == first_group) {
-                return None;
-            }
-
-            // Direct assignment, first writer wins: a content item holding
-            // several extracted words takes the group of its first word.
-            let mut partial: Vec<Option<usize>> = vec![None; content_items.len()];
-            for (word_idx, &content_idx) in word_to_content.iter().enumerate() {
-                if word_idx < assignments.len() && partial[content_idx].is_none() {
-                    partial[content_idx] = Some(assignments[word_idx]);
-                }
-            }
-
-            // A retrace marker binds FORWARD to the repeated/corrected material it
-            // points at: `<X> [/] Y` is one unit where X was abandoned and Y is the
-            // retry, so a retrace content node must travel with the following kept
-            // word's group. Retraced words are not counted in the Mor word domain, so
-            // retrace nodes get no direct assignment above; the generic back-fill
-            // below would attach them to the PRECEDING word, stranding them as a
-            // dangling `[/]` when the split boundary falls between the retrace and its
-            // material (real BA3 utseg output stranded retraces this way across the
-            // UMICH SNL corpus). Pre-assign each un-grouped retrace node the group of
-            // the next already-grouped content item; if none follows (a legitimately
-            // utterance-final retrace), leave it for the back-fill.
-            // Regression: `utseg_split_does_not_strand_retrace`.
-            for idx in 0..partial.len() {
-                if partial[idx].is_some() || as_retrace(&content_items[idx]).is_none() {
-                    continue;
-                }
-                if let Some(next_group) = partial[idx + 1..].iter().find_map(|group| *group) {
-                    partial[idx] = Some(next_group);
-                }
-            }
-
-            // One back-fill pass, seeded with the first extracted word's own
-            // group. The seed is what makes this total, and it is evidence
-            // rather than a default: an item sitting before the first grouped
-            // one is punctuation or a marker, and it travels with the child
-            // holding the utterance's first word, which is the group the model
-            // chose for that word. Everything after a grouped item travels
-            // with the most recent one, as before. The separate forward-fill
-            // pass that used to repair leading `None`s is what the seed
-            // replaces.
-            let mut last_group = first_group;
-            let by_content = partial
-                .into_iter()
-                .map(|slot| {
-                    if let Some(group) = slot {
-                        last_group = group;
-                    }
-                    last_group
-                })
-                .collect();
-
-            Some(Self {
-                by_content,
-                // Every stored entry came from `assignments`, so the highest
-                // assignment bounds them all.
-                group_count: rest.iter().copied().fold(first_group, usize::max) + 1,
-            })
-        }
-
-        /// Each content item's group, in content order: one entry per item.
-        pub(super) fn in_content_order(&self) -> impl Iterator<Item = usize> + '_ {
-            self.by_content.iter().copied()
-        }
-
-        /// One past the highest group any item names.
-        pub(super) fn group_count(&self) -> usize {
-            self.group_count
-        }
-    }
-}
-
-use content_groups::ContentItemGroups;
-
-/// The `%wor` slot-membership policy this module's decisions travel through.
-///
-/// Named once, and taken from chatter rather than restated. The doc on
-/// [`WorSlotMembershipPolicy::admits`] says the method is public precisely so
-/// that a per-content-item count in an utterance splitter can ask it instead
-/// of spelling the rule out beside its own walk; this module is one of the
-/// two trees that doc names, and this is the deletion it describes.
-const WOR_SLOT_POLICY: WorSlotMembershipPolicy = WorSlotMembershipPolicy::FilteredLexicalV1;
-
-/// Compute the child-group assignment for each main-tier word that occupies a
-/// `%wor` slot.
-///
-/// Which words those are is [`WOR_SLOT_POLICY`]'s answer, asked per word. A
-/// replaced word is admitted by its ORIGINAL, as the projection admits it.
-///
-/// The returned Vec has one entry per admitted word, in main-tier order;
-/// entries are child-group indices. The walk is per content item because that
-/// is what pairs a word with the group its item travels with, which is also
-/// why this cannot be `WorMainTierProjection` itself: that is constructible
-/// only from a whole `MainTier`, and it reports slots rather than the content
-/// items they came from.
-fn wor_eligible_word_groups(
-    content_items: &[UtteranceContent],
-    content_groups: &ContentItemGroups,
-) -> Vec<usize> {
-    let mut groups = Vec::new();
-    for (item, group) in content_items.iter().zip(content_groups.in_content_order()) {
-        walk_words(
-            std::slice::from_ref(item),
-            Some(TierDomain::Wor),
-            &mut |word| {
-                let admitted = match word {
-                    WordItem::Word(word) => WOR_SLOT_POLICY.admits(word),
-                    WordItem::ReplacedWord(replaced) => WOR_SLOT_POLICY.admits(&replaced.word),
-                    WordItem::Separator(_) => false,
-                };
-                if admitted {
-                    groups.push(group);
-                }
-            },
-        );
-    }
-    groups
-}
-
-/// Split an utterance into multiple utterances based on word assignments.
-///
-/// `assignments` is a Vec parallel to the extracted words, where each element
-/// is the 0-based utterance ID that word belongs to.
-pub fn split_utterance(utt: Utterance, assignments: &[usize]) -> Vec<Utterance> {
-    let content_items = &utt.main.content.content;
-    let word_to_content = build_word_to_content_map(content_items);
-
-    // One refusal for every way this assignment splits nothing, and a `Some`
-    // that carries a group for every content item. What this replaced was
-    // three early returns followed by a partial map that each of its two
-    // readers had to finish with `unwrap_or(0)`.
-    let Some(content_groups) =
-        ContentItemGroups::assign(content_items, &word_to_content, assignments)
-    else {
-        return vec![utt];
-    };
-
-    let mut groups: Vec<Vec<UtteranceContent>> = vec![Vec::new(); content_groups.group_count()];
-    for (item, group_id) in content_items.iter().zip(content_groups.in_content_order()) {
-        groups[group_id].push(item.clone());
-    }
-
-    let speaker = &utt.main.speaker;
-    // Capture the parent's main-tier bullet before consuming `utt`. Complete
-    // partitioned `%wor` evidence supersedes it with one exact hull per child;
-    // otherwise it travels only when the split kept a single child, the one
-    // case where it still measures the utterance it would be written onto.
-    // See `SoleChildSpan::claim`.
-    let parent_bullet = utt.main.content.bullet.clone();
-
-    // Capture the rest of the parent's main-tier metadata so each child
-    // can inherit the right slice of it. Per-field propagation policy
-    // (linkers → first only, terminator/postcodes → last only, language
-    // code/spans → all).
-    let parent_linkers = utt.main.content.linkers.clone();
-    let parent_terminator = utt.main.content.terminator.clone();
-    let parent_language_code = utt.main.content.language_code.clone();
-    let parent_postcodes = utt.main.content.postcodes.clone();
-    let parent_main_span = utt.main.span;
-    let parent_speaker_span = utt.main.speaker_span;
-
-    // Compute per-child %wor item lists only when the parent tier is count-
-    // matched and lexically corroborated against the typed main tier. None
-    // means absent or stale evidence (graceful drop).
-    let partitioned_wor = utt
-        .dependent_tiers
-        .iter()
-        // A search for one tier, not a policy over all of them, so the
-        // "everything else" case is genuinely "not the tier I am looking for"
-        // and a tier added later is correctly not it. Written as a `let-else`
-        // rather than a match with a wildcard so that distinction is visible:
-        // the file denies wildcard matches precisely because the OTHER one in
-        // it was a policy decision wearing the same syntax.
-        .find_map(|tier| {
-            let DependentTier::Wor(wor) = &tier.tier else {
-                return None;
-            };
-            Some(wor)
-        })
-        .and_then(|wor| {
-            let main_groups = wor_eligible_word_groups(content_items, &content_groups);
-            partition_wor_tier(&utt.main, wor, &main_groups, content_groups.group_count())
-        });
-
-    // Track (original_group_idx, utterance) so we can later look up the
-    // partitioned %wor for each kept child even after empty/all-separator
-    // groups are skipped.
-    let mut result: Vec<(usize, Utterance)> = Vec::new();
-
-    for (group_idx, mut group_content) in groups.into_iter().enumerate() {
-        if group_content.is_empty() {
-            continue;
-        }
-
-        // Strip leading Separator nodes (comma, tag, vocative) that landed
-        // at the start of this group after the split. A Separator at
-        // utterance-initial position is invalid CHAT, it belongs with the
-        // preceding content or should be dropped.
-        let first_non_sep = group_content
-            .iter()
-            .position(|item| !matches!(item, UtteranceContent::Separator(_)))
-            .unwrap_or(group_content.len());
-        if first_non_sep > 0 {
-            group_content.drain(..first_non_sep);
-        }
-        if group_content.is_empty() {
-            continue;
-        }
-
-        let mut main = MainTier::new(
-            speaker.clone(),
-            group_content,
-            Terminator::Period { span: Span::DUMMY },
-        );
-        // Language code applies to every child (utterance-scope), set
-        // it at construction time. Linkers, terminator, postcodes, and
-        // bullet are positional and applied to the right child after
-        // the loop.
-        if let Some(ref lang) = parent_language_code {
-            main.content = main.content.with_language_code(lang.clone());
-        }
-        // Source spans: inherit the parent's so children retain a
-        // useful (if coarse) source pointer instead of `Span::DUMMY`.
-        main.span = parent_main_span;
-        main.speaker_span = parent_speaker_span;
-        let new_utt = Utterance::new(main);
-        result.push((group_idx, new_utt));
-    }
-
-    if result.is_empty() {
-        tracing::warn!("utterance segmentation produced no groups, returning original");
-        return vec![utt];
-    }
-
-    let main_timing = split_main_timing_evidence(partitioned_wor.as_ref(), &result, parent_bullet);
-
-    // Per-tier policy. Walk the parent's dependent tiers once, dispatching
-    // each to its policy. `partitioned_wor` (if Some) is the precomputed
-    // per-group payload; AttachFirst tiers go to result[0]; Drop tiers
-    // produce no output.
-    let parent_dep_tiers = utt.dependent_tiers.clone();
-    if let Some((_, first_child)) = result.first_mut() {
-        for tier in &parent_dep_tiers {
-            if matches!(policy_for_tier(&tier.tier), TierSplitPolicy::AttachFirst) {
-                first_child.dependent_tiers.push(tier.clone());
-            }
-        }
-    }
-
-    // Linkers go on the FIRST child only, they describe relation to the
-    // *prior* (different) utterance, which only the first piece is adjacent
-    // to. Use a non-empty check so we don't bother cloning the empty
-    // SmallVec for the common case.
-    if !parent_linkers.is_empty()
-        && let Some((_, first_child)) = result.first_mut()
-    {
-        first_child.main.content.linkers = parent_linkers;
-    }
-
-    // Terminator and postcodes go on the LAST child only. Terminator
-    // describes how the original utterance ended, that's the last child.
-    // Postcodes are utterance-level analysis tags; placing them on the
-    // last child matches the conventional after-terminator serialization.
-    if let Some((_, last)) = result.last_mut() {
-        if let Some(term) = parent_terminator {
-            last.main.content.terminator = Some(term);
-        }
-        if !parent_postcodes.is_empty() {
-            last.main.content.postcodes = parent_postcodes;
-        }
-    }
-
-    // Attach partitioned %wor after child main-tier terminators are final, so
-    // the dependent tier cannot retain the parent's terminator on an earlier
-    // child or retain the default period on the last child.
-    if let Some(per_group) = partitioned_wor {
-        for (group_idx, child) in result.iter_mut() {
-            if let Some(child_wor) = per_group.get(*group_idx)
-                && !child_wor.items.is_empty()
-            {
-                let child_wor = child_wor
-                    .clone()
-                    .with_terminator(child.main.content.terminator.clone());
-                child
-                    .dependent_tiers
-                    .push(DependentTier::Wor(child_wor).into());
-            }
-        }
-    }
-
-    match main_timing {
-        SplitMainTimingEvidence::CompletePerChild(CompletePerChildMainTiming { bullets }) => {
-            debug_assert_eq!(bullets.len(), result.len());
-            for ((_, child), bullet) in result.iter_mut().zip(bullets) {
-                child.main.content.bullet = Some(bullet);
-            }
-        }
-        SplitMainTimingEvidence::ParentOnly(span) => {
-            // `claim` admits a span only when the split kept ONE child, so this
-            // writes the parent's own measurement back onto the utterance that
-            // still holds all of its content, and writes nothing at all when
-            // several children partition it.
-            if let Some(span) = span
-                && let Some((_, sole_child)) = result.last_mut()
-            {
-                sole_child.main.content.bullet = Some(span.into_bullet());
-            }
-        }
-    }
-
-    result.into_iter().map(|(_, u)| u).collect()
 }
 
 #[cfg(test)]
@@ -1175,7 +522,8 @@ mod tests {
         let chat_text = include_str!("../../../test-fixtures/eng_i_eat_cookies.cha");
         let chat = parse_chat(chat_text);
         let utt = get_utterance(&chat, 0).clone();
-        let result = split_utterance(utt, &[0, 0, 0]);
+        let assignments = vec![0; build_word_to_content_map(&utt.main.content.content).len()];
+        let result = split_utterance(utt, &assignments);
         assert_eq!(result.len(), 1);
     }
 
@@ -1200,7 +548,7 @@ mod tests {
     /// A question about the MODEL, not about rendered text. This used to scan
     /// the segment's CHAT string for a marker followed by a terminator, and any
     /// annotation sitting between the two hid the dangle:
-    /// `Sis <that first> [/] [* p:w] .` is stranded and the scan called it
+    /// `now <the red> [/] [* p:w] .` is stranded and the scan called it
     /// clean. So when chatter v0.10.0 introduced `AnnotatedRetrace` and the
     /// pre-assignment stopped matching it, the regression was invisible to the
     /// very test written to catch it.
@@ -1222,23 +570,21 @@ mod tests {
     }
 
     /// utseg must never split an utterance between a retrace marker and the
-    /// repeated/corrected material it points at. The real BA3 utseg pass stranded
-    /// retraces across the UMICH SNL corpus this way, e.g.
-    /// `Dig up your mud dig [/] dig [/] dig [/] dig fire trucks coming .`
-    /// split before the kept "dig" produced a dangling
-    /// `... dig [/] dig [/] dig [/] .` plus `dig fire trucks coming .`.
+    /// repeated/corrected material it points at. A split before the kept word
+    /// of `big cat [/] cat [/] cat runs .` once produced a dangling
+    /// `big cat [/] cat [/] .` plus `cat runs .`.
     #[test]
     fn utseg_split_does_not_strand_retrace() {
-        // `mud dig [/] dig [/] dig fire .`: a leading word, two retraced "dig",
-        // then the kept run "dig fire". Retraced words are not counted in the
-        // Mor word domain, so the three countable words are `mud`, `dig` (kept),
-        // `fire`. A stanza boundary before the kept "dig" assigns `mud` to group
-        // 0 and `dig fire` to group 1; the retrace nodes back-fill to the
+        // `big cat [/] cat [/] cat runs .`: a leading word, two retraced "cat",
+        // then the kept run "cat runs". Retraced words are not counted in the
+        // Mor word domain, so the three countable words are `big`, `cat` (kept),
+        // `runs`. A stanza boundary before the kept "cat" assigns `big` to group
+        // 0 and `cat runs` to group 1; the retrace nodes back-fill to the
         // preceding word's group (0), stranding them away from their material.
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
             @Participants:\tPAR0 Participant\n\
             @ID:\teng|test|PAR0|||||Participant|||\n\
-            *PAR0:\tmud dig [/] dig [/] dig fire .\n@End\n";
+            *PAR0:\tbig cat [/] cat [/] cat runs .\n@End\n";
         let chat = parse_chat(chat_text);
         let utt = get_utterance(&chat, 0).clone();
         let result = split_utterance(utt, &[0, 1, 1]);
@@ -1259,15 +605,14 @@ mod tests {
     /// `UtteranceContent::Retrace(_)`. The pre-assignment above then skipped
     /// it, the generic back-fill attached it to the PRECEDING word, and the
     /// stranding this whole block exists to prevent came back for exactly the
-    /// utterances that carry an error code, on the UMICH corpus the original
-    /// bug was found in. The crate still COMPILED, because the arm that lost
-    /// the case was a `matches!`.
+    /// utterances that carry an error code. The crate still COMPILED, because
+    /// the arm that lost the case was a `matches!`.
     #[test]
     fn utseg_split_does_not_strand_annotated_retrace() {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
             @Participants:\tPAR0 Participant\n\
             @ID:\teng|test|PAR0|||||Participant|||\n\
-            *PAR0:\tSis <that first> [/] [* p:w] that first you .\n@End\n";
+            *PAR0:\tnow <the red> [/] [* p:w] the red ball .\n@End\n";
         let chat = parse_chat(chat_text);
         let utt = get_utterance(&chat, 0).clone();
         let result = split_utterance(utt, &[0, 1, 1, 1]);
@@ -1283,9 +628,9 @@ mod tests {
     }
 
     /// Group-form (`<...> [/]`) variant of `utseg_split_does_not_strand_retrace`.
-    /// The real headline case was `Sis <that first> [/] .` followed by
-    /// `that first you .` (utseg split `Sis <that first> [/] that first you .`
-    /// before the kept "that"). A `<...> [/]` group is a single `Retrace` content
+    /// The failure shape was `now <the red> [/] .` followed by `the red ball .`
+    /// (a split of `now <the red> [/] the red ball .` before the kept "the").
+    /// A `<...> [/]` group is a single `Retrace` content
     /// node, so it must bind forward to its material exactly like a single-word
     /// retrace.
     #[test]
@@ -1293,11 +638,11 @@ mod tests {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
             @Participants:\tPAR0 Participant\n\
             @ID:\teng|test|PAR0|||||Participant|||\n\
-            *PAR0:\tSis <that first> [/] that first you .\n@End\n";
+            *PAR0:\tnow <the red> [/] the red ball .\n@End\n";
         let chat = parse_chat(chat_text);
         let utt = get_utterance(&chat, 0).clone();
-        // Words in the Mor domain (the retrace group is skipped): Sis, that,
-        // first, you. A boundary before the kept "that" puts Sis in group 0 and
+        // Words in the Mor domain (the retrace group is skipped): now, the,
+        // red, ball. A boundary before the kept "the" puts `now` in group 0 and
         // the kept material in group 1.
         let result = split_utterance(utt, &[0, 1, 1, 1]);
         assert_eq!(result.len(), 2, "expected a split into two segments");
@@ -1345,7 +690,7 @@ mod tests {
         let mut assignment_map = HashMap::new();
         assignment_map.insert(0, vec![0, 0, 0, 1, 1, 1, 1]);
 
-        apply_utseg_results(&mut chat, &assignment_map);
+        apply_utseg_results(&mut chat, &assignment_map).expect("admitted segmentation");
         assert_eq!(count_utterances(&chat), 2);
 
         let out0 = get_utterance(&chat, 0).to_chat_string();
@@ -1360,8 +705,45 @@ mod tests {
         let mut chat = parse_chat(chat_text);
         let original_count = count_utterances(&chat);
 
-        apply_utseg_results(&mut chat, &HashMap::new());
+        apply_utseg_results(&mut chat, &HashMap::new()).expect("unchanged file");
         assert_eq!(count_utterances(&chat), original_count);
+    }
+
+    #[test]
+    fn a_later_refusal_cannot_leave_earlier_utterances_partially_split() {
+        let source = include_str!("../../../test-fixtures/live_fixture/eng_multi_utt.cha");
+        let mut chat = crate::parse_and_validate(
+            source,
+            talkbank_model::ParseValidateOptions::default().with_validation(),
+        )
+        .expect("valid existing multi-utterance CHAT");
+        let original = chat.to_chat_string();
+        let assignments = HashMap::from([(0, vec![0, 0, 1, 1]), (1, vec![0, 1])]);
+        assert!(matches!(
+            apply_utseg_results(&mut chat, &assignments),
+            Err(UtsegApplyRefusal::Partition {
+                utterance_ordinal: 1,
+                ..
+            })
+        ));
+        assert_eq!(chat.to_chat_string(), original);
+    }
+
+    #[test]
+    fn an_unknown_source_ordinal_cannot_partially_apply_a_known_one() {
+        let source = include_str!("../../../test-fixtures/live_fixture/eng_multi_utt.cha");
+        let mut chat = crate::parse_and_validate(
+            source,
+            talkbank_model::ParseValidateOptions::default().with_validation(),
+        )
+        .expect("valid existing CHAT");
+        let original = chat.to_chat_string();
+        let assignments = HashMap::from([(0, vec![0, 0, 1, 1]), (99, vec![0])]);
+        assert!(matches!(
+            apply_utseg_results(&mut chat, &assignments),
+            Err(UtsegApplyRefusal::UnknownUtterance(99))
+        ));
+        assert_eq!(chat.to_chat_string(), original);
     }
 
     /// After utseg splits, no utterance should start with a Separator node.
@@ -1374,19 +756,19 @@ mod tests {
     ///
     /// Bug report: a user, 2026-04-02, 25-3.cha, `*INV: , or she didn't...`
     #[test]
-    fn utseg_split_strips_leading_separator() {
+    fn utseg_split_keeps_a_separator_with_its_preceding_child() {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
             @Participants:\tINV Investigator\n\
             @ID:\teng|test|INV|||||Investigator|||\n\
             *INV:\tshe's washing dishes , or she didn't order them .\n@End\n";
         let mut chat = parse_chat(chat_text);
 
-        // Stanza boundary: words 0-2 = group 0, words 3-7 = group 1.
-        // The comma separator sits between groups.
+        // The extraction domain includes the comma slot. Keep it with the
+        // preceding child rather than inventing a shorter assignment vector.
         let mut assignment_map = HashMap::new();
-        assignment_map.insert(0, vec![0, 0, 0, 1, 1, 1, 1, 1]);
+        assignment_map.insert(0, vec![0, 0, 0, 0, 1, 1, 1, 1, 1]);
 
-        apply_utseg_results(&mut chat, &assignment_map);
+        apply_utseg_results(&mut chat, &assignment_map).expect("admitted segmentation");
 
         // Verify the split produced two utterances
         let utt_count = count_utterances(&chat);
@@ -1403,7 +785,7 @@ mod tests {
                 assert!(
                     !matches!(first, UtteranceContent::Separator(_)),
                     "utterance at line {i} starts with a Separator node \
-                         (should have been stripped): {}",
+                         (must have retained source ownership): {}",
                     u.to_chat_string()
                 );
             }
@@ -1468,11 +850,22 @@ mod tests {
             );
         }
 
-        // One child, because the assignment vector names a group that no word
-        // fills. That child holds all seven words, so the parent's own
-        // measurement is its measurement and still travels.
-        let sole = split_utterance(parent, &[0, 0, 0, 0, 0, 0, 0, 1]);
-        assert_eq!(sole.len(), 1, "the empty group is dropped");
+        // An eighth assignment cannot name a phantom child. A genuinely
+        // unchanged seven-word plan retains the parent's actual measurement.
+        assert!(matches!(
+            talkbank_transform::utterance_split::UtteranceSplitPlan::for_morphology(
+                &parent,
+                &[0, 0, 0, 0, 0, 0, 0, 1],
+            ),
+            Err(
+                talkbank_transform::utterance_split::SplitRefusal::SlotCount {
+                    expected: 7,
+                    actual: 8,
+                }
+            ),
+        ));
+        let sole = split_utterance(parent, &[0; 7]);
+        assert_eq!(sole.len(), 1, "the unchanged parent is retained");
         let kept = sole[0]
             .main
             .content
@@ -1883,7 +1276,7 @@ mod tests {
             .clone()
             .expect("fixture must parse [- spa] language code");
 
-        let result = split_utterance(parent, &[0, 0, 1, 1, 1, 1]);
+        let result = split_utterance(parent, &[0, 0, 1, 1, 1]);
         assert!(result.len() >= 2);
 
         for (i, child) in result.iter().enumerate() {
@@ -2000,14 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn utseg_split_attributes_replaced_word_atomically_on_inconsistent_split() {
-        // BERT puts the boundary BETWEEN the replacement words "want" and
-        // "to" (assignments=[0, 0, 1, 1]). Structurally we cannot split
-        // inside a single main-tier slot. The first-assignment-wins logic
-        // attributes the entire ReplacedWord to "want"'s group (0). Net
-        // result: "I wanna" in group 0, "go" in group 1, same as if the
-        // boundary had been after the ReplacedWord. This pins the
-        // "ReplacedWord is atomic to splits" invariant.
+    fn utseg_refuses_inconsistent_split_inside_replacement_targets() {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
             @Participants:\tCHI Child\n\
             @ID:\teng|test|CHI|||||Child|||\n\
@@ -2015,20 +1401,18 @@ mod tests {
             @End\n";
         let chat = parse_chat(chat_text);
         let utt = get_utterance(&chat, 0).clone();
-        let result = split_utterance(utt, &[0, 0, 1, 1]);
-        assert_eq!(result.len(), 2);
-        let s0 = result[0].to_chat_string();
-        let s1 = result[1].to_chat_string();
-        // ReplacedWord stayed atomic: went with "want"'s assignment (0).
-        assert!(
-            s0.contains("wanna [: want to]"),
-            "ReplacedWord must be atomic on splits; got s0: {s0}"
+        let refused = talkbank_transform::utterance_split::UtteranceSplitPlan::for_morphology(
+            &utt,
+            &[0, 0, 1, 1],
         );
-        assert!(
-            !s1.contains("wanna") && !s1.contains("want"),
-            "child 1 should not contain any fragment of the ReplacedWord, got: {s1}"
-        );
-        assert!(s1.contains("go"), "child 1 should contain go, got: {s1}");
+        assert!(matches!(
+            refused,
+            Err(
+                talkbank_transform::utterance_split::SplitRefusal::IndivisibleContent {
+                    content_index: 1
+                },
+            )
+        ));
     }
 
     #[test]

@@ -607,7 +607,8 @@ impl UdSentence {
 /// Top-level UD response for one utterance.
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct UdResponse {
-    /// One or more UD sentences produced by the NLP engine.
+    /// Untrusted model sentences. Admit through `AdmittedUdResponse` before
+    /// utterance injection or secondary-language merging; never select a prefix.
     pub sentences: Vec<UdSentence>,
 }
 

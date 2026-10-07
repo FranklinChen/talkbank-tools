@@ -93,7 +93,12 @@ pub enum MatchMode {
 }
 
 mod comparison;
+mod correspondence;
+pub mod interleaving;
 use comparison::{Alignable, FuzzyComparison, LiteralMatchMode, PreparedFuzzyWord};
+pub use correspondence::{
+    CommonCorrespondences, CorrespondenceAdmission, CorrespondenceAnalysis, CorrespondenceBudget,
+};
 
 // ---------------------------------------------------------------------------
 // Public entry points

@@ -5,16 +5,20 @@
 //! All handlers share an `Arc<AppState>` and coordinate through the in-memory
 //! `JobStore` (backed by SQLite for crash recovery).
 
+pub(crate) mod binary;
 pub(crate) mod detail;
 pub(crate) mod lifecycle;
 pub(crate) mod stream;
 
+pub(crate) use binary::get_binary_result;
 pub(crate) use detail::{get_job, get_results, get_single_result};
 pub(crate) use lifecycle::{cancel_job, delete_job, list_job_cancellations, restart_job};
 pub(crate) use stream::stream_job;
 
 // Re-export utoipa-generated path structs so that the `OpenApi` derive in
 // `openapi.rs` can resolve them at `crate::routes::jobs::__path_*`.
+#[allow(unused_imports)]
+pub(crate) use binary::__path_get_binary_result;
 #[allow(unused_imports)]
 pub(crate) use detail::{__path_get_job, __path_get_results, __path_get_single_result};
 #[allow(unused_imports)]
@@ -58,6 +62,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/results", get(get_results))
         .route("/jobs/{job_id}/results/{*filename}", get(get_single_result))
+        .route(
+            "/jobs/{job_id}/artifacts/{*filename}",
+            get(get_binary_result),
+        )
         .route("/jobs/{job_id}/cancel", post(cancel_job))
         .route("/jobs/{job_id}/cancellations", get(list_job_cancellations))
         .route("/jobs/{job_id}", delete(delete_job))

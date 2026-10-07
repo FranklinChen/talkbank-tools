@@ -1,7 +1,9 @@
 //! Benchmark dispatch built on the Rust-owned transcribe and compare pipelines.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::chat_ops::morphosyntax_ops::MwtDict;
@@ -11,10 +13,7 @@ use crate::api::NumWorkers;
 use crate::benchmark::{BenchmarkRequest, process_benchmark};
 use crate::cache::UtteranceCache;
 use crate::pipeline::PipelineServices;
-use crate::recipe_runner::runtime::{
-    ChatOutputTarget, output_write_path, plan_work_units_for_job, primary_output_artifact,
-    sidecar_output_artifacts, write_text_output_artifact,
-};
+use crate::recipe_runner::runtime::plan_work_units_for_job;
 use crate::recipe_runner::work_unit::{BenchmarkWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
 use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
@@ -24,12 +23,20 @@ use crate::worker::pool::WorkerPool;
 
 use super::super::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    drain_supervised_file_tasks, is_retryable_worker_failure, spawn_progress_forwarder,
+    drain_supervised_file_tasks, is_retryable_worker_failure, spawn_observed_progress_forwarder,
     spawn_supervised_file_task, user_facing_error,
 };
 use super::BenchmarkDispatchPlan;
 use super::asr_media::{prepare_asr_media_input, preserved_media_name_for_chat};
 use super::audio_output::MergeAbbreviations;
+
+mod outputs;
+use outputs::BenchmarkOutputPlan;
+
+// Benchmark composes transcription and comparison. Keep that large state
+// machine behind a pinned owner BEFORE the generic supervisor wraps/moves it;
+// boxing only inside the supervisor would leave its entry stack unbounded.
+type BenchmarkFileFuture = Pin<Box<dyn Future<Output = FileTaskOutcome> + Send>>;
 
 /// Shared runtime dependencies for top-level benchmark dispatch.
 ///
@@ -141,23 +148,24 @@ pub(crate) async fn dispatch_benchmark_infer(
         let filename = file.filename.clone();
         let lang = lang.clone();
 
+        let task: BenchmarkFileFuture = Box::pin(async move {
+            let _permit = permit;
+            let services = PipelineServices::new(&pool, &cache);
+            let context = BenchmarkFileContext {
+                job: &job,
+                sink: sink.clone(),
+                services,
+                mwt: &mwt,
+                planned_units: planned_units.as_ref(),
+                should_merge_abbrev,
+                lang: &lang,
+            };
+            process_one_benchmark_file(&file, &mut opts, context).await
+        });
         tasks.push(spawn_supervised_file_task(
             filename,
             "benchmark file task",
-            async move {
-                let _permit = permit;
-                let services = PipelineServices::new(&pool, &cache);
-                let context = BenchmarkFileContext {
-                    job: &job,
-                    sink: sink.clone(),
-                    services,
-                    mwt: &mwt,
-                    planned_units: planned_units.as_ref(),
-                    should_merge_abbrev,
-                    lang: &lang,
-                };
-                process_one_benchmark_file(&file, &mut opts, context).await
-            },
+            task,
         ));
     }
 
@@ -217,6 +225,23 @@ async fn process_one_benchmark_file(
         return FileTaskOutcome::TerminalStateRecorded;
     };
 
+    let output_plan = match BenchmarkOutputPlan::admit(
+        &job.filesystem,
+        file,
+        planned_unit,
+        &job.dispatch.options,
+        sink.as_ref(),
+        job_id,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            lifecycle
+                .fail(&error.to_string(), classify_server_error(&error))
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+
     let gold_text = match tokio::fs::read_to_string(&planned_unit.gold_chat().source_path).await {
         Ok(text) => text,
         Err(err) => {
@@ -226,6 +251,19 @@ async fn process_one_benchmark_file(
             );
             lifecycle
                 .fail(&err_msg, FailureCategory::InputMissing)
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+
+    let reference = match crate::compare::AdmittedComparisonReference::admit(&gold_text) {
+        Ok(reference) => reference,
+        Err(error) => {
+            lifecycle
+                .fail(
+                    &error.to_string(),
+                    crate::runner::util::classify_server_error(&error),
+                )
                 .await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
@@ -255,20 +293,26 @@ async fn process_one_benchmark_file(
             lifecycle.stage(FileStage::Benchmarking).await;
         }
 
-        let progress_tx =
-            spawn_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
+        let (progress_tx, wait_observer, forwarder) =
+            spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
 
-        match process_benchmark(BenchmarkRequest {
-            audio_path: &audio_path,
-            gold_text: crate::api::ChatText::from(gold_text.as_str()),
-            lang,
-            services,
-            transcribe_options: opts,
-            mwt,
-            progress: Some(&progress_tx),
-        })
-        .await
-        {
+        let attempt = crate::worker::pool::checkout_wait::observing_checkout_waits(
+            wait_observer,
+            process_benchmark(BenchmarkRequest {
+                audio_path: &audio_path,
+                reference: reference.clone(),
+                lang,
+                services,
+                transcribe_options: opts,
+                mwt,
+                progress: Some(&progress_tx),
+            }),
+        )
+        .await;
+        // Every update the attempt sent is published before its next stage.
+        drop(progress_tx);
+        forwarder.finished().await;
+        match attempt {
             Ok(outputs) => {
                 lifecycle.stage(FileStage::Writing).await;
 
@@ -302,51 +346,12 @@ async fn process_one_benchmark_file(
                     MergeAbbreviations::Leave => outputs.annotated_main_chat,
                 };
 
-                let primary_output = primary_output_artifact(
-                    crate::api::ReleasedCommand::Benchmark,
-                    &planned_unit.audio().display_path,
-                );
-                // Recipe-catalog invariant: the `Benchmark` command's
-                // sidecar policy includes `*.compare.csv`. The
-                // catalog test in `recipe_runner/catalog.rs::tests`
-                // enforces this; a missing sidecar would fail before
-                // reaching here.
-                #[allow(clippy::expect_used)]
-                let csv_output_artifact = sidecar_output_artifacts(
-                    crate::api::ReleasedCommand::Benchmark,
-                    &planned_unit.audio().display_path,
-                )
-                .into_iter()
-                .find(|artifact| artifact.display_path.as_ref().ends_with(".compare.csv"))
-                .expect("benchmark command must emit a compare.csv sidecar");
-
-                let target = ChatOutputTarget::new(
-                    &job.filesystem,
-                    file_index,
-                    &primary_output.display_path,
-                );
-                if let Err(err) =
-                    write_text_output_artifact(&target, annotated_main_chat.as_str()).await
-                {
-                    warn!(error = %err, "Failed to write benchmark CHAT output");
-                }
-
-                let csv_path = output_write_path(
-                    &job.filesystem,
-                    file_index,
-                    &csv_output_artifact.display_path,
-                );
-                if let Err(err) = tokio::fs::write(&csv_path, &outputs.metrics_csv).await {
-                    warn!(error = %err, "Failed to write benchmark CSV output");
-                }
-
-                lifecycle
-                    .complete_with_result(
-                        primary_output.display_path.clone(),
-                        primary_output.content_type,
-                    )
+                return output_plan
+                    .persist(crate::benchmark::BenchmarkOutputs {
+                        annotated_main_chat,
+                        metrics: outputs.metrics,
+                    })
                     .await;
-                return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(err) => {
                 let category = classify_server_error(&err);
@@ -408,9 +413,36 @@ fn resolve_benchmark_original_audio_path(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_benchmark_original_audio_path;
+    use super::{BenchmarkFileFuture, resolve_benchmark_original_audio_path};
+    use crate::api::DisplayPath;
+    use crate::runner::util::{FileTaskOutcome, spawn_supervised_file_task};
     use crate::store::RunnerFilesystemConfig;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn heap_owned_benchmark_future_crosses_supervision_and_yield() {
+        let payload = [42_u8; 65_536];
+        let task: BenchmarkFileFuture = Box::pin(async move {
+            tokio::task::yield_now().await;
+            assert!(payload.iter().all(|byte| *byte == 42));
+            FileTaskOutcome::TerminalStateRecorded
+        });
+        // Only the fixed-size owning handle crosses the supervisor boundary,
+        // regardless of the composite future's captured state.
+        assert_eq!(
+            std::mem::size_of_val(&task),
+            2 * std::mem::size_of::<usize>()
+        );
+        let supervised = spawn_supervised_file_task(
+            DisplayPath::from("benchmark.wav"),
+            "benchmark file task",
+            task,
+        );
+        assert!(matches!(
+            supervised.handle.await.unwrap(),
+            FileTaskOutcome::TerminalStateRecorded
+        ));
+    }
 
     fn filesystem_config(source_paths: Vec<&str>, source_dir: &str) -> RunnerFilesystemConfig {
         RunnerFilesystemConfig {

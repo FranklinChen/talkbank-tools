@@ -43,13 +43,14 @@ pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, Plannin
     let spec = command_model::command_spec(job.dispatch.command);
     let inputs = discover_inputs_for_job(job);
     let work_units = plan_work_units(spec.planner, &inputs)?;
+    let output_policy = spec.selected_output_policy(&job.dispatch.options)?;
     let artifacts = work_units
         .iter()
         .map(|work_unit| {
             let source_display_path = primary_display_path_for_work_unit(work_unit).clone();
             let files = crate::recipe_runner::materialize::plan_materialized_files(
                 &source_display_path,
-                spec.output_policy,
+                output_policy,
             );
             PlannedArtifactSet {
                 source_display_path,

@@ -56,7 +56,15 @@ fn discover_skips_dummy() {
             .contains("real")
     );
 
-    // Dummy should have been copied to output
+    // Read-only discovery defers copies to admitted pass-through handling.
+    assert!(!out.path().join("dummy.cha").exists());
+    copy_nonmatching(
+        dir.path(),
+        out.path(),
+        InputKind::Chat,
+        ReleasedCommand::Morphotag,
+    )
+    .unwrap();
     assert!(out.path().join("dummy.cha").exists());
 }
 
@@ -427,10 +435,25 @@ fn build_server_names_dir_input() {
 
     let inputs = vec![dir.path().to_path_buf()];
     let outputs = [o.clone()];
-    let (names, result_map) = build_server_names(&[f], &outputs, &inputs).unwrap();
+    let plan = plan_server_inputs(
+        &crate::recipe_runner::runtime::test_options(ReleasedCommand::Morphotag),
+        &[f],
+        &outputs,
+        &inputs,
+        Some(&out),
+    )
+    .unwrap();
+    let names = plan
+        .inputs()
+        .iter()
+        .map(|input| input.server_name())
+        .collect::<Vec<_>>();
     assert_eq!(names.len(), 1);
     assert!(names[0].contains("test.cha"));
-    assert_eq!(result_map[&names[0]], o);
+    assert_eq!(
+        plan.inputs()[0].output_anchor(),
+        fs::canonicalize(out).unwrap().join("sub/test.cha")
+    );
 }
 
 #[test]
@@ -441,14 +464,25 @@ fn build_server_names_individual_files() {
     fs::write(&a, "x").unwrap();
     fs::write(&b, "y").unwrap();
 
-    let oa = dir.path().join("out_a.cha");
-    let ob = dir.path().join("out_b.cha");
+    let oa = dir.path().join("out/a.cha");
+    let ob = dir.path().join("out/b.cha");
 
     let inputs = vec![a.to_path_buf(), b.to_path_buf()];
-    let (names, result_map) =
-        build_server_names(&[a, b], &[oa.clone(), ob.clone()], &inputs).unwrap();
+    let plan = plan_server_inputs(
+        &crate::recipe_runner::runtime::test_options(ReleasedCommand::Morphotag),
+        &[a, b],
+        &[oa, ob],
+        &inputs,
+        Some(&dir.path().join("out")),
+    )
+    .unwrap();
+    let names = plan
+        .inputs()
+        .iter()
+        .map(|input| input.server_name())
+        .collect::<Vec<_>>();
     assert_eq!(names.len(), 2);
-    assert_eq!(result_map.len(), 2);
+    assert_eq!(plan.inputs().len(), 2);
     // Both should be simple filenames (common ancestor stripped)
     assert!(names[0].ends_with(".cha"));
     assert!(names[1].ends_with(".cha"));
@@ -614,7 +648,14 @@ fn discover_recursive_skips_nested_dummy() {
 
     assert_eq!(files.len(), 1);
     assert!(files[0].to_str().unwrap().contains("real"));
-    // Dummy should be copied preserving subdirectory
+    assert!(!out.path().join("sub/dummy.cha").exists());
+    copy_nonmatching(
+        dir.path(),
+        out.path(),
+        InputKind::Chat,
+        ReleasedCommand::Morphotag,
+    )
+    .unwrap();
     assert!(out.path().join("sub/dummy.cha").exists());
 }
 

@@ -347,6 +347,56 @@ fn test_fa_sets_bullet_from_word_span_when_no_prior_bullet() {
 }
 
 #[test]
+fn onset_only_postprocessing_cannot_repeat_a_clamped_fallback_without_a_bullet() {
+    use crate::chat_ops::fa::coordinates::{FileMs, Ms};
+    use crate::chat_ops::fa::origin::{ClampBound, Origin};
+
+    let mut chat = parse_chat(&proof_chat("hello ."));
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 20_000),
+        vec![FaWord {
+            utterance_index: UtteranceIdx::new(0),
+            utterance_word_index: WordIdx::new(0),
+            text: "hello".into(),
+        }],
+        vec![UtteranceIdx::new(0)],
+    )];
+    let end_origin = Origin::ClampedTo {
+        bound: ClampBound::RecordingEnd,
+        was: Box::new(Origin::FallbackDuration { assumed: Ms(500) }),
+        original: FileMs::new(20_480),
+        overshoot: Ms(480),
+    };
+    let timing = WordTiming::new(19_980, 20_000, Origin::TranscriptBullet, end_origin.clone())
+        .expect("positive recording-admitted interval");
+    let responses = vec![vec![Some(timing)]];
+    let _finalized = apply_fa_results(
+        &mut chat,
+        &groups,
+        &responses,
+        WordEndPolicy::onset_only(WordGapHealing::Heal),
+        true,
+    )
+    .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+    .expect("consume injection proof before checking serialized wor");
+    assert_eq!(get_utterance_bullet(&chat, 0), Some((19_980, 20_000)));
+    let word = get_utterance(&chat, 0)
+        .wor_tier()
+        .expect("written wor")
+        .words()
+        .next()
+        .expect("retained word");
+    assert_eq!(
+        word.inline_bullet
+            .as_ref()
+            .expect("word timing")
+            .timing
+            .end_ms,
+        20_000
+    );
+}
+
+#[test]
 fn test_fa_clears_zero_duration_authoritative_bullet_when_fa_produces_no_word_timings() {
     // Simulate a file that had a zero-duration bullet (start == end) from a
     // previous buggy FA run. The bullet is parsed from the file, so it is
@@ -592,7 +642,6 @@ fn test_fast_path_strips_backward_wor_timestamps_and_removes_stale_wor_tier() {
         "wav2vec_fa",
         &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
     )
-    .expect("timed CHAT has a usable media declaration")
     .with_written_decisions(written)
     .into_timeline_trace();
     assert_eq!(timeline.decisions.len(), 1);

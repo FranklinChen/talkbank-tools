@@ -1,7 +1,7 @@
 # Progress Reporting
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-10-06 22:34 EDT
 
 The server reports per-file progress to all connected clients (CLI, TUI, React
 dashboard) in real time. This chapter covers the data model, data flow, and how
@@ -77,13 +77,28 @@ set_file_progress(store, job_id, filename, FileStage::Aligning, None, None).awai
 ### Tier 2: Sub-file Numeric Progress (orchestrator)
 
 Orchestrators report fine-grained progress via a `ProgressSender` channel.
-The dispatch layer creates the channel with `spawn_progress_forwarder()` and
-passes the sender to the orchestrator.
+The dispatch layer creates the channel with
+`spawn_observed_progress_forwarder(sink, job_id, filename)` and passes the
+sender to the orchestrator. It also returns a checkout wait observer and the
+forwarder. The observer, installed around the work with
+`worker::pool::checkout_wait::observing_checkout_waits`, records each checkout
+that starts or stops waiting on a saturated pool; the store keeps that count
+(`FileStatus::worker_waits`) beside the reported stage and shows
+`waiting_for_worker` while it is positive, the reported stage otherwise. The
+forwarder publishes progress and wait changes in order, drains both channels,
+and is awaited after the work (`FileProgressForwarder::finished`), so no late
+update lands after the file's next stage. Work that is not an audio-file attempt
+(a text batch, align's utterance-timing pre-pass) uses
+`runner::util::observing_file_waits`, which records waits on one file or
+several and returns once they are all recorded.
 
 ```rust,ignore
-let progress_tx = spawn_progress_forwarder(store.clone(), job_id, filename);
+let (progress_tx, waits, forwarder) =
+    spawn_observed_progress_forwarder(sink.clone(), job_id, filename);
 
-process_fa(..., Some(&progress_tx)).await;
+let outcome = observing_checkout_waits(waits, run_utr_pass(..., Some(&progress_tx))).await;
+drop(progress_tx);
+forwarder.finished().await;
 ```
 
 Inside the orchestrator:
@@ -303,7 +318,7 @@ When adding progress to a new command, consider:
   them all at once.
 
 - **Per-file commands** (align, transcribe): Each file progresses independently
-  through its own stages. Use `spawn_progress_forwarder()` for sub-file
+  through its own stages. Use `spawn_observed_progress_forwarder()` for sub-file
   counters. Report meaningful milestones (group completion, window completion)
   rather than every small step.
 
@@ -324,5 +339,6 @@ When adding progress to a new command, consider:
 
 2. **Tier 2** (if the command has long-running per-file work):
    - Add `progress: Option<&ProgressSender>` to the orchestrator signature
-   - Call `spawn_progress_forwarder()` in the dispatch layer
+   - Call `spawn_observed_progress_forwarder()` in the dispatch layer, and
+     install its wait observer around the work
    - Send `ProgressUpdate` at meaningful points inside the orchestrator

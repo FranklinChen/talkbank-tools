@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{ChatText, LanguageCode3};
+use crate::api::LanguageCode3;
 use crate::chat_ops::ChatFile;
 use crate::types::worker_v2::{
     UtsegAdjacencyPolicyRevisionV2, UtsegBoundaryModelEvidenceV2, UtsegItemResultV2,
@@ -35,16 +35,13 @@ pub(crate) fn collect_utseg_batch_items(chat_file: &ChatFile) -> Vec<(usize, Uts
     collect_utseg_payloads(chat_file).batch_items
 }
 use batchalign_transform::utseg_compute;
-use batchalign_transform::validate::ValidityLevel;
 use tracing::info;
 
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
 use crate::params::UtsegFallbackPolicy;
 use crate::pipeline::PipelineServices;
-use crate::pipeline::text_infer::{
-    TextBatchHooks, TextPipelineHooks, run_text_batch_pipeline, run_text_pipeline,
-};
+use crate::pipeline::text_infer::{TextBatchHooks, TextPipelineHooks, run_text_batch_pipeline};
 use crate::text_batch::{EngineItemFailure, ItemFailure, TextBatchFileInput, TextBatchFileResults};
 
 /// How admitted utterance-boundary decisions enter the local transform.
@@ -219,8 +216,15 @@ impl LocalUtsegDecisionReceipt {
 ///
 /// Keeping the sink and filename in the same request prevents callers from
 /// invoking the observed path with only half of its retention capability.
-pub(crate) struct EvidenceRetainingUtsegRequest<'a> {
-    pub(crate) chat_text: ChatText<'a>,
+///
+/// `Document` is what is segmented: an admitted document
+/// ([`crate::pipeline::post_validate::PostValidated`]), or a diagnosed one
+/// whose findings are confined to some utterances
+/// ([`crate::pipeline::post_validate::LocalizedDiagnosis`]), whose other
+/// utterances are segmented and whose held-out ones are left as they are.
+pub(crate) struct EvidenceRetainingUtsegRequest<'a, Document> {
+    /// The document to segment.
+    pub(crate) document: Document,
     pub(crate) lang: &'a LanguageCode3,
     pub(crate) services: PipelineServices<'a>,
     pub(crate) fallback_policy: UtsegFallbackPolicy,
@@ -244,10 +248,10 @@ pub(crate) struct EvidenceRetainingUtsegRequest<'a> {
 /// Process CHAT while durably retaining the exact post-CHAT segmentation
 /// evidence requested for a transcribe experiment.
 pub(crate) async fn process_utseg_with_evidence(
-    request: EvidenceRetainingUtsegRequest<'_>,
-) -> Result<String, ServerError> {
+    request: EvidenceRetainingUtsegRequest<'_, crate::pipeline::post_validate::PostValidated>,
+) -> Result<crate::pipeline::post_validate::PostValidated, ServerError> {
     let EvidenceRetainingUtsegRequest {
-        chat_text,
+        document,
         lang,
         services,
         fallback_policy,
@@ -257,31 +261,79 @@ pub(crate) async fn process_utseg_with_evidence(
         cancellation,
     } = request;
     run_utseg_impl_observed(
-        chat_text.as_ref(),
+        document,
         lang,
         services,
         fallback_policy.is_allowed(),
         decision_policy,
         cancellation,
-        |requests, predictions| {
-            let trace = crate::utseg_evidence::UtsegEvidenceTrace::from_predictions(
-                crate::utseg_evidence::UtsegEvidencePhase::PostChat,
-                lang.as_ref(),
-                requests,
-                predictions,
-            )
-            .map_err(|error| ServerError::Validation(error.to_string()))?;
-            evidence_sink
-                .write(evidence_filename, &trace)
-                .map_err(|error| {
-                    ServerError::Persistence(format!(
-                        "could not retain requested post-CHAT utseg evidence for {evidence_filename}: {error}"
-                    ))
-                })?;
-            Ok(())
-        },
+        post_chat_evidence_observer(lang, evidence_filename, evidence_sink),
     )
     .await
+}
+
+/// Segment every utterance of a diagnosed transcript except the ones its
+/// findings are confined to, retaining the evidence exactly as for an
+/// admitted one. The result is judged afresh by the producer transition.
+pub(crate) async fn process_localized_utseg_with_evidence(
+    request: EvidenceRetainingUtsegRequest<'_, crate::pipeline::post_validate::LocalizedDiagnosis>,
+) -> Result<crate::pipeline::post_validate::ProducedOutput, ServerError> {
+    let EvidenceRetainingUtsegRequest {
+        document,
+        lang,
+        services,
+        fallback_policy,
+        decision_policy,
+        evidence_filename,
+        evidence_sink,
+        cancellation,
+    } = request;
+    let allow_stanza_fallback = fallback_policy.is_allowed();
+    crate::pipeline::text_infer::run_localized_text_pipeline(
+        document,
+        lang,
+        services,
+        utseg_hooks(),
+        async move |pool, items, lang| {
+            infer_admitted_batch_with_policy(
+                pool,
+                items,
+                lang,
+                allow_stanza_fallback,
+                decision_policy,
+                cancellation,
+            )
+            .await
+        },
+        post_chat_evidence_observer(lang, evidence_filename, evidence_sink),
+    )
+    .await
+}
+
+/// Retain one file's post-CHAT segmentation evidence where the request said.
+fn post_chat_evidence_observer<'a>(
+    lang: &'a LanguageCode3,
+    evidence_filename: &'a str,
+    evidence_sink: &'a crate::utseg_evidence::UtsegEvidenceSink,
+) -> impl FnOnce(&[(usize, UtsegBatchItem)], &[AdmittedUtsegPrediction]) -> Result<(), ServerError> + 'a
+{
+    move |requests, predictions| {
+        let trace = crate::utseg_evidence::UtsegEvidenceTrace::from_predictions(
+            crate::utseg_evidence::UtsegEvidencePhase::PostChat,
+            lang.as_ref(),
+            requests,
+            predictions,
+        )
+        .map_err(|error| ServerError::Validation(error.to_string()))?;
+        evidence_sink
+            .write(evidence_filename, &trace)
+            .map_err(|error| {
+                ServerError::Persistence(format!(
+                    "could not retain requested post-CHAT utseg evidence for {evidence_filename}: {error}"
+                ))
+            })?;
+        Ok(())
+    }
 }
 
 /// Infer once, then optionally rederive assignments from retained raw boundary
@@ -326,31 +378,37 @@ pub(crate) async fn process_utseg_batch(
     run_utseg_batch_impl(files, lang, pool, allow_stanza_fallback, cancellation).await
 }
 
+/// The single-file text-pipeline hooks for utterance segmentation.
+fn utseg_hooks() -> TextPipelineHooks<UtsegBatchItem, Vec<usize>, AdmittedUtsegPrediction> {
+    TextPipelineHooks {
+        command: crate::api::ReleasedCommand::Utseg,
+        collect: collect_utseg_batch_items,
+        integrate: integrate_admitted_assignments,
+        apply: |file, assignments| {
+            apply_utseg_document(file, assignments).map_err(ServerError::from)
+        },
+        provenance: crate::provenance::utseg_provenance,
+    }
+}
+
 async fn run_utseg_impl_observed<Observe>(
-    chat_text: &str,
+    document: crate::pipeline::post_validate::PostValidated,
     lang: &LanguageCode3,
     services: PipelineServices<'_>,
     allow_stanza_fallback: bool,
     decision_policy: UtsegDecisionPolicy,
     cancellation: Cancellation<'_>,
     observe: Observe,
-) -> Result<String, ServerError>
+) -> Result<crate::pipeline::post_validate::PostValidated, ServerError>
 where
     Observe:
         FnOnce(&[(usize, UtsegBatchItem)], &[AdmittedUtsegPrediction]) -> Result<(), ServerError>,
 {
-    run_text_pipeline(
-        chat_text,
+    crate::pipeline::text_infer::run_admitted_text_pipeline(
+        document,
         lang,
         services,
-        TextPipelineHooks {
-            command: crate::api::ReleasedCommand::Utseg,
-            validity: ValidityLevel::StructurallyComplete,
-            collect: collect_utseg_batch_items,
-            integrate: integrate_admitted_assignments,
-            apply: apply_utseg_results,
-            provenance: crate::provenance::utseg_provenance,
-        },
+        utseg_hooks(),
         // The generic pipeline's `infer` signature doesn't carry
         // command-specific state, so capture the operator opt-in (and
         // now the cancellation) here and bind it onto each
@@ -369,10 +427,6 @@ where
         observe,
     )
     .await
-    // The proof stops here: the single-file entry point is the library/CLI
-    // surface and returns text. The gate itself still ran inside
-    // `run_text_pipeline`, so a refusal is already a `ServerError`.
-    .map(crate::pipeline::post_validate::PostValidated::into_text)
 }
 
 async fn run_utseg_batch_impl(
@@ -388,7 +442,6 @@ async fn run_utseg_batch_impl(
         pool,
         TextBatchHooks {
             command: crate::api::ReleasedCommand::Utseg,
-            validity: ValidityLevel::StructurallyComplete,
             collect: collect_utseg_batch_items,
             apply: apply_utseg_predictions,
             provenance: crate::provenance::utseg_provenance,
@@ -415,12 +468,45 @@ fn apply_utseg_predictions(
     chat_file: &mut ChatFile,
     items: &[(usize, UtsegBatchItem)],
     predictions: &[AdmittedUtsegPrediction],
-) {
+) -> Result<(), ServerError> {
     let mut assignment_map: HashMap<usize, Vec<usize>> = HashMap::new();
     integrate_admitted_assignments(&mut assignment_map, items, predictions);
     if !assignment_map.is_empty() {
-        apply_utseg_results(chat_file, &assignment_map);
+        apply_utseg_document(chat_file, &assignment_map)?;
     }
+    Ok(())
+}
+
+pub(crate) fn apply_utseg_document(
+    chat_file: &mut ChatFile,
+    assignment_map: &HashMap<usize, Vec<usize>>,
+) -> Result<(), batchalign_transform::utseg::UtsegApplyRefusal> {
+    let losses = apply_utseg_results(chat_file, assignment_map)?;
+    if !losses.is_empty() {
+        let descriptions: Vec<_> = losses
+            .iter()
+            .map(|loss| {
+                format!(
+                    "input utterance {} %{} ({:?})",
+                    loss.utterance_ordinal() + 1,
+                    loss.tier_kind(),
+                    loss.reason(),
+                )
+            })
+            .collect();
+        let text = format!(
+            "Utterance segmentation invalidated dependent tiers: {}. Regenerate analysis if required.",
+            descriptions.join("; "),
+        );
+        let insert_pos = crate::provenance::insert_pos_after_constant_headers(chat_file);
+        chat_file.lines.insert(
+            insert_pos,
+            talkbank_model::model::Line::header(talkbank_model::model::Header::Comment {
+                content: crate::chat_ops::BulletContent::from_text(text),
+            }),
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,5 +1222,27 @@ mod tests {
         };
         assert_eq!(response.assignments, vec![0; words.len()]);
         assert_eq!(receipt.suppressed_split_before_word_indices, vec![6, 12]);
+    }
+    #[test]
+    fn invalidated_analysis_is_recorded_in_typed_output_without_losing_free_text() {
+        let source = include_str!("../../../test-fixtures/eng_hello_world_with_mor_gra_act.cha");
+        let mut chat = batchalign_transform::parse_and_validate(
+            source,
+            talkbank_model::ParseValidateOptions::default().with_validation(),
+        )
+        .expect("valid existing analyzed CHAT");
+        apply_utseg_document(&mut chat, &HashMap::from([(0, vec![0, 1])]))
+            .expect("supported partition");
+        let text = batchalign_transform::serialize::to_chat_string(&chat);
+        assert!(text.contains("input utterance 1 %mor"));
+        assert!(text.contains("input utterance 1 %gra"));
+        assert!(text.contains("%act:\tsmiles"));
+        assert!(!text.contains("%mor:"));
+        assert!(!text.contains("%gra:"));
+        crate::pipeline::post_validate::PostValidated::gate_owned(
+            chat,
+            crate::api::ReleasedCommand::Utseg,
+        )
+        .expect("checked construction of recorded partition");
     }
 }

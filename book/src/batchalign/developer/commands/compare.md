@@ -1,7 +1,7 @@
 # compare: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-05-19 22:58 EDT
+**Last updated:** 2026-10-04 20:06 EDT
 
 Implementation guide for the `compare` command. For user-facing
 documentation, see [User Guide: compare](../../user-guide/commands/compare.md).
@@ -65,7 +65,7 @@ states and the only transitions between them:
   It consumes morphotag's own post-validation proof and continues in the
   document that proof carries.
 - `ComparisonArtifacts`, whose single constructor is
-  `build(MorphotaggedMain, ChatFile)`. It RUNS the comparison rather than
+  `build(MorphotaggedMain, AdmittedComparisonReference)`. It RUNS the comparison rather than
   accepting a bundle, so the bundle a materializer reads is always the
   comparison of the two documents beside it.
 
@@ -84,16 +84,51 @@ proof between its `Morphosyntax` and `CompareAlign` stages and has no text to
 offer in its place.
 
 `PostValidated::into_judged_document()` is the transition that hands back the
-model. It succeeds for a gated proof and for a declined one, because a CA main
-transcript that morphotag declines to analyze still has to be compared, and it
-refuses a pass-through, which carries the input's own bytes and no output model
-at all.
+model. Every variant carries its admitted model, including unchanged source;
+consuming the proof releases editing authority and does not reparse its bytes.
 
-The gold companion is still parsed leniently, and its parse errors are still
-reported rather than refused, because nothing admits a gold companion at any
-validity level: `gate_comparison_output` judges compare's output against what
-that companion HAD, so refusing it for its own faults would refuse a document
-compare never damaged.
+The gold companion enters through `AdmittedComparisonReference`, whose private
+payload can be constructed only by complete source admission. It has no tier
+replacement exemption. The execution recipe refuses an invalid reference before
+calling the morphology gateway; benchmark admits the reference before ASR.
+Materialization consumes the admitted model without another parse. The output
+boundary independently requires complete checked construction and preservation.
+See the [command contract](../../architecture/command-contracts.md).
+
+The released path chooses `GoldCoverage::Complete` when constructing the bundle.
+`Alignment::of` records typed match, insertion and deletion steps for the whole
+file; utterance placement cannot prune scored steps. `InsertionScope` makes the
+separate partial-reference policy explicit for callers that actually have one.
+Word selection comes from Chatter's `PositionalDomain::Mor` traversal through
+`languaged_utterances`, not a second traversal over displayed words. This includes
+all replacement components and omits retraced material consistently.
+
+`complete_reference_chat_word_domain_contracts` snapshots six deterministic
+count contracts: exact match, omission, multiword replacement, retrace, repeated
+turn and zero-overlap turn. The snapshot records word totals as well as edits,
+so a perfect score with an accidentally empty denominator cannot pass. Released
+materialization strips ordinary `%mor`/`%gra` after structural projection and
+independently admits the completed output.
+
+`CompareMaterializedOutputs` carries the producer-built `CompareMetricsCsvTable`,
+not serialized CSV. The private `execution/kernel/outputs.rs` boundary owns both
+the per-file `metric,value` encoding and the consolidated CSV encoding. Both use
+the CSV library; source labels come from the planned source path, not a global
+rewrite of sidecar filenames. Metrics are never reconstructed by splitting CSV.
+Missing metric cells remain blank, and consolidated decimal formatting is kept.
+
+Only successful required CHAT and sidecar writes produce `WrittenComparison`,
+whose consuming completion method reports the result and releases the source-bound
+consolidated row. A failed primary, sidecar or staging write returns a persistence
+error rather than a warning followed by success. Paths-mode jobs retain both
+required artifacts in staging as well as at the requested destination. A failed
+write can leave a partial artifact; it does not establish file completion.
+
+Reference discovery falls back to the template only for `NotFound`. An unreadable
+existing companion is refused before inference, not replaced by a different
+reference. Boundary controls cover precedence, fallback, unreadable companions,
+blocked destinations, staging parity, and commas/quotes/newlines/Unicode in CSV
+source labels.
 
 ---
 

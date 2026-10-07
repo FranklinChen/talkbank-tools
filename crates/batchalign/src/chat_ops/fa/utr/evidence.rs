@@ -27,7 +27,7 @@ pub struct UtrResult {
     /// alignment may cut an over-budget utterance at.
     ///
     /// Derived from `alignment` and the token stream that produced it, in the
-    /// one function that holds both (`run_global_utr`), so the plan's JSON is
+    /// source-bound prepared pass that holds both, so the plan's JSON is
     /// already its replayable form; like `decisions`, it is excluded from
     /// equality and serialization.
     #[serde(skip)]
@@ -148,6 +148,8 @@ pub enum UtrAlignmentStrategy {
     UniqueExactSubsequence,
     /// The full-file Hirschberg alignment remained necessary.
     GlobalDp,
+    /// Joint singleton/adjacent different-speaker-run episode composition.
+    LocalInterleaving,
 }
 
 /// Zero-based main-tier utterance ordinal in one UTR plan.
@@ -159,6 +161,14 @@ impl UtrUtteranceOrdinal {
     /// Return the zero-based ordinal for indexing the same main-tier set.
     pub fn index(self) -> usize {
         self.0
+    }
+
+    /// THE crossing from a region's local census into the file's: a region
+    /// is a contiguous census slice starting at `region_start`, so a local
+    /// ordinal names the file utterance that far past it. Only plan assembly
+    /// (`UtrAlignmentPlan::assemble`) reaches this, once per published address.
+    pub(super) fn placed_after(self, region_start: Self) -> Self {
+        Self(region_start.0 + self.0)
     }
 
     /// THE conversion into forced alignment's utterance space.
@@ -215,6 +225,18 @@ pub struct UtrWordAddress {
 }
 
 impl UtrWordAddress {
+    /// The same word addressed in the file's census instead of a region's.
+    pub(super) fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+        let Self {
+            utterance_index,
+            word_index,
+        } = self;
+        Self {
+            utterance_index: utterance_index.placed_after(region_start),
+            word_index,
+        }
+    }
+
     /// Main-tier utterance containing this word.
     pub fn utterance_index(self) -> usize {
         self.utterance_index.index()
@@ -251,6 +273,9 @@ impl UtrAsrTokenAddress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UtrLexicalRelation {
+    /// Equal lexical words after removing terminal ASR sentence punctuation;
+    /// original provider text and coordinates remain in the match evidence.
+    TerminalPunctuation,
     /// Byte-for-byte equality.
     Exact,
     /// ASCII case-folded equality.
@@ -262,7 +287,7 @@ pub enum UtrLexicalRelation {
     },
 }
 
-/// One admitted CHAT-word to ASR-token match.
+/// One selected CHAT-word to ASR-token match, not proof of unique correspondence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UtrWordMatch {
     /// Address of the CHAT word.
@@ -286,7 +311,39 @@ pub struct NonEmptyUtrWordMatches {
     pub(super) rest: Vec<UtrWordMatch>,
 }
 
+impl UtrWordMatch {
+    /// The same match with its CHAT word addressed in the file's census.
+    pub(super) fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+        let Self {
+            word,
+            token,
+            chat_text,
+            asr_text,
+            relation,
+        } = self;
+        Self {
+            word: word.placed_after(region_start),
+            token,
+            chat_text,
+            asr_text,
+            relation,
+        }
+    }
+}
+
 impl NonEmptyUtrWordMatches {
+    /// Every match placed in the file's census.
+    pub(super) fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+        let Self { first, rest } = self;
+        Self {
+            first: first.placed_after(region_start),
+            rest: rest
+                .into_iter()
+                .map(|matched| matched.placed_after(region_start))
+                .collect(),
+        }
+    }
+
     pub(super) fn from_vec(matches: Vec<UtrWordMatch>) -> Option<Self> {
         let mut matches = matches.into_iter();
         let first = matches.next()?;
@@ -296,8 +353,9 @@ impl NonEmptyUtrWordMatches {
         })
     }
 
-    /// The lowest and highest matched ASR token ordinals: the extent the
-    /// proposal was built from, computed here and nowhere else.
+    /// The lowest and highest matched ASR token ordinals for addressing and
+    /// diagnostics. Ordinal order does not establish temporal extrema.
+    #[cfg(test)]
     pub(super) fn token_extent(&self) -> (UtrAsrTokenOrdinal, UtrAsrTokenOrdinal) {
         let first = self.first.token.token_index;
         self.rest
@@ -309,43 +367,145 @@ impl NonEmptyUtrWordMatches {
     }
 }
 
+/// A positive UTR interval admitted by its timing producer.
+///
+/// This is a provisional hint, not proof of recording containment or final
+/// CHAT validity. Consumers can read it but cannot create an empty interval.
+///
+/// ```
+/// use batchalign::chat_ops::fa::utr::PositiveUtrInterval;
+/// fn duration(interval: PositiveUtrInterval) -> u64 {
+///     interval.end_ms() - interval.start_ms()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use batchalign::chat_ops::fa::utr::PositiveUtrInterval;
+/// let invalid = PositiveUtrInterval { start_ms: 100, end_ms: 100 };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PositiveUtrInterval {
+    start_ms: u64,
+    end_ms: u64,
+}
+
+impl PositiveUtrInterval {
+    /// Admit the interval where provider timing becomes a proposed hint.
+    pub(super) fn admit(start_ms: u64, end_ms: u64) -> Option<Self> {
+        (start_ms < end_ms).then_some(Self { start_ms, end_ms })
+    }
+
+    /// Start of the admitted interval, in recording milliseconds.
+    pub fn start_ms(self) -> u64 {
+        self.start_ms
+    }
+
+    /// End of the admitted interval, in recording milliseconds.
+    pub fn end_ms(self) -> u64 {
+        self.end_ms
+    }
+
+    /// Publish admitted recovery geometry as a provisional hint, never as an
+    /// original transcript boundary. FA must derive its final span from words.
+    pub(super) fn into_hint(self) -> talkbank_model::model::Bullet {
+        talkbank_model::model::Bullet::utr_hint(self.start_ms, self.end_ms)
+    }
+
+    /// Keep only the observed interval after a preceding non-overlap end.
+    /// Exhaustion leaves no hint; this operation never extends an end.
+    pub(super) fn after(self, floor_end_ms: u64) -> Option<Self> {
+        Self::admit(self.start_ms.max(floor_end_ms), self.end_ms)
+    }
+
+    /// Cover two admitted observations without inventing either endpoint.
+    fn covering(self, other: Self) -> Self {
+        Self {
+            start_ms: self.start_ms.min(other.start_ms),
+            end_ms: self.end_ms.max(other.end_ms),
+        }
+    }
+}
+
 /// Timing geometry implied by one utterance's matched ASR tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum UtrTimingProposal {
     /// The matched tokens imply a usable positive-duration span.
     Positive {
-        /// Start of the first matched ASR token.
-        start_ms: u64,
-        /// End of the last matched ASR token.
-        end_ms: u64,
+        /// Producer-admitted interval; serialization retains start/end fields.
+        #[serde(flatten)]
+        interval: PositiveUtrInterval,
     },
-    /// The matched tokens imply a zero- or negative-duration span.
+    /// A matched provider token has zero or negative duration.
     NonPositive {
-        /// Start of the first matched ASR token.
+        /// Start of the unusable matched ASR token.
         start_ms: u64,
-        /// End of the last matched ASR token.
+        /// End of the unusable matched ASR token.
         end_ms: u64,
     },
 }
 
 impl UtrTimingProposal {
-    /// The span from the first matched token's start to the last matched
-    /// token's end, classified once at the moment the plan learns it. This
-    /// is the ONLY place the positive/non-positive fact is decided;
-    /// projection reads it and never recomputes it from tokens.
-    pub(super) fn spanning(first: &super::AsrTimingToken, last: &super::AsrTimingToken) -> Self {
-        if first.start_ms < last.end_ms {
-            Self::Positive {
-                start_ms: first.start_ms,
-                end_ms: last.end_ms,
-            }
-        } else {
-            Self::NonPositive {
-                start_ms: first.start_ms,
-                end_ms: last.end_ms,
-            }
+    /// Admit every matched provider interval before combining its evidence.
+    /// The first token proves nonemptiness; unrelated tokens cannot widen the
+    /// proposal. Projection consumes this classification without rematching.
+    pub(super) fn from_observations<'a>(
+        first: &'a super::lexical::ObservedWordTiming,
+        rest: impl IntoIterator<Item = &'a super::lexical::ObservedWordTiming>,
+    ) -> Self {
+        let admit = |token: &super::lexical::ObservedWordTiming| {
+            PositiveUtrInterval::admit(token.start_ms, token.end_ms).ok_or(Self::NonPositive {
+                start_ms: token.start_ms,
+                end_ms: token.end_ms,
+            })
+        };
+        let mut interval = match admit(first) {
+            Ok(interval) => interval,
+            Err(refusal) => return refusal,
+        };
+        for token in rest {
+            let next = match admit(token) {
+                Ok(interval) => interval,
+                Err(refusal) => return refusal,
+            };
+            interval = interval.covering(next);
         }
+        Self::Positive { interval }
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+
+    #[test]
+    fn interval_admission_and_clipping_never_extend_observed_evidence() {
+        assert_eq!(PositiveUtrInterval::admit(100, 100), None);
+        assert_eq!(PositiveUtrInterval::admit(200, 100), None);
+        let interval = PositiveUtrInterval::admit(100, 200).expect("positive interval");
+        assert_eq!(interval.after(0), Some(interval));
+        let clipped = interval.after(150).expect("positive residual interval");
+        assert_eq!((clipped.start_ms(), clipped.end_ms()), (150, 200));
+        assert_eq!(interval.after(200), None);
+        assert_eq!(interval.after(300), None);
+        let ceiling = PositiveUtrInterval::admit(u64::MAX - 1, u64::MAX)
+            .expect("positive interval at integer ceiling");
+        assert_eq!(ceiling.after(u64::MAX - 1), Some(ceiling));
+        assert_eq!(ceiling.after(u64::MAX), None);
+    }
+
+    #[test]
+    fn checked_positive_payload_preserves_the_proposal_wire_shape() {
+        let proposal = UtrTimingProposal::Positive {
+            interval: PositiveUtrInterval::admit(100, 900).expect("positive interval"),
+        };
+        insta::assert_json_snapshot!(proposal, @r###"
+        {
+          "status": "positive",
+          "start_ms": 100,
+          "end_ms": 900
+        }
+        "###);
     }
 }
 
@@ -353,7 +513,7 @@ impl UtrTimingProposal {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum UtrUtteranceAlignmentEvidence {
-    /// One or more CHAT words matched ASR tokens.
+    /// Both utterance endpoints have producer-admitted correspondences.
     Matched {
         /// Zero-based utterance ordinal among main tiers.
         utterance_index: UtrUtteranceOrdinal,
@@ -361,8 +521,54 @@ pub enum UtrUtteranceAlignmentEvidence {
         alignable_words: usize,
         /// Non-empty matched word population.
         matches: NonEmptyUtrWordMatches,
-        /// Span implied by the first and last matched ASR tokens.
+        /// Common-to-every-optimum matches admitted by the lexical producer.
+        admitted_matches: super::lexical::EndpointBoundUtrWordMatches,
+        /// Timing hull implied only by admitted correspondences.
         proposal: UtrTimingProposal,
+    },
+    /// Proved words remain usable as anchors, but cannot bound the utterance.
+    InteriorOnly {
+        /// Source utterance ordinal.
+        utterance_index: UtrUtteranceOrdinal,
+        /// Number of alignable CHAT words.
+        alignable_words: usize,
+        /// Selected optimum retained for inspection, not timing authority.
+        matches: NonEmptyUtrWordMatches,
+        /// Common correspondences retained even without endpoint proof.
+        admitted_matches: super::lexical::NonEmptyAdmittedUtrWordMatches,
+        /// Precisely which endpoint proof is missing.
+        missing_endpoints: super::lexical::MissingUtrEndpoints,
+    },
+    /// The selected path remains inspectable but cannot authorize timing.
+    SelectedOnly {
+        /// Source utterance ordinal.
+        utterance_index: UtrUtteranceOrdinal,
+        /// Number of alignable CHAT words.
+        alignable_words: usize,
+        /// Arbitrarily selected optimum, retained for inspection.
+        matches: NonEmptyUtrWordMatches,
+        /// Ambiguity is distinct from bounded proof work not being completed.
+        reason: UtrCorrespondenceRefusal,
+    },
+    /// Proof was refused before a selected match population was available.
+    Refused {
+        /// Source utterance ordinal.
+        utterance_index: UtrUtteranceOrdinal,
+        /// Number of alignable CHAT words.
+        alignable_words: usize,
+        /// Refusal does not claim lexical absence or acoustic ambiguity.
+        reason: UtrCorrespondenceRefusal,
+    },
+    /// Already timed and kept unchanged. Its region's correspondence search
+    /// exceeded its budget, so no word correspondence (and no forced-alignment
+    /// word anchor) was observed for it. Timing is never refused.
+    RetainedUnsearched {
+        /// Source utterance ordinal.
+        utterance_index: UtrUtteranceOrdinal,
+        /// Number of alignable CHAT words.
+        alignable_words: usize,
+        /// The region and the budget it exceeded.
+        unsearched: UtrBudgetRefusal,
     },
     /// The utterance had words, but none matched an ASR token.
     Unmatched {
@@ -385,16 +591,310 @@ pub enum UtrUtteranceAlignmentEvidence {
     },
 }
 
-/// Complete replayable evidence for one global UTR alignment pass.
+impl UtrUtteranceAlignmentEvidence {
+    /// The same evidence with every utterance and word address placed in the
+    /// file's census. Exhaustive, with every field named, so a new address
+    /// cannot be left in a region's local numbering.
+    fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+        match self {
+            Self::Matched {
+                utterance_index,
+                alignable_words,
+                matches,
+                admitted_matches,
+                proposal,
+            } => Self::Matched {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+                matches: matches.placed_after(region_start),
+                admitted_matches: admitted_matches.placed_after(region_start),
+                proposal,
+            },
+            Self::InteriorOnly {
+                utterance_index,
+                alignable_words,
+                matches,
+                admitted_matches,
+                missing_endpoints,
+            } => Self::InteriorOnly {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+                matches: matches.placed_after(region_start),
+                admitted_matches: admitted_matches.placed_after(region_start),
+                missing_endpoints,
+            },
+            Self::SelectedOnly {
+                utterance_index,
+                alignable_words,
+                matches,
+                reason,
+            } => Self::SelectedOnly {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+                matches: matches.placed_after(region_start),
+                reason,
+            },
+            Self::Refused {
+                utterance_index,
+                alignable_words,
+                reason,
+            } => Self::Refused {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+                reason,
+            },
+            Self::RetainedUnsearched {
+                utterance_index,
+                alignable_words,
+                unsearched,
+            } => Self::RetainedUnsearched {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+                unsearched,
+            },
+            Self::Unmatched {
+                utterance_index,
+                alignable_words,
+            } => Self::Unmatched {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+            },
+            Self::ExcludedMarkedOverlap {
+                utterance_index,
+                alignable_words,
+            } => Self::ExcludedMarkedOverlap {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+            },
+            Self::NoAlignableWords { utterance_index } => Self::NoAlignableWords {
+                utterance_index: utterance_index.placed_after(region_start),
+            },
+        }
+    }
+}
+
+/// One region's plan in the region's own census numbering: what a planner
+/// returns before the region is placed in the file. It cannot be published;
+/// [`UtrAlignmentPlan::assemble`] is the only route into a file plan, and it
+/// places every region through [`UtrUtteranceOrdinal::placed_after`].
+///
+/// Built only by [`Self::from_searched`], from one value per searched
+/// utterance of one region: exactly one entry per searched utterance, each
+/// pairing that utterance's evidence with its search envelope, and the span
+/// of the region it was searched for. The planner cannot hand `assemble` a
+/// plan shorter than its region, evidence and envelopes of different
+/// lengths, or a plan under another region's span.
+pub(super) struct LocalRegionPlan<'c> {
+    /// Algorithm the region's planner used (or attempted, if refused).
+    strategy: UtrAlignmentStrategy,
+    /// The region this plan searched.
+    span: super::regions::UtrRegionSpan,
+    /// One entry per searched utterance, owned or trailing context.
+    utterances: Vec<PlannedUtterance<'c>>,
+    /// Tokens whose admitted correspondences were withdrawn as contested.
+    withdrawn_claims: Vec<UtrAsrTokenOrdinal>,
+}
+
+/// One searched utterance's plan: the utterance, its correspondence
+/// evidence, and the search envelope forced alignment may use for it.
+pub(super) struct PlannedUtterance<'c> {
+    /// The utterance as the census records it.
+    pub(super) info: &'c super::UtrUtteranceInfo,
+    /// What correspondence established for it.
+    pub(super) evidence: UtrUtteranceAlignmentEvidence,
+    /// Where forced alignment may search for its words, if anywhere.
+    pub(super) envelope: Option<super::search::FaSearchEnvelope>,
+}
+
+impl<'c> LocalRegionPlan<'c> {
+    /// Plan every searched utterance of one region: `plan` turns each
+    /// utterance and its value into its evidence and envelope.
+    pub(super) fn from_searched<T>(
+        strategy: UtrAlignmentStrategy,
+        withdrawn_claims: Vec<UtrAsrTokenOrdinal>,
+        per_utterance: super::regions::PerSearched<'c, T>,
+        mut plan: impl FnMut(
+            usize,
+            &'c super::UtrUtteranceInfo,
+            T,
+        ) -> (
+            UtrUtteranceAlignmentEvidence,
+            Option<super::search::FaSearchEnvelope>,
+        ),
+    ) -> Self {
+        let span = per_utterance.searched().span();
+        let utterances = per_utterance
+            .into_pairs()
+            .enumerate()
+            .map(|(ordinal, (info, value))| {
+                let (evidence, envelope) = plan(ordinal, info, value);
+                PlannedUtterance {
+                    info,
+                    evidence,
+                    envelope,
+                }
+            })
+            .collect();
+        Self {
+            strategy,
+            span,
+            utterances,
+            withdrawn_claims,
+        }
+    }
+
+    /// Every searched utterance's plan, in order. A slice: entries may be
+    /// refined (an envelope added), never added or removed.
+    pub(super) fn utterances_mut(&mut self) -> &mut [PlannedUtterance<'c>] {
+        &mut self.utterances
+    }
+
+    /// The provider tokens this region's OWNED utterances admitted as
+    /// correspondences: the claims the file plan will publish. Trailing
+    /// context is excluded; its own region publishes it.
+    pub(super) fn owned_claims(&self) -> impl Iterator<Item = UtrAsrTokenOrdinal> + '_ {
+        self.utterances
+            .iter()
+            .take(self.span.owned())
+            .flat_map(|planned| {
+                // The two admitting states hold different proof types; one of
+                // the two options is filled, so nothing is allocated.
+                let (bound, interior) = match &planned.evidence {
+                    UtrUtteranceAlignmentEvidence::Matched {
+                        admitted_matches, ..
+                    } => (Some(admitted_matches), None),
+                    UtrUtteranceAlignmentEvidence::InteriorOnly {
+                        admitted_matches, ..
+                    } => (None, Some(admitted_matches)),
+                    UtrUtteranceAlignmentEvidence::SelectedOnly { .. }
+                    | UtrUtteranceAlignmentEvidence::Refused { .. }
+                    | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
+                    | UtrUtteranceAlignmentEvidence::Unmatched { .. }
+                    | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
+                    | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => (None, None),
+                };
+                bound
+                    .into_iter()
+                    .flat_map(|matches| matches.iter())
+                    .chain(interior.into_iter().flat_map(|matches| matches.iter()))
+                    .map(|matched| matched.matched().token.token_index)
+            })
+    }
+}
+
+/// Which word-order model a pass's census implies. Chosen once per file,
+/// exactly as before regions existed; regions bound the search, not the
+/// model, so hint projection reads this and nothing per region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UtrOrderModel {
+    /// One monotonic word order: no two adjacent participating turns belong
+    /// to different speakers.
+    Monotonic,
+    /// Adjacent different-speaker turns may interleave (joint composition);
+    /// each speaker's own order is preserved.
+    Interleaved,
+}
+
+/// What one anchored region did, for inspection: which utterances it owned,
+/// which ASR onsets it searched and which algorithm ran. Refusals are
+/// recorded on the utterances themselves, each naming its region.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UtrRegionSummary {
+    /// Owned utterances and searched onset window.
+    pub(super) span: super::regions::UtrRegionSpan,
+    /// Algorithm used for this region (attempted, if refused).
+    pub(super) strategy: UtrAlignmentStrategy,
+    /// Provider tokens whose correspondences this region withdrew because
+    /// a neighbouring region's owned words claimed them too: the regional
+    /// search cannot tell which claim the whole file would admit.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) withdrawn_claims: Vec<UtrAsrTokenOrdinal>,
+}
+
+impl UtrRegionSummary {
+    /// Owned utterances and searched onset window.
+    pub fn span(&self) -> super::regions::UtrRegionSpan {
+        self.span
+    }
+
+    /// Algorithm used for this region.
+    pub fn strategy(&self) -> UtrAlignmentStrategy {
+        self.strategy
+    }
+}
+
+/// Complete replayable evidence for one UTR pass.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UtrAlignmentPlan {
-    /// Strategy used to build the matched token ranges.
-    pub(super) strategy: UtrAlignmentStrategy,
+    /// Order model of the whole pass; governs hint projection.
+    pub(super) strategy: UtrOrderModel,
+    /// Anchored regions in document order; together they own every
+    /// utterance exactly once.
+    pub(super) regions: Vec<UtrRegionSummary>,
     /// Exhaustive evidence in CHAT utterance order.
     pub(super) utterances: Vec<UtrUtteranceAlignmentEvidence>,
+    /// Complete exact candidate ranges: search authority only, not timing.
+    pub(super) search_envelopes: Vec<Option<super::search::FaSearchEnvelope>>,
 }
 
 impl UtrAlignmentPlan {
+    /// Place each region's local plan in the file, in document order.
+    ///
+    /// Keeps the evidence for the utterances each region owns, dropping its
+    /// trailing context anchor (whose evidence its own region publishes),
+    /// and addresses it in the file's census. Regions arrive in document
+    /// order and partition the census, so concatenation is file order.
+    pub(super) fn assemble<'c>(
+        strategy: UtrOrderModel,
+        regions: impl IntoIterator<Item = LocalRegionPlan<'c>>,
+    ) -> Self {
+        let mut plan = Self {
+            strategy,
+            regions: Vec::new(),
+            utterances: Vec::new(),
+            search_envelopes: Vec::new(),
+        };
+        for local in regions {
+            let LocalRegionPlan {
+                strategy,
+                span,
+                utterances,
+                withdrawn_claims,
+            } = local;
+            let region_start = span.first_utterance();
+            plan.regions.push(UtrRegionSummary {
+                span,
+                strategy,
+                withdrawn_claims,
+            });
+            // A region plan has one entry per searched utterance, and a
+            // region searches every utterance it owns first, so the first
+            // `owned` entries are exactly the owned utterances.
+            for planned in utterances.into_iter().take(span.owned()) {
+                plan.utterances
+                    .push(planned.evidence.placed_after(region_start));
+                plan.search_envelopes.push(planned.envelope);
+            }
+        }
+        plan
+    }
+
+    /// Order model of the whole pass.
+    pub fn order_model(&self) -> UtrOrderModel {
+        self.strategy
+    }
+
+    /// Anchored regions in document order.
+    pub fn regions(&self) -> &[UtrRegionSummary] {
+        &self.regions
+    }
+
+    /// Every utterance's evidence in CHAT order.
+    pub fn utterances(&self) -> &[UtrUtteranceAlignmentEvidence] {
+        &self.utterances
+    }
+
     /// Per-utterance matched token extents, for tests that pin which tokens
     /// an alignment chose. Production never reads token ranges: projection
     /// consumes each utterance's `UtrTimingProposal` instead.
@@ -403,15 +903,113 @@ impl UtrAlignmentPlan {
         self.utterances
             .iter()
             .map(|utterance| match utterance {
-                UtrUtteranceAlignmentEvidence::Matched { matches, .. } => {
+                UtrUtteranceAlignmentEvidence::Matched { matches, .. }
+                | UtrUtteranceAlignmentEvidence::InteriorOnly { matches, .. }
+                | UtrUtteranceAlignmentEvidence::SelectedOnly { matches, .. } => {
                     let (minimum, maximum) = matches.token_extent();
                     Some((minimum.index(), maximum.index()))
                 }
-                UtrUtteranceAlignmentEvidence::Unmatched { .. }
+                UtrUtteranceAlignmentEvidence::Refused { .. }
+                | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
+                | UtrUtteranceAlignmentEvidence::Unmatched { .. }
                 | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
                 | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => None,
             })
             .collect()
+    }
+}
+
+/// Why a selected path did not establish correspondence authority.
+///
+/// Externally tagged on the wire: `"ambiguous"`, or
+/// `{"budget_exhausted": {"region": ..., "budget": ...}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UtrCorrespondenceRefusal {
+    /// None of this utterance's matches occurs in every optimal alignment.
+    Ambiguous,
+    /// The utterance's region exceeded a fixed search budget. Says nothing
+    /// about lexical absence or ambiguity, and nothing about other regions.
+    BudgetExhausted(UtrBudgetRefusal),
+}
+
+/// One region's correspondence search exceeding one fixed budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct UtrBudgetRefusal {
+    /// The refused region; no other region is affected.
+    pub(super) region: super::regions::UtrRegionSpan,
+    /// The budget it exceeded.
+    pub(super) budget: UtrSearchBudget,
+}
+
+impl UtrBudgetRefusal {
+    /// The refused region.
+    pub fn region(&self) -> super::regions::UtrRegionSpan {
+        self.region
+    }
+
+    /// The budget it exceeded.
+    pub fn budget(&self) -> UtrSearchBudget {
+        self.budget
+    }
+}
+
+/// Which fixed correspondence-search budget a region exceeded, with the
+/// limit in that budget's own unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UtrSearchBudget {
+    /// Monotonic proof: candidate (word, token) match edges.
+    CandidateEdges {
+        /// Edge limit.
+        limit: usize,
+    },
+    /// Monotonic proof under a fuzzy relation: word-pair comparisons.
+    FuzzyComparisons {
+        /// Comparison limit.
+        limit: usize,
+    },
+    /// Interleaved proof: source-graph nodes times reference positions.
+    InterleavingWork {
+        /// Work-cell limit.
+        limit: usize,
+    },
+    /// Interleaved proof: retained score cells.
+    InterleavingMemory {
+        /// Score-cell limit.
+        limit: usize,
+    },
+    /// Interleaved proof: distinct addressed candidate matches.
+    InterleavingCandidates {
+        /// Candidate limit.
+        limit: usize,
+    },
+}
+
+impl UtrSearchBudget {
+    /// The monotonic correspondence producer's named budget.
+    pub(super) fn monotonic(budget: batchalign_transform::dp_align::CorrespondenceBudget) -> Self {
+        use batchalign_transform::dp_align::CorrespondenceBudget;
+        let limit = budget.limit();
+        match budget {
+            CorrespondenceBudget::CandidateEdges => Self::CandidateEdges { limit },
+            CorrespondenceBudget::FuzzyComparisons => Self::FuzzyComparisons { limit },
+        }
+    }
+
+    /// The interleaved correspondence producer's named budget.
+    pub(super) fn interleaved(
+        refusal: batchalign_transform::dp_align::interleaving::LocalInterleavingRefusal,
+    ) -> Self {
+        use batchalign_transform::dp_align::interleaving::LocalInterleavingRefusal;
+        let limit = refusal.limit();
+        match refusal {
+            LocalInterleavingRefusal::WorkBudgetExceeded => Self::InterleavingWork { limit },
+            LocalInterleavingRefusal::MemoryBudgetExceeded => Self::InterleavingMemory { limit },
+            LocalInterleavingRefusal::CandidateBudgetExceeded => {
+                Self::InterleavingCandidates { limit }
+            }
+        }
     }
 }
 

@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use crate::api::{DisplayPath, JobId, JobStatus, MachineTime};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::{
-    AttemptFinishRecord, CompletedFileOutput, FileFailureRecord, FileProgressRecord,
-    FileRetryRecord, JobStore,
+    AttemptFinishRecord, FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord,
+    JobStore,
 };
 
 use super::FileStage;
@@ -40,7 +40,7 @@ pub(crate) trait RunnerEventSink: Send + Sync {
         job_id: &JobId,
         filename: &str,
         finished_at: crate::store::EventTime,
-        result: Option<CompletedFileOutput>,
+        completion: FileCompletion,
     );
     async fn mark_file_error(
         &self,
@@ -83,6 +83,15 @@ pub(crate) trait RunnerEventSink: Send + Sync {
         stage: FileStage,
         current: Option<i64>,
         total: Option<i64>,
+    );
+    /// One of the file's worker checkouts started or stopped waiting on a
+    /// saturated pool. A fact of its own, beside the reported stage: the
+    /// file shows "waiting for a worker" while any wait is open.
+    async fn set_file_worker_wait(
+        &self,
+        job_id: &JobId,
+        filename: &str,
+        change: crate::store::WorkerWaitChange,
     );
     async fn unfinished_files(&self, job_id: &JobId) -> Vec<DisplayPath>;
     async fn file_status_label(&self, job_id: &JobId, filename: &str) -> Option<String>;
@@ -145,10 +154,10 @@ impl RunnerEventSink for StoreRunnerEventSink {
         job_id: &JobId,
         filename: &str,
         finished_at: crate::store::EventTime,
-        result: Option<CompletedFileOutput>,
+        completion: FileCompletion,
     ) {
         self.store
-            .mark_file_done(job_id, filename, finished_at, result)
+            .mark_file_done(job_id, filename, finished_at, completion)
             .await;
     }
 
@@ -253,6 +262,17 @@ impl RunnerEventSink for StoreRunnerEventSink {
                     total,
                 },
             )
+            .await;
+    }
+
+    async fn set_file_worker_wait(
+        &self,
+        job_id: &JobId,
+        filename: &str,
+        change: crate::store::WorkerWaitChange,
+    ) {
+        self.store
+            .set_file_worker_wait(job_id, filename, change)
             .await;
     }
 

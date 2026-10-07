@@ -384,6 +384,59 @@ mod tests {
         );
     }
 
+    /// A diagnosed file wrote its output: a restart of the job (after another
+    /// file failed) keeps it rather than requeueing it, so it is never
+    /// retried, and it counts as completed, not failed.
+    #[test]
+    fn a_restart_keeps_a_diagnosed_file_and_requeues_only_the_failure() {
+        let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
+        let t = crate::unix_time;
+        assert!(job.mark_file_processing("a.cha", t(1.0)));
+        assert!(job.mark_file_done(
+            "a.cha",
+            t(2.0),
+            FileCompletion::Diagnosed {
+                result: CompletedFileOutput {
+                    filename: DisplayPath::from("a.cha"),
+                    content_type: ContentType::Chat,
+                    stamp: crate::api::FileStampOutcome::Unrecorded,
+                },
+                diagnostics: crate::api::FileOutputDiagnostics::of_findings(
+                    vec![crate::api::FileOutputDiagnostics::coded_finding(
+                        "E241",
+                        "reserved marker",
+                    )],
+                    Vec::new(),
+                ),
+            },
+        ));
+        assert!(job.mark_file_processing("b.cha", t(1.0)));
+        assert!(job.mark_file_error(
+            "b.cha",
+            &FileFailureRecord {
+                message: "worker crashed".into(),
+                category: crate::scheduling::FailureCategory::WorkerCrash,
+                finished_at: crate::store::EventTime::fixed(t(3.0)),
+            },
+        ));
+        assert!(job.any_terminal_files_failed(), "the error is a failure");
+        assert!(
+            !job.all_terminal_files_failed(),
+            "the diagnosed file is not"
+        );
+
+        job.execution.status = crate::api::JobStatus::Failed;
+        job.prepare_for_restart();
+
+        let a = job.execution.file_statuses["a.cha"].to_entry();
+        assert_eq!(a.status, FileStatusKind::Diagnosed, "never retried");
+        assert_eq!(
+            job.execution.file_statuses["b.cha"].status(),
+            FileStatusKind::Queued
+        );
+        assert_eq!(job.execution.completed_files, 1);
+    }
+
     /// File completion mutates file state and appends a success result.
     #[test]
     fn mark_file_done_updates_file_state() {
@@ -401,7 +454,7 @@ mod tests {
         assert!(job.mark_file_done(
             "a.cha",
             crate::unix_time(12.0),
-            Some(CompletedFileOutput {
+            FileCompletion::Clean(CompletedFileOutput {
                 filename: DisplayPath::from("a.cha"),
                 content_type: ContentType::Chat,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
@@ -478,6 +531,7 @@ mod tests {
             status,
             error,
             error_category: error.map(|_| crate::scheduling::FailureCategory::WorkerTimeout),
+            diagnostics: None,
             started_at,
             finished_at,
             next_eligible_at,
@@ -544,6 +598,24 @@ mod tests {
             FilePhase::Done {
                 started_at: Some(t(1.0)),
                 finished_at: Some(t(2.0)),
+            },
+            FilePhase::Diagnosed {
+                started_at: Some(t(1.0)),
+                finished_at: Some(t(2.0)),
+                diagnostics: Some(crate::api::FileOutputDiagnostics::of_findings(
+                    vec![crate::api::FileOutputDiagnostics::coded_finding(
+                        "E220",
+                        "digits inside a word",
+                    )],
+                    vec![crate::api::OutputShortfallRecord::StageSkipped {
+                        stage: crate::api::OptionalStage::Morphosyntax,
+                    }],
+                )),
+            },
+            FilePhase::Diagnosed {
+                started_at: None,
+                finished_at: None,
+                diagnostics: None,
             },
             FilePhase::Error {
                 started_at: None,

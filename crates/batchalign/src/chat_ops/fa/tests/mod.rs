@@ -45,6 +45,8 @@ mod grouping_and_wor;
 mod inject_and_parse;
 mod kept_main_bullets;
 mod kept_main_bullets_ordering;
+mod not_in_recording;
+mod onset_end_boundaries;
 mod postprocess_continuous;
 mod replaced_word_and_compound;
 mod timed_utterance_gate;
@@ -52,6 +54,7 @@ mod token_label_remap;
 mod two_pass_and_strategy;
 mod update_bullet;
 mod utr_and_monotonicity;
+mod utr_projection;
 
 pub(super) fn parse_chat(text: &str) -> talkbank_model::model::ChatFile {
     let parser = TreeSitterParser::new().unwrap();

@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-09-30 23:26 EDT
+**Last updated:** 2026-10-07 00:19 EDT
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -9,6 +9,58 @@ by running forced alignment against the corresponding audio file.
 **Requires:** a `.cha` file whose `@Media` header names an audio file visible
 to the server (or to the local daemon). See
 [Media Resolution](../../reference/command-io.md#1-align).
+
+`@Options: NoAlign` opts valid CHAT out of alignment and returns its exact
+original bytes, without timing changes, cleanup or processing stamps. It does
+not waive validation: a defective retained header, main tier or dependent tier
+must be repaired before the file can be returned successfully. Produced output
+that fails complete construction is refused rather than written as partial
+CHAT. See the [command contract](../../architecture/command-contracts.md).
+
+Alignment aims to time every alignable lexical word. When some words cannot
+be timed (their audio window was refused, the audio left for them could not
+contain them, or the aligner gave no usable interval), or are not in the
+recording at all (an utterance marked `[+ diary]`, a written diary note, is
+never looked for in the audio and gets no bullet; see
+[Utterances not in the recording](../../reference/forced-alignment.md#utterances-not-in-the-recording)),
+the file is still
+written: every measured timing is kept, the
+untimed words stay in the transcript without bullets, and the file is reported
+`diagnosed`, not done, with a `timing_incomplete` record giving the
+required and untimed word counts and the first untimed utterances with their
+cause. The CLI exits with code 7 when any file is diagnosed. This holds even
+when no word could be timed. Existing valid word timing counts as timing.
+Complete timing coverage is not a guarantee of acoustic accuracy; assumptions
+and review evidence remain visible.
+
+When corrupt `%wor` was the only timing, regeneration must establish real
+timing before output can be written. A fallback window longer than the selected
+aligner's budget is refused, not clipped to invent word positions. The error
+names the actual window and budget; use a compatible UTR backend to recover
+narrower acoustic timing or supply corrected timing. A planned alignment
+request alone is not evidence of successful regeneration.
+If the model produces no usable timing, the same obligation remains outstanding
+and the file is refused as unavailable evidence, with no output written.
+
+Whisper alignment uses only the supplied audio's real duration, not the silence
+its model adds to fill a fixed input window. This prevents padding from acquiring
+word timestamps. Decoder-conditioning tokens also cannot constrain the lexical
+alignment path. Neither restriction guarantees every word can be aligned or
+that model timing is acoustically correct.
+Its revised cache identity avoids reusing earlier grid results. For
+unbulleted turns, postprocessing retains the model-bound timing end instead of
+re-extending a fallback that was already cut to the recording.
+
+UTR's provisional interval covers all matched ASR timing evidence, including
+an earlier word whose end extends beyond the last word. Unmatched ASR text
+does not widen that interval. This fixes truncated hints for nested provider
+timestamps without changing lexical matching or certifying acoustic accuracy.
+
+UTR also leaves an utterance unresolved when a matched ASR interval is zero/reversed, or
+when non-overlap adjustment would consume its entire observed interval. It
+does not invent a 1 ms duration to make recovery look successful. Existing
+bullets and marked-overlap policy are preserved; forced alignment may supply
+new timing, but final output must still pass the complete checks.
 
 ---
 
@@ -78,7 +130,7 @@ flowchart TD
 
     group --> before_check{--before path\nprovided?}
     before_check -->|Yes| incremental[process_fa_incremental\nDiff old vs new, copy stable %wor,\nreuse preserved groups]
-    before_check -->|No| full[process_fa\nProcess all groups]
+    before_check -->|No| full[run_fa_from_ast\nProcess all groups]
 
     incremental --> engine_select
     full --> engine_select
@@ -602,8 +654,11 @@ normal pre-alignment state. `align` is precisely the command that creates
 those links. The audio file is still resolved and used normally. When an
 alignment run produces timing evidence, its output consumes the `unlinked`
 status before writing the file. A pass-through file, or a run that produces no
-timing evidence, preserves the status. Timed output is refused if `@Media` is
-missing, ambiguous, unusable, or carries a contradictory status.
+timing evidence, preserves the status. A transcript whose `@Media` is
+absent, declares the recording `missing`, or says `notrans` is refused before
+any work, with the header change named; a plain `@Media: name, audio` on a
+never-aligned transcript is aligned, and its output must then carry timing.
+See [What align accepts](../../reference/forced-alignment.md#what-align-accepts).
 
 **Re-aligning an already-aligned file does not shrink utterance bullets under
 the default `preserve` policy.**
@@ -628,6 +683,15 @@ a loopback server. What `align` reads and uploads, including the whole-file
 upload to Rev.AI for utterance timing, is on
 [Network and Transfer Costs](../network-costs.md); the routing rules are on
 [Server Mode](../server-mode.md).
+
+`--media-dir` is resolved before submission: relative CLI values are anchored
+to the directory from which you invoked the command; absolute values are kept
+unchanged. A direct API request must supply an absolute, nonempty Unicode path.
+Neither admission nor resolution proves that the directory or recording exists.
+For a remote server, use an explicit absolute server-visible directory rather
+than relying on a client-relative value. See the
+[media-root admission contract](../../developer/commands/align.md#media-root-admission)
+for storage and execution boundaries.
 
 **`--utr-strategy global` is the default behavior anyway.** Since the
 `auto` routing currently always returns `GlobalUtr` (see §"UTR strategy

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+import pytest
+from pydantic import ValidationError
+
 from batchalign.inference.provider_retry import ProviderRefusal, ProviderResponse
 from batchalign.inference.translate import (
     LoadedTranslation,
     TranslateBatchItem,
+    TranslateInferenceRequest,
     batch_infer_translate,
 )
-from batchalign.providers import BatchInferRequest
 
 
 def _monotonic_values(*values: float) -> Iterator[float]:
@@ -26,6 +29,25 @@ class TestTranslateModels:
         item = TranslateBatchItem(text="hola")
         assert item.model_dump() == {"text": "hola"}
         assert TranslateBatchItem.model_validate(item.model_dump()) == item
+
+    @pytest.mark.parametrize("field", ["source_lang", "target_lang"])
+    @pytest.mark.parametrize("value", ["", "en", "auto", "eng;spa", "éñg", "eng\n"])
+    def test_route_refuses_unchecked_codes(self, field: str, value: str) -> None:
+        payload = {"source_lang": "eng", "target_lang": "fra", "items": []}
+        payload[field] = value
+        with pytest.raises(ValidationError):
+            TranslateInferenceRequest.model_validate(payload)
+
+    def test_target_cannot_be_omitted_or_mutated(self) -> None:
+        with pytest.raises(ValidationError):
+            TranslateInferenceRequest.model_validate(
+                {"source_lang": "spa", "items": []}
+            )
+        request = TranslateInferenceRequest(
+            source_lang="spa", target_lang="fra", items=[]
+        )
+        with pytest.raises(ValidationError):
+            request.target_lang = "eng"
 
 
 class TestBatchInferTranslate:
@@ -46,14 +68,15 @@ class TestBatchInferTranslate:
             lambda: next(monotonic),
         )
 
-        def translate_fn(text: str, src_lang: str) -> str:
+        def translate_fn(text: str, src_lang: str, target_lang: str) -> str:
+            assert target_lang == "fra"
             calls.append((text, src_lang))
             return text.upper()
 
         response = batch_infer_translate(
-            BatchInferRequest(
-                task="translate",
-                lang="spa",
+            TranslateInferenceRequest(
+                target_lang="fra",
+                source_lang="spa",
                 items=[{"text": "hola"}, {"text": "adios"}],
             ),
             LoadedTranslation(
@@ -76,7 +99,7 @@ class TestBatchInferTranslate:
         }
         assert response.results[1].elapsed_s == 0.25
 
-    def test_defaults_lang_to_eng_and_skips_blank_items(self, monkeypatch) -> None:
+    def test_checked_source_and_target_and_blank_items(self, monkeypatch) -> None:
         calls: list[tuple[str, str]] = []
         # Batch start, the translated item's start and end, batch end. The
         # blank item never reaches the engine, so it reads no clock.
@@ -87,14 +110,15 @@ class TestBatchInferTranslate:
             lambda: next(monotonic),
         )
 
-        def translate_fn(text: str, src_lang: str) -> str:
+        def translate_fn(text: str, src_lang: str, target_lang: str) -> str:
+            assert target_lang == "eng"
             calls.append((text, src_lang))
             return f"{src_lang}:{text}"
 
         response = batch_infer_translate(
-            BatchInferRequest(
-                task="translate",
-                lang="",
+            TranslateInferenceRequest(
+                target_lang="eng",
+                source_lang="eng",
                 items=[{"text": "   "}, {"text": "hello"}],
             ),
             LoadedTranslation(
@@ -124,16 +148,17 @@ class TestBatchInferTranslate:
             lambda: next(monotonic),
         )
 
-        def translate_fn(text: str, src_lang: str) -> str:
+        def translate_fn(text: str, src_lang: str, target_lang: str) -> str:
+            assert target_lang == "eng"
             calls.append((text, src_lang))
             if text == "boom":
                 raise RuntimeError("translator exploded")
             return f"{src_lang}:{text.upper()}"
 
         response = batch_infer_translate(
-            BatchInferRequest(
-                task="translate",
-                lang="yue",
+            TranslateInferenceRequest(
+                target_lang="eng",
+                source_lang="yue",
                 items=[
                     {"bad": "shape"},
                     {"text": "hello"},
@@ -173,12 +198,13 @@ class TestBatchInferTranslate:
             lambda: next(monotonic),
         )
 
-        def translate_fn(text: str, src_lang: str) -> str:
+        def translate_fn(text: str, src_lang: str, target_lang: str) -> str:
+            assert target_lang == "eng"
             touched.append(f"{src_lang}:{text}")
             return text
 
         response = batch_infer_translate(
-            BatchInferRequest(task="translate", lang="eng", items=[]),
+            TranslateInferenceRequest(source_lang="eng", target_lang="eng", items=[]),
             LoadedTranslation(
                 engine="test-engine",
                 translate=translate_fn,
@@ -202,7 +228,8 @@ class TestBatchInferTranslate:
             lambda: next(monotonic),
         )
 
-        def translate_fn(text: str, src_lang: str) -> str:
+        def translate_fn(text: str, src_lang: str, target_lang: str) -> str:
+            assert target_lang == "eng"
             if text == "throttled":
                 raise ProviderRefusal(
                     ProviderResponse(status=429, retry_after_s=7.0),
@@ -213,9 +240,9 @@ class TestBatchInferTranslate:
             return text.upper()
 
         response = batch_infer_translate(
-            BatchInferRequest(
-                task="translate",
-                lang="spa",
+            TranslateInferenceRequest(
+                target_lang="eng",
+                source_lang="spa",
                 items=[{"text": "throttled"}, {"text": "dropped"}, {"text": "ok"}],
             ),
             LoadedTranslation(engine="test-engine", translate=translate_fn),

@@ -1,7 +1,7 @@
 # eval
 
 **Status:** Current
-**Last updated:** 2026-09-15 21:24 EDT
+**Last updated:** 2026-10-06 23:37 EDT
 
 `batchalign3 eval` contains offline evaluators. They consume retained artifacts
 and never submit ordinary processing jobs.
@@ -15,6 +15,7 @@ not invoke a model or provider and does not modify CHAT.
 ```bash
 batchalign3 eval utr-alignment \
   --chat recording_utr_input.cha \
+  --source-name recording.cha \
   --tokens recording_utr_tokens.json \
   --fuzzy-threshold 0.85 \
   --participation all-utterances \
@@ -23,7 +24,8 @@ batchalign3 eval utr-alignment \
 
 | Flag | Meaning |
 |------|---------|
-| `--chat <CHAT>` | Clean exact CHAT input used for global word alignment. |
+| `--chat <CHAT>` | Exact CHAT input that passes complete named validation before global word alignment. |
+| `--source-name <FILENAME>` | Original transcript filename when the input is a renamed debug snapshot. Defaults to the actual `--chat` filename. This does not read another file or exempt filename checks. |
 | `--tokens <JSON>` | Retained `AsrTimingToken` JSON array, normally a debug `_utr_tokens.json` artifact. |
 | `--output <JSON>` | Fresh report path. Existing paths are refused, and a complete report is atomically published. |
 | `--fuzzy-threshold <0..1>` | Use fuzzy Jaro-Winkler matching at this finite threshold. Omit for case-insensitive exact matching. |
@@ -31,15 +33,72 @@ batchalign3 eval utr-alignment \
 
 The report fingerprints both inputs, records the executable build identity,
 and retains exhaustive per-utterance match or refusal states. A matched state
-owns a nonempty word-to-token collection and a positive or nonpositive timing
-proposal. This is research evidence, not permission to overwrite main-tier or
+owns a nonempty word-to-token collection with proved first/last utterance
+correspondences (or, from schema 10, bounded ones) and a positive or
+nonpositive timing proposal.
+Schema 5 distinguishes `interior_only`: common-to-every-optimum words remain
+anchor evidence, but an unresolved first or last word prevents a whole-utterance
+timing proposal. `missing_endpoints` records `first`, `last` or `both`.
+The selected path remains inspectable in either state. Retained schema 4
+reports may contain partial-word hulls; those hulls do not prove utterance
+boundaries. This is research evidence, not permission to overwrite main-tier or
 `%wor` timing, and it never generates `%xalign`.
 
-Schema 2 matches words inside provider segments and records both the original
+Schema 7 distinguishes the production whole-source `local_interleaving` plan
+from the independent adjacent-pair `interleaving` observations added in schema 6.
+Production reserves reference words jointly across singleton/disjoint adjacent
+different-speaker-run episodes, extending runs only through typed-source overlap
+continuations. Its search envelopes record retained same-speaker
+bounds as an `interleaved` scope; this is search authority, not selected timing
+or acoustic speaker proof. `refused` with a `budget_exhausted` reason means proof
+was not completed, not that the words were absent or acoustically ambiguous.
+Older reports keep their original meaning.
+
+Schema 9 replays the anchored-region search production now uses: the transcript's
+own bullets partition it into regions, each solved within its own budget. The
+plan's `strategy` is the pass's order model (`monotonic` or `interleaved`);
+`regions` lists each region's owned utterances (`first_utterance`,
+`last_utterance`), its ASR onset window (`onset_floor`, `onset_ceiling`, each a
+`stream_edge` or an `anchor` with its utterance and milliseconds) and the
+algorithm it ran. A refused region's untimed utterances carry
+`{"budget_exhausted": {"region": ..., "budget": {"kind": ..., "limit": ...}}}`;
+its timed utterances are `retained_unsearched`, never refused. `ambiguous`
+reasons are unchanged. An `interior_only` utterance in a monotonic region may
+now carry an `order_corridor` search envelope bounded by its neighbours' proved
+timings; it is still not a timing proposal.
+
+Schema 10 widens `matched`: in an interleaved region, an endpoint word that every
+optimum matches, though not always to the same token, bounds the utterance by
+the extent of every token it may match, and the `proposal` covers that extent.
+Its `admitted_matches` then need not include that endpoint word. An endpoint
+some optimum leaves unmatched still makes the utterance `interior_only`.
+Each region may also list `withdrawn_claims`: provider token ordinals whose
+correspondence it withdrew because a neighbouring region's owned words claimed
+the same token across their shared anchor.
+
+Schema 3 adds `source_name` with the checked stem and its basis (`input_path`
+or `caller_declared`). A declared name is a caller's claim, not independently
+verified provenance. No debug suffix is guessed, no name is inferred from
+`@Media`, and unusable or non-UTF-8 names refuse rather than admitting anonymously.
+Retained schema 2 reports keep their original meaning.
+
+The plan still matches words inside provider segments and records both the original
 token index and its within-token word index. Each word retains its provider
 segment's interval; these are coarse timing proposals, not newly measured word
 timestamps. Input token JSON is unchanged, so retained older runs can be
 replayed into a fresh report without inference.
+
+The replay retains every dependent tier and has no regeneration exemption.
+Missing required declarations, corrupt retained `%mor`/`%gra`/`%wor`, and
+filename-dependent media mismatches refuse before token input is read or a
+report is published. Invalid CHAT exits 2; parser initialization and internal
+admission failures exit 6. A source refusal never modifies either input.
+
+The plan records one selected lexical alignment separately from correspondences
+proved common to every optimal lexical alignment. Repeated words, omitted ASR
+tokens and overlapping speech can admit ambiguous correspondence. Proved lexical
+endpoints and positive duration still do not establish acoustic identity or
+recognition accuracy; choosing a strategy by coverage cannot supply that evidence.
 
 ```mermaid
 flowchart LR

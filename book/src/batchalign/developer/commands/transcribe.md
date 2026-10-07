@@ -1,7 +1,7 @@
 # transcribe: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-16 08:18 EDT
+**Last updated:** 2026-10-05 13:57 EDT
 
 Implementation guide for the `transcribe` command. For user-facing
 documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe.md).
@@ -19,9 +19,10 @@ documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe
 | Pipeline orchestration | `crates/batchalign/src/pipeline/transcribe.rs`: `run_transcribe_pipeline()` | ASR, optional dedicated diarization, post-process, speaker projection, pre-CHAT utseg, CHAT assembly, optional morphotag, serialize |
 | Per-file dispatch | `crates/batchalign/src/runner/dispatch/transcribe_pipeline.rs` | Concurrent file orchestration bounded by semaphore |
 | ASR post-processing | `crates/batchalign-transform/src/asr_postprocess/mod.rs` | 8 stages: compound merge, MWT split, number expand, Cantonese norm, long-turn split, retokenization, disfluency, retrace detection |
-| Pre-CHAT utterance segmentation | `crates/batchalign/src/pipeline/transcribe.rs`: `process_asr_with_prechat_segmentation()` | Runs for eng/cmn/zho/yue when enabled: admitted BERT evidence and selected policy applied to prepared chunks before `build_chat` |
+| Pre-CHAT utterance segmentation | `crates/batchalign/src/pipeline/transcribe/preprocessing.rs`: `process_asr_with_prechat_segmentation()` | Runs for eng/cmn/zho/yue when enabled: admitted BERT evidence and selected policy applied to prepared chunks before `build_chat` |
 | CHAT assembly | `crates/batchalign-transform/src/build_chat/mod.rs:41`: `build_chat()` | Assembles `ChatFile` AST from `TranscriptDescription` (typed bridge) |
-| Speaker projection | `crates/batchalign/src/chat_ops/speaker.rs`: `project_speakers_onto_chunks()` | Projects raw segments onto timed ASR words and splits prepared chunks before utseg and CHAT assembly |
+| Speaker projection | `crates/batchalign/src/chat_ops/speaker/projection.rs`: `project_speakers_onto_chunks()` | Returns source-bound observations; explicit best-effort admission permits extraction together with retained evidence |
+| CHAT assembly stage | `crates/batchalign/src/pipeline/transcribe/assembly.rs` | Retains producer-derived speaker caveats and admits the typed document |
 | Speaker evidence cache | `crates/batchalign/src/transcribe/evidence_cache.rs` | Separate raw/derived identities and envelopes, per-key lease, typed miss authorization, durable commits, fakeable inference boundary |
 | Shared speaker operation | `crates/batchalign/src/transcribe/infer.rs`: `resolve_speaker_evidence_for_audio()` | Constructs the exact request/model identity and owns cache-or-infer resolution for both integrated `transcribe` and standalone `diarize` |
 | Standalone dispatch plan | `crates/batchalign/src/runner/dispatch/plan.rs`: `MediaAnalysisDispatchPlan::Diarize` | Carries an already-resolved backend, optional expected count, and cache policy; execution cannot invent or change them |
@@ -72,10 +73,9 @@ flowchart LR
     ASR --> SPKQ
     SPKQ -->|"yes, live"| SPK --> TURNS
     SPKQ -->|"yes, replay"| TURNS
-    SPKQ -->|"no"| PROJ
+    SPKQ -->|"no"| PREP
     TURNS --> PROJ
-    ASR --> PROJ
-    PROJ --> PREP --> PREUT --> CHAT --> POSTUT --> MOR --> OUT
+    ASR --> PREP --> PROJ --> PREUT --> CHAT --> POSTUT --> MOR --> OUT
     REV -.-> RAWE
     SPK -.-> SPKE
     TURNS -.-> SPKE
@@ -91,6 +91,61 @@ directly to CHAT construction; without morphosyntax, post-CHAT output goes to
 final validation. A replay state carries no Rev or speaker inference
 capability, so reaching either paid boundary requires an explicit exhaustive
 match change.
+
+### Word speaker assignments: explicit best-effort admission
+
+`SpeakerProjection` owns prepared chunks and their observations; it has no
+public chunk field or unchecked parts constructor. Extraction consumes explicit
+`BestEffortWithReviewEvidenceV1` admission. Pipeline states `Postprocessed`,
+`ChatReady` and the completed pipeline retain a required outcome: `AsrOnly`
+when no dedicated operation ran, or admitted dedicated evidence. Empty dedicated
+evidence is not `AsrOnly`: it retains the ASR coordinates explicitly.
+
+The acoustic choices are unchanged: greatest accumulated overlap per label,
+lexical-label overlap ties, nearest-segment gap fallback (original segment order
+for ties), preceding then following assignment for untimed or invalid intervals,
+and first lexical label if a chunk has no resolved word. These are policies,
+not proof of speaker accuracy. No strict refusal policy is implied by admission.
+
+With `--debug-dir`, `<stem>_speaker_projection.json` is an atomic, required
+native debug artifact. Failure to retain requested evidence refuses the
+postprocessing transition. This artifact is separate from `_speaker_evidence.json`
+(model/cache lineage) and `.turns.json` (diarization intervals); their schemas
+are unchanged. Live transcription and admitted offline replay use the same
+projection producer.
+
+Its schema version is **1**:
+
+| Field | Meaning |
+| --- | --- |
+| `policy` | `best_effort_with_review_evidence_v1`; explicitly admits the current assignment choices with caveats |
+| `needs_review` | Derived from assignments; true if any token slot is not supported by overlap with exactly one label |
+| `summary` | Derived counts: `words`, `directly_supported`, `contested`, `inferred`, `defaulted`, `retained_asr` |
+| `evidence.input_chunks_blake3` | Domain-separated fingerprint of exact prepared chunks, ASR indices, text, timing presence/values and word kinds |
+| `evidence.segments_blake3` | Domain-separated fingerprint of the exact ordered admitted intervals and model labels |
+| `evidence.speaker_boundaries` | Chunk boundaries introduced by a change of projected speaker |
+| `evidence.assignments[]` | One record per original prepared token slot, before speaker/utterance splitting |
+
+An assignment carries `source: {chunk, word}` (zero-based prepared-input address),
+`coordinate: {space, index}` (`asr` or `diarization`), and tagged `timing` and
+`basis` observations. Timing distinguishes `not_observed`, `untimed`,
+`invalid_interval`, `gap` (segment ordinal and distance) and `overlap` (number
+of positive labels, number of tied winners and winning accumulated milliseconds).
+Basis distinguishes `direct_overlap`, `nearest_segment`, `previous_word`,
+`following_word`, `first_label_default` and `retained_asr`. Neighbor bases carry
+their source-address witness. A contested winner remains contested even if its
+overlap is greater than every alternative.
+
+Counts include punctuation and other untimed slots: they are **not lexical
+accuracy percentages**. An inherited punctuation assignment therefore also
+requires review. When review is needed, CHAT receives a derived `@Comment`
+warning even without debug output. Complete CHAT construction admission still
+certifies structure, not acoustic correctness or named-person identity.
+
+The contracts retain historical assignment choices, source fingerprint changes,
+wire summary derivation, full offline replay and a deterministic evidence-write
+failure. No sleeps, live model downloads or clock-dependent assertions are
+needed for these boundary tests.
 
 ---
 

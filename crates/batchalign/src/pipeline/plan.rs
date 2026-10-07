@@ -1,7 +1,6 @@
 //! Shared stage identities and observation for consuming pipeline transitions.
 
 use std::fmt;
-use std::future::Future;
 use std::time::Instant;
 
 use tracing::info;
@@ -13,10 +12,6 @@ use crate::error::ServerError;
 pub(crate) enum StageId {
     /// Parse input content.
     Parse,
-    /// Run pre-validation.
-    PreValidate,
-    /// Clear existing derived tiers or annotations.
-    ClearExisting,
     /// Extract worker payloads.
     CollectPayloads,
     /// Run worker inference.
@@ -45,8 +40,6 @@ impl StageId {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Parse => "parse",
-            Self::PreValidate => "pre_validate",
-            Self::ClearExisting => "clear_existing",
             Self::CollectPayloads => "collect_payloads",
             Self::Infer => "infer",
             Self::ApplyResults => "apply_results",
@@ -68,11 +61,25 @@ impl fmt::Display for StageId {
     }
 }
 
-/// Observe a consuming transition without erasing its output type or boxing it.
+/// One pipeline stage's transition, owned on the heap by whoever produces it.
+///
+/// A stage future passed BY VALUE into an `async fn` is stored twice in the
+/// caller's state machine (rust-lang/rust#62958), and wrapping stages in
+/// observers nests that doubling at every level. Measured on 2026-10-06 with
+/// `-Zprint-type-sizes`: the morphosyntax stage (45.6 KB) became 91 KB inside
+/// `observe_stage`, 137 KB inside the transcribe progress wrapper, and the
+/// whole transcribe pipeline about 140 KB, copied onto the stack at every poll
+/// layer until a production tokio worker overflowed its 2 MiB stack. Requiring
+/// this type makes a stage cost one pointer in its caller, and no caller can
+/// pass an inline future again: the compiler refuses it. The general rule
+/// lives in [`crate::owned_future`].
+pub(crate) type StageFuture<'a, T> = crate::owned_future::OwnedFuture<'a, Result<T, ServerError>>;
+
+/// Observe a consuming transition without erasing its output type.
 pub(crate) async fn observe_stage<T>(
     command: &'static str,
     stage: StageId,
-    transition: impl Future<Output = Result<T, ServerError>>,
+    transition: StageFuture<'_, T>,
 ) -> Result<T, ServerError> {
     let started = Instant::now();
     info!(command, stage = %stage, "Starting pipeline stage");

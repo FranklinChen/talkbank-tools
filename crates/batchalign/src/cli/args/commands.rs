@@ -15,6 +15,17 @@ use crate::types::engines::{
 
 use super::{CommonOpts, IncrementalOpts};
 
+/// Standalone export, separate from model-facing mono resampling.
+#[derive(Args, Debug, Clone)]
+pub struct ConvertArgs {
+    /// Input paths and output directory; output is always a new recording.
+    #[command(flatten)]
+    pub common: CommonOpts,
+    /// Required encoding; the command does not guess from the source suffix.
+    #[arg(long, value_enum)]
+    pub format: crate::media::export::AudioExportFormat,
+}
+
 // ---------------------------------------------------------------------------
 // Per-command option enums
 //
@@ -527,8 +538,8 @@ pub struct TranscribeArgs {
 /// `translate` command takes no `--lang`). Source language is read per-file
 /// from the CHAT file's `@Languages:` header (BA2
 /// `pipelines/translate/seamless.py:40` uses `doc.langs[0]`); the
-/// translation target is hardcoded to English (BA2 `seamless.py:41`
-/// `tgt_lang="eng"`). The 2026-05-03 morphotag incident showed that a
+/// translation target is selected independently with `--target` (English
+/// by default). The 2026-05-03 morphotag incident showed that a
 /// job-level lang sentinel silently overrides per-file routing, do not
 /// re-introduce `--lang` here without re-reading that postmortem.
 #[derive(Args, Debug, Clone)]
@@ -548,6 +559,10 @@ pub struct TranslateArgs {
         value_parser = engine_selection_parser::<TranslateEngineName>(),
     )]
     pub translate_engine: TranslateEngineName,
+
+    /// Target language (three-letter ISO 639-3 code).
+    #[arg(long, default_value = "eng", value_parser = crate::api::LanguageCode3::try_new)]
+    pub target: crate::api::LanguageCode3,
 
     /// Merge abbreviations in output.
     #[arg(long, conflicts_with = "no_merge_abbrev")]
@@ -828,6 +843,11 @@ pub struct DiarizeArgs {
     /// NOT a worker count: see `--workers`. No short flag by design.
     #[arg(long, value_parser = parse_diarization_speaker_count)]
     pub num_speakers: Option<crate::options::DiarizationSpeakerCount>,
+
+    /// Rewrite timed CHAT using explicit tracks mapped to declared participants.
+    /// Without this option, media input produces anonymous turns JSON.
+    #[arg(long, value_name = "PAR0=CHI,PAR1=MOT")]
+    pub speaker_map: Option<crate::options::SpeakerTrackMapping>,
 
     /// Language (3-letter ISO code). Worker-pool selection only;
     /// diarization itself is language-independent.
@@ -1746,6 +1766,10 @@ pub struct UtrAlignmentEvalArgs {
     /// Exact CHAT document to align against retained UTR tokens.
     #[arg(long)]
     pub chat: std::path::PathBuf,
+    /// Original transcript filename for a renamed debug snapshot. Defaults to
+    /// the CHAT input filename; never inferred from a debug suffix or @Media.
+    #[arg(long)]
+    pub source_name: Option<std::path::PathBuf>,
     /// Retained `_utr_tokens.json` artifact.
     #[arg(long)]
     pub tokens: std::path::PathBuf,

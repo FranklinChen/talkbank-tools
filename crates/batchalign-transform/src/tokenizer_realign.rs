@@ -12,7 +12,7 @@
 //! - The standalone Rust server (`batchalign-server`), called directly
 //!
 //! The PyO3 crate provides only a thin wrapper that converts `Vec<PatchedToken>`
-//! to Python objects (`str` or `(str, bool)` tuples).
+//! to Stanza's string, MWT-hint, or explicit-component representations.
 //!
 //! # MWT Hint Convention
 //!
@@ -20,28 +20,61 @@
 //!
 //! - `(text, True)`: MWT: let the MWT processor expand (e.g. "don't" → do + n't)
 //! - `(text, False)`, NOT an MWT: suppress expansion (e.g. merged "ice-cream")
-//! - plain string: let Stanza's model decide
+//! - plain string: retain the token (Python restores its unchanged native hint)
 //!
 //! [`PatchedToken`] encodes this convention at the Rust↔Python boundary.
-//! The [`Hint`](PatchedToken::Hint) variant is emitted only when the
-//! character-DP merges multiple Stanza tokens into one and the merged text
-//! looks like an English contraction ([`is_contraction`]). All other cases
-//! produce [`Plain`](PatchedToken::Plain).
+//! Exact ordered grouping admits one patched token per authoritative word.
+//! Merges retain checked French components or carry an explicit MWT hint.
 //!
-//! # Provenance
-//!
-//! The character-position mapping algorithm replaces batchalign2's DP-based
-//! `tokenizer_processor` (ud.py:610-700). Per-language MWT override rules
-//! (BA2 `ud.py:662-695`) were audited and retired on 2026-04-21 after paired
-//! probes showed every rule was dormant, redundant, or harmful; see
-//! `book/src/reference/languages/{french,italian,portuguese,dutch}.md` for
-//! the audit records. The character-DP alone satisfies the morphotag 1-to-1
-//! invariant for the five previously-patched languages.
+//! French elision retains native tokenizer components under one authoritative
+//! word. Joining their spelling is not permission to erase their analysis.
+
+/// Native French components checked against the word they jointly spell.
+///
+/// Only the realigner constructs this capability. It cannot name unrelated
+/// components, introduce spelling, or split across authoritative word boundaries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrenchElision {
+    surface: String,
+    components: Vec<String>,
+}
+
+impl FrenchElision {
+    fn admit(surface: &str, components: Vec<String>) -> Option<Self> {
+        let (last, prefixes) = components.split_last()?;
+        if prefixes.is_empty()
+            || last.is_empty()
+            || components
+                .iter()
+                .any(|part| part.chars().any(char::is_whitespace))
+            || prefixes.iter().any(|part| {
+                !(part.ends_with('\'') || part.ends_with('’')) || part.chars().count() < 2
+            })
+            || components.concat() != surface
+        {
+            return None;
+        }
+        Some(Self {
+            surface: surface.to_owned(),
+            components,
+        })
+    }
+
+    /// The single authoritative word.
+    pub fn surface(&self) -> &str {
+        &self.surface
+    }
+
+    /// Exactly the native components that spell that word.
+    pub fn components(&self) -> &[String] {
+        &self.components
+    }
+}
 
 /// Token produced by [`align_tokens`] at the Rust↔Python boundary.
 ///
 /// Encodes Stanza's tokenize-postprocessor MWT hint convention:
-/// - `Plain(text)`, no hint, let Stanza's model decide
+/// - `Plain(text)`, unchanged token whose native hint Python can restore
 /// - `Hint(text, true)`: force MWT expansion
 /// - `Hint(text, false)`: suppress MWT expansion
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +83,8 @@ pub enum PatchedToken {
     Plain(String),
     /// MWT hint tuple: `(text, should_expand)`.
     Hint(String, bool),
+    /// Stanza's explicit expansion, retaining checked native French components.
+    FrenchElision(FrenchElision),
 }
 
 impl PatchedToken {
@@ -57,6 +92,7 @@ impl PatchedToken {
     pub fn text(&self) -> &str {
         match self {
             PatchedToken::Plain(s) | PatchedToken::Hint(s, _) => s,
+            PatchedToken::FrenchElision(group) => group.surface(),
         }
     }
 }
@@ -89,113 +125,114 @@ pub fn is_contraction(text: &str, alpha2: &str) -> bool {
 
 /// Align Stanza tokenizer output back to original CHAT words.
 ///
-/// Uses character-position mapping: the concatenated characters of Stanza tokens
-/// must equal the concatenated characters of original words (no reordering).
-/// If they don't match, the function returns the Stanza tokens unchanged as
-/// `PatchedToken::Plain` values.
+/// Native tokens must exactly tile each authoritative cleaned word in order.
+/// A token crossing a word boundary, missing content or different spelling
+/// refuses admission; it never falls back to an unbound token sequence.
 ///
-/// After merging, language-specific MWT patches are applied (French, Italian,
-/// Portuguese, Dutch).
+/// French native elision components are retained as an explicit expansion;
+/// English contraction merges request model expansion. Other merges suppress it.
 ///
 /// # Arguments
 ///
-/// - `original_words`: CHAT words (may contain shortening parens which are stripped)
+/// - `original_words`: cleaned words derived from the typed CHAT structure
 /// - `stanza_tokens`: tokens from Stanza's neural tokenizer
 /// - `alpha2`: ISO-639-1 language code (e.g. `"en"`, `"fr"`)
 pub fn align_tokens(
     original_words: &[String],
     stanza_tokens: &[String],
     alpha2: &str,
-) -> Vec<PatchedToken> {
-    if stanza_tokens.is_empty() || original_words.is_empty() {
-        return stanza_tokens
-            .iter()
-            .map(|t| PatchedToken::Plain(t.clone()))
-            .collect();
-    }
-
-    // Clean original words (strip CHAT shortening parens)
-    let cleaned: Vec<String> = original_words
-        .iter()
-        .map(|w| w.replace(['(', ')'], ""))
-        .collect();
-
-    // Build per-character maps: which word / which token does each char belong to?
-    let mut ref_chars: Vec<usize> = Vec::new();
-    for (word_idx, word) in cleaned.iter().enumerate() {
-        for _ in word.chars() {
-            ref_chars.push(word_idx);
+) -> Result<AlignedTokens, TokenAlignmentError> {
+    let mut tokens = Vec::with_capacity(original_words.len());
+    let mut native_index = 0;
+    for (word_index, word) in original_words.iter().enumerate() {
+        if word.is_empty() {
+            return Err(TokenAlignmentError::EmptyWord { word_index });
         }
-    }
-
-    let mut tok_chars: Vec<usize> = Vec::new();
-    for (tok_idx, tok) in stanza_tokens.iter().enumerate() {
-        for _ in tok.chars() {
-            tok_chars.push(tok_idx);
+        let start = native_index;
+        let mut remaining = word.as_str();
+        while !remaining.is_empty() {
+            let native = stanza_tokens
+                .get(native_index)
+                .ok_or(TokenAlignmentError::MissingToken { word_index })?;
+            if native.is_empty() {
+                return Err(TokenAlignmentError::EmptyToken { native_index });
+            }
+            remaining = remaining.strip_prefix(native.as_str()).ok_or(
+                TokenAlignmentError::WordBoundaryMismatch {
+                    word_index,
+                    native_index,
+                },
+            )?;
+            native_index += 1;
         }
-    }
-
-    // Character content must match, bail out if they don't
-    let ref_str: String = cleaned.iter().flat_map(|w| w.chars()).collect();
-    let tok_str: String = stanza_tokens.iter().flat_map(|t| t.chars()).collect();
-    if ref_str != tok_str {
-        return stanza_tokens
-            .iter()
-            .map(|t| PatchedToken::Plain(t.clone()))
-            .collect();
-    }
-
-    // Build word->token mapping: for each original word, which token indices span it?
-    let num_words = cleaned.len();
-    let mut word_to_tokens: Vec<Vec<usize>> = vec![vec![]; num_words];
-    for char_idx in 0..ref_chars.len() {
-        let w = ref_chars[char_idx];
-        let t = tok_chars[char_idx];
-        if word_to_tokens[w].last() != Some(&t) {
-            word_to_tokens[w].push(t);
-        }
-    }
-
-    // 1-to-1 case: one Stanza token per CHAT word, no merge needed.
-    if word_to_tokens.iter().all(|toks| toks.len() == 1) {
-        return stanza_tokens
-            .iter()
-            .map(|t| PatchedToken::Plain(t.clone()))
-            .collect();
-    }
-
-    // Merge case: at least one CHAT word spans multiple Stanza tokens.
-    // Emit PatchedToken::Hint only when the merged text looks like an
-    // English contraction (so Stanza's MWT processor expands it back).
-    let num_tokens = stanza_tokens.len();
-    let mut seen = vec![false; num_tokens];
-    let mut tokens: Vec<PatchedToken> = Vec::with_capacity(num_words);
-
-    for toks in &word_to_tokens {
-        let unseen: Vec<usize> = toks.iter().copied().filter(|&i| !seen[i]).collect();
-        if unseen.is_empty() {
-            continue;
-        }
-        if unseen.len() == 1 {
-            tokens.push(PatchedToken::Plain(stanza_tokens[unseen[0]].clone()));
+        let components = &stanza_tokens[start..native_index];
+        if components.len() == 1 {
+            tokens.push(PatchedToken::Plain(word.clone()));
         } else {
-            let merged: String = unseen.iter().map(|&i| stanza_tokens[i].as_str()).collect();
-            let is_contr = is_contraction(&merged, alpha2);
-            tokens.push(PatchedToken::Hint(merged, is_contr));
-        }
-        for &i in &unseen {
-            seen[i] = true;
-        }
-    }
-
-    // Append any unmapped tokens (shouldn't happen with correct alignment).
-    for (tok_idx, tok) in stanza_tokens.iter().enumerate() {
-        if !seen[tok_idx] {
-            tokens.push(PatchedToken::Plain(tok.clone()));
+            let elision = match alpha2 {
+                "fr" => FrenchElision::admit(word, components.to_vec()),
+                _ => None,
+            };
+            tokens.push(match elision {
+                Some(group) => PatchedToken::FrenchElision(group),
+                None => PatchedToken::Hint(word.clone(), is_contraction(word, alpha2)),
+            });
         }
     }
+    if native_index != stanza_tokens.len() {
+        return Err(TokenAlignmentError::ExtraTokens { native_index });
+    }
+    Ok(AlignedTokens { tokens })
+}
 
-    tokens
+/// A complete one-to-one realignment, admitted only by [`align_tokens`].
+#[derive(Debug)]
+pub struct AlignedTokens {
+    tokens: Vec<PatchedToken>,
+}
+
+impl AlignedTokens {
+    /// Checked tokens, one per authoritative word in input order.
+    pub fn tokens(&self) -> &[PatchedToken] {
+        &self.tokens
+    }
+}
+
+/// Native tokenization could not establish the authoritative word binding.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TokenAlignmentError {
+    /// The typed input contained an empty word.
+    #[error("token realignment: authoritative word {word_index} is empty")]
+    EmptyWord {
+        /// Zero-based authoritative word position.
+        word_index: usize,
+    },
+    /// The native token sequence contained an empty token.
+    #[error("token realignment: native token {native_index} is empty")]
+    EmptyToken {
+        /// Zero-based native token position.
+        native_index: usize,
+    },
+    /// The native sequence ended before its word was complete.
+    #[error("token realignment: missing native content for word {word_index}")]
+    MissingToken {
+        /// Zero-based authoritative word position.
+        word_index: usize,
+    },
+    /// Native spelling differed or a token crossed an authoritative boundary.
+    #[error("token realignment: native token {native_index} does not fit word {word_index}")]
+    WordBoundaryMismatch {
+        /// Zero-based authoritative word position.
+        word_index: usize,
+        /// Zero-based native token position.
+        native_index: usize,
+    },
+    /// Native content remained after every word was bound.
+    #[error("token realignment: extra native content at token {native_index}")]
+    ExtraTokens {
+        /// First unbound native token position.
+        native_index: usize,
+    },
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -203,6 +240,10 @@ pub fn align_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn aligned(words: &[String], native: &[String], lang: &str) -> Vec<PatchedToken> {
+        align_tokens(words, native, lang).unwrap().tokens().to_vec()
+    }
 
     // ── is_contraction ────────────────────────────────────────────────
 
@@ -234,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_empty_inputs() {
-        let result = align_tokens(&[], &[], "en");
+        let result = aligned(&[], &[], "en");
         assert!(result.is_empty());
     }
 
@@ -242,7 +283,7 @@ mod tests {
     fn test_one_to_one_mapping() {
         let words = vec!["hello".into(), "world".into()];
         let tokens = vec!["hello".into(), "world".into()];
-        let result = align_tokens(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, "en");
         assert_eq!(
             result,
             vec![
@@ -257,7 +298,7 @@ mod tests {
         // Stanza splits "ice-cream" into ["ice", "-", "cream"]
         let words = vec!["ice-cream".into()];
         let tokens = vec!["ice".into(), "-".into(), "cream".into()];
-        let result = align_tokens(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, "en");
         assert_eq!(result, vec![PatchedToken::Hint("ice-cream".into(), false)]);
     }
 
@@ -266,25 +307,63 @@ mod tests {
         // Stanza splits "don't" into ["do", "n't"]
         let words = vec!["don't".into()];
         let tokens = vec!["do".into(), "n't".into()];
-        let result = align_tokens(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, "en");
         assert_eq!(result, vec![PatchedToken::Hint("don't".into(), true)]);
     }
 
     #[test]
-    fn test_character_mismatch_passthrough() {
-        let words = vec!["hello".into()];
-        let tokens = vec!["goodbye".into()];
-        let result = align_tokens(&words, &tokens, "en");
-        assert_eq!(result, vec![PatchedToken::Plain("goodbye".into())]);
+    fn french_native_elision_keeps_components_and_word_identity() {
+        let words = vec!["l'escargot".into(), "dort".into()];
+        let native = vec!["l'".into(), "escargot".into(), "dort".into()];
+        let result = aligned(&words, &native, "fr");
+        let PatchedToken::FrenchElision(group) = &result[0] else {
+            panic!("native French components must survive realignment");
+        };
+        assert_eq!(group.surface(), "l'escargot");
+        assert_eq!(group.components(), &["l'", "escargot"]);
+        assert_eq!(result[1], PatchedToken::Plain("dort".into()));
+        assert_eq!(
+            result.iter().map(PatchedToken::text).collect::<Vec<_>>(),
+            words
+        );
     }
 
     #[test]
-    fn test_shortening_parens_stripped() {
-        // CHAT shortening: "(be)cause" → characters "because"
+    fn french_elision_admission_refuses_unrelated_or_empty_components() {
+        for (surface, components) in [
+            ("l'escargot", vec!["l'", "chat"]),
+            ("l'", vec!["l'", ""]),
+            ("ice-cream", vec!["ice", "-cream"]),
+            ("l'escargot", vec!["l'escargot"]),
+            ("l' escargot", vec!["l'", " escargot"]),
+        ] {
+            assert!(
+                FrenchElision::admit(surface, components.into_iter().map(str::to_owned).collect())
+                    .is_none()
+            );
+        }
+        assert!(FrenchElision::admit("l’escargot", vec!["l’".into(), "escargot".into()]).is_some());
+    }
+
+    #[test]
+    fn character_mismatch_refuses_unbound_tokens() {
+        let words = vec!["hello".into()];
+        let tokens = vec!["goodbye".into()];
+        assert!(matches!(
+            align_tokens(&words, &tokens, "en"),
+            Err(TokenAlignmentError::WordBoundaryMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn raw_shortening_notation_is_not_reparsed_by_the_realigner() {
         let words = vec!["(be)cause".into()];
         let tokens = vec!["because".into()];
-        let result = align_tokens(&words, &tokens, "en");
-        assert_eq!(result, vec![PatchedToken::Plain("because".into())]);
+        assert!(align_tokens(&words, &tokens, "en").is_err());
+        assert_eq!(
+            aligned(&["because".into()], &tokens, "en"),
+            vec![PatchedToken::Plain("because".into())]
+        );
     }
 
     // ── align_tokens: cross-language passthrough (no per-language rules) ──
@@ -293,13 +372,36 @@ mod tests {
     fn test_english_passthrough_no_patches() {
         let words = vec!["the".into(), "dog".into()];
         let tokens = vec!["the".into(), "dog".into()];
-        let result = align_tokens(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, "en");
         assert_eq!(
             result,
             vec![
                 PatchedToken::Plain("the".into()),
                 PatchedToken::Plain("dog".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn native_tokens_cannot_cross_authoritative_word_boundaries() {
+        assert!(align_tokens(&["foo".into(), "bar".into()], &["foobar".into()], "en").is_err());
+        assert!(align_tokens(&["foo".into()], &["foo".into(), "bar".into()], "en").is_err());
+        assert!(align_tokens(&["foo".into()], &[], "en").is_err());
+        assert!(align_tokens(&[], &["foo".into()], "en").is_err());
+        assert!(align_tokens(&["".into()], &[], "en").is_err());
+        assert!(align_tokens(&["foo".into()], &["".into(), "foo".into()], "en").is_err());
+    }
+
+    #[test]
+    fn unicode_native_components_tile_words_without_character_maps() {
+        let result = aligned(
+            &["école".into(), "中文".into()],
+            &["é".into(), "cole".into(), "中文".into()],
+            "fr",
+        );
+        assert_eq!(
+            result.iter().map(PatchedToken::text).collect::<Vec<_>>(),
+            ["école", "中文"]
         );
     }
 }

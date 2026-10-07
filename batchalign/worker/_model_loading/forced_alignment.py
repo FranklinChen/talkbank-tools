@@ -40,10 +40,10 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         _state.qwen_fa_host = load_qwen_fa(lang, device_policy=bootstrap.device_policy)
         _state.fa_model_name = QWEN_FORCED_ALIGNER_MODEL_ID
     elif backend is FaEngine.WHISPER:
-        from batchalign.inference.fa import load_whisper_fa
+        from batchalign.inference.fa import WHISPER_FA_ENGINE_ID, load_whisper_fa
 
         _state.whisper_fa_model = load_whisper_fa(device_policy=bootstrap.device_policy)
-        _state.fa_model_name = "whisper-fa-large-v2"
+        _state.fa_model_name = WHISPER_FA_ENGINE_ID
     elif backend is FaEngine.WAVE2VEC:
         import importlib.metadata as importlib_metadata
 

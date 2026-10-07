@@ -6,6 +6,8 @@ use super::identity::AppliedAnalyses;
 use super::worker::infer_batch;
 use crate::chat_ops::morphosyntax_ops::l2;
 use crate::chat_ops::{ChatFile, LanguageCode};
+use crate::error::ServerError;
+use crate::infer_retry::Cancellation;
 use crate::pipeline::PipelineServices;
 
 fn secondary_dispatch_supported(
@@ -36,12 +38,33 @@ fn secondary_dispatch_supported(
 /// Returns what the secondary workers reported about the analysis merged in,
 /// so a caller that stamps provenance names those models beside the
 /// primary-language ones and counts their repairs with the rest.
+/// Cancellation is not a successful placeholder fallback: it aborts this
+/// transition, so callers cannot post-validate or write a stopped analysis.
 pub(crate) async fn dispatch_secondary_l2(
     chat_file: &mut ChatFile,
     deferred: Vec<l2::L2DeferredPosition>,
     services: PipelineServices<'_>,
     filename: &str,
-) -> AppliedAnalyses {
+    cancellation: Cancellation<'_>,
+) -> Result<AppliedAnalyses, ServerError> {
+    cancellation
+        .supervise(Box::pin(dispatch_secondary_l2_active(
+            chat_file,
+            deferred,
+            services,
+            filename,
+            cancellation,
+        )))
+        .await?
+}
+
+async fn dispatch_secondary_l2_active(
+    chat_file: &mut ChatFile,
+    deferred: Vec<l2::L2DeferredPosition>,
+    services: PipelineServices<'_>,
+    filename: &str,
+    cancellation: Cancellation<'_>,
+) -> Result<AppliedAnalyses, ServerError> {
     use crate::chat_ops::morphosyntax_ops::{BatchWord, MorphosyntaxBatchItem};
 
     let deferred_words = deferred.len();
@@ -124,13 +147,7 @@ pub(crate) async fn dispatch_secondary_l2(
             &empty_mwt,
             true,
             None,
-            // Secondary L2 dispatch has no job or `MorphosyntaxParams` in
-            // scope here (see the module doc: this splices @s-word results
-            // back into an already-parsed `ChatFile`, several layers below
-            // any job-carrying caller); genuinely NotWired.
-            crate::infer_retry::Cancellation::NotWired {
-                reason: "secondary L2 dispatch has no job or params in scope",
-            },
+            cancellation,
         )
         .await
         {
@@ -148,7 +165,7 @@ pub(crate) async fn dispatch_secondary_l2(
                 for (span, admitted) in lang_spans.into_iter().zip(responses.iter()) {
                     let line_idx = span.line_idx();
                     let words = span.len();
-                    let Some(sentence) = admitted.response().sentences.first() else {
+                    let Some(sentence) = admitted.response().sentence() else {
                         tracing::warn!(
                             lang = %lang3,
                             line_idx,
@@ -181,6 +198,7 @@ pub(crate) async fn dispatch_secondary_l2(
                     "L2 morphotag: secondary dispatch succeeded"
                 );
             }
+            Err(ServerError::Cancelled) => return Err(ServerError::Cancelled),
             Err(e) => {
                 tracing::warn!(
                     lang = %lang3,
@@ -202,7 +220,7 @@ pub(crate) async fn dispatch_secondary_l2(
         gra_upgraded = outcome.gra_upgraded,
         "L2 morphotag: splice complete"
     );
-    applied
+    Ok(applied)
 }
 
 #[cfg(test)]
@@ -212,7 +230,73 @@ mod tests {
     use crate::stanza_registry::StanzaRegistry;
     use crate::types::worker::StanzaLanguageProcessors;
 
-    use super::secondary_dispatch_supported;
+    use super::{dispatch_secondary_l2, secondary_dispatch_supported};
+
+    #[tokio::test]
+    async fn cancelled_secondary_transition_cannot_admit_applied_analysis() {
+        use crate::cache::UtteranceCache;
+        use crate::infer_retry::Cancellation;
+        use crate::pipeline::PipelineServices;
+        use crate::worker::pool::{PoolConfig, WorkerPool};
+
+        let input = include_str!("../../../../test-fixtures/eng_spa_at_s_contiguous.cha");
+        let (mut chat, _) =
+            batchalign_transform::parse::parse_lenient(&crate::chat_parser(), input);
+        let before = batchalign_transform::serialize::to_chat_string(&chat);
+        let scratch = tempfile::tempdir().expect("test cache directory");
+        let cache = UtteranceCache::sqlite(Some(scratch.path().join("cache")))
+            .await
+            .expect("test cache");
+        let pool = WorkerPool::new(PoolConfig::default());
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let result = dispatch_secondary_l2(
+            &mut chat,
+            Vec::new(),
+            PipelineServices::new(&pool, &cache),
+            "test.cha",
+            Cancellation::Token(&token),
+        )
+        .await;
+        assert!(matches!(result, Err(crate::error::ServerError::Cancelled)));
+        assert_eq!(
+            batchalign_transform::serialize::to_chat_string(&chat),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn secondary_transition_with_no_work_and_no_job_remains_successful() {
+        use crate::cache::UtteranceCache;
+        use crate::infer_retry::Cancellation;
+        use crate::pipeline::PipelineServices;
+        use crate::worker::pool::{PoolConfig, WorkerPool};
+
+        let input = include_str!("../../../../test-fixtures/eng_spa_at_s_contiguous.cha");
+        let (mut chat, _) =
+            batchalign_transform::parse::parse_lenient(&crate::chat_parser(), input);
+        let before = batchalign_transform::serialize::to_chat_string(&chat);
+        let scratch = tempfile::tempdir().expect("test cache directory");
+        let cache = UtteranceCache::sqlite(Some(scratch.path().join("cache")))
+            .await
+            .expect("test cache");
+        let pool = WorkerPool::new(PoolConfig::default());
+        let result = dispatch_secondary_l2(
+            &mut chat,
+            Vec::new(),
+            PipelineServices::new(&pool, &cache),
+            "test.cha",
+            Cancellation::NotWired {
+                reason: "offline test has no job",
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(
+            batchalign_transform::serialize::to_chat_string(&chat),
+            before
+        );
+    }
 
     fn registry_with_caps() -> StanzaRegistry {
         let mut caps = BTreeMap::new();

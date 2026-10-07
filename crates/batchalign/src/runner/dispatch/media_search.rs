@@ -463,8 +463,8 @@ pub(crate) async fn resolve_transcript_media(
     host: &DispatchHostContext,
     filename: &str,
     read_path: &Path,
-    chat_text: &str,
-    media_dir: Option<&str>,
+    declared_media: impl FnOnce() -> crate::media::DeclaredMedia,
+    media_dir: Option<&crate::options::AbsoluteMediaRoot>,
 ) -> Result<PathBuf, UnresolvedMedia> {
     let media_mapping = job.filesystem.media_mapping.clone();
     let media_subdir = job.filesystem.media_subdir.clone();
@@ -491,7 +491,7 @@ pub(crate) async fn resolve_transcript_media(
         .to_string_lossy()
         .to_string();
     let mapped_subdir = media_search_subdir(filename, media_subdir.as_str());
-    let media_dir_path = media_dir.map(Path::new);
+    let media_dir_path = media_dir.map(crate::options::AbsoluteMediaRoot::as_path);
 
     // Every rung goes through `search.try_place`, which records the place and
     // then looks. There is no separate push to forget, which is what went
@@ -656,7 +656,7 @@ pub(crate) async fn resolve_transcript_media(
             // made a branch here print "nowhere" for a file that had just been
             // searched under nine extensions alongside its own transcript.
             let places = search.describe();
-            let err_msg = match crate::media::DeclaredMedia::read(chat_text) {
+            let err_msg = match declared_media() {
                 crate::media::DeclaredMedia::Absent { as_written } => format!(
                     "{filename} declares its own media absent (@Media status \
                      '{as_written}') and none was found. This is a fact about the \

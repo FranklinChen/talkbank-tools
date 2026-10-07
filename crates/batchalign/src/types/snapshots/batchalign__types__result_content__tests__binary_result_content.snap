@@ -1,0 +1,8 @@
+---
+source: crates/batchalign/src/types/result_content.rs
+expression: wire
+---
+{
+  "byte_len": 4,
+  "digest": "187bd8971ece62826787ed94ab63696c9224d949d24ca973a51b9c73af50b95d"
+}

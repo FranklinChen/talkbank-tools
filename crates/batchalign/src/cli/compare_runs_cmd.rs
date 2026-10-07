@@ -21,18 +21,15 @@ use super::error::CliError;
 
 /// The report envelope's shape, including the serialized rows it carries.
 ///
-/// Bumped to 2 on 2026-09-16: an alignment row's `left_timing` / `right_timing`
-/// changed from a nullable timing object to a tagged timing STATE that names
-/// why an untimed token has no timing.
-const REPORT_SCHEMA: u32 = 2;
+/// Version 3 adds annotation presence and nullable complete-analysis agreement.
+const REPORT_SCHEMA: u32 = 3;
 /// What the comparison COMPUTED, which is part of a comparison's identity.
 ///
-/// Bumped alongside the schema above, and this is the load-bearing half. Pair
-/// results are cached under a `comparison_id` derived from this constant, so
-/// leaving it at 1 would serve rows in the old shape out of an earlier run's
-/// cache, and the columns added beside them would read as empty cells rather
-/// than as a mismatch. A cache hit is not a correctness certificate.
-const ALGORITHM_VERSION: u32 = 2;
+/// Version 3 admits fully valid retained CHAT and compares every word/clitic
+/// chunk, with utterance-local heads independent of mapped speaker spelling.
+/// Version 4 requires complete, source-bound speaker correspondence for token modes.
+/// Older comparison caches cannot establish these facts and are not reused.
+const ALGORITHM_VERSION: u32 = 4;
 
 pub(super) fn run(args: &CompareRunsArgs) -> Result<(), CliError> {
     match &args.action {
@@ -408,6 +405,9 @@ fn atomic_csv(path: &Path, records: &[Value], subject: &str) -> Result<(), CliEr
                     "token",
                     "left_text",
                     "right_text",
+                    "left_annotation_state",
+                    "right_annotation_state",
+                    "analysis_agreement",
                     "tokenization",
                     "lemma",
                     "pos",
@@ -435,6 +435,12 @@ fn atomic_csv(path: &Path, records: &[Value], subject: &str) -> Result<(), CliEr
                             num(row, "token"),
                             text(row, "left_text"),
                             text(row, "right_text"),
+                            text(row, "left_annotation"),
+                            text(row, "right_annotation"),
+                            row.get("analysis_agreement")
+                                .and_then(Value::as_bool)
+                                .map(|value| value.to_string())
+                                .unwrap_or_default(),
                             differs(row, "tokenization"),
                             differs(row, "lemma"),
                             differs(row, "pos"),

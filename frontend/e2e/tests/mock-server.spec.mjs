@@ -218,6 +218,28 @@ async function startHarness() {
       }),
     ],
     [
+      "diagjob",
+      // A transcription whose second file was written with admission
+      // diagnostics: the job completed, the file is neither done nor failed.
+      makeJob("diagjob", "completed", {
+        submittedAt: "2026-02-25T00:07:00Z",
+        fileStatuses: [
+          makeFileStatus("clean.cha", "done"),
+          makeFileStatus("noisy.cha", "diagnosed", {
+            started_at: "2026-02-25T00:00:01.000Z",
+            finished_at: "2026-02-25T00:00:02.000Z",
+            diagnostics: {
+              findings: [
+                "E220 a digit inside a word",
+                "E241 a reserved marker in the wrong case",
+              ],
+              skipped_stages: ["skipped morphosyntax: it requires an admitted document"],
+            },
+          }),
+        ],
+      }),
+    ],
+    [
       "failjob",
       makeJob("failjob", "failed", {
         submittedAt: "2026-02-25T00:08:00Z",
@@ -553,6 +575,23 @@ test("dashboard list/detail/actions work against the mock harness", async ({ pag
 
     const deleted = await request.get(`${harness.baseUrl}/jobs/donejob`);
     expect(deleted.status()).toBe(404);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a file written with diagnostics renders as written output, not as an error", async ({ page }) => {
+  const harness = await startHarness();
+  try {
+    await page.goto(`${harness.baseUrl}/dashboard/jobs/diagjob`, {
+      waitUntil: "domcontentloaded",
+    });
+    await expect(page.getByText("noisy.cha")).toBeVisible();
+    await expect(
+      page.getByText("written, 2 diagnostics, 1 stage skipped").first(),
+    ).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Diagnosed/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Errors/ })).toBeDisabled();
   } finally {
     await harness.close();
   }

@@ -10,11 +10,13 @@
 //!
 //! # Supporting a task is not knowing its engine
 //!
-//! A command is available when the worker advertises the command's primary
-//! infer task. That alone decides advertisement and job acceptance, from any
+//! An inference command is available when the worker advertises the catalog's
+//! admitted infer task. That decides advertisement and job acceptance, from any
 //! admitted report, including one a lazily loading worker gave before it
 //! loaded anything, so advertisement never withholds a command merely because
-//! a model has not been loaded yet.
+//! a model has not been loaded yet. Native media requirements do not consult
+//! model reports and cannot produce an inference requirement; their tools and
+//! artifacts are admitted by the native operation.
 //!
 //! Knowing which engine runs a task is a separate fact, read later. Only forced
 //! alignment needs it before dispatch (its cache rows are namespaced by the FA
@@ -48,11 +50,17 @@ pub(crate) fn command_supported(
     plan: &CapabilityPlan,
     reports: &WorkerEngineReports,
 ) -> Result<(), EngineIdentityUnavailable> {
-    if reports.supports(plan.primary_infer_task) {
+    let requirement = match plan.require_inference() {
+        Ok(requirement) => requirement,
+        // Native execution is independent of a worker's model report. Tool
+        // admission and encoding are owned by the native operation itself.
+        Err(_) => return Ok(()),
+    };
+    if reports.supports(requirement.task()) {
         Ok(())
     } else {
         Err(EngineIdentityUnavailable::NotSupported {
-            task: plan.primary_infer_task,
+            task: requirement.task(),
         })
     }
 }
@@ -61,13 +69,15 @@ pub(crate) fn command_supported(
 fn derive_command_capabilities(reports: &WorkerEngineReports) -> Vec<ReleasedCommand> {
     let mut derived = Vec::new();
 
-    // Two passes, so server-composed commands are advertised after the
+    // Inference passes precede native media, preserving the existing order.
+    // Server-composed commands are advertised after the
     // commands they are composed from. Within a pass the order is the catalog's
     // declaration order, which is itself the advertised order (see
     // `recipe_runner::catalog::COMMAND_SPECS`).
     for kind in [
         CommandCapabilityKind::DirectInfer,
         CommandCapabilityKind::ServerComposed,
+        CommandCapabilityKind::NativeMedia,
     ] {
         for spec in command_specs()
             .iter()
@@ -115,7 +125,10 @@ impl WorkerCapabilitySnapshot {
         commands.dedup();
         let infer_tasks = command_specs()
             .iter()
-            .map(|spec| spec.capabilities.primary_infer_task)
+            .filter_map(|spec| match spec.capabilities {
+                CapabilityPlan::Inference(requirement) => Some(requirement.task()),
+                CapabilityPlan::NativeMedia(_) => None,
+            })
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -210,12 +223,48 @@ mod tests {
     }
 
     #[test]
-    fn no_infer_tasks_derive_no_commands() {
-        assert!(
-            WorkerCapabilitySnapshot::detected(&reports(&[]))
-                .commands()
-                .is_empty()
+    fn no_infer_tasks_advertise_only_native_media() {
+        let snapshot = WorkerCapabilitySnapshot::detected(&reports(&[]));
+        assert_eq!(snapshot.commands(), &[ReleasedCommand::Convert]);
+        assert!(snapshot.infer_tasks().is_empty());
+    }
+
+    #[test]
+    fn native_media_has_no_inference_requirement_and_needs_no_worker_report() {
+        use crate::recipe_runner::command_spec::{CapabilityPlan, NativeMediaCapability};
+        let plan = CapabilityPlan::NativeMedia(NativeMediaCapability::AudioExport);
+        assert_eq!(
+            plan.require_inference(),
+            Err(NativeMediaCapability::AudioExport)
         );
+        assert_eq!(command_supported(&plan, &reports(&[])), Ok(()));
+    }
+
+    #[test]
+    fn released_inference_admission_preserves_task_and_worker_support() {
+        for spec in crate::command_model::command_specs() {
+            let requirement = match spec.capabilities.require_inference() {
+                Ok(requirement) => requirement,
+                Err(native) => {
+                    assert_eq!(spec.command, ReleasedCommand::Convert);
+                    assert_eq!(
+                        native,
+                        crate::recipe_runner::command_spec::NativeMediaCapability::AudioExport
+                    );
+                    assert_eq!(command_supported(&spec.capabilities, &reports(&[])), Ok(()));
+                    continue;
+                }
+            };
+            let task = requirement.task();
+            assert_eq!(
+                command_supported(&spec.capabilities, &reports(&[])),
+                Err(EngineIdentityUnavailable::NotSupported { task })
+            );
+            assert_eq!(
+                command_supported(&spec.capabilities, &reports(&[(task, None)])),
+                Ok(())
+            );
+        }
     }
 
     #[test]
@@ -240,6 +289,7 @@ mod tests {
                 "compare",
                 "opensmile",
                 "avqi",
+                "convert",
             ]
         );
     }
@@ -298,7 +348,7 @@ mod tests {
         let snapshot = WorkerCapabilitySnapshot::detected(&reports(&[(InferTask::Asr, None)]));
         assert_eq!(
             commands(&snapshot),
-            vec!["transcribe", "transcribe_s", "benchmark"]
+            vec!["transcribe", "transcribe_s", "benchmark", "convert"]
         );
     }
 
@@ -326,14 +376,17 @@ mod tests {
     fn a_detected_report_replaces_the_assumed_view_even_when_empty() {
         let detected = reports(&[(InferTask::Morphosyntax, None), (InferTask::Utseg, None)]);
         let snapshot = WorkerCapabilitySnapshot::resolve(false, Some(&detected));
-        assert_eq!(commands(&snapshot), vec!["morphotag", "utseg", "compare"]);
+        assert_eq!(
+            commands(&snapshot),
+            vec!["morphotag", "utseg", "compare", "convert"]
+        );
         assert_eq!(
             snapshot.infer_tasks(),
             &[InferTask::Morphosyntax, InferTask::Utseg]
         );
 
         let empty = WorkerCapabilitySnapshot::resolve(false, Some(&reports(&[])));
-        assert!(empty.commands().is_empty());
+        assert_eq!(empty.commands(), &[ReleasedCommand::Convert]);
         assert!(empty.infer_tasks().is_empty());
     }
 }

@@ -20,6 +20,7 @@ use crate::api::{StampJoiner, StampSafeText};
 use crate::chat_ops::nlp::UdResponse;
 use crate::provenance::EngineNames;
 use crate::types::worker_v2::{MorphosyntaxModelIdentityV2, UdRelationRepairV2};
+use batchalign_transform::morphosyntax::{AdmittedUdResponse, UnexpectedSentenceCount};
 
 /// Where one admitted response came from.
 ///
@@ -44,18 +45,14 @@ pub(super) enum MorphosyntaxResponseSource {
     },
     /// The worker had no words to analyze for this item, so no model ran.
     NoWordsToAnalyze,
-    /// No model ran: the item's language has no Stanza morphosyntax support,
-    /// so the server filled an empty response that leaves the `L2|xxx`
-    /// placeholder in place.
-    UnsupportedLanguagePlaceholder,
 }
 
 /// One morphosyntax response admitted at the worker boundary, paired with
 /// where it came from. Constructed only by the dispatch code that receives the
-/// worker result, and by the unsupported-language fill.
+/// worker result. Unsupported primary work cannot mint a response.
 #[derive(Debug, Clone)]
 pub(crate) struct AdmittedMorphosyntaxResponse {
-    response: UdResponse,
+    response: AdmittedUdResponse,
     source: MorphosyntaxResponseSource,
 }
 
@@ -67,35 +64,23 @@ impl AdmittedMorphosyntaxResponse {
         response: UdResponse,
         model: MorphosyntaxModelIdentityV2,
         repairs: Vec<UdRelationRepairV2>,
-    ) -> Self {
-        Self {
-            response,
+    ) -> Result<Self, UnexpectedSentenceCount> {
+        Ok(Self {
+            response: AdmittedUdResponse::try_from(response)?,
             source: MorphosyntaxResponseSource::Worker { model, repairs },
-        }
+        })
     }
 
     /// The empty response for an item the worker had no words to analyze.
     pub(super) fn no_words() -> Self {
         Self {
-            response: UdResponse {
-                sentences: Vec::new(),
-            },
+            response: AdmittedUdResponse::empty(),
             source: MorphosyntaxResponseSource::NoWordsToAnalyze,
         }
     }
 
-    /// The empty response filled for an item in an unsupported language.
-    pub(super) fn unsupported_language_placeholder() -> Self {
-        Self {
-            response: UdResponse {
-                sentences: Vec::new(),
-            },
-            source: MorphosyntaxResponseSource::UnsupportedLanguagePlaceholder,
-        }
-    }
-
     /// The UD analysis.
-    pub(crate) fn response(&self) -> &UdResponse {
+    pub(crate) fn response(&self) -> &AdmittedUdResponse {
         &self.response
     }
 
@@ -120,26 +105,24 @@ impl AdmittedMorphosyntaxResponse {
         lang: &str,
         repairs: Vec<UdRelationRepairV2>,
     ) -> Self {
-        Self {
+        Self::from_worker(
             response,
-            source: MorphosyntaxResponseSource::Worker {
-                model: MorphosyntaxModelIdentityV2 {
-                    stanza_version: crate::api::ReportedEngineName::try_from(stanza_version)
-                        .expect("test Stanza version is a valid engine name"),
-                    lang: crate::api::LanguageCode3::try_new(lang)
-                        .expect("test language is ISO 639-3"),
-                    pipeline: crate::types::worker_v2::MorphosyntaxPipelineV2::Standard,
-                },
-                repairs,
+            MorphosyntaxModelIdentityV2 {
+                stanza_version: crate::api::ReportedEngineName::try_from(stanza_version)
+                    .expect("test Stanza version is a valid engine name"),
+                lang: crate::api::LanguageCode3::try_new(lang).expect("test language is ISO 639-3"),
+                pipeline: crate::types::worker_v2::MorphosyntaxPipelineV2::Standard,
             },
-        }
+            repairs,
+        )
+        .expect("worker test double must obey per-payload sentence cardinality")
     }
 }
 
 /// Every distinct Stanza model behind the responses one run applied.
 ///
-/// Empty when no model analyzed anything (no items, wordless items, or only
-/// unsupported-language placeholders), in which case provenance names no
+/// Empty when no model analyzed anything (no items or wordless items), in
+/// which case provenance names no
 /// engine rather than inventing one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct MorphosyntaxEngines(BTreeSet<MorphosyntaxModelIdentityV2>);
@@ -233,7 +216,7 @@ impl AppliedAnalyses {
     /// common path clones nothing.
     pub(crate) fn take_applied(
         responses: Vec<AdmittedMorphosyntaxResponse>,
-    ) -> (Vec<UdResponse>, Self) {
+    ) -> (Vec<AdmittedUdResponse>, Self) {
         let mut applied = Self::none();
         let responses = responses
             .into_iter()
@@ -243,8 +226,7 @@ impl AppliedAnalyses {
                         applied.engines.0.insert(model);
                         applied.repairs.0.extend(repairs);
                     }
-                    MorphosyntaxResponseSource::NoWordsToAnalyze
-                    | MorphosyntaxResponseSource::UnsupportedLanguagePlaceholder => {}
+                    MorphosyntaxResponseSource::NoWordsToAnalyze => {}
                 }
                 admitted.response
             })
@@ -266,8 +248,7 @@ impl AppliedAnalyses {
                 }
                 self.repairs.0.extend(repairs.iter().cloned());
             }
-            MorphosyntaxResponseSource::NoWordsToAnalyze
-            | MorphosyntaxResponseSource::UnsupportedLanguagePlaceholder => {}
+            MorphosyntaxResponseSource::NoWordsToAnalyze => {}
         }
     }
 
@@ -329,16 +310,50 @@ mod tests {
     }
 
     #[test]
+    fn worker_response_admission_refuses_multiple_sentences_before_identity_can_be_applied() {
+        let model = MorphosyntaxModelIdentityV2 {
+            stanza_version: crate::api::ReportedEngineName::try_from("test").expect("version"),
+            lang: crate::api::LanguageCode3::try_new("eng").expect("language"),
+            pipeline: MorphosyntaxPipelineV2::Standard,
+        };
+        let one: UdResponse =
+            serde_json::from_str(r#"{"sentences":[{"words":[]}]}"#).expect("wire double");
+        for count in [0, 1, 2, 3] {
+            let raw = UdResponse {
+                sentences: (0..count).map(|_| one.sentences[0].clone()).collect(),
+            };
+            let result = AdmittedMorphosyntaxResponse::from_worker(raw, model.clone(), Vec::new());
+            if count > 1 {
+                assert_eq!(
+                    result
+                        .expect_err("no admitted primary or secondary response")
+                        .actual,
+                    count
+                );
+            } else {
+                let admitted = result.expect("empty or single analysis");
+                assert_eq!(admitted.response().sentence().is_some(), count == 1);
+                let (responses, applied) = AppliedAnalyses::take_applied(vec![admitted]);
+                assert_eq!(responses.len(), 1);
+                assert_eq!(responses[0].sentence().is_some(), count == 1);
+                assert_eq!(
+                    joined(&applied).as_deref(),
+                    Some("stanza-test:eng:standard")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn engines_name_distinct_worker_models_and_skip_items_no_model_ran_for() {
         let applied = vec![
             AdmittedMorphosyntaxResponse::for_test(empty(), "1.11.1", "eng"),
-            AdmittedMorphosyntaxResponse::unsupported_language_placeholder(),
             AdmittedMorphosyntaxResponse::no_words(),
             AdmittedMorphosyntaxResponse::for_test(empty(), "1.11.1", "eng"),
             AdmittedMorphosyntaxResponse::for_test(empty(), "1.11.1", "deu"),
         ];
         let (responses, applied) = AppliedAnalyses::take_applied(applied);
-        assert_eq!(responses.len(), 5);
+        assert_eq!(responses.len(), 4);
         assert_eq!(
             joined(&applied).as_deref(),
             Some("stanza-1.11.1:deu:standard+stanza-1.11.1:eng:standard")
@@ -374,10 +389,8 @@ mod tests {
 
     #[test]
     fn no_analysis_names_no_engine_and_repairs_nothing() {
-        let (_, applied) = AppliedAnalyses::take_applied(vec![
-            AdmittedMorphosyntaxResponse::unsupported_language_placeholder(),
-            AdmittedMorphosyntaxResponse::no_words(),
-        ]);
+        let (_, applied) =
+            AppliedAnalyses::take_applied(vec![AdmittedMorphosyntaxResponse::no_words()]);
         assert!(applied.ran_no_model());
         assert_eq!(applied.repair_count(), None);
         assert!(AppliedAnalyses::none().ran_no_model());
@@ -428,10 +441,6 @@ mod tests {
         assert_eq!(
             AdmittedMorphosyntaxResponse::no_words().source(),
             &MorphosyntaxResponseSource::NoWordsToAnalyze
-        );
-        assert_eq!(
-            AdmittedMorphosyntaxResponse::unsupported_language_placeholder().source(),
-            &MorphosyntaxResponseSource::UnsupportedLanguagePlaceholder
         );
     }
 }

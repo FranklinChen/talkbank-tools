@@ -1,7 +1,7 @@
 # speaker-identify
 
 **Status:** Current
-**Last updated:** 2026-09-09 13:24 EDT
+**Last updated:** 2026-10-05 07:39 EDT
 
 Score each timed utterance of a CHAT transcript against one or more voices you
 enroll from the recording itself, and write the scores and verdicts beside the
@@ -15,6 +15,43 @@ utterance is to each enrolled voice.
 **It does not modify the transcript.** The output is a JSON evidence file. What
 to do with a verdict, in particular whether to change a speaker code, is a
 decision about your corpus's own conventions, and it stays yours.
+
+---
+
+## Input admission
+
+The complete named transcript must pass Chatter validation before media
+resolution, conversion or embedding. Parseability alone is insufficient.
+Speaker identification retains all CHAT content and regenerates no dependent
+tier, so corrupt `%mor`, `%gra` or `%wor` content has no recovery exemption.
+Filename-dependent media declarations are checked against the input filename.
+Refused files produce no speaker evidence.
+
+The task owns Chatter's immutable admission proof. Attempts read that same typed
+document; they do not reparse it or manufacture validity from selected tiers.
+A valid utterance without a bullet remains an explicit `unscored` observation.
+Audio containment is a separate check against the actual recording: CHAT
+validation cannot establish that a syntactically valid bullet fits that audio.
+
+## Failure ownership
+
+An enrollment outside the recording or shorter than the model's minimum is an
+input refusal, not an acoustic verdict. Missing outcomes and malformed embedding
+responses are protocol failures. Model-manifest, prepared-audio, filesystem and
+producer failures do not claim that the submitted CHAT is invalid. These failed
+runs produce no evidence document.
+
+Worker dispatch retains the original typed failure through the embedding
+capability. The task boundary hands it back to the existing worker-error path:
+crashes, timeouts and transient worker responses retain its bounded retry policy;
+bootstrap and protocol failures do not become retryable. Memory-pressure failures
+retain their distinct scheduling category. No classifier guesses a category from
+diagnostic wording, and no speaker-specific retry loop is introduced.
+
+Rust API consumers should match the typed payloads of `EmbeddingInferenceFailure`
+and `SpeakerIdentityFailure`, not compare rendered strings. These error types no
+longer implement `Clone` or `PartialEq`: owned transport errors cannot truthfully
+promise those traits. Successful evidence schemas and acoustic policy are unchanged.
 
 ---
 

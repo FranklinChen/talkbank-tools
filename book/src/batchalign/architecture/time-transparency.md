@@ -1,7 +1,7 @@
 # Time Transparency: A Cross-Cutting UX Principle
 
 **Status:** Current
-**Last updated:** 2026-05-19 21:03 EDT
+**Last updated:** 2026-10-06 21:44 EDT
 
 ## Principle
 
@@ -88,7 +88,7 @@ will actually download. Wrap every `from_pretrained()` call.
 ### Rust side: progress forwarding to the file-status sink
 
 The runner spawns a `progress_forwarder` per request (see
-`crates/batchalign/src/runner/dispatch/audio_task.rs:spawn_progress_forwarder`).
+`crates/batchalign/src/runner/util/file_status/supervision.rs:spawn_observed_progress_forwarder`).
 It reads `progress_v2` lines from worker stdout and dispatches them to a
 `FileStatusEventSink` (see
 `crates/batchalign/src/runner/util/file_status/event_sink.rs`). The sink
@@ -108,7 +108,7 @@ duplicate event-shape logic in each UI; the sink is the single source.
 
 ```mermaid
 flowchart LR
-    worker["Worker (Python)<br/>_progress.emit_*"] -->|"progress_v2 JSON line"| runner["Runner (Rust)<br/>spawn_progress_forwarder"]
+    worker["Worker (Python)<br/>_progress.emit_*"] -->|"progress_v2 JSON line"| runner["Runner (Rust)<br/>spawn_observed_progress_forwarder"]
     runner -->|"FileStatusEvent"| sink["FileStatusEventSink<br/>(util/file_status/)"]
     sink --> cli["CLI / console reporter"]
     sink --> tui["TUI dashboard component"]
@@ -220,5 +220,5 @@ would also need a progress signal mid-load.
 - [User-facing model-downloads chapter](../user-guide/model-downloads.md).
 - [Developer-facing model-downloads chapter](../developer/model-downloads-and-caching.md).
 - Source: `batchalign/worker/_progress.py`, `batchalign/worker/_protocol.py`.
-- Rust forwarder: `crates/batchalign/src/runner/dispatch/audio_task.rs:spawn_progress_forwarder`.
+- Rust forwarder: `crates/batchalign/src/runner/util/file_status/supervision.rs:spawn_observed_progress_forwarder`.
 - Sink: `crates/batchalign/src/runner/util/file_status/event_sink.rs`.

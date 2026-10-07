@@ -24,7 +24,10 @@ pub enum JobStatus {
     /// A worker is actively processing the job's files.  Transitions to a
     /// terminal state when all files finish, or when the job is cancelled.
     Running,
-    /// All files were processed successfully.  Terminal.
+    /// Every file was processed and written, none failed: each is done
+    /// (clean) or diagnosed (written with diagnostics, not certified
+    /// complete; counted in `diagnosed_files`). A completed job with
+    /// diagnosed files is not a clean success.  Terminal.
     Completed,
     /// One or more files encountered an unrecoverable error.  Terminal, but
     /// can be restarted, only files that did not complete will be re-queued.
@@ -184,7 +187,7 @@ impl std::str::FromStr for JobStatus {
 ///
 /// Each file in a job tracks its own status independently.  On job restart,
 /// only files in resumable states (`Queued`, `Processing`, `Interrupted`) are
-/// re-queued; `Done` and `Error` files are left as-is.
+/// re-queued; `Done`, `Diagnosed` and `Error` files are left as-is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
@@ -195,6 +198,14 @@ pub enum FileStatusKind {
     Processing,
     /// File was processed successfully and its result is available.  Terminal.
     Done,
+    /// The command's own producer generated output that did not pass output
+    /// admission, and the output was written anyway together with every
+    /// diagnostic the admission found (see `FileStatusEntry.diagnostics`).
+    /// Terminal, not resumable, and not an error: the result is available,
+    /// and the job completes. Only generating producers (transcription) can
+    /// reach it; a command that transforms submitted CHAT is held to the
+    /// strict gate and fails instead.
+    Diagnosed,
     /// Processing failed for this file (see `FileStatusEntry.error`).  Terminal.
     Error,
     /// The job was interrupted (server shutdown/crash) while this file was
@@ -205,12 +216,28 @@ pub enum FileStatusKind {
 impl FileStatusKind {
     /// A terminal file will not be processed further.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Error)
+        match self {
+            Self::Done | Self::Diagnosed | Self::Error => true,
+            Self::Queued | Self::Processing | Self::Interrupted => false,
+        }
     }
 
     /// A resumable file can be reset to queued on job restart.
     pub fn is_resumable(self) -> bool {
-        matches!(self, Self::Interrupted | Self::Processing | Self::Queued)
+        match self {
+            Self::Interrupted | Self::Processing | Self::Queued => true,
+            Self::Done | Self::Diagnosed | Self::Error => false,
+        }
+    }
+
+    /// The file's output was written and is available as a result: a clean
+    /// success, or output written with diagnostics. Neither is retried,
+    /// neither is requeued by a restart, and neither counts as a failure.
+    pub fn wrote_output(self) -> bool {
+        match self {
+            Self::Done | Self::Diagnosed => true,
+            Self::Queued | Self::Processing | Self::Error | Self::Interrupted => false,
+        }
     }
 }
 
@@ -220,6 +247,7 @@ impl std::fmt::Display for FileStatusKind {
             Self::Queued => write!(f, "queued"),
             Self::Processing => write!(f, "processing"),
             Self::Done => write!(f, "done"),
+            Self::Diagnosed => write!(f, "diagnosed"),
             Self::Error => write!(f, "error"),
             Self::Interrupted => write!(f, "interrupted"),
         }
@@ -234,6 +262,7 @@ impl std::str::FromStr for FileStatusKind {
             "queued" => Ok(Self::Queued),
             "processing" => Ok(Self::Processing),
             "done" => Ok(Self::Done),
+            "diagnosed" => Ok(Self::Diagnosed),
             "error" => Ok(Self::Error),
             "interrupted" => Ok(Self::Interrupted),
             other => Err(format!("unknown FileStatusKind: {other}")),
@@ -303,6 +332,10 @@ pub enum FileProgressStage {
     Comparing,
     /// File is deferred for a retry after a retryable failure.
     RetryScheduled,
+    /// A request of the file is queued for a worker: the pool is saturated
+    /// (every slot busy, nothing idle to evict). Congestion, not failure; the
+    /// file keeps its place and resumes its previous stage when served.
+    WaitingForWorker,
 }
 
 impl FileProgressStage {
@@ -336,6 +369,7 @@ impl FileProgressStage {
             Self::ResolvingCoreference => "Resolving coreference",
             Self::Comparing => "Comparing",
             Self::RetryScheduled => "Retry scheduled",
+            Self::WaitingForWorker => "Waiting for a worker",
         }
     }
 }

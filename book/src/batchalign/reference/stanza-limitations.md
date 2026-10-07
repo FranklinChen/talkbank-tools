@@ -1,7 +1,7 @@
 # Stanza Limitations: Observed Defects with Version Pinning
 
 **Status:** Reference (living document, update when Stanza behavior changes)
-**Last updated:** 2026-10-01 07:10 EDT
+**Last updated:** 2026-10-02 21:26 EDT
 **Current Stanza pin:** `stanza[transformers]>=1.15.0,<1.16` (see `pyproject.toml`)
 **Current English MWT package:** `gum`
 
@@ -201,11 +201,11 @@ for these.
 
 ### BA3 mitigation (ACTIVE)
 
-**Grammatical-invariant rewrite on typed UD data.** The "main clauses
-require a finite verb" invariant is checked on each UdSentence before
-`map_ud_sentence` runs; when violated AND an MWT-bound `'s` tagged as
-PART/case is present AND exactly one NOUN-tagged `-ing` word exists,
-the rule rewrites the sentence into its coherent copula-progressive
+**Bounded rewrite on typed UD data.** Before mapping, a sentence with no
+finite verb is eligible only when an MWT-bound `'s` tagged as PART/case,
+its noun/proper-noun subject and one distinct eligible `-ing` predicate
+form the known misparse shape. Absence of a finite verb alone is not a
+reason to rewrite fragments or noun phrases. The rule produces a copula-progressive
 analysis (flipping `'s` to AUX/be/Fin, promoting the `-ing` word to
 root VERB/VerbForm=Part, reattaching subject and object dependencies).
 Handles two sub-patterns:
@@ -236,12 +236,20 @@ reading (`batchalign/inference/_english_verb_reading.py`) and sends it
 in UD MISC as `VerbReadingLemma=wash`. Without one the sentence is not
 rescued: a verb with a noun's lemma is a fabricated analysis.
 
+**Distinct rewrite roles.** An `-ing` noun such as `building` can itself
+be the subject/possessor. It must not also become the progressive predicate:
+that aliases two rewrite roles and creates self-dependent UD heads. Candidate
+admission requires distinct particle, subject and predicate IDs; completing the
+candidate additionally requires the verbal lemma. The mutation accepts only
+that completed role binding. A nominal `building's units` reading is left
+untouched, while an `-ing` subject does not hide a separate eligible predicate
+in `building's overflowing`.
+
 Implementation: `crates/batchalign-transform/src/morphosyntax/invariants/finite_verb_main_clause.rs::rescue_english_copula_progressive`.
 Dispatcher: `crates/batchalign-transform/src/morphosyntax/invariants.rs::apply_grammatical_invariants`.
-Hook point: `crates/batchalign-transform/src/morphosyntax/injection.rs:276`
-(`apply_grammatical_invariants(ud_sentence, &ctx)`; the subsequent
-`map_ud_sentence`/`map_ud_sentence_expanded` calls land at `:287` and
-`:289` respectively).
+Hook point: the owned utterance injection in
+`crates/batchalign-transform/src/morphosyntax/injection.rs`, before walking
+the transformed UD sentence for mapping and alignment.
 
 ### Tests
 
@@ -251,6 +259,8 @@ Hook point: `crates/batchalign-transform/src/morphosyntax/injection.rs:276`
 lady pattern B, which also checks the verb lemma `wash`) and the 1.15.0
 gerund shape; no-op tests for a gerund whose subject heads elsewhere, a noun
 with no verb reading, a copula before an adjective and existential `there`;
+distinct-role cases cover an `-ing` subject with and without a separate
+progressive predicate, including an acyclic alignment walk after the rewrite;
 and the `VerbLemma` and `-ing` predicates. The worker's verb-reading evidence
 is tested in `batchalign/tests/pipelines/morphosyntax/test_english_verb_reading.py`.
 
@@ -344,6 +354,22 @@ happened. The hint survives the realignment and reaches Stanza's MWT
 processor intact. Applies to every language for which the runtime
 capability table reports `has_mwt=True` (see Defect 5 for how MWT
 availability is decided per language).
+
+French native elision splits need a different representation. Merging
+`l'` and `escargot` to `(l'escargot, False)` preserves spelling but suppresses
+the article's analysis. The realigner now constructs a checked component
+group and sends Stanza its supported `(surface, component_list)` expansion.
+The native components must exactly reconstruct one authoritative word, with
+nonempty apostrophe-terminated prefixes. Stanza then tags those components;
+the existing UD range mapper writes them as clitics in one `%mor` item. This
+does not infer a French article or invent a lemma from apostrophe spelling.
+
+Realignment itself now returns a producer-admitted sequence or a typed failure.
+Native tokens must tile each cleaned input word exactly, without crossing its
+boundary or adding/omitting content. A sentence-count mismatch also refuses
+the worker result. The realigner does not parse raw CHAT shortening notation:
+cleaned text belongs to the typed CHAT projection. Exact ordered tiling replaces
+the former two per-character index arrays and silent mismatch pass-through.
 
 ### Tests
 

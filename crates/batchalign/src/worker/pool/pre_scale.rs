@@ -35,8 +35,15 @@ impl WorkerPool {
         lang: impl Into<WorkerLanguage>,
         target: usize,
     ) {
+        let Ok(requirement) = crate::command_model::command_spec(command)
+            .capabilities
+            .require_inference()
+        else {
+            // Native work shares job scheduling, not Python worker capacity.
+            return;
+        };
         let key = WorkerKey::without_engine_selection(
-            WorkerTarget::for_command_with_mode(command, self.config.runtime.bootstrap_mode),
+            WorkerTarget::for_inference_with_mode(requirement, self.config.runtime.bootstrap_mode),
             lang.into(),
         );
         self.pre_scale_key(command, key, target).await;
@@ -71,8 +78,14 @@ impl WorkerPool {
         target: usize,
         options: &CommandOptions,
     ) {
+        let Ok(requirement) = crate::command_model::command_spec(command)
+            .capabilities
+            .require_inference()
+        else {
+            return;
+        };
         let key = WorkerKey::from_command_options(
-            command,
+            requirement,
             lang.into(),
             options,
             self.config.runtime.bootstrap_mode,

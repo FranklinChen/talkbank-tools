@@ -43,6 +43,7 @@
   - [compare-runs](batchalign/user-guide/commands/compare-runs.md)
   - [benchmark](batchalign/user-guide/commands/benchmark.md)
   - [opensmile](batchalign/user-guide/commands/opensmile.md)
+  - [convert](batchalign/user-guide/commands/convert.md)
   - [avqi](batchalign/user-guide/commands/avqi.md)
   - [diarize](batchalign/user-guide/commands/diarize.md)
   - [speaker-identify](batchalign/user-guide/commands/speaker-identify.md)

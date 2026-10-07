@@ -118,7 +118,11 @@ async fn error_morphotag_empty_file() {
     if info.status == JobStatus::Completed {
         assert!(!results.is_empty());
         assert!(
-            results[0].content.contains("@End"),
+            results[0]
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("@End"),
             "Output should be valid CHAT (contains @End)"
         );
     }
@@ -168,7 +172,11 @@ async fn edge_morphotag_xxx_utterance() {
 
     if info.status == JobStatus::Completed {
         assert!(
-            results[0].content.contains("@End"),
+            results[0]
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("@End"),
             "Output should be valid CHAT"
         );
     }
@@ -218,7 +226,11 @@ async fn edge_morphotag_www_utterance() {
 
     if info.status == JobStatus::Completed {
         assert!(
-            results[0].content.contains("@End"),
+            results[0]
+                .content
+                .as_text()
+                .expect("text command result")
+                .contains("@End"),
             "Output should be valid CHAT"
         );
     }

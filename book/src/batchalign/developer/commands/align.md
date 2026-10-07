@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-09-30 22:58 EDT
+**Last updated:** 2026-10-07 09:56 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -13,7 +13,7 @@ see [User Guide: align](../../user-guide/commands/align.md).
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
 | CLI args | `crates/batchalign/src/cli/args/commands.rs`: `AlignArgs` | UTR/FA engine flags, strategy, fuzzy, buffer params |
-| Options builder | `crates/batchalign/src/cli/args/options.rs:130-194` (inline dispatch) | Maps `AlignArgs` → `CommandOptions::Align(AlignOptions)` |
+| Options builder | `crates/batchalign/src/cli/args/options.rs`: `build_typed_options` | Maps `AlignArgs` → `CommandOptions::Align(AlignOptions)` and anchors CLI media roots |
 | Command definition | `crates/batchalign/src/commands/align.rs`: `AlignCommand` | `CommandDefinition` impl, pre-validation gate |
 | FA pipeline | `crates/batchalign/src/runner/dispatch/fa_pipeline.rs` | Per-file FA orchestration: UTR → grouping → FA → injection |
 | UTR dispatch | `crates/batchalign/src/runner/dispatch/utr.rs` | Resolved strategy construction and per-recording grouping context |
@@ -23,7 +23,90 @@ see [User Guide: align](../../user-guide/commands/align.md).
 | Model callback | `batchalign/inference/fa.py` | Whisper token onsets or indexed Wave2Vec word intervals with optional model score |
 | Durable evidence | `crates/batchalign/src/types/traces.rs`, `runner/debug_dumper.rs` | Versioned, fail-closed FA evidence sidecar when `--debug-dir` is enabled |
 
+Whisper's processor pads short audio to a fixed encoder capacity. The model
+callback binds attention to the waveform's sample count, extractor hop length
+and twofold encoder stride before normalization, median filtering and DTW.
+Only the admitted observed prefix may produce token times. It rejects empty
+or unsupported extents and a DTW index outside that prefix; padded silence is
+not recording evidence. The same private alignment-window owner validates the
+tokenizer prefix and terminal label against the attention rows, excludes
+conditioning rows before normalization and DTW, and pairs every retained row
+with its label during timed-token projection. Prefix labels retain zero times;
+the terminal label remains an acoustic end sentinel. Missing or reordered DTW
+rows cannot be zipped into a plausible partial response. This follows the
+[upstream conditioning exclusion](https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py)
+without adding a transcript crop or inventing a word interval.
+The caller still applies normal label reconciliation,
+word-interval admission and output checking. Restricting the grid is not a
+proof of acoustic accuracy or permission to clamp failed timings into place.
+The reported FA identity includes this callback's algorithm revision; earlier
+padded-grid or conditioning-contaminated evidence remains stored but cannot hit
+the `whisper-fa-large-v2-lexical-window-v2` namespace.
+Postprocessing without an utterance bullet retains the admitted producer end
+and its provenance, including recording clamps, rather than applying the
+onset-only fallback duration a second time. A missing boundary is not new evidence.
+
 ---
+
+## Media-root admission
+
+`AlignOptions::media_dir` retains a `MediaRootDeclaration`, serialized as the
+same optional JSON string as before. This is unadmitted request/storage metadata,
+not permission to search the filesystem. Historical relative declarations remain
+deserializable, so one old job cannot prevent the job database from loading.
+
+The CLI anchors relative roots to its submission cwd and returns a typed
+`InvalidCommandOptions` refusal if that cwd cannot be read. Empty roots fail;
+absolute roots and absent roots need no cwd lookup. Direct API submissions must
+already declare an absolute root: `JobSubmission::validate` refuses ambiguous
+values before job staging creates directories or writes files.
+
+`FaDispatchPlan::from_job` independently admits stored metadata and owns an
+`AbsoluteMediaRoot`. Its checked constructors preserve Unicode, symlinks and
+`..`; they do not canonicalize, normalize, replace invalid bytes lossily or
+claim existence. Unadmitted historical roots produce an explicit plan refusal,
+never execution against a daemon-selected cwd. `FaFileContext` and media search
+accept only the admitted root, not raw strings or declarations. Search order,
+recording-name policy and subsequent media/inference admission are unchanged.
+
+## Complete timing before normal output
+
+CHAT validity and restored media linkage are not proof of completed alignment.
+Input admission captures `RequiredFaTiming` from that source's typed lexical
+words. Retry attempts share immutable obligations, not independently chosen
+counts. Compound filler model labels are grouped under their original CHAT word;
+replacement targets and nonalignable content do not invent new obligations.
+
+After finalization, the same source owner measures the result against the
+source: `RequiredFaTiming::admit` returns `FaCompletion::Complete` when every
+required word retains a positive interval, or `FaCompletion::Partial` with an
+`UntimedAccount` naming each utterance with untimed words, the words, and the
+cause (`WindowRefused`, carrying the refused window grouping recorded;
+`NotPlaced`, a run grouping could place in no request; `NotInRecording`, an
+utterance the transcript marks as not speech in the recording, such as
+`[+ diary]`; or `NoUsableTiming`). It observes written `%wor` when present and the typed
+main-word timing surface for a no-`%wor` projection; retained `%wor` does not
+depend on a caller refreshing a second representation. `AdmittedFaResult`
+keeps the completion payload alongside Chatter's immutable output admission.
+Full and incremental alignment, retained `%wor` reuse and no-group paths share
+this boundary. An empty lexical population has no word-timing obligation.
+Declined alignment instead retains the separately admitted unchanged source,
+as described below.
+
+A partial result is written, never discarded: measured timing is kept, untimed
+words stay in the transcript without bullets, and `AdmittedFaResult::shortfalls`
+derives one `timing_incomplete` shortfall from the account (totals plus the
+first 20 utterances), so the file is reported `diagnosed` (CLI exit code 7),
+never clean. The complete account is logged once. A document in which no word
+could be timed is written and diagnosed the same way.
+`AlignmentCompletionFailure::SourceChanged` (the aligned document's words no
+longer match the source) remains an internal producer fault (HTTP 500) that
+refuses the file, and so does `OffRecordUtteranceTimed`: an utterance not in
+the recording came out with a timed word, or with a bullet the policy does
+not keep (see
+[Utterances not in the recording](../../reference/forced-alignment.md#utterances-not-in-the-recording)). Complete timing does not prove acoustic identity or
+accuracy: UTR missing/misplaced counts, FA assumptions and review decisions
+remain evidence.
 
 ## `@Options: NoAlign`: strict pass-through
 
@@ -34,23 +117,22 @@ tiers (`%xalign`, `%xrev`) are stripped.
 
 The rationale is that a researcher who sets `@Options: NoAlign` has explicitly
 opted this file out of all alignment processing.  Batchalign must respect that
-decision unconditionally, including for cleanup passes that might seem benign
-(such as monotonicity enforcement).  Any existing timestamps, even backward
-ones from a previous run, are the researcher's responsibility.
+decision for valid inputs, including for cleanup passes that might seem benign
+(such as monotonicity enforcement). Invalid retained CHAT must be refused;
+the option does not authorize writing invalid input unchanged.
 
 If a file with `@Options: NoAlign` carries validation errors from a previous
 FA run, the correct fix is to repair the file manually or remove the option,
 re-run align, and re-add the option if still needed.
 
-Implementation: `run_fa_from_ast` checks `is_no_align(&chat_file)` immediately
-after parsing (before media resolution, pre-validation, and all FA logic) and
-returns `FaAdmission::pass_through(...)`, which is one of exactly two routes to
-a returned FA result. The proof it carries is `PostValidated::pass_through`:
-not gated, because gating would re-judge the INPUT against a bar the input never
-had to meet, and carrying the input's OWN BYTES rather than a re-serialization
-of the parsed model, so "unchanged" is literally true. It used to be built by
-the sibling constructor that serializes the model, which made a parse-and-
-serialize round trip of a file align had promised not to touch.
+Implementation: `read_fa_source_named` pairs the original source with its parse and
+completely admits a `NoAlign` document before issuing its unchanged-output
+capability. UTR and FA inference are skipped for that admitted branch.
+`FaAdmission::pass_through` consumes the capability, not independent text and
+model arguments. The writer retains the original bytes without serialization.
+Media preparation remains a separate dispatch step; this is not a promise to
+skip every media-access check. See the authoritative
+[command admission contract](../../architecture/command-contracts.md).
 
 "Zero modifications" includes the `[fc-ba3 align ...]` provenance comment. Until
 this became a transition on the typed proof
@@ -61,18 +143,49 @@ and the abbreviation merge.
 
 ---
 
-## Pre-validation gate
+## Input admission
 
-`align` requires CHAT Level 2 (parseable + headers + valid main tiers) before
-running inference. Invalid files are rejected immediately with a typed error
-rather than consuming GPU time. See
-[Command Contracts](../../architecture/command-contracts.md) for the validity
-level definitions.
+`fa/input.rs` selects a source-bound retain/reuse-versus-regenerate plan before
+media preparation or inference. Chatter completely admits the original document
+to retain valid `%wor`, including partially reusable timing. If that fails,
+only concrete word-tier candidates may be removed. Retained structure must pass
+all normal checks, except that discarding its only recorded timing may issue an
+explicit pending linked-media timing obligation rather than complete validity.
+That source-bound obligation travels with the working model and each retry
+until UTR/FA establishes timing and full checked output admission succeeds.
+It cannot authorize unchanged output, and headers are not edited to excuse it.
+A source with linked `@Media` and no timing at all, the state before a first
+alignment, is admitted the same way: Chatter's timing-regeneration validation
+runs every rule and returns E544 as the pending obligation, under the origin
+`NeverTimed`, so its messages speak of alignment rather than regeneration. A
+`NoAlign` or dummy file keeps its E544 refusal, since align would write it back
+unchanged. Admission also decides the `@Media` declaration of every actively
+aligned source (`AlignableMedia`): absent, `missing` or `notrans` is refused as
+input before any work, with the header change named, and so is a pending
+obligation under `--main-bullets exact`, which could never meet it. The table
+is in the [forced-alignment reference](../../reference/forced-alignment.md#what-align-accepts).
+The source-admission owner also observes attempted output timing before final
+construction admission: an inference request or response alone does not discharge
+the obligation. If no timing survived, it reports `evidence_unavailable`; other
+output defects still require complete checking and remain internal failures.
+Main-tier, header, morphology,
+grammar and other retained faults remain refusal grounds. Producer/internal
+failures are never regeneration permission.
 
-Implemented in `crates/batchalign/src/commands/align.rs`:
-```rust,ignore
-validate_to_level(chat, ValidationLevel::MainTiers)?;
-```
+CA selects preservation, without a word-tier exemption. `NoAlign` requires
+complete original-source admission and retains byte-exact output proof. The
+working disposition owns the admitted model across retries. Only its active
+payload can receive UTR, and each attempt carries the same source admission
+and matching anchors. There is no free model-plus-diagnostics constructor or
+generated-CHAT reparse. After mutation, all output paths still require complete
+typed construction admission. See [command contracts](../../architecture/command-contracts.md).
+
+An active incremental run admits the declared prior through `RetainedFaPrior`
+before media preparation or UTR. The immutable proof survives retries, and
+`process_fa_incremental` reads its admitted model without reparsing. Unreadable
+or invalid priors refuse the file instead of silently falling back to a full
+run. See [Command Contracts](../../architecture/command-contracts.md) for the
+authoritative policy and current enforcement scope.
 
 ---
 
@@ -302,6 +415,71 @@ probability.
 
 ## UTR strategy resolution
 
+### Checked timing projection
+
+UTR learns `PositiveUtrInterval` at the timing producer. Its fields and
+constructor are private to recovery; readers use `start_ms()` and `end_ms()`.
+`UtrTimingProposal::Positive` owns this payload instead of unchecked scalar
+fields. Serialized evidence still uses the same `status`, `start_ms` and
+`end_ms` fields, with no extra nested object.
+
+Global and local recovery share endpoint admission against the source lexical
+census. `EndpointBoundUtrWordMatches` can be constructed only when both the first
+and last alignable CHAT words are bounded: each has a common-to-every-optimum
+correspondence, or the joint interleaving producer observed that it is matched
+in every optimum (it can never be missing) and supplies `EndpointExtents`, the
+extent of every token it may match. Two turns ending and beginning with the same
+word across an overlap are the usual case: neither boundary word has one token
+in every optimum, but each lies inside its candidates' extent, so the hull
+including that extent crops none of its speech. The monotonic producers observe
+common correspondences only and pass `EndpointExtents::UNOBSERVED`.
+Only this payload can produce an utterance timing hull. Nonempty interior-only
+evidence retains eligible FA anchors but emits no hint (`incomplete_boundary`
+review decision), so grouping follows its existing unhinted recovery path rather
+than cropping unresolved prefix/suffix speech to an interior token. Missing
+interior words alone do not prevent endpoint-proved recovery. An endpoint word
+some optimum leaves unmatched (absent from the provider stream, or written
+there differently) bounds nothing, and its utterance gets no hint. Existing
+bullets are preserved. This lexical proof is not proof of acoustic identity.
+
+A region's plan pairs each searched utterance's evidence with its search
+envelope (`LocalRegionPlan`, built only by `LocalRegionPlan::from_searched`
+from a `PerSearched` value made by mapping that region's `SearchedCensus`), so
+a plan cannot be shorter than its region, its evidence and envelopes cannot
+differ in length, and `UtrAlignmentPlan::assemble` reads each plan's own span.
+
+The matched-timing producer admits every admitted
+provider token as a positive interval, then takes their temporal hull
+(minimum start, maximum end). Token ordinal order does not establish time
+extrema: an earlier or interior token may extend beyond the last token. Only
+matched tokens contribute; unrelated ASR text inside the ordinal range cannot
+widen a proposal. Coarse tokens retain their measured interval when several
+lexical words share it. An invalid matched interval leaves a `non_positive`
+proposal naming that token's original endpoints; surrounding valid tokens
+cannot manufacture a positive span around it. The wire shape is unchanged.
+
+Global projection preserves existing bullets and the existing marked-overlap
+exemption. A non-overlap proposal may be clipped to the preceding committed
+end only while a positive observed interval remains. An exhausted proposal
+stays untimed with a `projection_exhausted` review decision; it cannot become
+`start + 1`. Injection counts reflect applied hints, not pre-clipping matches.
+The two-pass local recovery producer returns the same checked interval type,
+so zero/reversed local spans cannot reach its writer either. These are still
+provisional recovery hints, not recording-containment or output-validity proofs.
+FA and complete construction admission remain responsible for final output.
+
+Both writers consume the admitted interval's `into_hint()` operation. Local
+overlap recovery, like global recovery, therefore writes `BulletSource::Utr`,
+not an original transcript boundary. Final-word postprocessing cannot inherit
+a provisional local hint's end as a measured or retained duration; FA-derived
+timing and its review provenance remain responsible for the final word end.
+
+This does not solve lexical correspondence under dense reordered overlap and
+does not change strategy selection. Refusal of an unsupported interval must
+not be confused with a successful timing recovery.
+
+### Submitted strategy
+
 `ResolvedUtrStrategy::from_options()` in
 `crates/batchalign/src/runner/dispatch/options.rs` resolves the submitted policy.
 The two-pass variant owns its tuning and travels through both initial and
@@ -520,27 +698,23 @@ re-reading bullets and falsely labeling them observations.
 
 ## Post-FA validation
 
-After FA finishes, `FaOutput::processed` consumes the mutable `ChatFile` and
-calls Chatter's `reconcile_media_timing`. The result retains either an untimed
-document or a timed document with exactly one usable, linked `@Media`
-declaration. Only that state can reach the serialization boundary in
-`runner/dispatch/fa_pipeline.rs`. Dummy and `NoAlign` paths use the separate
-`FaOutput::PassThrough` variant, preserving their input without claiming that
-timing work occurred. A typed `MediaTimingError` fails contradictory timed
-output before any successful result can be written.
+Every FA path builds a draft, `FaResult<ChatFile>`, and hands it to
+`FaAdmission::finish`, which takes it through Chatter's
+`reconcile_media_timing` against the declaration admission proved usable
+(`AlignableMedia::reconcile`, the only constructor of `ReconciledOutput`). The
+result retains either an untimed document or a timed document with exactly one
+usable, linked `@Media` declaration. Only that state can reach the
+serialization boundary in `runner/dispatch/fa_pipeline.rs`. Dummy and
+`NoAlign` paths use the separate `FaOutput::PassThrough` variant, preserving
+their input without claiming that timing work occurred. Because admission
+decided the declaration, a `MediaTimingError` here can only mean the alignment
+changed the header; it is reported as an internal fault.
 
-The reconciled CHAT file is then gated at the level its INPUT was admitted at,
-`MainTierValid` (L2), by `FaAdmission::finish` (output gate equivalent to
-[Command Contracts: align post-validation](../../architecture/command-contracts.md#align-post-validation)).
-
-The gate is **fail-closed**, and this paragraph used to say the opposite
-("validation errors are warnings only ... logged but do not fail the job").
-That was true of the `warn!`-and-write shape `PostValidated` replaced: a file
-whose `%mor` had drifted or whose terminator a transform had eaten still landed
-on disk and still reported success. A file whose aligned output now fails the
-gate fails THAT file with `FailureCategory::Validation`, and nothing is written.
-The level comes off the admission rather than being restated at the gate, so
-output cannot be judged at a lower bar than its input was admitted at.
+`FaAdmission::finish` then requires Chatter's complete checked-construction
+proof, including dependent-tier alignment. There is no caller-selected output
+validity level or inherited-invalidity waiver. A failed output admission is a
+tool failure, not evidence that the submitted CHAT was invalid; no CHAT output
+is written. See [Command Contracts](../../architecture/command-contracts.md#completion-and-publication).
 
 The proof the gate returns is what the writer carries. It reaches
 `FileOutput::Chat` as a `PostValidated`, not a `String`, so the bytes written

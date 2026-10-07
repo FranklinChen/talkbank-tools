@@ -65,6 +65,36 @@ pub(super) struct PendingTiming {
     end_origin: Origin,
 }
 
+/// A retained transcript boundary, never a provisional runtime UTR hint.
+///
+/// Borrowed from this postprocessing pass's utterance. Only this checked
+/// observation can supply an inherited word end or a transcript clamp.
+#[derive(Clone, Copy)]
+struct TranscriptBoundary<'a>(&'a Bullet);
+
+impl<'a> TranscriptBoundary<'a> {
+    fn observe(bullet: &'a Bullet) -> Option<Self> {
+        match bullet.source {
+            BulletSource::Authoritative => Some(Self(bullet)),
+            BulletSource::Utr => None,
+        }
+    }
+
+    fn extend_derived_end(self, timing: PendingTiming) -> PendingTiming {
+        let end_ms = self.0.timing.end_ms;
+        if end_ms > timing.start_ms && end_ms > timing.end_ms {
+            timing.with_end(
+                end_ms,
+                Origin::InheritedFromNeighbour {
+                    from: FileMs::new(end_ms),
+                },
+            )
+        } else {
+            timing
+        }
+    }
+}
+
 /// What post-processing did, and what it learned.
 ///
 /// # Why the tally rides along
@@ -422,6 +452,12 @@ pub fn postprocess_utterance_timings_with_boundary_policy(
     }
     debug_assert_eq!(word_timings.len(), word_is_compound_filler.len());
     debug_assert_eq!(word_timings.len(), word_is_filler.len());
+    let transcript_boundary = utterance
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(TranscriptBoundary::observe);
     let utterance_span_ms = utterance
         .main
         .content
@@ -445,54 +481,25 @@ pub fn postprocess_utterance_timings_with_boundary_policy(
         let n = word_timings.len();
 
         // Last timed word: it has no successor, so its end is the one the
-        // engine could not supply. The utterance bullet is a better answer
-        // than any constant when there is one.
+        // engine could not supply. A retained transcript boundary may supply
+        // a better answer; a provisional UTR hint cannot authorize extension.
         //
         // A measured end is left alone: only a derived one may be replaced,
         // and only ever extended, never shortened.
-        // Index and scalars in ONE pass through a borrow: the value itself is
-        // moved out only on the branch that writes it back, so the common
-        // no-change path copies nothing. Reading them together also removes the
-        // "`rposition` proved this is `Some`" step that a separate lookup needs
-        // and that has no honest answer if it ever fails.
+        // Move the timing into the checked boundary's operation, without
+        // copying its provenance chain or manufacturing a missing slot.
         if policy.ends_are_derived()
-            && let Some((idx, span_start_ms, span_end_ms)) = word_timings
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(idx, slot)| slot.as_ref().map(|s| (idx, s.start_ms, s.end_ms)))
+            && let Some(idx) = word_timings.iter().rposition(Option::is_some)
         {
-            // Two genuinely different answers, and which one was used is a
-            // fact about the number: the utterance bullet is a boundary a human
-            // or an earlier pass placed, the constant is invented outright.
-            // `unwrap_or` made them the same integer.
-            let (end_ms, invented) = match utterance
-                .main
-                .content
-                .bullet
-                .as_ref()
-                .map(|bullet| bullet.timing.end_ms)
-                .filter(|utt_end| *utt_end > span_start_ms)
-            {
-                Some(utt_end) => (
-                    utt_end,
-                    Origin::InheritedFromNeighbour {
-                        from: FileMs::new(utt_end),
-                    },
-                ),
-                None => (
-                    span_start_ms + LAST_WORD_FALLBACK_MS,
-                    Origin::FallbackDuration {
-                        assumed: Ms(LAST_WORD_FALLBACK_MS),
-                    },
-                ),
-            };
-            // `with_end`, not `remeasured`: this pass SUBSTITUTES its own
-            // account of the end rather than adjusting the one that was there.
-            if end_ms > span_end_ms
+            // Without a transcript boundary, keep the admitted producer end.
+            // Its onset-only fallback has already passed recording admission;
+            // repeating start + 500 here undid a recording-end clamp and
+            // erased its origin. Neither absence nor a UTR hint supplies new
+            // word-end evidence; both retain the producer's original origin.
+            if let Some(boundary) = transcript_boundary
                 && let Some(span) = word_timings[idx].take()
             {
-                word_timings[idx] = Some(span.with_end(end_ms, invented));
+                word_timings[idx] = Some(boundary.extend_derived_end(span));
             }
         }
 
@@ -623,13 +630,12 @@ pub fn postprocess_utterance_timings_with_boundary_policy(
     // word span after postprocess.  Clamping to a narrow UTR/ASR bullet before
     // that overwrite would prevent the self-healing from ever running.
     let has_fa_wor = utterance.wor_tier().is_some();
-    if let Some(ref bullet) = utterance.main.content.bullet
-        && bullet.source == BulletSource::Authoritative
+    if let Some(boundary) = transcript_boundary
         && has_fa_wor
         && existing_wor_boundaries == ExistingWorBoundaryPolicy::Preserve
     {
-        let utt_start = bullet.timing.start_ms;
-        let utt_end = bullet.timing.end_ms;
+        let utt_start = boundary.0.timing.start_ms;
+        let utt_end = boundary.0.timing.end_ms;
         let last_timed_idx = word_timings.iter().rposition(|timing| timing.is_some());
 
         for (idx, timing) in word_timings.iter_mut().enumerate() {
@@ -954,7 +960,7 @@ fn set_word_timing(word: &mut Word, timings: &[Option<WordTiming>], idx: &mut us
     if *idx < timings.len() {
         match &timings[*idx] {
             Some(span) => {
-                word.inline_bullet = Some(Bullet::new(span.start_ms, span.end_ms));
+                word.inline_bullet = Some(span.bullet());
             }
             None => {
                 word.inline_bullet = None;

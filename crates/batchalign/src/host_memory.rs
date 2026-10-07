@@ -676,12 +676,16 @@ impl HostMemoryCoordinator {
             let base = spec.base_mb_for_runtime(runtime_is_free_threaded);
             let worst_case_mb = (base.0 as f64 * spec.loading_overhead.0) as u64;
             let worst_case = batchalign_types::api::MemoryMb(worst_case_mb);
-            let per_worker_budget =
-                batchalign_types::memory::estimate_per_worker_peak_mb_with_profile(
-                    worst_case,
-                    spec.profile,
-                    &tier,
-                );
+            let per_worker_budget = match spec.profile {
+                Some(profile) => {
+                    batchalign_types::memory::estimate_per_worker_peak_mb_with_profile(
+                        worst_case, profile, &tier,
+                    )
+                }
+                // Native encoder slots still reserve host memory, but there
+                // is no fictitious model-startup envelope to clamp against.
+                None => worst_case,
+            };
             let pending_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             let Some((granted_workers, reserved_mb)) = plan_job_reservation(

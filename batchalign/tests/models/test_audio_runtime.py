@@ -376,6 +376,53 @@ def test_extract_token_timestamps_handles_integer_num_frames(monkeypatch) -> Non
     assert recorded[0].shape == (2, 2)
 
 
+def test_generated_conditioning_rows_do_not_shift_lexical_timestamps(
+    monkeypatch,
+) -> None:
+    recorded: list[np.ndarray] = []
+    _install_whisper_generation_helpers(monkeypatch, recorded_matrices=recorded)
+    output = _FakeGenerateOutput(
+        cross_attentions=[
+            _attention_step([99.0, 0.0, 0.0, 0.0]),
+            _attention_step([98.0, 0.0, 0.0, 0.0]),
+            _attention_step([97.0, 0.0, 0.0, 0.0]),
+            _attention_step([1.0, 2.0, 3.0, 4.0]),
+            _attention_step([4.0, 3.0, 2.0, 1.0]),
+        ],
+        sequences=torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.int64),
+    )
+    timestamps = _extract_token_timestamps(
+        _FakeWhisperModel(),
+        output,
+        [(0, 0)],
+        num_frames=8,
+        num_input_ids=3,
+    )
+    assert recorded[0].shape == (2, 4)
+    torch.testing.assert_close(
+        timestamps,
+        torch.tensor([[0.0, 0.0, 0.0, 0.02, 0.04, 0.04]]),
+    )
+
+
+def test_generated_prefix_only_needs_no_dtw(monkeypatch) -> None:
+    recorded: list[np.ndarray] = []
+    _install_whisper_generation_helpers(monkeypatch, recorded_matrices=recorded)
+    output = _FakeGenerateOutput(
+        cross_attentions=[_attention_step([1.0, 2.0, 3.0, 4.0])],
+        sequences=torch.tensor([[1, 2]], dtype=torch.int64),
+    )
+    timestamps = _extract_token_timestamps(
+        _FakeWhisperModel(),
+        output,
+        [(0, 0)],
+        num_frames=8,
+        num_input_ids=1,
+    )
+    assert recorded == []
+    assert torch.equal(timestamps, torch.zeros((1, 2)))
+
+
 def test_extract_token_timestamps_handles_uniform_list_num_frames(monkeypatch) -> None:
     recorded: list[np.ndarray] = []
     _install_whisper_generation_helpers(monkeypatch, recorded_matrices=recorded)

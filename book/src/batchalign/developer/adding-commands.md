@@ -1,7 +1,7 @@
 # Adding a New Command
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-06 15:08 EDT
 
 This guide walks through adding a new batchalign3 command end-to-end.
 
@@ -18,6 +18,7 @@ one `CatalogEntry` in `recipe_runner/catalog.rs` naming a `Recipe` in
 | `ReferenceProjection` (compare against gold) | `compare` | `COMPARE_RECIPE`, `compare.rs` |
 | `MediaAnalysis` (non-CHAT artifact out) | `opensmile` | `OPENSMILE_RECIPE`, `runner/dispatch/media_analysis_v2.rs` |
 | `Composite` (reuses other recipes) | `benchmark` | `BENCHMARK_RECIPE`, `runner/dispatch/benchmark_pipeline.rs` |
+| `NativeMedia` (no inference worker) | `convert` | `CONVERT_RECIPE`, `execution/native_media.rs` |
 
 **Start with `align`** if your command takes CHAT in and produces modified CHAT
 out; **`morphotag`** if it batches several files through one ML call.
@@ -34,10 +35,13 @@ it is stale, and this page is the current procedure.
 
 ## Quick start
 
-```bash
-make check    # after each file edit (~6s)
-make test     # verify nothing broke (~6s)
-```
+Map the producer and all consumers before implementation. Batch command
+registration, options, planning, dispatch, output admission, wire consumers,
+regression controls and documentation into one coherent change. Compile the
+affected targets at that boundary, collect the complete failure inventory,
+repair it together, then reuse the compiled binary for the focused control deck.
+Do not rebuild or run broad suites after each edit. Follow the applicable
+workflow policy for formatting, lint and final publication checks.
 
 ## Architecture overview
 
@@ -47,6 +51,15 @@ Every command flows through these layers:
 CLI args → CommandOptions → JobSubmission → Runner
         → shared family dispatch / worker pool → output materialization
 ```
+
+Native media consumes managed capacity and supervision but bypasses worker
+probing, model loading and inference task selection. Its shared resource entry
+has `profile: None`, not an invented worker profile. Required choices such as
+export format have no default: `OutputDeclaration::AudioExport` is selected
+against the submitted `CommandOptions` before materialization. Restored jobs
+and result lookup use those same options. Generic CHAT/text writers refuse
+binary outputs; verified encoding and binary delivery have separate consuming
+publication capabilities.
 
 The key files, in the order you'll edit them:
 

@@ -35,9 +35,9 @@ pub use self::artifact::{
     ValidatedProducedRun, ValidatedTranscriptionPlan,
 };
 pub use self::cross_mode::{
-    AlignmentPairResult, AlignmentTokenDifference, LexicalMismatchCount, MorphotagDifference,
-    MorphotagPairResult, MorphotagTokenDifference, PairFailureReason, PairOutcome,
-    TimingDistribution, TokenTiming, TokenTimingState, WorSlotDrift,
+    AlignmentPairResult, AlignmentTokenDifference, AnnotationPresence, LexicalMismatchCount,
+    MorphotagDifference, MorphotagPairResult, MorphotagTokenDifference, PairFailureReason,
+    PairOutcome, TimingDistribution, TokenTiming, TokenTimingState, WorSlotDrift,
     compare_validated_alignment_plan, compare_validated_morphotag_plan,
     compare_validated_transcription_pairs,
 };

@@ -494,7 +494,12 @@ mod tests {
             WorkerBootstrapMode::Profile,
             WorkerBootstrapMode::Task,
         ] {
-            let probe = WorkerKey::from_command_options(command, language.clone(), &options, mode);
+            let requirement = crate::command_model::command_spec(command)
+                .capabilities
+                .require_inference()
+                .expect("test command requires inference");
+            let probe =
+                WorkerKey::from_command_options(requirement, language.clone(), &options, mode);
             let dispatch = execute_v2_worker_key(language.clone(), &request, mode)
                 .expect("a typed request derives a worker key");
             assert_eq!(probe, dispatch, "{command} in {mode:?}");
@@ -647,7 +652,10 @@ mod tests {
         );
 
         let capability_key = WorkerKey::from_command_options(
-            crate::api::ReleasedCommand::Transcribe,
+            crate::command_model::command_spec(crate::api::ReleasedCommand::Transcribe)
+                .capabilities
+                .require_inference()
+                .expect("transcribe requires inference"),
             language.clone(),
             &options,
             WorkerBootstrapMode::LazyProfile,

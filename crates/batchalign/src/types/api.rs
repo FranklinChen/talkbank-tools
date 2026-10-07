@@ -179,6 +179,7 @@ mod tests {
             FileStatusKind::Queued,
             FileStatusKind::Processing,
             FileStatusKind::Done,
+            FileStatusKind::Diagnosed,
             FileStatusKind::Error,
             FileStatusKind::Interrupted,
         ] {
@@ -208,6 +209,7 @@ mod tests {
             FileStatusKind::Queued,
             FileStatusKind::Processing,
             FileStatusKind::Done,
+            FileStatusKind::Diagnosed,
             FileStatusKind::Error,
             FileStatusKind::Interrupted,
         ] {
@@ -260,14 +262,34 @@ mod tests {
         assert!(!FileStatusKind::Queued.is_terminal());
         assert!(!FileStatusKind::Processing.is_terminal());
         assert!(FileStatusKind::Done.is_terminal());
+        assert!(FileStatusKind::Diagnosed.is_terminal());
         assert!(FileStatusKind::Error.is_terminal());
         assert!(!FileStatusKind::Interrupted.is_terminal());
 
         assert!(FileStatusKind::Queued.is_resumable());
         assert!(FileStatusKind::Processing.is_resumable());
         assert!(!FileStatusKind::Done.is_resumable());
+        assert!(!FileStatusKind::Diagnosed.is_resumable());
         assert!(!FileStatusKind::Error.is_resumable());
         assert!(FileStatusKind::Interrupted.is_resumable());
+
+        // Written output, clean or diagnosed, is never redone; an error is.
+        assert!(FileStatusKind::Done.wrote_output());
+        assert!(FileStatusKind::Diagnosed.wrote_output());
+        assert!(!FileStatusKind::Error.wrote_output());
+    }
+
+    /// The wire spelling downstream clients branch on.
+    #[test]
+    fn diagnosed_file_status_wire_value() {
+        assert_eq!(
+            serde_json::to_string(&FileStatusKind::Diagnosed).unwrap(),
+            "\"diagnosed\""
+        );
+        assert_eq!(
+            serde_json::from_str::<FileStatusKind>("\"diagnosed\"").unwrap(),
+            FileStatusKind::Diagnosed
+        );
     }
 
     #[test]
@@ -277,6 +299,7 @@ mod tests {
             status: FileStatusKind::Processing,
             error: None,
             error_category: None,
+            diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: Some(crate::unix_time(1700000000.0)),
             finished_at: None,
@@ -290,6 +313,88 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let back: FileStatusEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, back);
+        assert!(
+            !json.contains("diagnostics"),
+            "a file without diagnostics does not mention them on the wire: {json}"
+        );
+
+        // A diagnosed file: the status and its findings travel together, and
+        // the wire shape is the one downstream clients read.
+        let diagnosed = FileStatusEntry {
+            status: FileStatusKind::Diagnosed,
+            diagnostics: Some(FileOutputDiagnostics::of_findings(
+                vec![FileOutputDiagnostics::coded_finding(
+                    "E220",
+                    "digits inside a word",
+                )],
+                vec![OutputShortfallRecord::StageSkipped {
+                    stage: OptionalStage::Morphosyntax,
+                }],
+            )),
+            progress_current: None,
+            progress_total: None,
+            progress_stage: None,
+            progress_label: None,
+            ..entry
+        };
+        let json = serde_json::to_value(&diagnosed).unwrap();
+        assert_eq!(json["status"], "diagnosed");
+        assert_eq!(
+            json["diagnostics"],
+            serde_json::json!({
+                "findings": {
+                    "bar": "construction",
+                    "finding_count": 1,
+                    "findings_by_code": [{"code": "E220", "count": 1}],
+                    "first_findings": [{
+                        "code": "E220",
+                        "level": "structurally_complete",
+                        "message": "digits inside a word"
+                    }],
+                    "full_findings": {"kind": "inline"},
+                },
+                "shortfalls": [{"kind": "stage_skipped", "stage": "morphosyntax"}],
+            })
+        );
+        let back: FileStatusEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(diagnosed, back);
+
+        // A record stored before the bar was recorded (flat, as build
+        // 95b74761 wrote it) still reads, as the construction judgement it
+        // was; a flat record with no findings reads as shortfalls only.
+        let flat = serde_json::json!({
+            "finding_count": 1,
+            "findings_by_code": [{"code": "E220", "count": 1}],
+            "first_findings": [{
+                "code": "E220",
+                "level": "structurally_complete",
+                "message": "digits inside a word"
+            }],
+            "full_findings": {"kind": "inline"},
+            "shortfalls": [{"kind": "stage_skipped", "stage": "morphosyntax"}],
+        });
+        let read: FileOutputDiagnostics = serde_json::from_value(flat).unwrap();
+        assert_eq!(Some(read), diagnosed.diagnostics);
+        let shortfalls_only: FileOutputDiagnostics = serde_json::from_value(serde_json::json!({
+            "finding_count": 0,
+            "full_findings": {"kind": "inline"},
+            "shortfalls": [{"kind": "stage_skipped", "stage": "morphosyntax"}],
+        }))
+        .unwrap();
+        assert_eq!(shortfalls_only.findings, None);
+        assert_eq!(shortfalls_only.shortfalls.len(), 1);
+        // A record that reports nothing, or has a field neither shape has,
+        // is refused rather than read as an emptier record.
+        for refused in [
+            serde_json::json!({}),
+            serde_json::json!({"shortfall": [{"kind": "stage_skipped", "stage": "morphosyntax"}]}),
+            serde_json::json!({"finding_count": 0, "full_findings": {"kind": "inline"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<FileOutputDiagnostics>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
     }
 
     /// A body must IDENTIFY as a health response; the rest may default.
@@ -359,6 +464,7 @@ mod tests {
                 status: FileStatusKind::Processing,
                 error: None,
                 error_category: None,
+                diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: Some(crate::unix_time(1700000000.0)),
                 finished_at: None,

@@ -30,8 +30,16 @@ impl WorkerPool {
         lang: impl Into<WorkerLanguage>,
         options: &CommandOptions,
     ) -> bool {
+        let Ok(requirement) = crate::command_model::command_spec(command)
+            .capabilities
+            .require_inference()
+        else {
+            // Native execution never gains memory admission by claiming an
+            // already resident ML worker.
+            return false;
+        };
         let key = WorkerKey::from_command_options(
-            command,
+            requirement,
             lang.into(),
             options,
             self.config.runtime.bootstrap_mode,

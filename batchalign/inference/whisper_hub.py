@@ -126,6 +126,7 @@ def load_whisper_hub_asr(
     # Import lazily so the resolver path and error types are usable
     # without pulling in the heavy ML stack (transformers / torch) just
     # for a configuration lookup.
+    from batchalign.inference._domain_types import WhisperTimestampMode
     from batchalign.inference.asr import load_whisper_asr
 
     # ``model_path`` is a snapshot the worker already materialized at the
@@ -141,6 +142,7 @@ def load_whisper_hub_asr(
         base=model_id,
         language="auto",
         device_policy=device_policy,
+        timestamp_mode=WhisperTimestampMode.SEGMENT,
     )
     # Flip the fine-tune flag on the shared handle after construction.
     # The stock ``load_whisper_asr`` signature does not take

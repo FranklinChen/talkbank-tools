@@ -77,6 +77,7 @@ const SURFACE_GROUPS: &[SurfaceGroup] = &[
             "opensmile",
             "compare",
             "avqi",
+            "convert",
         ],
         coverage: PROCESSING_COVERAGE,
         note: "primary transcript and audio processing commands",

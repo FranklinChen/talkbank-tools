@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::api::{DurationMs, LanguageCode3};
+use crate::api::DurationMs;
 use crate::chat_ops::CacheTaskName;
 use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::{AudioIdentity, WordGapHealing};
@@ -214,8 +214,6 @@ impl CacheOverrides {
 /// together through `process_morphosyntax`, `process_morphosyntax_batch`,
 /// and `process_morphosyntax_incremental`.
 pub struct MorphosyntaxParams<'a> {
-    /// ISO 639-3 language code (e.g., `"eng"`, `"spa"`).
-    pub lang: &'a LanguageCode3,
     /// How to handle Stanza retokenization during injection.
     pub tokenization_mode: TokenizationMode,
     /// How to handle non-primary languages in multilingual files.

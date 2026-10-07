@@ -161,11 +161,16 @@ pub(crate) fn find_mor_line_for(chat: &str, at_s_text: &str) -> Option<String> {
 /// What a provenance stamp's timestamp reads as in a golden snapshot.
 const PINNED_STAMP_TIMESTAMP: &str = "<timestamp>";
 
-/// Pin the wall-clock timestamp of every provenance stamp in `chat`.
+/// What a provenance stamp's producing build reads as in a golden snapshot.
+const PINNED_STAMP_BUILD: &str = "<build>";
+
+/// Pin the wall-clock timestamp and the producing build of every provenance
+/// stamp in `chat`.
 ///
-/// A stamp records what ran (command, engines, options that shape the output)
-/// and when it ran. A golden snapshot must hold the first and never the
-/// second, or it changes on every run and can never be accepted. Each line is
+/// A stamp records what ran (command, engines, options that shape the output),
+/// which build ran it and when. A golden snapshot must hold the first and
+/// never the other two, or it changes on every run or rebuild and can never be
+/// accepted. Each line is
 /// read by `extract_provenance`, the same codec the writer uses, so only a
 /// real stamp is touched and a malformed one fails the test instead of being
 /// masked. The timestamp is the stamp's closing section, so it is replaced as
@@ -186,7 +191,17 @@ pub(crate) fn pin_provenance_timestamps(chat: &str) -> String {
                         entry.timestamp
                     );
                 };
-                pinned.push_str(head);
+                // The build is a field the codec read back, replaced as
+                // exactly the `build=<value>` text it was written as.
+                let head = match entry.fields.get("build") {
+                    Some(build) => head.replacen(
+                        &format!("build={build}"),
+                        &format!("build={PINNED_STAMP_BUILD}"),
+                        1,
+                    ),
+                    None => head.to_owned(),
+                };
+                pinned.push_str(&head);
                 pinned.push_str(PINNED_STAMP_TIMESTAMP);
                 pinned.push(']');
             }

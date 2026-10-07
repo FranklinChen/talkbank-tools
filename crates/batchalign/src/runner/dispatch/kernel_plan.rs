@@ -134,6 +134,9 @@ fn execution_lane_for(
     model_sharing: ModelSharingPolicy,
 ) -> ExecutionLaneHint {
     match model_sharing {
+        ModelSharingPolicy::NoModels => ExecutionLaneHint::Io {
+            max_workers: runtime::max_thread_workers(),
+        },
         ModelSharingPolicy::DelegatedToSubcommands => ExecutionLaneHint::Delegated,
         ModelSharingPolicy::SharedWarmWorkers => match resource_lane {
             ResourceLane::GpuHeavy => ExecutionLaneHint::Gpu {

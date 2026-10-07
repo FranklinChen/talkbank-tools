@@ -1,7 +1,7 @@
 # Batchalign Workers
 
 **Status:** Current
-**Last updated:** 2026-10-01 07:44 EDT
+**Last updated:** 2026-10-06 22:34 EDT
 
 Per-app worker concerns specific to the Batchalign runtime: pool
 sizing, RAM-tier-aware memory budgets, model loading per worker,
@@ -304,7 +304,7 @@ Without safeguards the failure surfaces at two layers:
    morphosyntactic annotation. Nothing in the log names the file;
    downstream auditors see a per-file success.
 
-### Safeguard 1: idle-eviction + bounded wait in `checkout`
+### Safeguard 1: idle-eviction, then a wait without a deadline, in `checkout`
 
 `crates/batchalign/src/worker/pool/eviction.rs`,
 `/dispatch.rs`, `/checkout.rs`.
@@ -321,17 +321,73 @@ order before returning any error:
    handle, decrements that group's `total`, and drops the handle on
    a detached task. One global-cap slot is now free; the main loop
    `continue`s back to spawn.
-2. **Park on `worker_returned: Arc<Notify>`** with a bounded
-   deadline (`checkout_wait_timeout_s`, default 300 s). Every
-   `CheckedOutWorker::drop` calls `notify_waiters()` so all
-   saturated checkouts across all keys wake on any return and retry
-   in parallel. On wakeup, retry eviction (now backed by the freshly
-   returned idle worker) and spawn.
-3. **On deadline**, return
-   `Err(WorkerError::SpawnFailed("no worker available for {target}/{lang} within {secs}s, pool saturated with no idle workers to evict"))`.
-   Genuine starvation case (every worker checked out and busy, no
-   returns for 5 minutes); propagates to the orchestrator which
-   turns it into a per-file error, never a silent empty tier.
+2. **Park on `worker_returned: Arc<Notify>`** (no worker for this
+   key) or on the group's `available` semaphore (this key's workers
+   are all busy). Every `CheckedOutWorker::drop` calls `notify_one()`,
+   so each return wakes one saturated checkout (the BUG-028 herd
+   fix), which retries eviction and spawn.
+3. **Keep waiting.** A saturated pool is congestion, not a failure
+   of the request, so the wait has **no deadline**. Each park is
+   raced against a **report interval** (`PoolConfig::checkout_wait_report_interval`,
+   300 s; the server does not expose it as a setting): when it passes,
+   the wait is logged (key, how long it has waited, the group's total
+   and idle counts) and the checkout re-probes from the top, so a
+   state that changed under it is re-read rather than trusted.
+4. **Reconcile the counts.** At each report interval the pool checks
+   that every worker a group's `total` counts is in an idle queue or
+   held by an `AwayFromQueue` guard (a checkout, a TCP checkout, a
+   spawn in flight, a health-check drain, a memory-pressure eviction's
+   shutdown). The guards are the only movers of `WorkerGroup::away`, so
+   that count cannot drift, and a guarded worker leaves the group only
+   through `AwayFromQueue::retire`, which takes it out of `total` before
+   the guard stops counting it (so neither a removal in progress nor a
+   taken worker's emptied guard distorts the count). A group that
+   counts workers nothing holds is a stale count, not congestion: no
+   worker will ever come back. Seen once (it may be a worker between a
+   queue and its guard) it is logged; the same group with the same
+   count at the next interval ends the wait with the typed, terminal
+   `WorkerError::PoolAccountingBroken` (`System`, not retried), naming
+   the group and its counts. Two unrelated mismatches never confirm
+   each other. A checkout parked on its own group's permits reconciles
+   only that group; one parked on the pool-wide return signal (its own
+   group empty, waiting for another group to free a slot) reconciles
+   every group.
+
+   The wait otherwise ends only when a worker is available, when the
+   pool shuts down (`WorkerError::PoolShuttingDown`), or when its
+   caller drops it: a cancelled job's supervised file task is dropped,
+   and the wait with it. A worker that is genuinely checked out and
+   never comes back is held, so it is waited on: whether every
+   exchange is bounded is a property of each transport, not something
+   this wait can prove.
+
+Until 2026-10-06 step 3 was a 300 s deadline that returned
+`SpawnFailed("no worker available ... pool saturated with no idle
+workers to evict")`, classified as a system error and not retried.
+In a large batch (several jobs, each with several files in flight,
+all needing the same few Stanza workers) a file routinely queued
+longer than that behind other files' long requests and was lost,
+although nothing was wrong with it.
+
+**The wait is visible in the file's progress.** The audio-file shell
+(transcribe, align, speaker identification) and benchmark install a
+`CheckoutWaitObserver` around every attempt
+(`checkout_wait::observing_checkout_waits`, carried by a task local
+exactly as `CURRENT_JOB_ID` is, so no dispatch signature changes);
+align's utterance-timing pre-pass, which runs before that shell,
+installs its own, and the text batch commands (morphotag, utseg,
+translate, coref) observe their inference through
+`runner::util::observing_file_waits`, coref's one batch on every
+file in it. Each wait's start and end is recorded on the file
+(`RunnerEventSink::set_file_worker_wait`) as a fact of its own,
+`FileStatus::worker_waits`, beside the stage the pipeline reported.
+The file shows `waiting_for_worker` ("Waiting for a worker") while
+any wait is open, and the reported stage, with its counts, otherwise:
+the display is derived from both facts, so the pipeline's progress
+(a text batch's own reporter included) and the wait observer never
+overwrite each other. A checkout outside an observed task
+(a spawned sub-task, a health probe) waits the same way, unobserved,
+and is still logged at every report interval.
 
 ```mermaid
 flowchart TD
@@ -340,13 +396,15 @@ flowchart TD
     FP -- no --> SP["try_spawn_into_group"]
     SP -- spawned --> RET
     SP -- at cap --> HASW{"this key has\nlive workers?"}
-    HASW -- yes --> AWAIT1["await available permit\n(existing behavior)"]
-    AWAIT1 --> RET
+    HASW -- yes --> AWAIT1["park on available permit\n(report interval)"]
     HASW -- no --> EV["try_evict_idle_from_other_group"]
     EV -- Evicted --> SP
-    EV -- NoIdleElsewhere --> AWAIT2["await worker_returned\n(bounded: checkout_wait_timeout_s)"]
-    AWAIT2 -- wakeup --> EV
-    AWAIT2 -- deadline --> FAIL["Err(SpawnFailed saturation_timeout)"]
+    EV -- NoIdleElsewhere --> AWAIT2["park on worker_returned\n(report interval)"]
+    AWAIT1 -- permit --> RET
+    AWAIT1 -- interval passed: log, re-probe --> FP
+    AWAIT2 -- wakeup, or interval passed: log --> FP
+    AWAIT1 -- pool shutdown --> STOP["Err(PoolShuttingDown)"]
+    AWAIT2 -- pool shutdown --> STOP
 ```
 
 Invariants:
@@ -388,9 +446,12 @@ job/file-status reporting path.
 1. Idle-eviction prevents the saturation-induced "cannot wait
    (would deadlock)" error in the common case where other groups
    hold idle workers.
-2. Bounded wait handles the rarer case where every worker is
-   genuinely checked out by returning a typed error after 5
-   minutes rather than blocking forever.
+2. When every worker is genuinely checked out, the checkout waits its
+   turn, visibly (file progress `waiting_for_worker`, a log line per
+   report interval), and is served when a worker comes back. Pool
+   shutdown, the job's cancellation, or a pool count that stays
+   unreconciled for two report intervals (`PoolAccountingBroken`) ends
+   the wait.
 3. The morphosyntax orchestrator converts every pool-level failure
    into per-file errors that the CLI surfaces as non-zero exit
    codes. No code path writes a file with a stripped tier.
@@ -401,13 +462,12 @@ job/file-status reporting path.
 |---|---|---|
 | `max_workers_per_key` | per-profile, RAM-derived (`recommend_max_workers_per_key`); GPU `≈ ram_total_mb / 16 GB`, Stanza `≈ ram_total_mb / 12 GB`, IO `1` | Per-key cap; prevents one language from hogging |
 | `max_total_workers` | computed from RAM (clamped 2-32) | Global cap |
-| `checkout_wait_timeout_s` | 300 | Bounded wait before saturation error |
+| `checkout_wait_report_interval` (`PoolConfig` field, not a server setting: `serve` passes `None`) | 300 s | How often a saturated checkout logs, re-probes and reconciles the counts; not a deadline |
 
 Raising `max_total_workers` or `max_workers_per_key` reduces how
 often eviction fires but never changes correctness. The
-saturation-timeout knob should match the orchestrator's
-per-language-group timeout so a checkout stall and a language stall
-surface at the same timescale.
+report interval only changes how often a long wait is logged and
+re-probed.
 
 ## Pipeline Parallelism
 
@@ -465,7 +525,8 @@ forward-looking proposal, not a commitment.
 | `translate/` | Translate: one request per utterance, provider pacing and retries in `provider.rs` and `items.rs` |
 | `worker/pool/mod.rs` | Worker lifecycle and group management |
 | `worker/pool/eviction.rs` | Idle eviction (`try_evict_idle_from_other_group`, `select_eviction_target`) |
-| `worker/pool/checkout.rs` / `dispatch.rs` | Checkout state machine (saturation timeout, `worker_returned` notify) |
+| `worker/pool/checkout.rs` / `dispatch.rs` | Checkout state machine (saturated wait, `worker_returned` notify) |
+| `worker/pool/checkout_wait.rs` | `SaturatedWait` (report interval, shutdown), `CheckoutWaitObserver` task local |
 | `runner/util/auto_tune.rs` | `compute_job_workers()` planning |
 | `types/runtime.rs` | Re-exports `MemoryTier::from_total_mb` and `estimate_per_worker_peak_mb_with_profile` from `batchalign-types::memory` (Phase β); `command_execution_budget_mb` for legacy callers. `MemoryTier` is the sole canonical source of per-tier per-profile envelopes (Principle 1); `estimate_per_worker_peak_mb_with_profile` is the tier-aware per-command estimator (Principle 2). |
 | `batchalign/runtime_constants.toml` | Per-command base RAM (process and threaded variants), worker caps, command-to-task map. Generated from `batchalign-types/src/command_spec.rs` via `xtask gen-runtime-toml` (Phase β); do not edit directly. No longer holds per-profile worker startup envelopes, those live on `MemoryTier`. |

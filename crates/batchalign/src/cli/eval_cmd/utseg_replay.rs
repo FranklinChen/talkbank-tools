@@ -46,7 +46,8 @@ use crate::cli::error::CliError;
 use crate::cli::eval_cmd::InputIdentity;
 use crate::provenance::{GeneratedComment, UnparseableStamp, recognize_generated_comment};
 use crate::utseg::{
-    AdmittedUtsegPrediction, collect_utseg_batch_items, integrate_admitted_assignments,
+    AdmittedUtsegPrediction, apply_utseg_document, collect_utseg_batch_items,
+    integrate_admitted_assignments,
 };
 use crate::utseg_evidence::{
     AdmittedUtsegEvidence, AdmittedUtsegEvidenceItem, UtsegEvidenceAdmissionError,
@@ -56,7 +57,7 @@ use batchalign_transform::asr_postprocess;
 use batchalign_transform::build_chat;
 use batchalign_transform::parse::parse_lenient;
 use batchalign_transform::serialize::to_chat_string;
-use batchalign_transform::utseg::{UtsegBatchItem, apply_utseg_results};
+use batchalign_transform::utseg::UtsegBatchItem;
 use batchalign_transform::validate::{ValidityLevel, validate_to_level};
 use talkbank_model::SemanticEq;
 
@@ -230,6 +231,9 @@ impl fmt::Display for BindingMismatch {
 /// comparison result: nothing was compared.
 #[derive(Debug, thiserror::Error)]
 enum UtsegReplayRefusal {
+    /// Retained assignments cannot preserve the producing CHAT structure.
+    #[error(transparent)]
+    Partition(#[from] batchalign_transform::utseg::UtsegApplyRefusal),
     /// An artifact could not be read.
     #[error("cannot read {}: {source}", path.display())]
     Read {
@@ -856,7 +860,7 @@ fn replay_post_chat(
     let utterances_before = chat.utterances().count();
     let mut assignments: HashMap<usize, Vec<usize>> = HashMap::new();
     integrate_admitted_assignments(&mut assignments, &collected, bound.as_slice());
-    apply_utseg_results(&mut chat, &assignments);
+    apply_utseg_document(&mut chat, &assignments)?;
     let utterances_after = chat.utterances().count();
 
     let recomputed = comparison_basis(&chat, "reapplied segmentation")?;
@@ -1003,7 +1007,7 @@ mod tests {
         assert!(errors.is_empty(), "fixture must parse cleanly");
         let mut map = HashMap::new();
         map.insert(0, assignments);
-        apply_utseg_results(&mut chat, &map);
+        apply_utseg_document(&mut chat, &map).expect("admitted replay split");
         to_chat_string(&chat)
     }
 

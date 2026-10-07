@@ -242,12 +242,15 @@ impl Job {
 
     /// Convert to the API `JobListItem` summary.
     pub fn to_list_item(&self) -> JobListItem {
-        let error_files = self
-            .execution
-            .file_statuses
-            .values()
-            .filter(|fs| fs.status() == FileStatusKind::Error)
-            .count() as i64;
+        let count = |kind: FileStatusKind| {
+            self.execution
+                .file_statuses
+                .values()
+                .filter(|fs| fs.status() == kind)
+                .count() as i64
+        };
+        let error_files = count(FileStatusKind::Error);
+        let diagnosed_files = count(FileStatusKind::Diagnosed);
         let duration_s = self.duration();
 
         JobListItem {
@@ -259,6 +262,7 @@ impl Job {
             total_files: self.total_files() as i64,
             completed_files: self.execution.completed_files,
             error_files,
+            diagnosed_files,
             error: self.execution.error.clone(),
             submitted_at: self.schedule.submitted_at,
             submitted_by: self.submitted_by(),

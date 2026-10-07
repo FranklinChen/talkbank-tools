@@ -1,6 +1,31 @@
 {
   "components": {
     "schemas": {
+      "ArtifactDigest": {
+        "description": "Canonical BLAKE3 identity, admitted from a digest or checked hexadecimal text.",
+        "type": "string"
+      },
+      "BinaryResultDescriptor": {
+        "additionalProperties": false,
+        "description": "Nonempty artifact identity sent instead of binary bytes in a JSON response.",
+        "properties": {
+          "byte_len": {
+            "description": "Exact byte count; a zero-length artifact is not an exported recording.",
+            "format": "int64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "digest": {
+            "$ref": "#/components/schemas/ArtifactDigest",
+            "description": "Identity of the bytes, verified again by the delivery consumer."
+          }
+        },
+        "required": [
+          "byte_len",
+          "digest"
+        ],
+        "type": "object"
+      },
       "CallerHost": {
         "description": "Hostname or remote IP of the caller who issued a cancel.\n\nEmpty when the source did not report identity (older clients,\nlocalhost defaults). Persisted in `cancellations.host` and\nprojected onto `jobs.last_cancelled_host`.",
         "type": "string"
@@ -157,7 +182,9 @@
           "chat",
           "csv",
           "text",
-          "json"
+          "json",
+          "wav",
+          "mp3"
         ],
         "type": "string"
       },
@@ -308,6 +335,7 @@
           "parse_error",
           "input_missing",
           "evidence_unavailable",
+          "analysis_unavailable",
           "worker_crash",
           "worker_timeout",
           "worker_protocol",
@@ -320,6 +348,30 @@
           "model_access_denied"
         ],
         "type": "string"
+      },
+      "FileOutputDiagnostics": {
+        "description": "What a file written with diagnostics reports.\n\nCarried by a file whose status is [`FileStatusKind::Diagnosed`]: its output\nwas written but is not certified complete, because its producer's admission\nfound something (transcription generated CHAT that Chatter did not admit),\nbecause requested work did not apply (a shortfall), or both. Validation is\nexactly as strict as for any other output; what differs is that the verdict\nis reported beside the written file instead of replacing it.\n\nBounded: its findings carry the count, a count per error code and the\nfirst [`Self::FIRST_FINDINGS`] findings, because the record is copied into\nevery file status entry on every poll. A longer list is written once, in\nfull, to a sidecar file ([`FullFindings::Sidecar`]).\n\nThe bar the output was judged against exists only with findings: a file\ndiagnosed for its shortfalls alone was admitted, and has no findings and no\nbar to report. Records written before the bar was recorded (a flat\n`finding_count` at the top level) are still read: every such record was\nwritten for transcription's generated output, the only producer of\ndiagnosed output then, which is judged against complete construction.",
+        "properties": {
+          "findings": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JudgedFindingsRecord",
+                "description": "What output admission found, with the bar it judged against. Absent\nwhen the document was admitted and only shortfalls diagnose the file."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "shortfalls": {
+            "description": "Requested work the written document does not carry.",
+            "items": {
+              "$ref": "#/components/schemas/OutputShortfallRecord"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "FilePayload": {
         "description": "A single CHAT file submitted by the client.",
@@ -364,7 +416,8 @@
           "translating",
           "resolving_coreference",
           "comparing",
-          "retry_scheduled"
+          "retry_scheduled",
+          "waiting_for_worker"
         ],
         "type": "string"
       },
@@ -435,8 +488,8 @@
         "description": "Result for a single processed file.",
         "properties": {
           "content": {
-            "description": "Processed file content (CHAT text or CSV).  Empty string when\n`error` is `Some`.",
-            "type": "string"
+            "$ref": "#/components/schemas/ResultContent",
+            "description": "Inline text or a binary artifact descriptor. This is untrusted wire\ndata, not a destination or write-admission capability."
           },
           "content_type": {
             "$ref": "#/components/schemas/ContentType",
@@ -532,6 +585,17 @@
       "FileStatusEntry": {
         "description": "Per-file status within a job.\n\nTracks processing state, timing, progress, and error details for a\nsingle file.  The server updates these entries as workers report\nresults, and they are included in `JobInfo.file_statuses`.",
         "properties": {
+          "diagnostics": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FileOutputDiagnostics",
+                "description": "What output admission found in a file written with diagnostics.\nPresent only when `status` is `Diagnosed`, following the `error`\nfield's pattern: this entry is a flat record whose status-specific\nfields are optional, not a union per status."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "duration_s": {
             "oneOf": [
               {
@@ -648,15 +712,113 @@
         "type": "object"
       },
       "FileStatusKind": {
-        "description": "Per-file lifecycle states within a job.\n\nEach file in a job tracks its own status independently.  On job restart,\nonly files in resumable states (`Queued`, `Processing`, `Interrupted`) are\nre-queued; `Done` and `Error` files are left as-is.",
+        "description": "Per-file lifecycle states within a job.\n\nEach file in a job tracks its own status independently.  On job restart,\nonly files in resumable states (`Queued`, `Processing`, `Interrupted`) are\nre-queued; `Done`, `Diagnosed` and `Error` files are left as-is.",
         "enum": [
           "queued",
           "processing",
           "done",
+          "diagnosed",
           "error",
           "interrupted"
         ],
         "type": "string"
+      },
+      "FindingCodeCount": {
+        "description": "How many findings carried one error code.",
+        "properties": {
+          "code": {
+            "description": "The code; absent for findings that carry none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "count": {
+            "description": "How many findings carried it.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "type": "object"
+      },
+      "FindingLevel": {
+        "description": "Which check made a finding: a coarse gate level, or complete construction\nadmission.",
+        "enum": [
+          "parseable",
+          "structurally_complete",
+          "main_tier_valid",
+          "construction"
+        ],
+        "type": "string"
+      },
+      "FullFindings": {
+        "description": "Where the complete list of a file's findings is.",
+        "oneOf": [
+          {
+            "description": "On the record: `first_findings` is the whole list.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "inline"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Too long for the record: written once, in full, as JSON to this\nserver-side file in the job's staging directory.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "sidecar"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "description": "Path of the sidecar file on the server.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Too long for the record, and writing the sidecar failed: only the\nfirst findings, the count and the tally per code are available. The\noutput itself was written; a diagnostics file that could not be\nwritten does not make it an error.",
+            "properties": {
+              "error": {
+                "description": "Why writing it failed.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "unwritten"
+                ],
+                "type": "string"
+              },
+              "path": {
+                "description": "Where the sidecar was to be written.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "error",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "HealthResponse": {
         "description": "`GET /health` response.\n\nProvides a snapshot of server liveness, capacity, and operational\nmetrics. The CLI uses this for daemon version checks (`build_hash`) and\ncapability probing.",
@@ -1115,7 +1277,7 @@
             ]
           },
           "completed_files": {
-            "description": "Number of files that finished successfully (`Done`).",
+            "description": "Number of files that reached a terminal state: done, diagnosed or\nerror.",
             "format": "int64",
             "type": "integer"
           },
@@ -1129,6 +1291,11 @@
                 "type": "null"
               }
             ]
+          },
+          "diagnosed_files": {
+            "description": "Number of files written with diagnostics (`Diagnosed`): their output\nis on disk, but it is not certified complete. A `completed` job with a\nnonzero count is not a clean success.",
+            "format": "int64",
+            "type": "integer"
           },
           "duration_s": {
             "oneOf": [
@@ -1347,6 +1514,53 @@
         ],
         "type": "object"
       },
+      "JudgedFindingsRecord": {
+        "description": "What one output judgement found, bounded, with the bar it was held to.",
+        "properties": {
+          "bar": {
+            "$ref": "#/components/schemas/JudgementBar",
+            "description": "The bar the output was judged against."
+          },
+          "finding_count": {
+            "description": "How many findings the judgement made, in all; at least one.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "findings_by_code": {
+            "description": "How many findings carried each error code, most frequent first.",
+            "items": {
+              "$ref": "#/components/schemas/FindingCodeCount"
+            },
+            "type": "array"
+          },
+          "first_findings": {
+            "description": "The first findings, in the order the judgement found them, at most\n[`FileOutputDiagnostics::FIRST_FINDINGS`].",
+            "items": {
+              "$ref": "#/components/schemas/OutputFindingRecord"
+            },
+            "type": "array"
+          },
+          "full_findings": {
+            "$ref": "#/components/schemas/FullFindings",
+            "description": "Where the complete list is."
+          }
+        },
+        "required": [
+          "bar",
+          "finding_count",
+          "full_findings"
+        ],
+        "type": "object"
+      },
+      "JudgementBar": {
+        "description": "The bar an output was judged against, as a refusal reports it.",
+        "enum": [
+          "construction",
+          "preservation"
+        ],
+        "type": "string"
+      },
       "LanguageSpec": {
         "description": "Job language: `auto` (the ASR engine detects one language), `per-file` (each file's `@Languages:` header decides), an ISO 639-3 code such as `eng`, or a code-switched pair such as `eng,spa`, primary language first.",
         "examples": [
@@ -1414,6 +1628,177 @@
         "minimum": 0,
         "type": "integer"
       },
+      "OffRecordPostcode": {
+        "description": "A postcode that marks an utterance as not speech in the recording, so\nalignment leaves it untimed.\n\nA closed set, read from Chatter's typed postcodes (never from the line's\ntext). The CHAT manual defines no fixed postcode set (\"postcodes can be\ndesigned to fit the needs of your particular project\"), so membership\nhere is a recorded ruling, one per postcode, never inferred from a name.",
+        "enum": [
+          "diary"
+        ],
+        "type": "string"
+      },
+      "OptionalStage": {
+        "description": "An optional later stage of a generating producer.",
+        "enum": [
+          "utterance_segmentation",
+          "morphosyntax"
+        ],
+        "type": "string"
+      },
+      "OutputFindingRecord": {
+        "description": "One admission finding.",
+        "properties": {
+          "code": {
+            "description": "The CHAT error code (for example `E220`), when the finding has one: a\ncommand's own completion checks name none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "$ref": "#/components/schemas/FindingLevel",
+            "description": "The validity level the finding belongs to."
+          },
+          "message": {
+            "description": "What was found, without the code.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "message"
+        ],
+        "type": "object"
+      },
+      "OutputShortfallRecord": {
+        "description": "Requested work a written document does not carry, and why.",
+        "oneOf": [
+          {
+            "description": "The stage requires an admitted document, and the generated output was\ndiagnosed, so the stage did not run.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "stage_skipped"
+                ],
+                "type": "string"
+              },
+              "stage": {
+                "$ref": "#/components/schemas/OptionalStage",
+                "description": "The stage."
+              }
+            },
+            "required": [
+              "stage",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The stage ran and its own output could not be admitted; the admitted\ndocument from before it was written instead.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "stage_not_applied"
+                ],
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/components/schemas/StageRefusalRecord",
+                "description": "Why, as the stage's own admission reported it, bounded."
+              },
+              "stage": {
+                "$ref": "#/components/schemas/OptionalStage",
+                "description": "The stage."
+              }
+            },
+            "required": [
+              "stage",
+              "refusal",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A per-utterance stage ran on a diagnosed document and left out the\nutterances its findings are confined to: every other utterance has\nthe stage's result, these keep their generated form.",
+            "properties": {
+              "first_held_out": {
+                "description": "The first of them (positions among the file's utterances before\nthe stage, counting from 1), at most\n[`FileOutputDiagnostics::FIRST_FINDINGS`].",
+                "items": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "held_out_utterances": {
+                "description": "How many utterances it left out, at least one.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "stage_held_out"
+                ],
+                "type": "string"
+              },
+              "stage": {
+                "$ref": "#/components/schemas/OptionalStage",
+                "description": "The stage."
+              }
+            },
+            "required": [
+              "stage",
+              "held_out_utterances",
+              "first_held_out",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forced alignment left required words untimed. The measured timing\nwas written; these words are in the transcript without bullets.",
+            "properties": {
+              "first_untimed": {
+                "description": "The first of those utterances, in transcript order, at most\n[`FileOutputDiagnostics::FIRST_FINDINGS`].",
+                "items": {
+                  "$ref": "#/components/schemas/UntimedUtteranceRecord"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "timing_incomplete"
+                ],
+                "type": "string"
+              },
+              "required_words": {
+                "description": "Required lexical words in the file.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "untimed_utterances": {
+                "description": "How many utterances have untimed words, at least one.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "untimed_words": {
+                "description": "How many of them have no positive interval, at least one.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "required_words",
+              "untimed_words",
+              "untimed_utterances",
+              "first_untimed",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ProvenanceEntry": {
         "description": "One extracted provenance entry from a CHAT file.",
         "properties": {
@@ -1467,6 +1852,225 @@
           "reason"
         ],
         "type": "object"
+      },
+      "RefusedWindowTrace": {
+        "description": "Wire form of [`batchalign_transform::decisions::RefusedWindow`]: one\nvariant per cause, tagged by `cause`, each carrying only its own numbers.",
+        "oneOf": [
+          {
+            "description": "Longer than the engine's alignment budget.",
+            "properties": {
+              "budget_ms": {
+                "description": "The budget exceeded, in milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cause": {
+                "enum": [
+                  "over_budget"
+                ],
+                "type": "string"
+              },
+              "end_ms": {
+                "description": "End of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_ms": {
+                "description": "Start of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start_ms",
+              "end_ms",
+              "budget_ms",
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The window holds no audio.",
+            "properties": {
+              "at_ms": {
+                "description": "The position at which the window starts and ends.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cause": {
+                "enum": [
+                  "empty"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "at_ms",
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The end precedes the start.",
+            "properties": {
+              "cause": {
+                "enum": [
+                  "inverted"
+                ],
+                "type": "string"
+              },
+              "end_ms": {
+                "description": "The proposed end, which precedes the start.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_ms": {
+                "description": "The proposed start.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start_ms",
+              "end_ms",
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The window ends past the end of the recording.",
+            "properties": {
+              "cause": {
+                "enum": [
+                  "past_recording"
+                ],
+                "type": "string"
+              },
+              "end_ms": {
+                "description": "End of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "exceeds_by_ms": {
+                "description": "How far past the recording's end, in milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_ms": {
+                "description": "Start of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start_ms",
+              "end_ms",
+              "exceeds_by_ms",
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Over budget, and the recovered word anchors leave a stretch longer\nthan the budget to cut across: the utterance's placement needs review.",
+            "properties": {
+              "budget_ms": {
+                "description": "The budget exceeded, in milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cause": {
+                "enum": [
+                  "anchor_gap"
+                ],
+                "type": "string"
+              },
+              "end_ms": {
+                "description": "End of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "gap_end_ms": {
+                "description": "End of that stretch, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "gap_start_ms": {
+                "description": "Start of the widest uncrossable stretch, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_ms": {
+                "description": "Start of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start_ms",
+              "end_ms",
+              "budget_ms",
+              "gap_start_ms",
+              "gap_end_ms",
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Over budget; recovery matched the utterance but gave no usable cut.",
+            "properties": {
+              "budget_ms": {
+                "description": "The budget exceeded, in milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cause": {
+                "enum": [
+                  "anchors_unusable"
+                ],
+                "type": "string"
+              },
+              "end_ms": {
+                "description": "End of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_ms": {
+                "description": "Start of the window, in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unusable": {
+                "$ref": "#/components/schemas/UnusableAnchorsTrace",
+                "description": "Why the matches could not be cut at. Not `cause`, which is this\nobject's own tag."
+              }
+            },
+            "required": [
+              "start_ms",
+              "end_ms",
+              "budget_ms",
+              "unusable",
+              "cause"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "RegistryWorkerRefusal": {
         "description": "Why a registry daemon was not adopted. Either way the remedy is to restart\nthe daemon with this server's build (`batchalign3 worker stop`, then\n`batchalign3 worker start` for its profile and language).",
@@ -1533,7 +2137,8 @@
           "compare",
           "avqi",
           "diarize",
-          "speaker_identify"
+          "speaker_identify",
+          "convert"
         ],
         "type": "string"
       },
@@ -1541,9 +2146,89 @@
         "description": "A path relative to a data repo root (e.g. `\"French/Newcastle/Photos/13\"`).\n\nValid on any machine that has the repo cloned, but must be combined\nwith a server root path to produce a [`ServerPath`] for I/O.",
         "type": "string"
       },
+      "ResultContent": {
+        "description": "Content on the result wire: inline text or a streamed artifact descriptor.\nUntagged serialization retains the existing JSON string for text results.",
+        "oneOf": [
+          {
+            "description": "Inline CHAT, CSV, plain text or JSON document bytes.",
+            "type": "string"
+          },
+          {
+            "$ref": "#/components/schemas/BinaryResultDescriptor",
+            "description": "Binary bytes must be downloaded and admitted separately."
+          }
+        ]
+      },
       "Sha256Digest": {
         "description": "A validated lowercase SHA-256 digest.",
         "type": "string"
+      },
+      "StageRefusalRecord": {
+        "description": "Why an optional stage's own output was not admitted, bounded as\n[`FileOutputDiagnostics`] is: it travels in every poll's file status.",
+        "oneOf": [
+          {
+            "description": "The stage's output was judged and failed.",
+            "properties": {
+              "bar": {
+                "$ref": "#/components/schemas/JudgementBar",
+                "description": "The bar it was judged against."
+              },
+              "finding_count": {
+                "description": "How many findings the judgement made, in all.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "findings_by_code": {
+                "description": "How many findings carried each error code, most frequent first.",
+                "items": {
+                  "$ref": "#/components/schemas/FindingCodeCount"
+                },
+                "type": "array"
+              },
+              "first_findings": {
+                "description": "The first findings, at most [`FileOutputDiagnostics::FIRST_FINDINGS`].",
+                "items": {
+                  "$ref": "#/components/schemas/OutputFindingRecord"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "judged"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "bar",
+              "finding_count",
+              "first_findings",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The stage could not establish an output to judge; one statement of\nwhy, as its producer gave it.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "unestablished"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "The producer's statement.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "StatusMessageResponse": {
         "description": "Response body for mutating operations that return a status confirmation\n(e.g. cancel, delete, restart).\n\nReturned with HTTP 200 on success. Clients can branch on `status` for\nprogrammatic handling and display `message` to users.",
@@ -1562,6 +2247,125 @@
           "message"
         ],
         "type": "object"
+      },
+      "UntimedCauseRecord": {
+        "description": "Why an utterance's words have no timing.",
+        "oneOf": [
+          {
+            "description": "Its audio window was refused, so no alignment request was made.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "window_refused"
+                ],
+                "type": "string"
+              },
+              "window": {
+                "$ref": "#/components/schemas/RefusedWindowTrace",
+                "description": "The refused window and its cause."
+              }
+            },
+            "required": [
+              "window",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "It was placed in no request: the audio left for a run of untimed\nutterances could not contain their words.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "not_placed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No refusal names it, and no positive interval resulted for these\nwords: the aligner returned none, or they could not be sent to it.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "no_usable_timing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The transcript marks it as not speech in the recording, so alignment\nnever looks for it there: no request, no bullet, untimed by design.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "not_in_recording"
+                ],
+                "type": "string"
+              },
+              "postcode": {
+                "$ref": "#/components/schemas/OffRecordPostcode",
+                "description": "The postcode that marks it."
+              }
+            },
+            "required": [
+              "postcode",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "UntimedUtteranceRecord": {
+        "description": "One utterance forced alignment left with untimed words.",
+        "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/UntimedCauseRecord",
+            "description": "Why."
+          },
+          "untimed_words": {
+            "description": "How many of them are untimed, at least one.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "utterance": {
+            "description": "The utterance's position among the file's utterances, counting from 1.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "words": {
+            "description": "Required lexical words in it.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "utterance",
+          "words",
+          "untimed_words",
+          "cause"
+        ],
+        "type": "object"
+      },
+      "UnusableAnchorsTrace": {
+        "description": "Wire form of [`batchalign_transform::decisions::UnusableAnchors`].",
+        "enum": [
+          "no_reliable_anchors",
+          "anchors_refused",
+          "anchors_describe_other_words",
+          "no_interior_cut"
+        ],
+        "type": "string"
       },
       "WorkerCapabilityAdmission": {
         "description": "What the server decided about one worker key's latest capability report.",
@@ -1804,6 +2608,53 @@
           }
         },
         "summary": "Return full detail for a single job, including per-file statuses.",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/jobs/{job_id}/artifacts/{filename}": {
+      "get": {
+        "operationId": "get_binary_result",
+        "parameters": [
+          {
+            "description": "Job identifier",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact recorded artifact identity",
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "Binary recording bytes"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No successful binary result"
+          }
+        },
+        "summary": "Stream a recorded successful binary result. This endpoint inherits the\nsame router/middleware boundary as job metadata and text results.",
         "tags": [
           "jobs"
         ]

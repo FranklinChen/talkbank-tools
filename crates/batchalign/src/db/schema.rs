@@ -167,7 +167,7 @@ pub struct FileStatusRow {
 
     /// Column `status TEXT NOT NULL DEFAULT 'queued'`.
     /// Per-file lifecycle state. One of: `"queued"`, `"processing"`,
-    /// `"done"`, `"error"`, `"interrupted"`.
+    /// `"done"`, `"diagnosed"`, `"error"`, `"interrupted"`.
     pub status: String,
 
     /// Column `error TEXT` (nullable).
@@ -179,6 +179,13 @@ pub struct FileStatusRow {
     /// Machine-readable error classification (e.g. `"parse_error"`,
     /// `"worker_crash"`). Used by the dashboard to group failures.
     pub error_category: Option<String>,
+
+    /// Column `diagnostics TEXT` (nullable).
+    /// JSON object of a diagnosed file's admission findings
+    /// (`api::FileOutputDiagnostics`). Raw here; decoded at the database
+    /// boundary (`store::queries::recover_file_phase`). `None` for every
+    /// phase but `"diagnosed"`.
+    pub diagnostics: Option<String>,
 
     /// Column `content_type TEXT NOT NULL DEFAULT 'chat'`.
     /// MIME-like content descriptor for the result file. Typically

@@ -11,7 +11,7 @@ use crate::params::MorphosyntaxParams;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
 use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
-use crate::types::engines::TranslateEngineName;
+use crate::translate::TranslationRoute;
 use crate::worker::pool::WorkerPool;
 
 /// Runtime morphotag options resolved from command options for execution.
@@ -71,7 +71,6 @@ pub(crate) trait WorkerGateway: Send + Sync {
         &self,
         chat_text: &str,
         before_text: Option<&str>,
-        lang: &LanguageCode3,
         options: MorphotagRuntimeOptions,
         progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
         cancellation: Cancellation<'_>,
@@ -98,13 +97,13 @@ pub(crate) trait WorkerGateway: Send + Sync {
     ///
     /// One file, not a batch: translate stops a file at its first failed
     /// utterance, a verdict that is only per-file when the file is sent
-    /// alone. `engine` is the job's selection: it keys the worker that serves
+    /// alone. The sealed route holds the file's source, job's target and engine;
+    /// its engine keys the worker that serves
     /// the requests and sets the pacing and retry policy they are sent under.
     async fn translate_file(
         &self,
         file: &TextBatchFileInput,
-        lang: &LanguageCode3,
-        engine: &TranslateEngineName,
+        route: &TranslationRoute,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults;
 
@@ -146,12 +145,11 @@ impl WorkerGateway for PooledWorkerGateway {
     async fn morphotag_for_compare(
         &self,
         chat_text: &str,
-        lang: &LanguageCode3,
+        _lang: &LanguageCode3,
         mwt: &MwtDict,
         cancellation: Cancellation<'_>,
     ) -> Result<PostValidated, ServerError> {
         let params = MorphosyntaxParams {
-            lang,
             tokenization_mode: TokenizationMode::Preserve,
             multilingual_policy: MultilingualPolicy::ProcessAll,
             mwt,
@@ -184,13 +182,11 @@ impl WorkerGateway for PooledWorkerGateway {
         &self,
         chat_text: &str,
         before_text: Option<&str>,
-        lang: &LanguageCode3,
         options: MorphotagRuntimeOptions,
         progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
         cancellation: Cancellation<'_>,
     ) -> Result<PostValidated, ServerError> {
         let params = MorphosyntaxParams {
-            lang,
             tokenization_mode: options.tokenization_mode,
             multilingual_policy: options.multilingual_policy,
             mwt: &options.mwt,
@@ -234,11 +230,10 @@ impl WorkerGateway for PooledWorkerGateway {
     async fn translate_file(
         &self,
         file: &TextBatchFileInput,
-        lang: &LanguageCode3,
-        engine: &TranslateEngineName,
+        route: &TranslationRoute,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults {
-        crate::translate::process_translate_file(file, lang, engine, &self.pool, cancellation).await
+        crate::translate::process_translate_file(file, route, &self.pool, cancellation).await
     }
 
     async fn coref_batch(

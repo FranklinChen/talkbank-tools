@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-01 21:20 EDT
+**Last updated:** 2026-10-06 23:58 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -44,8 +44,8 @@ flowchart TD
     EnTitlePeriod["strip_english_title_periods_on_elements()\n⚠ English transcribe rule\n(must precede Stage 3 split)"]
     Pre["prepare_words_pre_expansion()\nStages 1-3b, including\nCantonese normalization (2d)"]
     AW_pre["Vec&lt;AsrWord&gt;\n(digits still raw,\n% tokens already split)"]
-    Expand["expand_number()\nper-word Rust pass\n(chatter num_words: tables/CJK/\ncurrency/ordinals; Batchalign: por ordinals)"]
-    Split["split_words_with_whitespace()\npost-expansion re-split"]
+    Expand["write_word_forms()\nper-word Rust pass: expand_number()\n(chatter num_words: tables/CJK/\ncurrency/ordinals; Batchalign: por ordinals),\nalphanumeric links, letter strings"]
+    Split["multi-word expansion re-split\n(inside write_word_forms)"]
     AW["AsrWord\n&bull; text: AsrNormalizedText\n&bull; start_ms/end_ms: Option i64\n&bull; kind: WordKind"]
     Fin["finalize_words_to_chunks()\nStages 5-5b"]
     EnICap["apply_english_transcribe_rules_pre_retokenize()\n(I-cap: i→I, i'll→I'll, …)"]
@@ -303,7 +303,7 @@ removed (see [Number Expansion](../reference/number-expansion.md)).
 
 The functions involved are:
 `prepare_words_pre_expansion()` (stages 1-3, Cantonese normalization included),
-`expand_number()` plus `split_words_with_whitespace()` (stage 4 + 4.5), and
+`write_word_forms()` (stage 4 + 4.5), and
 `finalize_words_to_chunks()` (stages 5-5b). The monolithic `process_raw_asr()`
 is a sync fallback that follows the same shape. Both return a `Result`: their
 one failure is a Cantonese normalization that changed a monologue's character
@@ -316,8 +316,8 @@ count.
 | 2d | **Cantonese normalization** (lang=yue only) | `prepare_words_pre_expansion()` | The monologue's words are normalized as ONE run through `AlignedNormalization` (simplified → traditional plus the 31-entry domain table), and each word gets back exactly its own characters. It runs before stage 3 because that stage interpolates timestamps across a token's characters and must see final text, and because normalizing afterwards would normalize one character at a time and lose every multi-character replacement. A conversion that changed the character count refuses the file (`NormalizationChangedLength`, carrying both counts) rather than re-cutting words away from their timings. |
 | 3 | Multi-word splitting | `prepare_words_pre_expansion()` | Space-containing tokens split, timestamps interpolated, hyphens joined |
 | 3b | **Percent-suffix split** | `split_percent_suffix_words()` | `"80%"` → `"80"` + per-language percent word ("percent" for eng, 11 languages covered) with proportional timing. `%` is the CHAT dep-tier sigil and structurally illegal on the main tier in any language. Dormant for single-language en/es (see below); fires for languages where Rev.AI applies ITN. For code-switched text (`AsrTextLanguage::CodeSwitched`) the digit group is kept and `%` dropped, because no language is known to write the percent word in. |
-| 4 | **Number expansion** | `expand_number()` per word | Single Rust pass: Batchalign's Portuguese indicator-ordinal check (`ordinal_por`) runs first; everything else routes to chatter's `talkbank_transform::num_words::expand_number`, which owns per-language cardinal tables, CJK numerals, English ordinals/decades, currency and digit-leading hyphen compounds (`"17-year-old"` → `"seventeen-year-old"` in digit-rejecting languages), plus dash-ranges (split and recurse). The per-language percent word stays Batchalign's (`language_percent_word`). **Skipped for code-switched text**: nothing says which language a numeral was spoken in, so digits stay digits and are reported for review rather than written out as words the speaker may not have said. |
-| 4.5 | **Post-expansion re-split** | `split_words_with_whitespace()` | Expansion can produce multi-word text (`"100"` → `"one hundred"`, `"$80"` → `"eighty dollars"`). A `ChatWordText` holds one main-tier token, so whitespace-bearing entries are split into separate `AsrWord`s with proportionally distributed timing. |
+| 4 | **Word forms** | `write_word_forms()` per word | A spelling of a reserved marker (`www`, `xxx`, `yyy`, any case) is a spoken string of letters and is written `www@k` (CHAT manual 8.8.1), never as the untranscribed marker; this rule writes no word in a language and applies to code-switched text too. A letter-led token whose digits stand alone is linked with each digit spelled (`b2` to `b_two`, `R2D2` to `R_two_D_two`, manual 8.8.3); a run of several digits inside a word (`abc123`) has no reading its surface gives and stays as recognized, reported for review. Number expansion: `expand_number()` per word. Single Rust pass: Batchalign's Portuguese indicator-ordinal check (`ordinal_por`) runs first; everything else routes to chatter's `talkbank_transform::num_words::expand_number`, which owns per-language cardinal tables, CJK numerals, English ordinals/decades, currency and digit-leading hyphen compounds (`"17-year-old"` → `"seventeen-year-old"` in digit-rejecting languages), plus dash-ranges (split and recurse). The per-language percent word stays Batchalign's (`language_percent_word`). **Skipped for code-switched text**: nothing says which language a numeral was spoken in, so digits stay digits and are reported for review rather than written out as words the speaker may not have said. |
+| 4.5 | **Post-expansion re-split** | inside `write_word_forms()` | Expansion can produce multi-word text (`"100"` → `"one hundred"`, `"$80"` → `"eighty dollars"`). A `ChatWordText` holds one main-tier token, so whitespace-bearing entries are split into separate `AsrWord`s with proportionally distributed timing. |
 
 ### Rev.AI and the stage-3b/4/4.5 defense-in-depth
 
@@ -398,6 +398,22 @@ All three types use `#[serde(transparent)]`, `as_str()`, `Display`,
 pipeline stage transformations and `push_str()` for hyphen-joining.
 
 ## Construction-Time Validation
+
+Word admission is not whole-document admission. After assembly and provenance
+injection, transcription judges the document with complete Chatter
+checked-construction admission through `PostValidated::produced` before optional
+CHAT processing. An admitted document continues: segmentation and morphology
+consume that typed document (as a `PostValidated`), not a serialization parsed
+back into a new model, every edit requires fresh admission, and the final
+writer receives the proof. A document that does not pass, typically because a
+structurally-only legal word (E220) was kept verbatim for review, is a
+`DiagnosedOutput`: segmentation runs outside the utterances its findings belong
+to, morphology is skipped (each recorded as a shortfall), and it is written
+with every finding, so the file is reported `diagnosed` instead of
+failing. An optional stage whose own output is refused keeps the admitted
+document from before it, also recorded as a shortfall. The
+[command contract](command-contracts.md) owns the output policy, and
+[CHAT validation failures](../developer/chat-validation-failures.md) explains it.
 
 ```mermaid
 flowchart TD
@@ -496,13 +512,28 @@ Verified against source: `strip_separator_words` in
 flowchart LR
     Raw["Option&lt;AudioPositionSeconds&gt;\n(a proven position,\nor None when absent)"]
     Internal["Option i64\n(milliseconds)"]
-    Output["Option u64\n(milliseconds)"]
-    Bullet["Bullet\n(u64 ms)"]
+    Output["DescribedTiming\nPositive(PositiveInterval)\nor Untimed(cause)"]
+    Bullet["Bullet\n(PositiveInterval::bullet)"]
 
     Raw -->|"WordTiming::admit_positions_or_untimed()\nvia normalized_timing_range()"| Internal
-    Internal -->|"as u64 cast\nin transcript_from_asr_utterances()"| Output
-    Output -->|"build_word_utterance()"| Bullet
+    Internal -->|"DescribedTiming::admit_millis()\nin transcript_from_asr_utterances()"| Output
+    Output -->|"build_word_utterance():\nword bullet, and the utterance\nbullet covering them"| Bullet
 ```
+
+Every bullet transcription generates comes from a `PositiveInterval`
+(`asr_postprocess::timing`): private fields, one constructor over an
+`AdmittedInterval` that refuses an empty span (`ZeroLengthSpan`), and
+`PositiveInterval::bullet` as the one construction of a generated bullet. The
+description types (`WordDesc.timing`, `UtteranceDesc.timing`) carry
+`DescribedTiming`, never two optional numbers, so a zero-width or inverted pair
+reaches `build_chat` as an untimed word with its cause and writes no bullet.
+The utterance bullet is the `covering` hull of its positive words (minimum
+start, maximum end), so it is positive by construction and is not widened by an
+untimed word; an utterance with no positive word has no bullet. The JSON form
+(the PyO3 `build_chat()` bridge) keeps its flat `start_ms`/`end_ms` fields and
+is admitted the same way on the way in. The `AsrWord` stage still stores
+`Option i64`; carrying the proof through post-processing itself is a later
+change.
 
 An `AsrElement`'s `ts` and `end_ts` are `Option<AudioPositionSeconds>`, the
 shared position type from `batchalign-types`: `Some` for an endpoint the

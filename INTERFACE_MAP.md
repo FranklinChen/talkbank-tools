@@ -1,7 +1,7 @@
 # Python/Rust Interface Map
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:57 EDT
+**Last updated:** 2026-10-02 23:08 EDT
 
 This document is the unified reference for all Python/Rust interface boundaries in batchalign3.
 
@@ -173,8 +173,13 @@ does not join an uncancellable OS stdin read.
 task/payload agreement, prepared-batch loading and item-count checks, the
 failure taxonomy, and result normalization into the typed V2 payloads. Python
 keeps the host of loaded model runners plus one adapter per task, which
-parses the frozen batch into typed batch items, builds `BatchInferRequest`,
-manages the morphosyntax progress callback, and calls the model.
+parses the frozen batch into typed batch items, manages the morphosyntax
+progress callback, and calls the model. Translation builds the frozen
+`TranslateInferenceRequest` with mandatory checked source and target codes;
+its Rust-to-Python callback carries `(source, target, batch_json)`. Other NLP
+tasks retain `BatchInferRequest`. Legacy batch translation explicitly admits
+its English-only contract into the same checked translation request; it is
+not the target-aware V2 route.
 
 ---
 

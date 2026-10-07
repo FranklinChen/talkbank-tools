@@ -1348,6 +1348,24 @@ def test_invalid_utseg_assignment_host_output_fails_its_item(
 def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
     """The live V2 router should hand translate requests to the text host."""
 
+    seen = []
+
+    def translate_runner(req):
+        seen.append(req)
+        return BatchInferResponse(
+            results=[
+                InferResponse.timed(
+                    lambda: ItemProduced(
+                        result={
+                            "kind": "translated",
+                            "raw_translation": "hola",
+                            "engine": "googletrans-v1",
+                        }
+                    )
+                )
+            ]
+        )
+
     payload_path = tmp_path / "translate-batch.json"
     _write_json_payload(payload_path, {"items": [{"text": "hello there"}]})
 
@@ -1376,27 +1394,17 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
             asr=AsrExecutionHostV2(),
             forced_alignment=ForcedAlignmentExecutionHostV2(),
             speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(
-                translate_runner=lambda req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={
-                                    "kind": "translated",
-                                    "raw_translation": "hola",
-                                    "engine": "googletrans-v1",
-                                }
-                            )
-                        )
-                    ]
-                )
-            ),
+            text=TextExecutionHostV2(translate_runner=translate_runner),
         ),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, TranslationResultV2)
     assert response.result.items[0].raw_translation == "hola"
+    assert len(seen) == 1
+    assert seen[0].source_lang == "eng"
+    assert seen[0].target_lang == "spa"
+    assert seen[0].items == ({"text": "hello there"},)
 
 
 def test_invalid_translate_host_item_fails_only_that_item(tmp_path: Path) -> None:

@@ -1,13 +1,14 @@
 # benchmark
 
 **Status:** Current
-**Last updated:** 2026-09-16 20:45 EDT
+**Last updated:** 2026-10-04 20:41 EDT
 
 Transcribe audio via ASR and evaluate word error rate (WER) against gold
 `.cha` transcripts in the same directory. A composite command that runs
 `transcribe` followed by `compare` internally.
 
 Outputs per audio file:
+
 1. A hypothesis `.cha` transcript
 2. A `.compare.csv` with WER metrics
 
@@ -106,6 +107,12 @@ The hypothesis `.cha` contains a main-annotated view (unlike `compare`, which
 outputs the projected reference). The `%xsrep` and `%xsmor` tiers are
 injected on the hypothesis utterances showing how the hypothesis deviates from
 the gold.
+
+The file is reported complete only after both the CHAT transcript and metrics
+sidecar have been written successfully, including their staged copies for
+download. A write failure reports that file as failed; it does not rerun ASR.
+Some partial files may remain after failure, so their presence alone does not
+establish successful completion.
 
 ---
 

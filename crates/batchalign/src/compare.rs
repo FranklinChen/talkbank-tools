@@ -15,7 +15,6 @@ use std::path::Path;
 use crate::api::LanguageCode3;
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use crate::pipeline::PipelineServices;
-use tracing::warn;
 
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, TokenizationMode};
 use crate::chat_ops::{DependentTier, Header, Line};
@@ -24,9 +23,33 @@ use crate::params::MorphosyntaxParams;
 use crate::pipeline::post_validate::{PostValidated, UtteranceCensus};
 use crate::text_batch::TextBatchFileInput;
 use batchalign_transform::compare::{
-    clear_comparison, format_metrics_csv, inject_comparison, project_gold_structurally,
+    CompareMetricsCsvTable, clear_comparison, inject_comparison, project_gold_structurally,
 };
-use batchalign_transform::parse::parse_lenient;
+
+/// A completely admitted reference transcript. Only source admission produces
+/// this capability; reference content has no regeneration exemption.
+#[derive(Debug, Clone)]
+pub(crate) struct AdmittedComparisonReference {
+    file: Box<talkbank_model::validation::ValidChatFile>,
+}
+
+impl AdmittedComparisonReference {
+    /// Admit the reference once, before transcription or morphology inference.
+    pub(crate) fn admit(text: &str) -> Result<Self, ServerError> {
+        let source = crate::pipeline::text_infer::admit_retained_text(
+            &crate::chat_parser(),
+            text,
+            talkbank_model::model::TranscriptName::Anonymous,
+        )?;
+        Ok(Self {
+            file: Box::new(source.into_valid_file()),
+        })
+    }
+
+    fn into_document(self) -> crate::chat_ops::ChatFile {
+        self.file.into_unchecked()
+    }
+}
 
 /// Released compare outputs.
 pub(crate) struct CompareMaterializedOutputs {
@@ -38,8 +61,8 @@ pub(crate) struct CompareMaterializedOutputs {
     /// materializer had the `ChatFile` in hand the whole time. See
     /// [`gate_comparison_output`] for what it is judged against and why.
     pub chat_output: PostValidated,
-    /// CSV sidecar containing aggregate and per-POS compare metrics.
-    pub metrics_csv: String,
+    /// Producer-built metrics, retained structurally until each CSV boundary.
+    pub metrics: CompareMetricsCsvTable,
 }
 
 /// Internal main-annotated compare output used by benchmark-style flows.
@@ -50,50 +73,18 @@ pub(crate) struct MainAnnotatedCompareOutputs {
     /// consequence as [`CompareMaterializedOutputs::chat_output`]; the writer
     /// there was `runner::dispatch::benchmark_pipeline`.
     pub annotated_main_chat: PostValidated,
-    /// CSV sidecar containing aggregate and per-POS compare metrics.
-    pub metrics_csv: String,
+    /// Producer-built metrics, retained structurally until CSV encoding.
+    pub metrics: CompareMetricsCsvTable,
 }
 
-/// Judge a comparison artifact by PRESERVATION, against the document it
-/// descends from.
+/// Establish complete checked construction AND preservation against the
+/// admitted document this artifact descends from. Neither property substitutes
+/// for the other: a valid projection can still lose source structure.
 ///
-/// # Why not a validity level
-///
-/// Because neither of these two commands admits its input at one:
-///
-/// - compare's released output is the GOLD companion, structurally projected.
-///   That companion is read from disk and [`parse_lenient`]'d, its parse errors
-///   are `warn!`ed and not refused, and nothing calls `validate_to_level` on it
-///   anywhere on this path.
-/// - benchmark's main-annotated output descends from ASR text that
-///   `transcribe::process_transcribe` returns as a bare `String`, and it too is
-///   re-parsed leniently here before the comparison runs.
-///
-/// A level gate therefore judges these outputs against a bar their inputs were
-/// never held to, and picking a weak level does not fix it. This gated at
-/// [`batchalign_transform::validate::ValidityLevel::Parseable`] until
-/// 2026-09-07 on exactly that reasoning, and the reasoning was wrong twice
-/// over: L0 inspects only the parse errors it is passed, and the caller always
-/// passed none, so the level was vacuous; while `validate_output`'s terminator
-/// loop runs for every command regardless of the level, and asks whether the
-/// document HAS terminators rather than whether this command kept them. A gold
-/// companion with one terminator-less non-CA utterance had always been written
-/// and became a hard `ServerError::Validation` with no output at all, which is
-/// the very failure that docstring claimed to have avoided.
-///
-/// # What it judges instead
-///
-/// The honest property for a command whose input nothing vouched for is that
-/// the output did not LOSE what the input had, so the input's own faults are
-/// carried through and this command's damage is not. `input` is the census of
-/// the document the artifact DESCENDS from, taken before this module edited
-/// it: the gold companion for compare, the morphotagged main transcript for
-/// benchmark. Both materializers below only add headers and rewrite dependent
-/// tiers, so nothing on this path can legitimately drop a main-tier
-/// terminator, and a build that starts doing so is refused.
-///
-/// The judgement travels with the proof, so the abbreviation merge the writers
-/// run afterwards is judged the same way rather than against a fresh bar.
+/// `input` is taken before edits: the completely admitted reference for released
+/// compare, or the morphotagged main document for benchmark. Both documents reach
+/// the materializer through producer-owned admission proofs, without reparsing.
+/// The output proof carries the judgment through any later abbreviation merge.
 fn gate_comparison_output(
     input: UtteranceCensus,
     output: crate::chat_ops::ChatFile,
@@ -101,8 +92,7 @@ fn gate_comparison_output(
 ) -> Result<PostValidated, ServerError> {
     // BY VALUE: both call sites drop the model immediately afterwards, and a
     // borrowing form would clone the whole document straight back.
-    PostValidated::preserving(input, output, command)
-        .map_err(|failure| ServerError::Validation(failure.to_string()))
+    PostValidated::preserving(input, output, command).map_err(|failure| failure.into_server_error())
 }
 
 /// The comparison's states, and the only transitions between them.
@@ -119,7 +109,6 @@ mod artifacts {
     use tracing::info;
 
     use crate::chat_ops::ChatFile;
-    use crate::error::ServerError;
     use crate::pipeline::post_validate::PostValidated;
 
     /// The morphotagged main transcript, as a document only morphotag's own
@@ -135,16 +124,12 @@ mod artifacts {
         /// THE transition into the comparison: consume morphotag's proof and
         /// go on in the document it judged.
         ///
-        /// Fails only for a proof that carries no document at all, which is a
-        /// pass-through; morphotag's two routes both carry one, so the compare
-        /// pipeline does not meet that error. It is returned rather than
-        /// papered over with a parse because parsing here would be the very
-        /// re-parse this graph exists to remove.
-        pub(super) fn from_proof(proof: PostValidated) -> Result<Self, ServerError> {
-            proof
-                .into_judged_document()
-                .map(|file| Self { file })
-                .map_err(|refused| ServerError::Validation(refused.to_string()))
+        /// Every admitted output owns its model, including unchanged source;
+        /// no serialized-output reparse is needed or permitted.
+        pub(super) fn from_proof(proof: PostValidated) -> Self {
+            Self {
+                file: proof.into_judged_document(),
+            }
         }
     }
 
@@ -175,7 +160,11 @@ mod artifacts {
         /// comparison of the two documents beside it. Passing a bundle built
         /// from different documents is not a mistake a caller can make here,
         /// because a caller does not supply the bundle at all.
-        pub(super) fn build(main: MorphotaggedMain, gold_file: ChatFile) -> Self {
+        pub(super) fn build(
+            main: MorphotaggedMain,
+            reference: super::AdmittedComparisonReference,
+        ) -> Self {
+            let gold_file = reference.into_document();
             // A `FILE.gold.cha` companion is a re-transcription of the same
             // recording, so main material it does not account for is genuinely
             // unmatched output.
@@ -210,41 +199,29 @@ mod artifacts {
 
 use artifacts::{ComparisonArtifacts, ComparisonParts, MorphotaggedMain};
 
-/// Build the comparison from morphotag's proof and the gold companion's text.
-///
-/// The main side arrives as a PROOF and is never parsed here. The gold side is
-/// the one input nothing vouched for: it is read off disk as it is, parsed
-/// leniently, and its parse errors are reported rather than refused. That
-/// asymmetry is deliberate and is the same one [`gate_comparison_output`]
-/// documents: compare's output is judged against what the gold companion HAD,
-/// so refusing the companion for its own faults would refuse a document this
-/// command never damaged.
+/// Consume the two admitted documents without parsing either serialization.
 fn build_comparison_artifacts_from_proof(
     morphotagged_main: PostValidated,
-    gold_text: &str,
-) -> Result<ComparisonArtifacts, ServerError> {
-    let main = MorphotaggedMain::from_proof(morphotagged_main)?;
+    reference: AdmittedComparisonReference,
+) -> ComparisonArtifacts {
+    let main = MorphotaggedMain::from_proof(morphotagged_main);
+    ComparisonArtifacts::build(main, reference)
+}
 
-    let (gold_file, gold_errors) = parse_lenient(&crate::chat_parser(), gold_text);
-    if !gold_errors.is_empty() {
-        warn!(
-            num_errors = gold_errors.len(),
-            "Parse errors in gold file (continuing)"
-        );
-    }
-
-    Ok(ComparisonArtifacts::build(main, gold_file))
+enum ComparisonMain<'a> {
+    Source(&'a str),
+    /// A constructed main transcript, admitted by its type.
+    Constructed(crate::pipeline::post_validate::PostValidated),
 }
 
 async fn build_comparison_artifacts(
-    main_text: &str,
-    gold_text: &str,
-    lang: &LanguageCode3,
+    main: ComparisonMain<'_>,
+    reference: AdmittedComparisonReference,
+    _lang: &LanguageCode3,
     services: PipelineServices<'_>,
     mwt: &MwtDict,
 ) -> Result<ComparisonArtifacts, ServerError> {
     let mor_params = MorphosyntaxParams {
-        lang,
         tokenization_mode: TokenizationMode::Preserve,
         multilingual_policy: MultilingualPolicy::ProcessAll,
         mwt,
@@ -269,9 +246,24 @@ async fn build_comparison_artifacts(
     // the gate had judged came to be re-read by a parser that tolerates what
     // the gate refuses. What the command writes is the comparison artifact, and
     // that gets its own proof in the materializers below.
+    let parsed = match main {
+        ComparisonMain::Source(text) => {
+            crate::pipeline::morphosyntax::ParsedFile::parse(text, mor_params.policy.ca_policy)?
+        }
+        ComparisonMain::Constructed(output) => {
+            crate::pipeline::morphosyntax::ParsedFile::from_output(
+                output,
+                mor_params.policy.ca_policy,
+            )?
+        }
+    };
     let morphotagged_main =
-        crate::morphosyntax::process_morphosyntax(main_text, services, &mor_params).await?;
-    build_comparison_artifacts_from_proof(morphotagged_main, gold_text)
+        crate::pipeline::morphosyntax::run_admitted_morphosyntax(parsed, services, &mor_params)
+            .await?;
+    Ok(build_comparison_artifacts_from_proof(
+        morphotagged_main,
+        reference,
+    ))
 }
 
 fn materialize_main_annotated(
@@ -295,7 +287,7 @@ fn materialize_main_annotated(
             main_file,
             crate::api::ReleasedCommand::Benchmark,
         )?,
-        metrics_csv: format_metrics_csv(&bundle.metrics).map_err(|err| {
+        metrics: CompareMetricsCsvTable::from_metrics(&bundle.metrics).map_err(|err| {
             ServerError::Persistence(format!("compare CSV serialization failed: {err}"))
         })?,
     })
@@ -310,7 +302,7 @@ fn materialize_released(
         bundle,
     } = artifacts.into_parts();
     // Taken BEFORE the projection, because the released output descends from
-    // the gold companion, faults included.
+    // the completely admitted gold companion.
     let input = UtteranceCensus::of(&gold_file);
     let mut gold_file = project_gold_structurally(&main_file, &gold_file, &bundle);
     apply_media_header_from_main(&main_file, &mut gold_file);
@@ -325,7 +317,7 @@ fn materialize_released(
             gold_file,
             crate::api::ReleasedCommand::Compare,
         )?,
-        metrics_csv: format_metrics_csv(&bundle.metrics).map_err(|err| {
+        metrics: CompareMetricsCsvTable::from_metrics(&bundle.metrics).map_err(|err| {
             ServerError::Persistence(format!("compare CSV serialization failed: {err}"))
         })?,
     })
@@ -375,8 +367,8 @@ fn apply_media_header_from_main(
 /// workflow materialization.
 ///
 /// Steps:
-/// 1. Run morphosyntax on `main_text` (so it has %mor/%gra).
-/// 2. Parse gold file.
+/// 1. Completely admit the retained reference.
+/// 2. Admit and run morphosyntax on `main_text` (regenerating %mor/%gra).
 /// 3. Build the comparison bundle from main vs gold.
 /// 4. Materialize the projected reference-side output.
 pub(crate) async fn process_compare(
@@ -387,7 +379,14 @@ pub(crate) async fn process_compare(
     mwt: &MwtDict,
 ) -> Result<CompareMaterializedOutputs, ServerError> {
     materialize_released(
-        build_comparison_artifacts(main_text, gold_text, lang, services, mwt).await?,
+        build_comparison_artifacts(
+            ComparisonMain::Source(main_text),
+            AdmittedComparisonReference::admit(gold_text)?,
+            lang,
+            services,
+            mwt,
+        )
+        .await?,
     )
 }
 
@@ -399,24 +398,31 @@ pub(crate) async fn process_compare(
 /// to offer here, and no constructor anywhere below would accept one.
 pub(crate) fn process_compare_morphotagged_main(
     morphotagged_main: PostValidated,
-    gold_text: &str,
+    reference: AdmittedComparisonReference,
 ) -> Result<CompareMaterializedOutputs, ServerError> {
     materialize_released(build_comparison_artifacts_from_proof(
         morphotagged_main,
-        gold_text,
-    )?)
+        reference,
+    ))
 }
 
-/// Process one compare flow and keep the main transcript as the structural anchor.
-pub(crate) async fn process_compare_main_annotated(
-    main_text: &str,
-    gold_text: &str,
+/// Continue benchmark comparison from its admitted constructed transcript.
+pub(crate) async fn process_compare_constructed_main(
+    main: crate::pipeline::post_validate::PostValidated,
+    reference: AdmittedComparisonReference,
     lang: &LanguageCode3,
     services: PipelineServices<'_>,
     mwt: &MwtDict,
 ) -> Result<MainAnnotatedCompareOutputs, ServerError> {
     materialize_main_annotated(
-        build_comparison_artifacts(main_text, gold_text, lang, services, mwt).await?,
+        build_comparison_artifacts(
+            ComparisonMain::Constructed(main),
+            reference,
+            lang,
+            services,
+            mwt,
+        )
+        .await?,
     )
 }
 
@@ -520,13 +526,13 @@ mod tests {
     /// which is what keeps the deleted lenient parse from growing back: a
     /// future caller reaching for text has nothing to call.
     fn comparison_of(main: &str, gold: &str) -> ComparisonArtifacts {
-        let (gold_file, _) = parse_lenient(&TreeSitterParser::new().expect("parser"), gold);
+        let reference = AdmittedComparisonReference::admit(gold)
+            .expect("the positive reference fixture must be completely valid");
         let main = MorphotaggedMain::from_proof(PostValidated::for_test(
             main,
             crate::api::ReleasedCommand::Morphotag,
-        ))
-        .expect("a gated proof carries the document it judged");
-        ComparisonArtifacts::build(main, gold_file)
+        ));
+        ComparisonArtifacts::build(main, reference)
     }
 
     fn make_chat(utterances: &[(&str, &str)]) -> String {
@@ -629,7 +635,7 @@ mod tests {
 
     #[test]
     fn gold_materializer_projects_structural_tiers_for_exact_match() {
-        let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n%gra:\t1|2|COM 2|0|ROOT 3|2|PUNCT\n%wor:\thello \u{15}0_100\u{15} world \u{15}100_200\u{15} .\n@End\n";
+        let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n%gra:\t1|2|COM 2|0|ROOT 3|2|PUNCT\n%wor:\thello \u{15}0_100\u{15} world \u{15}100_200\u{15} .\n@End\n";
         let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n@End\n";
 
         let output = materialize_released(comparison_of(main, gold)).expect("materialized");
@@ -638,22 +644,18 @@ mod tests {
         assert!(!output.chat_output.as_str().contains("%gra:"));
         assert!(output.chat_output.as_str().contains("%wor:\thello"));
         assert!(output.chat_output.as_str().contains("\u{15}0_100\u{15}"));
+        assert!(
+            output
+                .chat_output
+                .as_str()
+                .contains("@Media:\tsample, audio")
+        );
     }
 
-    /// RED FIRST (2026-09-07): the comparison gate refuses a LOSS, and the
-    /// same output is admitted when the input was already like that.
-    ///
-    /// Both assertions are one test on purpose, because either alone is
-    /// satisfiable by a gate that does the wrong thing. The predecessor of
-    /// this test stripped the terminators from the INPUTS and asserted a
-    /// refusal, which a gate reading only the output passes without ever
-    /// comparing anything: its verdict was identical under "the command
-    /// degraded the file" and "the file arrived that way", so it was not
-    /// evidence of a preservation check. Here the two calls differ ONLY in
-    /// what the input had, so a gate that ignores the input fails one of them
-    /// whichever way it leans.
+    /// Preservation detects new losses, while complete admission also refuses
+    /// inherited invalidity. Neither case can authorize malformed output.
     #[test]
-    fn the_comparison_gate_refuses_a_lost_terminator_and_admits_an_absent_one() {
+    fn comparison_requires_validity_even_when_input_already_lacked_a_terminator() {
         let parser = TreeSitterParser::new().expect("parser");
         let intact = make_chat(&[("PAR", "hello world today .")]);
         let (intact_file, _) = parse_lenient(&parser, &intact);
@@ -675,42 +677,27 @@ mod tests {
             "the refusal must name what broke, got: {refusal}"
         );
 
-        let admitted = gate_comparison_output(
+        let inherited = gate_comparison_output(
             UtteranceCensus::of(&stripped_file),
             stripped_file,
             crate::api::ReleasedCommand::Compare,
         )
-        .expect("the very same bytes must be admitted when the input had no terminator either");
-        assert!(admitted.as_str().contains("*PAR:\thello world today"));
+        .expect_err("inherited invalidity cannot authorize output");
+        assert!(matches!(inherited, ServerError::OutputAdmission { .. }));
     }
 
-    /// RED FIRST (2026-09-07): a gold companion that ARRIVES without a
-    /// terminator is still written. Compare cannot have caused an absence its
-    /// input already had, and refusing it is refusing a document the command
-    /// never damaged.
+    /// Invalid reference source cannot acquire comparison admission.
     #[test]
-    fn a_gold_companion_that_arrives_without_a_terminator_is_still_written() {
-        let main = make_chat(&[("PAR", "hello big world .")]);
-        // Read from disk and parsed leniently: nothing admits a gold companion
-        // at any level, so a terminator-less utterance in one is an INPUT
-        // property, not a loss.
+    fn invalid_gold_cannot_authorize_a_successful_comparison_output() {
         let gold = make_chat(&[("PAR", "hello world today")]);
-
-        let output = materialize_released(comparison_of(&main, &gold))
-            .expect("a gold companion compare never damaged must still be written");
-        assert!(
-            output
-                .chat_output
-                .as_str()
-                .contains("*PAR:\thello world today"),
-            "got: {}",
-            output.chat_output.as_str()
-        );
+        let refusal = AdmittedComparisonReference::admit(&gold)
+            .expect_err("invalid reference input must refuse before comparison");
+        assert!(matches!(refusal, ServerError::ChatAdmission(_)));
     }
 
     #[test]
     fn released_compare_output_copies_media_header_from_main() {
-        let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
+        let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio, unlinked\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";
         let gold = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n@End\n";
 
         let output = materialize_released(comparison_of(main, gold)).expect("materialized");
@@ -719,7 +706,7 @@ mod tests {
             output
                 .chat_output
                 .as_str()
-                .contains("@Media:\tsample, audio")
+                .contains("@Media:\tsample, audio, unlinked")
         );
         assert!(!output.chat_output.as_str().contains("%mor:"));
         assert!(!output.chat_output.as_str().contains("%gra:"));

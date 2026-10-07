@@ -4,7 +4,7 @@ use crate::api::{DisplayPath, JobId};
 use crate::scheduling::{AttemptOutcome, RetryDisposition, WorkUnitKind};
 
 use super::super::{
-    AttemptFinishRecord, AttemptStartRecord, CompletedFileOutput, EventTime, FileFailureRecord,
+    AttemptFinishRecord, AttemptStartRecord, EventTime, FileCompletion, FileFailureRecord,
     FileProgressRecord, FileRetryRecord, JobStore, PersistedFileUpdate,
 };
 
@@ -36,21 +36,23 @@ impl JobStore {
         .await;
     }
 
-    /// Mark one file as done and optionally record a downloadable result.
+    /// Mark one file as finished without failing (`Done`, or `Diagnosed`
+    /// when its written output carries admission diagnostics) and record its
+    /// downloadable result if it has one.
     pub(crate) async fn mark_file_done(
         &self,
         job_id: &JobId,
         filename: &str,
         finished_at: EventTime,
-        result: Option<CompletedFileOutput>,
+        completion: FileCompletion,
     ) {
-        let persisted_content_type: Option<String> = result
-            .as_ref()
+        let persisted_content_type: Option<String> = completion
+            .result()
             .map(|output| output.content_type.to_string());
 
         let Some(update) = self
             .registry
-            .mark_file_done(job_id, filename, finished_at.instant(), result)
+            .mark_file_done(job_id, filename, finished_at.instant(), completion)
             .await
         else {
             return;
@@ -189,6 +191,22 @@ impl JobStore {
         let _ = self.registry.clear_file_retry_state(job_id, filename).await;
     }
 
+    /// Apply a change in one file's open worker waits and notify listeners.
+    pub(crate) async fn set_file_worker_wait(
+        &self,
+        job_id: &JobId,
+        filename: &str,
+        change: crate::store::WorkerWaitChange,
+    ) {
+        if let Some(update) = self
+            .registry
+            .set_file_worker_wait(job_id, filename, change)
+            .await
+        {
+            self.notify_file_update(&update.job_id, update.file, update.completed_files);
+        }
+    }
+
     /// Apply an ephemeral progress update to one file and notify listeners.
     pub(crate) async fn set_file_progress(
         &self,
@@ -251,7 +269,7 @@ mod tests {
                 &JobId::from("job-1"),
                 "a.cha",
                 crate::store::EventTime::fixed(crate::unix_time(10.0)),
-                Some(CompletedFileOutput {
+                FileCompletion::Clean(crate::store::CompletedFileOutput {
                     filename: DisplayPath::from("a.cha"),
                     content_type: ContentType::Chat,
                     stamp: crate::api::FileStampOutcome::Unrecorded,

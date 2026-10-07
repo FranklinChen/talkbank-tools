@@ -39,7 +39,22 @@ pub(super) async fn dispatch_test_echo_files(
             .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Processing)
             .await;
 
-        let result_display_path = result_display_path_for_command(job.dispatch.command, filename);
+        let result_display_path = match result_display_path_for_command(
+            job.dispatch.command,
+            &job.dispatch.options,
+            filename,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                lifecycle
+                    .fail(
+                        &error.to_string(),
+                        crate::scheduling::FailureCategory::System,
+                    )
+                    .await;
+                continue;
+            }
+        };
 
         let output_text = if file.has_chat {
             let read_path: std::path::PathBuf = if job.filesystem.paths_mode

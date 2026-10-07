@@ -10,33 +10,51 @@
 //! the worker protocol evolves from V1 payloads to V2 prepared artifacts.
 
 use crate::chat_ops::fa::{
-    BulletRepairPolicy, FaGroup, WordTiming, apply_fa_results_with_projection_policy,
-    collect_existing_fa_word_timings, expand_bullets_for_edge_fillers, group_utterances,
-    refresh_existing_alignment_for_utterance, strip_wor_from_monotonicity_stripped_utterances,
+    BulletRepairPolicy, FaGroup, RecordingPresence, WordTiming,
+    apply_fa_results_with_projection_policy, collect_existing_fa_word_timings,
+    expand_bullets_for_edge_fillers, group_utterances, refresh_existing_alignment_for_utterance,
+    strip_wor_from_monotonicity_stripped_utterances,
 };
 use crate::chat_ops::{ChatFile, Line, Utterance};
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
 use crate::runner::util::ProgressSender;
-use crate::types::results::{FaOutput, FaResult};
+use crate::types::results::FaResult;
 use batchalign_transform::diff::UtteranceDelta;
 use batchalign_transform::diff::preserve::{TierKind, copy_dependent_tiers};
-use batchalign_transform::parse::{is_dummy, is_no_align, parse_lenient};
-// `ValidityLevel` and `validate_to_level` are no longer named here: the level
-// FA admits at, and the level it gates output at, both live on `FaAdmission`.
 use tracing::info;
 
 use super::units::{FaDispatchInputs, resolve_group_timings};
 use super::{AdmittedFaResult, FaAdmission};
 use crate::chat_ops::fa::Grouping;
 
+/// Completely admitted prior CHAT. Its timing may be reused only after this
+/// source-admission capability has been produced, before any UTR inference.
+pub(crate) struct RetainedFaPrior {
+    file: Box<talkbank_model::validation::ValidChatFile>,
+}
+
+impl RetainedFaPrior {
+    pub(crate) fn admit(text: &str) -> Result<Self, ServerError> {
+        let source = crate::pipeline::text_infer::admit_retained_text(
+            &crate::chat_parser(),
+            text,
+            talkbank_model::model::TranscriptName::Anonymous,
+        )?;
+        Ok(Self {
+            file: Box::new(source.into_valid_file()),
+        })
+    }
+}
+
 /// Process a CHAT file through forced alignment incrementally.
 ///
-/// Compares `before_text` (previous file with timings) against `after`
+/// Compares an admitted prior file with timings against `after`
 /// (the user-edited version) and only re-aligns FA groups that contain changed
 /// utterances. Unchanged groups preserve their existing timings.
 ///
-/// Falls back to full processing if no "before" is available.
+/// Falls back to full processing if the admitted prior has no reusable region.
+/// A missing or invalid declared prior is refused by the caller before inference.
 ///
 /// # It takes the MODEL, not a serialization of one
 ///
@@ -47,15 +65,11 @@ use crate::chat_ops::fa::Grouping;
 /// the `process_fa` fallback. Four parses and a serialization per incremental
 /// file, all to recover a document the caller already had.
 ///
-/// Two consequences beyond the cost, and both make this path agree with the
-/// full-file one rather than diverge from it. The document's own parse errors
-/// now reach [`FaAdmission::admit`] instead of a re-parse's (a round trip
-/// through the serializer used to launder them away), and a `@Options: dummy`
-/// or `NoAlign` document passes through as the bytes it was READ as rather
-/// than as a re-serialization of its model, which is what align promises and
-/// what `run_fa_from_ast` already did.
+/// Both paths consume a source-produced disposition admitted before inference.
+/// An active model carries that admission through UTR; a declared no-op keeps
+/// its exact original bytes and cannot enter the UTR mutation phase.
 pub(crate) async fn process_fa_incremental(
-    before_text: &str,
+    before: &RetainedFaPrior,
     after: super::FaInputDocument<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
@@ -65,10 +79,19 @@ pub(crate) async fn process_fa_incremental(
 ) -> Result<AdmittedFaResult, ServerError> {
     use batchalign_transform::diff::{DiffSummary, diff_chat};
 
-    let parser = crate::chat_parser();
-    let (before_file, _) = parse_lenient(&parser, before_text);
-
-    let deltas = diff_chat(&before_file, &after.chat_file);
+    let active = match after {
+        super::FaInputDocument::Preserved(source) => {
+            return Ok(FaAdmission::pass_through(
+                source,
+                fa_params.gap_healing,
+                fa_params.engine.as_wire_name(),
+                services.cache_namespace,
+            ));
+        }
+        super::FaInputDocument::Active(active) => active,
+    };
+    let before_file = before.file.document();
+    let deltas = diff_chat(before_file, &active.chat_file);
     let summary = DiffSummary::from_deltas(&deltas);
 
     info!(
@@ -85,37 +108,25 @@ pub(crate) async fn process_fa_incremental(
     if summary.unchanged == 0 && summary.speaker_changed == 0 && summary.timing_only == 0 {
         // The AST entry point, not `process_fa`: the document is already
         // parsed, and `process_fa` exists only to parse a string into one.
-        return super::run_fa_from_ast(after, audio, worker_lang, services, fa_params, progress)
-            .await;
+        return super::run_fa_from_ast(
+            super::FaInputDocument::Active(active),
+            audio,
+            worker_lang,
+            services,
+            fa_params,
+            progress,
+        )
+        .await;
     }
 
     // The "after" document's own model is the mutation target. It used to be a
     // third parse of its own serialization.
-    let super::FaInputDocument {
+    let super::ActiveFaInput {
         mut chat_file,
-        parse_errors,
-        text: after_text,
+        admission,
         main_bullets,
         anchors,
-    } = after;
-
-    if is_dummy(&chat_file) || is_no_align(&chat_file) {
-        // `after_text` is the bytes the document was READ as, so the
-        // pass-through is literally unchanged. It used to be a
-        // re-serialization of the model, because that is all the caller had
-        // handed over.
-        return Ok(FaAdmission::pass_through(
-            chat_file,
-            after_text,
-            fa_params.gap_healing,
-            fa_params.engine.as_wire_name(),
-            services.cache_namespace,
-        ));
-    }
-
-    // Same owner as the full path: the level is stated on `FaAdmission`, and
-    // the proof it returns is what every `Ok` return below is gated against.
-    let admission = FaAdmission::admit(&chat_file, &parse_errors)?;
+    } = active;
 
     // The same pairing the full path makes. The "after" document is this
     // run's input, so under `--main-bullets keep` its bullets, bound at the
@@ -125,7 +136,7 @@ pub(crate) async fn process_fa_incremental(
         crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
 
     let reusable_after_indices =
-        reuse_stable_wor_timing_from_before(&before_file, &mut chat_file, &deltas);
+        reuse_stable_wor_timing_from_before(before_file, &mut chat_file, &deltas);
     let reusable_after_touched: Vec<crate::chat_ops::UtteranceIdx> = reusable_after_indices
         .iter()
         .map(|&idx| crate::chat_ops::UtteranceIdx::new(idx))
@@ -140,11 +151,15 @@ pub(crate) async fn process_fa_incremental(
     let recording = audio.recording().await?;
     // The anchors describe the "after" document's words, which the reuse
     // above copied `%wor` onto without changing a word.
+    let (admission, grouping) = admission.admit_grouping(
+        group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors),
+        &chat_file,
+    )?;
     let Grouping {
         groups,
         decisions: grouping_decisions,
         windows_clamped,
-    } = group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors);
+    } = grouping;
     if groups.is_empty() {
         // Every utterance reused by `reuse_stable_wor_timing_from_before` is
         // folded in here so `%wor` (when requested) is written after
@@ -178,7 +193,7 @@ pub(crate) async fn process_fa_incremental(
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
                 services.cache_namespace,
-            )?
+            )
             .with_written_decisions(written),
         );
     }
@@ -267,12 +282,11 @@ pub(crate) async fn process_fa_incremental(
     let decision_traces = decision_records.into_iter().map(Into::into).collect();
     let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
-    // Post-validation runs in `FaAdmission::finish`, below, at the level this
-    // file was ADMITTED at, together with every other `Ok` return.
-    let output = FaOutput::processed(chat_file)?;
-
+    // The media/timing transition and post-validation run in
+    // `FaAdmission::finish`, below, against what this file was ADMITTED
+    // with, together with every other `Ok` return.
     admission.finish(FaResult {
-        output,
+        output: chat_file,
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
         cache_namespace: services.cache_namespace.clone(),
@@ -319,6 +333,12 @@ fn reuse_stable_wor_timing_from_before(
             } => (*before_idx, *after_idx),
             _ => continue,
         };
+        // An utterance not in the recording takes no timing from anywhere,
+        // the prior file's `%wor` included (input admission stripped its own).
+        match get_utterance(after_file, after_idx.raw()).map(RecordingPresence::of) {
+            Some(RecordingPresence::InRecording) => {}
+            Some(RecordingPresence::NotInRecording(_)) | None => continue,
+        }
 
         copy_dependent_tiers(
             before_file,
@@ -406,6 +426,30 @@ mod tests {
         format!(
             "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n*CHI:\t{words0}\n%wor:\thello \u{15}100_500\u{15} world \u{15}600_1000\u{15} .\n*CHI:\t{words1}\n%wor:\tgoodbye \u{15}1500_2000\u{15} .\n@End\n"
         )
+    }
+
+    #[test]
+    fn prior_admission_retains_valid_timing_and_refuses_corrupt_tiers() {
+        let valid = chat_with_wor("hello world .", "goodbye .").replacen(
+            "*CHI:",
+            "@Media:\ttest, audio\n*CHI:",
+            1,
+        );
+        let admitted = RetainedFaPrior::admit(&valid)
+            .unwrap_or_else(|error| panic!("timed prior control must be valid: {error}"));
+        assert!(crate::chat_ops::fa::has_reusable_wor_timing(
+            admitted.file.document()
+        ));
+        for invalid in [
+            valid.replace("@End", "%mor:\tnoun|goodbye noun|extra .\n@End"),
+            valid.replace("hello world .", "<hello [/] world ."),
+            valid.replace("@End", "@Languages:\teng\n@End"),
+        ] {
+            assert!(matches!(
+                RetainedFaPrior::admit(&invalid),
+                Err(ServerError::ChatAdmission(_))
+            ));
+        }
     }
 
     /// The incremental path copies the "before" file's `%wor` into the edited

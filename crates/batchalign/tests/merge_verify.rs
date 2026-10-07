@@ -20,7 +20,7 @@
 //! - HOLD (clock, region): untouched entirely.
 //! - Demotion: a confident line with adverse verdicts GAINS a review
 //!   flag; text and timing are never moved.
-//! - Preservation invariant: main tiers byte-identical in and out.
+//! - Preservation invariant: main-tier structure survives normalized writing.
 // Integration tests are exempt from the crate's deny-level panic lints,
 // matching the src/lib.rs `#![cfg_attr(test, allow(...))]` pattern
 // (see docs/panic-audit/).
@@ -210,36 +210,20 @@ fn unscorable_fa_line_promotes_with_na_note() {
     );
 }
 
-/// The pass is SURGICAL: every byte outside the %com tiers it edits
-/// is preserved verbatim, including constructs the model writer would
-/// canonicalize (an attached comma "how, see" must NOT become
-/// "how , see"). Regression: the corpus run failed its own invariant
-/// on exactly this (2026-07-17); the fix is line splicing into the
-/// original text, never whole-file reserialization.
+/// Attached commas and wrapped main tiers retain structure, not formatting.
 #[test]
-fn untouched_text_is_byte_identical_including_attached_comma() {
+fn normalized_output_preserves_attached_comma_structure() {
     let fx = fixture();
     run_merge_verify(&fx).success();
     let out = std::fs::read_to_string(fx.out.join("S1.cha")).expect("read output");
     assert!(
-        out.contains("I know how, see ?"),
-        "attached comma must survive byte-identically, got: {}",
+        out.contains("I know how , see ?"),
+        "the typed writer normalizes the comma, got: {}",
         out.lines()
             .find(|l| l.contains("I know how"))
             .unwrap_or("<line missing>")
     );
-    // Stronger: every line not carrying an edited flag is verbatim.
-    let input_lines: Vec<&str> = DRAFT_CHA.lines().collect();
-    let output_lines: Vec<&str> = out.lines().collect();
-    for line in &input_lines {
-        if line.starts_with("%com:") {
-            continue; // the pass may rewrite these
-        }
-        assert!(
-            output_lines.contains(line),
-            "non-%com input line missing verbatim from output: {line:?}"
-        );
-    }
+    assert_main_structure_preserved(DRAFT_CHA, &out);
 }
 
 /// REVIEW and HOLD flags pass through unchanged; the review queue
@@ -304,34 +288,270 @@ fn demotion_adds_review_flag_without_moving_text() {
     );
 }
 
-/// Preservation invariant: every LOGICAL main tier (continuation
-/// lines joined) is identical between input and output. The fixture
-/// includes a wrapped utterance so re-wrapping is exercised.
+/// Use the grammar and model, never a second main-tier scanner.
 #[test]
-fn main_tiers_are_logically_identical() {
+fn main_tiers_are_structurally_identical() {
     let fx = fixture();
     run_merge_verify(&fx).success();
     let out = std::fs::read_to_string(fx.out.join("S1.cha")).expect("read output");
-    let logical = |chat: &str| -> Vec<String> {
-        let mut acc: Vec<String> = Vec::new();
-        let mut in_main = false;
-        for line in chat.lines() {
-            if line.starts_with('*') {
-                acc.push(line.to_owned());
-                in_main = true;
-            } else if in_main && line.starts_with('\t') {
-                let current = acc.last_mut().expect("continuation follows a main tier");
-                current.push(' ');
-                current.push_str(line.trim_start_matches('\t'));
-            } else {
-                in_main = false;
-            }
-        }
-        acc
+    assert_main_structure_preserved(DRAFT_CHA, &out);
+}
+
+fn admitted(chat: &str) -> talkbank_model::validation::ValidChatFile {
+    let parser = batchalign_transform::parse::TreeSitterParser::new().expect("parser");
+    batchalign_transform::parse_source_with_parser(&parser, chat)
+        .admit(
+            talkbank_model::model::TranscriptName::Anonymous,
+            &talkbank_model::NullErrorSink,
+        )
+        .expect("complete CHAT admission")
+        .into_valid_file()
+}
+
+fn assert_main_structure_preserved(before: &str, after: &str) {
+    use talkbank_model::SemanticEq;
+    use talkbank_model::model::Line;
+    let before = admitted(before);
+    let after = admitted(after);
+    let mains = |file: &talkbank_model::validation::ValidChatFile| {
+        file.document()
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Utterance(u) => Some(u.main.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
     };
-    assert_eq!(
-        logical(DRAFT_CHA),
-        logical(&out),
-        "logical main tiers must be identical through merge-verify"
+    assert!(
+        mains(&before).semantic_eq(&mains(&after)),
+        "typed main tiers changed"
     );
+}
+
+/// Valid parsing alone is not admission; every retained tier is checked.
+#[test]
+fn invalid_sources_are_refused_without_output() {
+    let cases = [
+        DRAFT_CHA.replace("@Languages:\teng\n", ""),
+        DRAFT_CHA.replace("yes .", "yes"),
+        DRAFT_CHA.replace(
+            "%com:\tverify: placement (diarization mislabel)",
+            "%wor:\t[ .",
+        ),
+        DRAFT_CHA.replacen(
+            "%com:\tverify: placement (diarization mislabel)",
+            "%mor:\tx|yes x|extra .",
+            1,
+        ),
+        DRAFT_CHA.replacen(
+            "%com:\tverify: placement (diarization mislabel)",
+            "%gra:\t1|999|ROOT",
+            1,
+        ),
+        DRAFT_CHA.replace("S1, audio", "different, audio"),
+    ];
+    for source in cases {
+        let fx = fixture();
+        std::fs::write(fx.draft.join("S1.cha"), source).expect("source");
+        run_merge_verify(&fx).failure();
+        assert!(!fx.out.exists(), "refusal must precede output creation");
+    }
+}
+
+#[test]
+fn conflicting_and_identical_duplicate_verdicts_are_refused() {
+    for conflict in [false, true] {
+        let fx = fixture();
+        let mut doc: serde_json::Value = serde_json::from_str(VERDICTS_JSON).expect("wire");
+        let lines = doc["sessions"][0]["lines"].as_array_mut().expect("lines");
+        let mut duplicate = lines[0].clone();
+        if conflict {
+            duplicate["ear"] = serde_json::json!("no");
+        }
+        lines.push(duplicate);
+        std::fs::write(&fx.verdicts, doc.to_string()).expect("verdicts");
+        run_merge_verify(&fx)
+            .failure()
+            .stderr(predicates::str::contains("duplicate verdict"));
+        assert!(!fx.out.exists());
+    }
+}
+
+#[test]
+fn duplicate_sessions_and_unsafe_stems_are_refused() {
+    for (first, second) in [("S1", "S1"), ("S1", "s1"), ("é", "e\u{301}")] {
+        let fx = fixture();
+        if first != "S1" {
+            std::fs::rename(
+                fx.draft.join("S1.cha"),
+                fx.draft.join(format!("{first}.cha")),
+            )
+            .expect("rename");
+            std::fs::write(
+                fx.draft.join(format!("{first}.cha")),
+                DRAFT_CHA.replace("@Media:\tS1, audio", &format!("@Media:\t{first}, audio")),
+            )
+            .expect("source");
+        }
+        let mut doc: serde_json::Value = serde_json::from_str(VERDICTS_JSON).expect("wire");
+        doc["sessions"][0]["session"] = serde_json::json!(first);
+        let mut duplicate = doc["sessions"][0].clone();
+        duplicate["session"] = serde_json::json!(second);
+        doc["sessions"]
+            .as_array_mut()
+            .expect("sessions")
+            .push(duplicate);
+        std::fs::write(&fx.verdicts, doc.to_string()).expect("verdicts");
+        run_merge_verify(&fx)
+            .failure()
+            .stderr(predicates::str::contains("duplicate session"));
+        assert!(!fx.out.exists());
+    }
+    for stem in [
+        "",
+        ".",
+        "..",
+        "../S1",
+        "/S1",
+        "nested/S1",
+        "nested\\S1",
+        "C:S1",
+    ] {
+        let fx = fixture();
+        let doc = serde_json::json!({"sessions": [{"session": stem, "lines": []}]});
+        std::fs::write(&fx.verdicts, doc.to_string()).expect("verdicts");
+        run_merge_verify(&fx)
+            .failure()
+            .stderr(predicates::str::contains("unsafe session"));
+        assert!(!fx.out.exists());
+    }
+}
+
+#[test]
+fn ordinal_and_later_session_refusal_do_not_write_earlier_sessions() {
+    let fx = fixture();
+    let mut doc: serde_json::Value = serde_json::from_str(VERDICTS_JSON).expect("wire");
+    doc["sessions"][0]["lines"][0]["utterance_index"] = serde_json::json!(8);
+    std::fs::write(&fx.verdicts, doc.to_string()).expect("verdicts");
+    run_merge_verify(&fx)
+        .failure()
+        .stderr(predicates::str::contains("only 8"));
+    assert!(!fx.out.exists());
+
+    let fx = fixture();
+    let mut doc: serde_json::Value = serde_json::from_str(VERDICTS_JSON).expect("wire");
+    doc["sessions"]
+        .as_array_mut()
+        .expect("sessions")
+        .push(serde_json::json!({"session": "S2", "lines": []}));
+    std::fs::write(
+        fx.draft.join("S2.cha"),
+        DRAFT_CHA.replace("@Languages:\teng\n", ""),
+    )
+    .expect("invalid later source");
+    std::fs::write(&fx.verdicts, doc.to_string()).expect("verdicts");
+    run_merge_verify(&fx).failure();
+    assert!(
+        !fx.out.exists(),
+        "all sessions must be admitted before any writes"
+    );
+}
+
+#[test]
+fn promoted_comments_retain_structured_segments_and_plain_comments() {
+    use talkbank_model::model::{BulletContentSegment, DependentTier, Line};
+    let fx = fixture();
+    let source = DRAFT_CHA.replacen("%com:\tverify: placement (diarization mislabel)",
+        "%com:\tcontributor note \u{15}1000_2000\u{15} ; verify: placement\n\tcontinued flag text \u{15}%pic:\"image.jpg\"\u{15} trailing contributor note", 1);
+    std::fs::write(fx.draft.join("S1.cha"), &source).expect("source");
+    run_merge_verify(&fx).success();
+    let output = std::fs::read_to_string(fx.out.join("S1.cha")).expect("output");
+    assert_main_structure_preserved(&source, &output);
+    let file = admitted(&output);
+    let first = file
+        .document()
+        .lines
+        .iter()
+        .find_map(|line| match line {
+            Line::Utterance(u) => Some(u),
+            _ => None,
+        })
+        .expect("utterance");
+    let comment = first
+        .dependent_tiers
+        .iter()
+        .find_map(|entry| match &entry.tier {
+            DependentTier::Com(com) => Some(com),
+            _ => None,
+        })
+        .expect("comment");
+    assert!(
+        comment
+            .content
+            .segments
+            .iter()
+            .any(|s| matches!(s, BulletContentSegment::Bullet(_)))
+    );
+    assert!(
+        comment
+            .content
+            .segments
+            .iter()
+            .any(|s| matches!(s, BulletContentSegment::Picture(_)))
+    );
+    assert!(output.contains("contributor note"));
+    assert!(output.contains("trailing contributor note"));
+    assert!(output.contains("machine-verified"));
+}
+
+#[test]
+fn plain_contributor_comment_is_not_promoted_or_dropped() {
+    let fx = fixture();
+    let source = DRAFT_CHA.replacen(
+        "%com:\tverify: placement (diarization mislabel)",
+        "%com:\ta plain contributor comment",
+        1,
+    );
+    std::fs::write(fx.draft.join("S1.cha"), &source).expect("source");
+    run_merge_verify(&fx).success();
+    let output = std::fs::read_to_string(fx.out.join("S1.cha")).expect("output");
+    assert!(output.contains("%com:\ta plain contributor comment"));
+    assert_main_structure_preserved(&source, &output);
+}
+
+#[test]
+fn review_queue_wire_is_deterministic() {
+    let fx = fixture();
+    run_merge_verify(&fx).success();
+    let queue = std::fs::read_to_string(fx.out.join("review-queue.json")).expect("queue");
+    run_merge_verify(&fx).success();
+    assert_eq!(
+        queue,
+        std::fs::read_to_string(fx.out.join("review-queue.json")).expect("second queue")
+    );
+    insta::assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(&queue).expect("wire"), @r#"
+    {
+      "entries": [
+        {
+          "category": "other",
+          "ear": "no",
+          "fa_mean_score": 0.41,
+          "pitch": "child",
+          "session": "S1",
+          "tier": "review",
+          "utterance_index": 1
+        },
+        {
+          "category": "confident",
+          "ear": "no",
+          "fa_mean_score": 0.05,
+          "pitch": "adult",
+          "session": "S1",
+          "tier": "demote",
+          "utterance_index": 3
+        }
+      ]
+    }
+    "#);
 }

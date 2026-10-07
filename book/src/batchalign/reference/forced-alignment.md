@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-10-01 14:00 EDT
+**Last updated:** 2026-10-07 09:56 EDT
 
 ## Overview
 
@@ -50,8 +50,11 @@ flowchart TD
 
 ## Prerequisites
 
-Before alignment can begin, two steps must succeed:
+Before alignment can begin, three steps must succeed:
 
+0. **Input admission**: the transcript is parsed once and admitted, and its
+   `@Media` declaration is decided, before any media is resolved or any
+   inference runs. See [What align accepts](#what-align-accepts).
 1. **Media resolution**: The server locates the audio file for the CHAT
    file from server-visible local paths, either alongside it (paths mode),
    through a shared `source_dir`, via local `media_mappings`, or via an
@@ -62,7 +65,54 @@ Before alignment can begin, two steps must succeed:
    converted to 16 kHz mono WAV via ffmpeg and cached at
    `~/.batchalign3/media_cache/`. See [ensure_wav](media-conversion.md#ensure_wav--conversion-cache).
 
-Both steps happen in the Rust server before any Python worker is invoked.
+All three happen in the Rust server before any Python worker is invoked.
+
+### What align accepts
+
+Admission (`crates/batchalign/src/fa/input.rs`) decides whether a transcript
+is one align can transform and what its output then owes. A transcript align
+writes back unchanged (`@Options: NoAlign`, dummy files) is admitted as it is
+and needs no `@Media`. Every other transcript is admitted or refused by its
+`@Media` header and its timing:
+
+| `@Media` header | Timing in the input | Outcome |
+| --- | --- | --- |
+| `@Media: name, audio` (or `video`) | some | aligned |
+| `@Media: name, audio, unlinked` | none | aligned; `unlinked` is removed once the output carries timing, and kept if alignment produced none (the file is then written untimed and reported diagnosed) |
+| `@Media: name, audio` | none | aligned; the output must carry timing, because a linked header without timing is invalid CHAT (E544), so if alignment produces none the file is refused with a message saying so and nothing is written |
+| none | none | refused before any work: add `@Media: name, audio, unlinked` (or `video`) after the `@ID` headers |
+| `missing` type or status, or `notrans` | any | refused before any work, with the header change named |
+| `name, audio, unlinked` | some | refused by Chatter (E552): `unlinked` beside timing contradicts itself |
+
+A linked header with no timing under `--main-bullets exact` is refused before
+any work too: `exact` keeps untimed utterances untimed and runs no UTR, so the
+timing the header requires could never be written. Two `@Media` headers, or a
+media type or status CHAT does not define, are refused by Chatter's validation
+(E501, E535, E536) with its own message.
+
+`name` is the transcript's own file name without its extension: CHAT requires
+the two to match (E531), and the media search looks for the recording under
+that name. The CHAT manual's `unlinked` ("transcripts that have not yet been
+linked to media") is the declaration for a transcript awaiting its first
+alignment; the plain linked form without timing is also accepted, because
+removing exactly that condition is what align is for. It is admitted through
+Chatter's own timing-regeneration validation, which applies every other rule,
+so any other fault in the transcript still refuses it.
+
+Align does not write a missing `@Media` header itself. The header's media
+type is a declaration about the recording (audio or video) that the media
+search does not establish: it finds a file by name under any of several
+extensions, and a container such as `.mp4` can hold either. Authoring that
+declaration would be a change to the transcript beyond the timing the user
+asked for, so align names the line to add instead, and refuses before running
+any inference, so the refusal costs nothing.
+
+Every refusal here is the input's: it is reported as such, with the change to
+make, never as an internal error to restart. Because admission has decided
+the declaration, the media/timing transition that runs after alignment
+(`FaAdmission::reconcile_output`, over Chatter's `reconcile_media_timing`)
+cannot fail for a reason in the input; if it ever does, the alignment changed
+the header, and that is reported as the internal fault it is.
 
 ## Execution flow and ownership
 
@@ -111,8 +161,10 @@ flowchart TD
 
 **Key functions:**
 - `run_utr_pass(&mut ChatFile, ...)`: mutates AST, returns `UtrResult`
-- `run_fa_from_ast(ChatFile, ...)`: accepts AST directly, returns `FaResult`
-- `process_fa(&str, ...)`: parse-then-delegate wrapper for callers that only have text (transcribe, incremental)
+- `run_fa_from_ast(FaInputDocument, ...)`: accepts the admitted AST directly
+  and returns the admitted, writable result; every path ends in
+  `FaAdmission::finish`, which takes the draft through the media/timing
+  transition and the output gate
 
 ## Pipeline: UTR then FA
 
@@ -193,19 +245,37 @@ production CHAT files from CLAN).
    - **Full-file** (mostly-untimed or short audio): ASR runs on the full audio
      and the result is cached as a single entry.
 3. Converts ASR response tokens to `AsrTimingToken` (text + start_ms + end_ms).
-4. Calls `inject_utr_timing()`. That function first tries a cheap exact
-   monotonic subsequence match for the whole document word list against the ASR
-   word list. If that match is unique, timing assignment is linear-time and no
-   DP is needed. If the match is missing or ambiguous, UTR falls back to a
-   **single global Hirschberg DP alignment** of all document words (timed +
-   untimed) against the projected ASR words, using **case-insensitive exact
-   matching** for the default global strategy. Timed utterances participate in
-   the alignment to anchor their neighbors but their bullets are left
-   unchanged. For each untimed utterance, the min/max matched ASR token
-   indices determine the utterance bullet's time span. The global alignment
+4. Calls `inject_utr_timing()`. That function first partitions the transcript
+   into **anchored regions** (see "Anchored regions" below): the bullets the
+   file already has bound both the utterances and the ASR onsets each region
+   may match, and each region is solved on its own, within its own budget.
+   Within a region it first tries a cheap exact monotonic subsequence match of
+   the region's word list against the region's ASR words. If that match is
+   unique, timing assignment is linear-time and no DP is needed. If the match
+   is missing or ambiguous, UTR falls back to one **Hirschberg DP alignment** of
+   the region's words (timed + untimed) against its projected ASR words, using
+   **case-insensitive exact matching** for the default global strategy. Timed
+   utterances participate in the alignment to anchor their neighbors but their
+   bullets are left unchanged. The selected path is retained for inspection, but timing uses
+   only correspondences proven common to **every** optimal lexical alignment.
+   For each untimed utterance, the timing hull of those admitted provider
+   observations determines the provisional span. The global alignment
    avoids the token-exhaustion problem that per-utterance windowed approaches
    suffer from. It is still a monotonic aligner, so dense overlap /
    text-audio reordering remains a known limitation.
+
+   Before mutation, a private prepared pass owns the mutable transcript borrow,
+   census, selected plan, anchors and following retained timing bounds.
+   Projection consumes that pass; it cannot accept another transcript or
+   independently supplied observations. Non-overlap hints intersect their
+   provider span with the preceding non-overlap timing floor and the earliest
+   following retained non-overlap start. Existing bullets are never rewritten.
+   A nonempty intersection may narrow a hint but never extend it; exhaustion
+   leaves the turn untimed and records a review-required
+   `projection_exhausted` decision. Marked overlap keeps its existing exemption
+   and supplies neither bound. The original lexical plan remains available:
+   this geometric refusal neither rematches words nor proves uniqueness or
+   acoustic accuracy.
 
    **Two-pass only:** `--utr-fuzzy <threshold>` configures the experimental
    `--utr-strategy two-pass` strategy (default 0.85; 1.0 for exact-only
@@ -215,15 +285,83 @@ production CHAT files from CLAN).
 ```mermaid
 flowchart TD
     words["Transcript words + ASR words"]
+    regions["Partition at retained bullets\ninto anchored regions"]
+    budget{"Region within\nits search budget?"}
+    refused["Refuse this region only:\nuntimed turns refused with\nregion + budget named;\ntimed turns keep their bullets"]
     unique{"Unique exact\nmonotonic subsequence?"}
     exact["Assign utterance token ranges\nwithout DP"]
-    dp["Run one global Hirschberg DP\nacross the whole file"]
+    dp["Run one Hirschberg DP\nover the region"]
     bullets["Inject/recover\nutterance bullets"]
 
-    words --> unique
+    words --> regions --> unique
     unique -->|"yes"| exact --> bullets
-    unique -->|"no"| dp --> bullets
+    unique -->|"no"| budget
+    budget -->|"yes"| dp --> bullets
+    budget -->|"no"| refused
 ```
+
+#### Anchored regions
+
+One whole-file correspondence search used to have one fixed budget. A long
+recording with a partly timed transcript exceeded it as one problem, and every
+utterance in the file was refused, including the timed ones and the untimed
+ones whose neighbours were timed. The bullets a file already has are exactly
+the information that makes the problem small, so the search is partitioned by
+them (`chat_ops/fa/utr/regions.rs`):
+
+- An **anchor** is a timed utterance with no overlap marker. Anchors whose
+  starts decrease in document order contradict each other, so the anchors used
+  are a longest chain of non-decreasing starts (patience sorting, O(n log n));
+  a timed utterance outside that chain keeps its bullet and is an ordinary
+  member of the region around it.
+- A **region** begins at an anchor (the first one at the first utterance) and
+  owns every utterance up to the next anchor. Its search also reads that next
+  anchor as unowned **context**, so the anchor's own words absorb its own
+  tokens and a turn just before it may still interleave with it.
+- Its **ASR window** is every token whose onset lies between the leading
+  anchor's start and the trailing anchor's end, never closing before the
+  leading anchor's own end (anchors may share a start, and a zero-length
+  trailing bullet would otherwise leave the region no tokens). The first region
+  opens at the stream edge and the last closes at it, so every token lies in
+  some window. Edges are typed (`UtrRegionEdge::StreamEdge` or `Anchor`), never
+  a sentinel time.
+- Neighbouring windows **overlap** on the shared anchor's own span, and each
+  region claims a token at most once within itself. Across regions, a token
+  inside the anchor's span can be claimed twice: in an interleaved file an
+  untimed turn on each side of the anchor may each claim it, and each region's
+  claim is proved only for that region's problem. (The unit is the provider
+  token, which may hold several words; the whole token is withdrawn.) Such a token is
+  **contested**: the decomposition cannot say which claim, if either, the whole
+  file would admit, so neither is admitted. The regions that claimed it are
+  planned again with that correspondence withdrawn (the first pass finds the
+  contest; only the regions involved are planned twice); both utterances keep
+  their other evidence, and each region's summary lists the token in
+  `withdrawn_claims`. In a monotonic file hint projection also crops a second
+  claim away (an utterance before the anchor and one after it cannot both be
+  bounded inside it).
+- The **order model** (monotonic, or interleaved when adjacent participating
+  turns belong to different speakers) is still chosen once per file, exactly as
+  before; regions bound the work, not the model. Hint projection reads the
+  pass's `UtrOrderModel`.
+- Each region's plan is built in the region's local numbering and reaches the
+  file plan only through `UtrAlignmentPlan::assemble`, which places every
+  utterance and word address with `UtrUtteranceOrdinal::placed_after` and
+  drops the trailing context's evidence (its own region publishes it).
+
+A region whose proof work still exceeds a budget is refused **as that region**.
+Each untimed utterance it owns is `refused` with
+`{"budget_exhausted": {"region": ..., "budget": {"kind": ..., "limit": ...}}}`
+and a review decision `correspondence_budget_exhausted` naming the region and
+budget. Each timed utterance it owns is `retained_unsearched`: its bullet is
+kept, and recovery simply observed no word anchors for it. Timing is never
+refused, and no other region is affected. A transcript with no bullets at all
+is one region, so it behaves as before.
+
+Bullets are trusted as region bounds. A provider token far outside the bullets
+around it (seconds, not the usual few hundred milliseconds of boundary
+imprecision) is outside every window that could claim it for the wrong
+utterance, and an anchor's own first word heard before its bullet starts is
+matched only as the previous region's context, so it yields no word anchor.
 
 #### UTR alignment evidence and offline replay
 
@@ -245,11 +383,57 @@ new inference is required to replay it.
 
 The global alignment plan is a first-class typed value. It records the chosen
 strategy, participation policy, every utterance state, every monotone
-word-to-token match, its lexical relation, and the timing proposal derived
-from the first and last matched token. Deliberately excluded overlap lines are
+word-to-token match, its lexical relation, separately admitted common
+correspondences, and their checked timing hull. Deliberately excluded overlap lines are
 distinct from attempted but unmatched lines. A matched utterance has a
-nonempty match collection by construction. Positive and nonpositive proposals
-are distinct states.
+nonempty selected and admitted collections by construction. A `selected_only`
+utterance retains its chosen matches but has no proposal; its reason distinguishes
+proved ambiguity from proof-budget exhaustion. Positive and nonpositive proposals
+are distinct states. Source-bound correspondence carries the original timing;
+neither projection nor anchors can supply a different ASR stream beside the proof.
+
+For single-speaker monotonic matching, the plan retains a separate **FA search envelope** when every participating
+lexical word has a complete exact, case-insensitive embedding in ASR. Forward
+and reverse scans bound the earliest through latest possible embeddings in
+linear space; repeated-word ambiguity retains the entire candidate range. This
+is not a selected correspondence, UTR hint, word anchor, bullet or write proof.
+Grouping may use it only for an untimed utterance with the identical source word
+census, and only when the whole range fits its existing recording/neighbor
+corridor. Missing lexical words, invalid provider timing or a conflicting
+corridor leave ordinary recovery/refusal intact; unresolved candidates are never
+cropped away to fit an engine budget. Provider segments may bound a search but
+cannot supply individual word anchors. Original bullets stay authoritative,
+trailing padding remains budget-bound, and normal output still requires complete
+producer-admitted word timing. Debug evidence records `search_envelopes`
+separately from admitted correspondences and proposals.
+
+For adjacent different-speaker turns, the whole-source planner instead analyzes
+joint singleton/speaker-run compositions. It preserves source word and same-speaker
+turn order while permitting disjoint adjacent-speaker episodes; extending a
+following speaker's run requires source-observed overlap continuations. Reference
+words cannot be assigned twice or stolen from later turns by an independent
+local match. Common endpoint proof permits hints, while mandatory but ambiguous
+words retain their full candidate hull as search-only evidence. These envelopes
+use retained same-speaker bounds rather than another speaker's provisional crop.
+Original bullets and output-completion requirements are unchanged. This bounded
+model does not cover arbitrary reordering or prove acoustic speaker identity.
+See [implementation and limits](../developer/backchannel-aware-alignment.md#bounded-partial-order-correspondence-kernel).
+
+The monotonic bounded proof uses the existing match relation, not a second fuzzy policy.
+With substitution costing two gaps, optimal lexical matches are longest monotone
+chains. Sparse forward/backward chain ranks identify the edges on optimal chains;
+the sole optimal edge at a rank is common to every optimum. This avoids a
+quadratic-memory matrix. Exact/case-insensitive modes use word posting lists;
+fuzzy words are prepared once before comparison. The proof admits at most
+1,048,576 candidate edges and 64,000,000 fuzzy comparisons per region, and the
+joint interleaved proof has its own work, score-memory and candidate limits.
+Exceeding any limit means `budget_exhausted` for that region, naming the budget
+(`candidate_edges`, `fuzzy_comparisons`, `interleaving_work`,
+`interleaving_memory` or `interleaving_candidates`) and its limit; it is not a
+claim that the words are ambiguous.
+The existing unique full-subsequence fast path needs no sparse proof work.
+Local overlap recovery uses the same common-correspondence admission within
+its selected window; repeated words alone cannot authorize a local hint.
 
 `UtrResult` retains this plan even though production projection still changes
 bullets only for untimed utterances. This distinction lets experiments inspect
@@ -261,27 +445,68 @@ For an offline replay over retained debug artifacts:
 ```bash
 batchalign3 eval utr-alignment \
   --chat recording_utr_input.cha \
+  --source-name recording.cha \
   --tokens recording_utr_tokens.json \
   --fuzzy-threshold 0.85 \
   --output recording_utr_alignment.json
 ```
 
-The command performs no inference and does not mutate CHAT. It requires a
-clean parse, fingerprints both inputs with BLAKE3, records the executable build
+The command performs no inference and does not mutate CHAT. It requires
+complete named CHAT admission, with no retained-tier regeneration exemption,
+before reading tokens. It fingerprints both inputs with BLAKE3, records the executable build
 identity, and atomically publishes a complete report without overwriting an
 existing output. Omit
 `--fuzzy-threshold` for case-insensitive exact matching. Add
 `--participation exclude-marked-overlap` to
 replay the participation rule used by the first pass of two-pass UTR.
 
-Offline report schema 2 adds the within-token word address and uses this
-lexical projection. The input token JSON format is unchanged. Older reports
+Offline report schema 9 records the plan's `strategy` as the pass's order
+model (`monotonic` or `interleaved`), adds `regions` (each anchored region's
+span and the algorithm it used), names the region and budget in every budget
+refusal, and adds `retained_unsearched`. Since schema 4 it retains the
+within-token word address and checked source-name identity, `admitted_matches`,
+and the distinction between `selected_only` and timing-authorized `matched`. `matches` still describes the selected
+path; do not treat it as timing authority. For renamed debug snapshots,
+`--source-name` declares the original filename; otherwise admission uses the
+actual input filename. It neither guesses suffixes nor exempts filename checks.
+The declaration is not independently verified historical provenance.
+The input token JSON format is unchanged. Older reports
 retain their original meaning and should be kept alongside a fresh replay.
 
 The resulting proposal is evidence, not a final main-tier or `%wor` policy.
+**Partial-span boundary limitation:** a common interior word does not locate
+the utterance's unresolved prefix or suffix. For example, in `hello now`
+against `hello hello now`, correspondence can prove only `now`. Its interval
+cannot establish where the whole utterance starts, so such an utterance gets
+no hint (`interior_only`, review decision `incomplete_boundary`). It is still
+not unlocated: in a monotonic region every one of its words lies after every
+proved word of the utterances before it and before every proved word of the
+utterances after it, and inside any retained non-overlap bullets around it.
+When both sides are bounded that way and the bounds contain its own proved
+words, the plan gives it an `order_corridor` search envelope between those
+neighbouring proved timings (`chat_ops/fa/utr/interior.rs`; the decision
+records `bounded_search_window`). Forced alignment may search the utterance's
+words inside it; it never becomes a bullet, so it stays distinct from an
+endpoint-proved timing. An unbounded side, contradictory bounds or provider
+timing out of token order give no corridor, and the utterance keeps the
+ordinary unhinted path. Interleaved regions derive their corridors from the
+joint producer instead.
+
 Complete lexical coverage does not by itself establish word-boundary accuracy,
 and partial or unmatched states require an explicit abstention or fallback in
 downstream research code.
+
+Even common-to-every-optimum lexical correspondence is not acoustic-accuracy proof.
+Repeated vocabulary and temporally interleaved overlap can remain ambiguous even
+when every proposed interval is positive. Choosing between strategies by timed
+utterance or FA group count does not establish which correspondence is correct.
+
+Synthetic drift regressions retain recovery coverage separately from misplaced
+intervals. Untimed turns remain visible, distinguished by whether any of their
+synthetic ASR words survived recognition loss. An empty violation list means
+only that no observed timing violated the checks; it cannot certify complete
+recovery. The short control requires a checked complete-observation state.
+These tests measure synthetic correspondence, not model or corpus accuracy.
 
 #### Overlap Strategy Selection
 
@@ -533,15 +758,16 @@ usually already heard most of that utterance's words, and grouping cuts the
 utterance at those words.
 
 - **Anchors** (`chat_ops/fa/utr/anchors.rs`). A `WordAnchor` is a transcript
-  word UTR matched EXACTLY or CASE-INSENSITIVELY to an ASR token holding
-  exactly one word; its interval is that token's. Fuzzy matches and
+  word whose correspondence occurs in every optimal alignment, matched EXACTLY
+  or CASE-INSENSITIVELY to an ASR token holding exactly one word; its interval is
+  the original token observation bound into that proof. Ambiguous matches, fuzzy matches and
   multi-word tokens (provider segments) are not anchors: neither says when
   this word ended. Anchors come from the global pass only. `AnchorIndex::from_plan`
   is the only production constructor of an observed index, called in
-  `run_global_utr`, the one function holding both the plan and the token
-  stream. Each matched utterance is recorded as anchored, as having no
+  the prepared global pass; it consumes the source-bound plan without an
+  independently supplied token stream. Each selected utterance is recorded as anchored, as having no
   reliable match, or as refused with an `AnchorDisorder` (out of word order,
-  overlapping in time, inverted, or naming a token absent from the stream);
+  overlapping in time, or inverted);
   a disordered set is refused, never re-sorted. UTR's word ordinal converts to
   FA's `WordIdx` in one function (`UtrWordOrdinal::fa_word`), which is sound
   because both extract words with `collect_fa_words`. When no UTR pass with
@@ -1094,7 +1320,7 @@ flowchart TD
     impose --> repair["bullet repair (optional)\nrequires ImposedBullets"]
     repair --> mono["monotonicity\nrequires ImposedBullets"]
     mono --> wor["%wor written (main-tier cuts folded in)"]
-    wor --> held["verify_held -> KeptBulletsHeld\nor KeptBulletError (fails the file)"]
+    wor --> held["restore_and_verify: restore given bullets\nof utterances not in the recording,\nthen KeptBulletsHeld or KeptBulletError\n(fails the file)"]
 ```
 
 The ordering is carried by types, not comments. Repair and monotonicity each
@@ -1117,6 +1343,19 @@ The phases, and what each does with a kept bullet:
 | Monotonicity pass 2, revisable earlier, kept later | May move the later start (`BoundaryFromWords`) | `BoundaryFromWords` becomes `InterleavedWords`, cutting only the earlier side; a zero-width strip of the earlier side cites `yielded_to_kept_start` |
 | Monotonicity pass 2, kept earlier, revisable later | Cut or strip the earlier bullet | `KeptEndYield`: the later start moves forward to the kept end (cutting leading words that reach back before it), or the later timing is stripped if nothing would remain; effect `YieldedToKeptBullet` |
 | Monotonicity pass 2, both kept | Cut or strip the earlier bullet | Left in place, recorded once per pair as `kept_bullet_left_unresolved` |
+
+A bullet the input gave an utterance not in the recording (`[+ diary]`) is
+bound as `GivenSlot::OffRecord`, not `Kept`: input admission has removed it
+from the working model, `impose` leaves it out, every phase above sees no
+bullet there (one appearing is `KeptBulletError::OffRecordBullet`), and
+`restore_and_verify` puts it back exactly as given only after the `%wor`
+write, so it is never a fixed point a neighbour is cut, stripped or ordered
+against, and then checks it like any kept bullet. If timing aligned around it
+then conflicts with it (start order, or a same-speaker overlap), the output
+cannot be valid: the file is refused as `KeptOffRecordBulletConflict`
+(validation, HTTP 400), naming the utterances, and nothing is written. The
+gate decides, not a copy of its rules: the output is judged again without
+those bullets, and only if that passes is the refusal theirs.
 
 An `Empty` kept bullet (start equals end) is written exactly as given with every
 word untimed, and always recorded. The provenance stamp records
@@ -1144,14 +1383,28 @@ time. An end must therefore be derived, and the only end available is the next
 word's onset, so the parser chains them: each word's end = the next word's
 start.
 
-This is not a mode, and there is no alternative treatment. A word whose end
-equals its own start has no duration, which is the absence of a timing rather
-than a timing; a `%wor` tier of such words is the symptom, not a setting.
+The chaining always runs for an onset-only engine; there is no setting that
+turns it off and no other treatment. When two words share an onset, the first
+would end where it starts. A span with no duration is the absence of a timing,
+not a timing, so it is not admitted: that word stays in the transcript
+untimed, and the file reports it (see
+[A word with no positive timing](#a-word-with-no-positive-timing)).
 
 The **last word** of each utterance has no next word to chain to. In the
 parser it takes a named fallback (`LAST_WORD_FALLBACK_MS`, 500 ms); in
-post-processing its end is extended to the utterance bullet end (from UTR or
-original CHAT) when one is available.
+post-processing may extend its end to a retained transcript bullet end, but
+never to a provisional runtime UTR hint. The hint helps select an audio window;
+it does not measure where the final word stops. Without a retained boundary,
+the producer's fallback (including any recording-end clamp) and its origin
+survive unchanged, and assumed timing remains visible as requiring review.
+Measured word ends and `--pauses` behavior remain unchanged.
+
+The postprocessing pass admits a private, borrowed `TranscriptBoundary` only
+from `BulletSource::Authoritative`. Both last-word extension and transcript
+clamping consume that same source distinction, preventing one branch from
+treating a provisional hint as authority while another correctly excludes it.
+This does not claim that retained transcript bullets are human ground truth;
+serialized CHAT does not preserve the runtime source marker.
 
 #### Word timing clamping policy
 
@@ -1300,6 +1553,54 @@ if *any* utterance had timing (potentially missing untimed ones). ba3 skips
 UTR only if *all* utterances are timed, and when UTR can't match a specific
 utterance, proportional interpolation provides a fallback.
 
+### Utterances not in the recording
+
+An utterance marked `[+ diary]` is a written diary note set into the
+transcript; it is not speech in the recording (ruling of 2026-10-07), so align
+leaves it untimed. The CHAT manual defines no fixed set of postcodes
+("postcodes can be designed to fit the needs of your particular project") and
+gives `[+ diary]` no meaning of its own; where it speaks of diary material
+(`@Bck`, the `Diary-` `@Comment`s, gems marking diary entries) it treats it as
+written notes, not transcribed speech, which is what the ruling records. No
+other postcode excludes an utterance: membership is a closed set
+(`OffRecordPostcode`), one recorded ruling per postcode.
+
+`RecordingPresence::of` (`crates/batchalign/src/chat_ops/fa/presence.rs`)
+reads the postcode from Chatter's typed model (`main.content.postcodes`), never
+from the line's text, and is the one owner of the rule. For such an utterance:
+
+- Input admission removes its bullet, inline word timing and `%wor` from the
+  working document, after the main-bullet policy and the timing obligations
+  were bound to the input as parsed, so no stage reads that timing as an
+  anchor, a window or reusable word timing.
+- UTR offers none of its words for matching and takes no anchor from it, so
+  speech in the recording that happens to share its words is matched to the
+  spoken utterance it belongs to. The timed/untimed count and the
+  partial-window search treat it as needing no timing: a file whose only
+  untimed utterances are diary notes runs no UTR.
+- Interpolation gives it no share of a gap, and grouping makes no alignment
+  request for it, so its neighbours are placed exactly as if it were absent.
+- The incremental path (`--before`) does not copy a prior `%wor` onto it.
+- Completion reports it untimed with the cause `not_in_recording`
+  (`{"kind": "not_in_recording", "postcode": "diary"}`, shown as "not in the
+  recording: [+ diary]") in the `timing_incomplete` shortfall, never dropped
+  from the account. Like every untimed cause, it makes the file `diagnosed`
+  (exit 7), even when every spoken word is timed.
+
+A bullet the input gave such an utterance follows the main-bullet policy:
+`derive` (the default) recomputes each bullet from the utterance's aligned
+words, and a diary note has none, so it is written without one; `keep` and
+`exact` keep every given bullet exactly as given, this one too, but never use
+it as evidence for another utterance: it is restored only after every phase
+that orders or cuts bullets has run (`MainBulletAuthority::restore_and_verify`;
+see [Kept main bullets](#kept-main-bullets---main-bullets-keep)). Completion
+enforces both: a timed word on a diary note, or a bullet other than the given
+one under `keep`/`exact` (any bullet under `derive`), is an internal fault
+(`OffRecordUtteranceTimed`) and nothing is written. A kept note bullet that
+conflicts with timing aligned around it refuses the file as
+`KeptOffRecordBulletConflict` (see the kept main bullets section); rerun with
+`--main-bullets derive`, or correct the bullet.
+
 ## Engine Selection
 
 | Engine | Model | Response format | Languages | Default? |
@@ -1308,6 +1609,79 @@ utterance, proportional interpolation provides a fallback.
 | `whisper` | Whisper large-v2 cross-attention DTW | `TokenLevel` (token text + onset seconds) | any | No |
 | `cantonese` | MMS_FA CTC forced alignment over jyutping | `WordLevel` | any (romanizes only for `yue`) | No |
 | `qwen3_fa` | `Qwen/Qwen3-ForcedAligner-0.6B-hf` | `WordLevel` | `yue`, `zho`, `cmn`, `eng` | No |
+
+### Who chooses the engine, and how
+
+The engine is chosen per run, and only in these ways:
+
+1. **The default**, `wav2vec` (`FaEngineName::DEFAULT`), when nothing else
+   says otherwise. The CLI flag and a deserialized request take their default
+   from the same constant.
+2. **`--fa-engine <name>`** on the `align` command.
+3. **An `fa` engine override** (`--engine-overrides '{"fa": "<name>"}'`),
+   which takes precedence over `--fa-engine` (`AlignOptions::effective_fa_engine`).
+
+There is no per-language routing: `align` never picks an engine from
+`@Languages`. A language-restricted engine (`qwen3_fa`) is checked against
+every declared language before any work, and an unsupported one refuses the
+file with the names of the language-general engines; it is never swapped for
+another engine silently. The Cantonese engine runs only when chosen.
+
+Within a run, one thing can change the engine for part of a file: a `wav2vec`
+or `cantonese` group that fails with a recoverable CTC error is retried on
+`whisper` for that group alone (see
+[Wave2Vec to Whisper CTC fallback](#wave2vec--whisper-ctc-fallback)). Those
+words then have onset-derived ends, and the fallback is recorded in the FA
+evidence.
+
+### When to choose which
+
+- **`wav2vec`** (default): measures each word's start and end. Use it unless a
+  measurement on your material says otherwise.
+- **`whisper`**: reports token onsets only, so every word's end is derived
+  (below). It accepts a longer window (20 s against 15 s). Choose it when
+  measurement on your material shows it locates more words; on the one
+  measurement recorded below it located fewer.
+- **`cantonese`**: the Wave2Vec aligner over jyutping, for Cantonese (`yue`)
+  material.
+- **`qwen3_fa`**: for `yue`, `zho`, `cmn` and `eng` only; measures start and
+  end.
+
+### What each engine reports, and what `%wor` can say
+
+| Engine | Reports | `%wor` word end |
+|---|---|---|
+| `wav2vec`, `cantonese`, `qwen3_fa` | each word's start AND end | measured by the engine |
+| `whisper` | each token's ONSET only | derived: the next word's onset; the utterance's last word gets an assumed end, kept visible as assumed |
+
+So a `%wor` tier from `whisper` carries real word starts and derived ends: a
+word's span runs to its successor's start and includes any pause after it. See
+[Word end times for an onset-only engine](#word-end-times-for-an-onset-only-engine).
+
+### A word with no positive timing
+
+A word timing is admitted only with a positive extent (`WordTiming::new`
+requires end after start); there is no zero-length word timing in the
+program. A word the aligner could not place, placed outside the audio it was
+given, or gave no width (two equal onsets) keeps its text and gets no bullet.
+The file is still written, with every timing that was measured, and is reported
+`diagnosed` with a `timing_incomplete` record: how many required words are
+untimed, and the first utterances with their cause (no request was made
+because the utterance's audio window was refused; no request was made because
+the audio left for a run of untimed utterances could not contain their words;
+or no usable timing resulted). It is never certified as completely aligned, and it is
+never discarded.
+
+### One measurement: `wav2vec` and `whisper` on the same file
+
+One German child-speech recording of 1,011 utterances (382 with utterance
+bullets), aligned in place by the same build with the FA cache bypassed, each
+engine locating words only where an utterance window existed. Of 4,797
+required words, `wav2vec` timed 2,075 and `whisper` 973. This is one file
+under one set of conditions, not a general law about the two engines; on that
+material the measuring engine located more than twice as many words.
+
+### Engine names
 
 Select one with `--fa-engine <name>`. The names above are the canonical ones,
 the spellings `--help` advertises. Each engine also answers to its historical
@@ -1785,16 +2159,14 @@ difference decides what a `%wor` tier can express:
 | Wave2Vec | word start AND end | measured by the engine |
 | Whisper FA | token ONSETS only | derived from the next onset |
 
-Because Whisper FA reports only when a word starts, a word's end has to be
-inferred from its neighbour. Selecting it as the alignment engine without that
-inference in place yields zero-duration words: `%wor` entries whose start and
-end are equal. Wave2Vec is therefore the default, and Whisper FA is an explicit
-opt-in via `--fa-engine whisper`.
-
-Aligning the same material through both engines shows the difference directly:
-Wave2Vec yields word durations in the 250 to 500 ms range conversational
-English occupies, while Whisper FA yields 0 ms for every word unless the
-onset-to-interval step runs.
+Because Whisper FA reports only when a word starts, each word's end is
+derived from its neighbour's onset, always (see
+[Word end times for an onset-only engine](#word-end-times-for-an-onset-only-engine));
+a word whose derived span would have no duration is left untimed rather than
+written as zero-length. A measured end is better than a derived one, so
+Wave2Vec is the default and Whisper FA an explicit choice via
+`--fa-engine whisper` (see [Engine Selection](#engine-selection), including the
+one recorded measurement of the two on the same file).
 
 The CTC fallback described above still catches genuine Wave2Vec refusals, which
 are rare: a merged group is capped at 448 label bytes, and MMS_FA offers one

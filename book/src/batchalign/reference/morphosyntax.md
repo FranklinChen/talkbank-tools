@@ -1,7 +1,7 @@
 # Morphosyntax Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-01 21:15 EDT
+**Last updated:** 2026-10-04 15:23 EDT
 
 ## 1. Overview
 
@@ -9,6 +9,94 @@ The batchalign morphosyntax pipeline (`morphotag` command) adds %mor and %gra ti
 CHAT transcripts.  Rust owns CHAT parsing, word extraction, UD-to-CHAT mapping, AST
 injection, and serialization.  Python's only role is ML inference, calling Stanza for
 POS/lemma/dependency analysis.
+
+### Completion and refusal
+
+A successful morphotag file must cover every utterance submitted for analysis.
+Correct response cardinality alone is insufficient: an empty model response,
+invalid dependency structure, failed word mapping or failed tier injection
+refuses that file. Other files in the job can continue. No incomplete CHAT
+output or success provenance is published for the refused file.
+
+`MatchedMorphosyntaxResponses::inject` returns a producer-constructed
+`InjectionResult` only after all requested utterances complete. Its typed
+`InjectionError::Incomplete` retains the affected utterance's decision and
+diagnostic. Both ordinary and incremental orchestration consume this same
+completion boundary before advancing to applied analysis. Callers must discard
+the partially modified in-memory destination on error.
+Orchestration retains the typed failure as `ServerError::MorphosyntaxInjection`,
+classified as a system/analysis failure rather than invalid submitted CHAT.
+It does not automatically retry the same incomplete analysis.
+
+Before either primary injection or secondary-language merging, the worker
+boundary consumes the raw `UdResponse` into `AdmittedUdResponse`: explicitly
+no sentence, or one entire sentence. Multiple sentences for one submitted
+utterance or secondary span are refused, never silently reduced to the first.
+Empty admission does not establish lexical completion. Special-form synthesis
+and the documented optional secondary-language placeholders remain distinct
+policies; secondary failure cannot introduce truncated analysis into the merge.
+Malformed worker results and mismatched response counts are analysis/system
+failures, not advice to repair otherwise valid CHAT.
+
+Direct Rust clients retain the raw `UdResponse` wire representation.
+`MatchedMorphosyntaxResponses::new` now returns `ResponseAdmissionError` for
+either batch-count or per-item sentence-count failure; its `responses()`
+accessor borrows admitted analyses, not raw mutable sentence vectors.
+Producers can use `AdmittedUdResponse::try_from` and pair those proofs using
+`MatchedMorphosyntaxResponses::from_admitted` without checking them again.
+The injection convenience API remains unchanged. No CHAT/JSON output format
+or model wire schema changes. Protocol-double tests prove these refusal
+boundaries; they do not establish a real model regression or linguistic accuracy.
+
+Utterances that legitimately have no analyzable lexical content are a distinct
+case, not a model failure. Documented special-form synthesis and secondary-
+language placeholder policies remain explicit; they are not fallbacks for
+missing analysis of ordinary lexical words.
+
+Placeholder identity comes from a collected word's typed role, never from its
+spelling. A literal lexical word such as `xbxxx` or `xbxxxness` is ordinary
+model input even when another word in the utterance is a genuine masked form.
+For example, `boom@o` receives the explicit onomatopoeic category `on|boom`;
+it does not authorize reinterpreting a neighboring literal word as a form.
+The same rule applies to selected replacement targets and to words remaining
+after retrace exclusion, in both preservation and retokenization modes.
+
+### Transcriber part-of-speech hints
+
+By default, `$POS` hints override the selected word's model POS category;
+`--no-pos-hints` leaves the model category unchanged. Hint collection uses
+Chatter's canonical morphology positions, not a separate lexical counter.
+Excluded fillers, fragments and `xxx` consume no position; commas retain their
+morphology slots. For replacements, the selected replacement targets supply
+the hints, not the replaced surface word. Retokenization maps these typed
+source positions to generated morphology items before applying the hints.
+Incremental reuse compares the same selected hints, so changing a replacement
+target's hint requires fresh analysis even when cleaned words are unchanged.
+
+### Language capability admission
+
+CHAT validity and model availability are separate judgments. An unsupported
+primary `@Languages` declaration refuses analysis as `analysis_unavailable`,
+not invalid CHAT; this file-level policy also applies to nonlexical input.
+Do not change truthful language declarations to get a different model to run.
+CA pass-through declines analysis before this boundary and remains fully
+source-admitted.
+
+The canonical payload collector selects outstanding work, including each
+utterance's effective `[- LANG]` precode. `DispatchPlan` binds these exact
+payloads to their worker pool and admits every language against its runtime
+Stanza registry before dispatching any group. Missing registry or required
+processors produces a typed, non-retryable `ServerError::AnalysisUnavailable`
+(HTTP 412). A mixed file with any unavailable required analysis publishes no
+partial CHAT. Unsupported utterance languages cannot obtain empty successful
+responses or borrow the secondary-word placeholder policy.
+
+Incremental compatible, complete prior `%mor`/`%gra` pairs discharge their
+utterance's analysis obligation without requiring that utterance's model.
+Missing or incompatible pairs still require capability admission. Per-word
+and span `@s` secondary analysis retains its explicit `L2|xxx` policy below.
+Prior reuse does not override the separate file-level primary-header support
+policy.
 
 ### Per-file scoping via `@Options`
 
@@ -33,9 +121,10 @@ Scoping](./chat-options.md).
 ```mermaid
 flowchart TD
     chat["CHAT files"]
-    parse["parse_lenient()\n(talkbank-transform::parse)"]
-    clear["clear_morphosyntax()\nstrip existing %mor/%gra"]
+    parse["ParsedFile::parse()\nsource-bound retained-CHAT admission"]
+    clear["Selected %mor/%gra replacement\nphysically removed by admission"]
     collect["collect_payloads()\nper-utterance word lists"]
+    admit["DispatchPlan::admit()\nall required effective languages"]
     batch["execute_v2 morphosyntax\n→ Python Stanza worker<br/>(no-op cache: always infer)"]
     mode{"TokenizationMode?"}
     preserve["map_ud_sentence()\nmerge MWT → clitics\n1 MOR per CHAT word"]
@@ -45,26 +134,27 @@ flowchart TD
     l2{"L2 @s words\ndeferred?"}
     l2disp["dispatch_secondary_l2()\nplan + dispatch secondary Stanza"]
     splice["splice_l2_into_chat()\nreplace L2|xxx"]
+    post["Complete typed output admission"]
     out["Serialize → CHAT"]
 
-    chat --> parse --> clear --> collect --> batch
+    chat --> parse --> clear --> collect --> admit --> batch
     batch --> mode
     mode -->|Preserve| preserve --> inject_p
     mode -->|StanzaRetokenize| retok --> inject_r
     inject_p --> l2
     inject_r --> l2
-    l2 -->|yes| l2disp --> splice --> out
-    l2 -->|no| out
+    l2 -->|yes| l2disp --> splice --> post --> out
+    l2 -->|no| post
 ```
 
 The diagram shows the two injection paths that diverge based on
 `TokenizationMode`. The L2 secondary dispatch runs after primary
 injection by default; pass `--no-l2-morphotag` to skip it.
 
-**Cache note:** Morphosyntax (a text NLP task) uses a **no-op cache**,
-all utterances skip cache lookup and are always sent to Stanza inference.
-This is faster than SQLite lookups, as Stanza workers stay warm between
-utterances in the cross-file batch. Audio tasks (transcribe, align)
+**Cache note:** Outstanding morphosyntax work uses a **no-op cache** and is
+sent to Stanza inference. Incremental complete-pair reuse is a separate,
+source-admitted operation, not an inference-cache hit. Workers stay warm
+across files handled by the bounded per-file dispatcher. Audio tasks (transcribe, align)
 use real caching; text tasks (morphosyntax, utseg, translate) do not.
 
 ### Data Flow
@@ -72,10 +162,8 @@ use real caching; text tasks (morphosyntax, utseg, translate) do not.
 ```text
 Rust entry point: `crates/batchalign/src/morphosyntax/mod.rs::run_morphosyntax_impl`
   │
-  ├── Parse CHAT (Rust AST via tree-sitter, parsed once per file)
-  │
-  ├── clear_morphosyntax(): strip existing %mor/%gra tiers
-  │     (talkbank-transform::morphosyntax::payload)
+  ├── Source-bound retained-CHAT admission (tree-sitter, once per file)
+  │     physically removes selected %mor/%gra before admitting retained CHAT
   │
   ├── collect_payloads(): extract utterance word lists globally, one
   │     CollectedUtterance each (its line, its ordinal, the item sent and
@@ -103,7 +191,7 @@ Rust entry point: `crates/batchalign/src/morphosyntax/mod.rs::run_morphosyntax_i
   │     → transform-layer plan, secondary dispatch, merge, splice
   │     (crates/batchalign/src/morphosyntax/batch.rs)
   │
-  ├── apply_pos_hints() (if --respect-pos-hints, default on)
+  ├── apply_pos_hint_evidence() (unless --no-pos-hints)
   │     → transcriber `$POS` annotations override POS categories
   │     (talkbank-transform::morphosyntax::pos_hints)
   │
@@ -152,7 +240,7 @@ glue is:
 |------|---------|
 | `morphosyntax/mod.rs` | `run_morphosyntax_impl()`: top-level orchestrator called from the `morphotag` command |
 | `morphosyntax/batch.rs` | `dispatch_secondary_l2()`: async wrapper that calls into the transform-layer L2 seam for secondary @s dispatch |
-| `morphosyntax/worker.rs` | Stanza-pool dispatch, `partition_groups_by_stanza_support()` |
+| `morphosyntax/worker.rs` | Runtime-admitted, payload-bound `DispatchPlan` and Stanza-pool dispatch |
 | `chat_ops/nlp/mapping/mod.rs` | Re-export shim: `pub use talkbank_transform::morphosyntax::*`: historical alias kept so existing imports keep resolving. New code should import from `talkbank_transform` directly. |
 | `chat_ops/nlp/types.rs` | FA-only raw-response types (`FaRawToken`, `FaIndexedTiming`, `FaRawResponse`); the UD/NLP type set (`UdSentence`, `UdWord`, `UdId`, etc.) lives in `talkbank_transform::morphosyntax`. |
 
@@ -827,6 +915,17 @@ sequenceDiagram
 The design, index spaces and limitations are in
 [L2 Morphotag](l2-morphotag.md).
 
+### Cancellation is not a placeholder fallback
+
+Secondary-language analysis inherits the caller's cancellation authority in
+both ordinary and incremental morphotag. Cancelling the job stops the secondary
+dispatch and its retry waits. The secondary transition returns a typed
+`ServerError::Cancelled`, not a successful `AppliedAnalyses`; the consuming
+pipeline therefore cannot post-validate or write that stopped analysis.
+Unsupported languages and ordinary inference/merge failures still retain the
+documented `L2|xxx` fallback. An explicitly jobless caller remains jobless;
+secondary dispatch never invents a replacement cancellation token.
+
 ### Validation and repair policy
 
 - Whole-utterance same-language all-`@s` patterns are rejected during
@@ -847,23 +946,14 @@ language under the new `[- LANG]` precode. See
 the `chatter` CLI `fix-s` debug command
 for the full safety contract.
 
-### Unsupported non-primary languages
+### Unsupported secondary-word languages
 
-`morphotag` skips files whose **primary** `@Languages` code is not
-Stanza-supported with a typed diagnostic (no pipeline entry). When the
-primary IS supported, non-primary content targeting an unsupported
-language degrades gracefully:
-
-- `[- UNSUPPORTEDLANG]` precodes, `infer_batch` partitions language
-  groups via `partition_groups_by_stanza_support`; unsupported groups
-  bypass Stanza dispatch and the words receive `L2|xxx` in `%mor`.
-- `@s:UNSUPPORTEDLANG` per-word markers, the secondary dispatch path
-  for that span is short-circuited the same way; the host primary
-  analysis is preserved and the `@s` token's slot stays as `L2|xxx`.
-
-The worker never crashes on an unsupported secondary, and other
-utterances or spans in the same file targeting supported languages
-continue to receive real morphology.
+`@s:UNSUPPORTEDLANG` per-word or span markers retain `L2|xxx` when the
+secondary dispatch cannot supply analysis. Host utterance analysis is
+preserved; supported spans can still receive real morphology. This is an
+explicit secondary-word policy, not successful analysis of those words.
+Whole-utterance `[- LANG]` precodes instead select required primary analysis;
+see [Language capability admission](#language-capability-admission).
 
 ### Key Files
 

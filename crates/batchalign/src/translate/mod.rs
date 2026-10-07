@@ -55,7 +55,6 @@ use batchalign_transform::translate::{
     TranslateBatchItem, TranslationSource, TranslationText, WritingSystem, apply_translate_results,
     chat_punct_chars, collect_translate_payloads,
 };
-use batchalign_transform::validate::ValidityLevel;
 use tracing::{info, warn};
 
 use crate::error::ServerError;
@@ -65,6 +64,54 @@ use crate::text_batch::{ItemFailure, TextBatchFileInput, TextBatchFileResults};
 
 use self::items::{ItemTransport, Wait, translate_items};
 use self::provider::ProviderGiveUp;
+
+/// One immutable, checked source/target/engine route for a file's requests.
+/// Neither gateway nor transport can replace just one of these choices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TranslationRoute {
+    source: LanguageCode3,
+    target: LanguageCode3,
+    engine: TranslateEngineName,
+}
+
+impl TranslationRoute {
+    pub(crate) fn for_file(
+        source: LanguageCode3,
+        options: &crate::options::TranslateOptions,
+    ) -> Self {
+        Self {
+            source,
+            target: options.target.clone(),
+            engine: options.effective_translate_engine(),
+        }
+    }
+
+    pub(crate) fn source(&self) -> &LanguageCode3 {
+        &self.source
+    }
+    pub(crate) fn target(&self) -> &LanguageCode3 {
+        &self.target
+    }
+    pub(crate) fn engine(&self) -> &TranslateEngineName {
+        &self.engine
+    }
+
+    fn request(
+        &self,
+        item: &TranslateBatchItem,
+    ) -> Result<
+        crate::types::worker_v2::ExecuteRequestV2,
+        crate::worker::text_request_v2::TextRequestBuildErrorV2,
+    > {
+        build_translate_request_v2(
+            &PreparedTextRequestIdsV2::for_task("translate"),
+            self.source(),
+            self.target(),
+            self.engine().worker_backend(),
+            item,
+        )
+    }
+}
 
 /// The failures translate itself defines for one item.
 ///
@@ -171,23 +218,21 @@ impl AdmittedTranslation {
 /// Returns `(filename, Ok(output) | Err(error))` for the file.
 pub(crate) async fn process_translate_file(
     file: &TextBatchFileInput,
-    lang: &LanguageCode3,
-    engine: &TranslateEngineName,
+    route: &TranslationRoute,
     pool: &WorkerPool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
     run_text_batch_pipeline(
         std::slice::from_ref(file),
-        lang,
+        route.source(),
         pool,
         TextBatchHooks {
             command: crate::api::ReleasedCommand::Translate,
-            validity: ValidityLevel::StructurallyComplete,
             collect: collect_translate_payloads,
             apply: apply_translate_file,
             provenance: translation_provenance,
         },
-        async move |pool, items, lang| infer_batch(pool, items, lang, engine, cancellation).await,
+        async move |pool, items, _lang| infer_batch(pool, items, route, cancellation).await,
     )
     .await
 }
@@ -216,7 +261,7 @@ fn apply_translate_file(
     chat_file: &mut ChatFile,
     items: &[(usize, TranslationSource)],
     responses: &[AdmittedTranslation],
-) {
+) -> Result<(), ServerError> {
     let translation_map: HashMap<usize, TranslationText> = items
         .iter()
         .zip(responses)
@@ -229,6 +274,7 @@ fn apply_translate_file(
     if !translation_map.is_empty() {
         apply_translate_results(chat_file, &translation_map);
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +292,11 @@ fn apply_translate_file(
 async fn infer_batch(
     pool: &WorkerPool,
     items: &[(usize, TranslationSource)],
-    lang: &LanguageCode3,
-    engine: &TranslateEngineName,
+    route: &TranslationRoute,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<Result<AdmittedTranslation, TranslateItemFailure>>, ServerError> {
+    let lang = route.source();
+    let engine = route.engine();
     // Fallible in chatter 0.3.0; stringified error (`LanguageCodeError` not
     // re-exported upstream).
     let src_lang_code = LanguageCode::new(lang.as_ref()).map_err(|e| {
@@ -271,14 +318,14 @@ async fn infer_batch(
     info!(
         num_items = items.len(),
         lang = %lang,
+        target = %route.target(),
         engine = %engine.as_wire_name(),
         "Dispatching translate execute_v2 requests, one per item"
     );
 
     let mut transport = WorkerTransport {
         pool,
-        lang,
-        engine,
+        route,
         cancellation,
     };
     let outcome = translate_items(&rendered, engine, &punct_refs, &mut transport).await?;
@@ -300,8 +347,7 @@ async fn infer_batch(
 /// cancellation.
 struct WorkerTransport<'a> {
     pool: &'a WorkerPool,
-    lang: &'a LanguageCode3,
-    engine: &'a TranslateEngineName,
+    route: &'a TranslationRoute,
     cancellation: Cancellation<'a>,
 }
 
@@ -310,21 +356,18 @@ impl ItemTransport for WorkerTransport<'_> {
         &mut self,
         item: &TranslateBatchItem,
     ) -> Result<TranslationItemResultV2, ServerError> {
-        let request = build_translate_request_v2(
-            &PreparedTextRequestIdsV2::for_task("translate"),
-            self.lang,
-            &LanguageCode3::eng(),
-            self.engine.worker_backend(),
-            item,
-        )
-        .map_err(|error| {
+        let request = self.route.request(item).map_err(|error| {
             ServerError::Validation(format!(
                 "failed to build translate V2 worker request: {error}"
             ))
         })?;
-        let response =
-            dispatch_execute_v2_with_retry(self.pool, self.lang, &request, self.cancellation)
-                .await?;
+        let response = dispatch_execute_v2_with_retry(
+            self.pool,
+            self.route.source(),
+            &request,
+            self.cancellation,
+        )
+        .await?;
         let result = parse_translate_result_v2(response).map_err(|error| {
             ServerError::Validation(format!("invalid translate V2 result: {error}"))
         })?;
@@ -357,6 +400,27 @@ fn single_item(
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translate_route_binds_the_exact_request_languages_and_engine() {
+        let options = crate::options::TranslateOptions {
+            target: LanguageCode3::fra(),
+            translate_engine: TranslateEngineName::Nllb,
+            ..Default::default()
+        };
+        let route = TranslationRoute::for_file(LanguageCode3::spa(), &options);
+        let request = route
+            .request(&TranslateBatchItem {
+                text: "hola .".into(),
+            })
+            .unwrap();
+        let crate::types::worker_v2::TaskRequestV2::Translate(payload) = request.payload else {
+            panic!("translate request")
+        };
+        assert_eq!(payload.source_lang, LanguageCode3::spa());
+        assert_eq!(payload.target_lang, LanguageCode3::fra());
+        assert_eq!(payload.engine, TranslateEngineName::Nllb.worker_backend());
+    }
 
     fn engine() -> ReportedEngineName {
         ReportedEngineName::try_from("googletrans-v1").expect("valid engine name")
@@ -449,7 +513,10 @@ mod tests {
         };
         let stamp = comment.format();
         assert!(
-            stamp.starts_with("[fc-ba3 translate | engine=googletrans-v1 ; lang=eng | "),
+            stamp.starts_with(&format!(
+                "{}engine=googletrans-v1 ; lang=eng | ",
+                crate::provenance::written_stamp_opening("translate")
+            )),
             "{stamp}"
         );
     }

@@ -91,6 +91,7 @@ batchalign-types = { workspace = true, features = ["sqlx"] }
 batchalign-fa-core = { path = "../batchalign-fa-core" }
 # chat_ops module deps (formerly batchalign-chat-ops, folded 2026-04-30)
 talkbank-model = { workspace = true }
+talkbank-transform = { workspace = true }
 talkbank-parser = { workspace = true }
 batchalign-transform = { workspace = true }
 tokio = { workspace = true }

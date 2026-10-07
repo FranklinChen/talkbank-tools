@@ -7,7 +7,7 @@
 
 use smallvec::SmallVec;
 use talkbank_model::model::TierContentItems;
-use talkbank_model::model::{GrammaticalRelation, Mor, ParseHealthTier, Utterance};
+use talkbank_model::model::{GrammaticalRelation, Mor, Utterance};
 
 use crate::extract::ExtractedWord;
 use crate::inject::MisalignmentDiagnostic;
@@ -42,8 +42,8 @@ pub struct WordTokenMapping {
 /// What a [`WordTokenMapping`] was built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MappingBasis {
-    /// The words' and the tokens' texts concatenate to the same string, and
-    /// each word maps to the tokens covering its own characters.
+    /// Source words match model surface-token text. A producer-admitted
+    /// expansion can carry that ownership to differently spelled components.
     Text,
     /// The texts diverged; words were spread over tokens by position and
     /// length alone, so a word's tokens may hold another word's text.
@@ -74,6 +74,34 @@ impl WordTokenMapping {
             .get(word_idx)
             .filter(|v| !v.is_empty())
             .map(|s| s.as_slice())
+    }
+
+    /// Carry existing ownership through a complete ordered token expansion.
+    /// Refuse empty pieces, gaps, overlaps, or absent producer positions;
+    /// callers cannot establish new source ownership by supplying ranges.
+    pub(crate) fn expanded(self, ranges: &[std::ops::Range<usize>]) -> Option<Self> {
+        let mut next = 0;
+        for range in ranges {
+            if range.start != next || range.end <= range.start {
+                return None;
+            }
+            next = range.end;
+        }
+        let inner = self
+            .inner
+            .into_iter()
+            .map(|indices| {
+                let mut expanded = SmallVec::new();
+                for index in indices {
+                    expanded.extend(ranges.get(index)?.clone());
+                }
+                Some(expanded)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            inner,
+            basis: self.basis,
+        })
     }
 }
 
@@ -256,14 +284,28 @@ pub fn retokenize_utterance(
     let old_content = utterance.main.content.content.take();
     let mut new_content = Vec::with_capacity(old_content.len());
 
-    rebuild_content(old_content, &mut ctx, &mut new_content);
-    utterance.main.content.content = TierContentItems::new(new_content);
+    // Retain the source payload until expansion and tier admission both
+    // succeed. A refused rewrite must not turn a clean source into a damaged
+    // intermediate, or certify completion merely because counts still match.
+    rebuild_content(old_content.clone(), &mut ctx, &mut new_content);
 
     if !ctx.diagnostics.is_empty() {
-        utterance.mark_parse_taint(ParseHealthTier::Main);
         for warning in &ctx.diagnostics {
             tracing::warn!("retokenize: {warning}");
         }
+        utterance.main.content.content = TierContentItems::new(old_content);
+        return Err(MisalignmentDiagnostic {
+            chat_words: original_words
+                .iter()
+                .map(|word| word.text.as_str().to_owned())
+                .collect(),
+            expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
+                original_words.len(),
+            ),
+            actual: talkbank_model::alignment::helpers::MorItemCount::new(mors.len()),
+            stanza_tokens_after_mapping: stanza_tokens.to_vec(),
+            suspected_class: crate::inject::MisalignmentClass::Unknown,
+        });
     }
 
     tracing::debug!(
@@ -273,7 +315,12 @@ pub fn retokenize_utterance(
         mor_cursor = ctx.mor_cursor,
         "retokenize_utterance: about to inject"
     );
-    crate::inject::inject_morphosyntax(utterance, mors, terminator, gra_relations)
+    utterance.main.content.content = TierContentItems::new(new_content);
+    let admitted = crate::inject::inject_morphosyntax(utterance, mors, terminator, gra_relations);
+    if admitted.is_err() {
+        utterance.main.content.content = TierContentItems::new(old_content);
+    }
+    admitted
 }
 
 #[cfg(test)]
@@ -371,6 +418,39 @@ mod tests {
         let stanza_tokens = vec!["you".to_string(), "eat".to_string()];
 
         assert!(try_deterministic_word_token_mapping(&original_words, &stanza_tokens).is_none());
+    }
+
+    #[test]
+    fn admitted_expansions_carry_ownership_without_normalizing_away_accents() {
+        let words = extracted_words(&["decírmelo", "hoy"]);
+        let surface = vec!["decírmelo".into(), "hoy".into()];
+        let mapping = build_word_token_mapping(&words, &surface)
+            .expanded(&[0..3, 3..4])
+            .expect("complete producer expansion");
+        assert_eq!(mapping.basis(), MappingBasis::Text);
+        assert_eq!(mapping.tokens_for_word(0), &[0, 1, 2]);
+        assert_eq!(mapping.tokens_for_word(1), &[3]);
+        let components = vec!["decir".into(), "me".into(), "lo".into(), "hoy".into()];
+        assert_eq!(
+            build_word_token_mapping(&words, &components).basis(),
+            MappingBasis::Length
+        );
+        for ranges in [
+            vec![0..0, 0..1],
+            vec![0..1, 2..3],
+            vec![0..2, 1..3],
+            std::iter::once(0..1).collect(),
+        ] {
+            assert!(
+                build_word_token_mapping(&words, &surface)
+                    .expanded(&ranges)
+                    .is_none()
+            );
+        }
+        let guessed = build_word_token_mapping(&words, &["otro".into(), "hoy".into()])
+            .expanded(&[0..3, 3..4])
+            .expect("ordered expansion retains its basis");
+        assert_eq!(guessed.basis(), MappingBasis::Length);
     }
 
     #[test]

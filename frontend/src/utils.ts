@@ -2,6 +2,14 @@ import type { components } from "./generated/api";
 
 type FileProgressStage = components["schemas"]["FileProgressStage"];
 type LanguageSpec = components["schemas"]["LanguageSpec"];
+type FileOutputDiagnostics = components["schemas"]["FileOutputDiagnostics"];
+type FullFindings = components["schemas"]["FullFindings"];
+type JudgementBar = components["schemas"]["JudgementBar"];
+type StageRefusalRecord = components["schemas"]["StageRefusalRecord"];
+type OutputShortfallRecord = components["schemas"]["OutputShortfallRecord"];
+type OptionalStage = components["schemas"]["OptionalStage"];
+type UntimedCauseRecord = components["schemas"]["UntimedCauseRecord"];
+type RefusedWindowTrace = components["schemas"]["RefusedWindowTrace"];
 
 /** Formatting helpers. */
 
@@ -57,6 +65,7 @@ const PROGRESS_STAGE_LABELS: Record<FileProgressStage, string> = {
   resolving_coreference: "Resolving coreference",
   comparing: "Comparing",
   retry_scheduled: "Retry scheduled",
+  waiting_for_worker: "Waiting for a worker",
 };
 
 /**
@@ -118,6 +127,10 @@ export function statusColor(status: string): string {
     case "completed":
     case "done":
       return "bg-green-100 text-green-700";
+    // Output written with admission diagnostics: neither green (a clean
+    // success) nor red (a failure).
+    case "diagnosed":
+      return "bg-yellow-100 text-yellow-800";
     case "failed":
     case "error":
       return "bg-red-100 text-red-700";
@@ -143,6 +156,8 @@ export function statusDotColor(status: string): string {
     case "completed":
     case "done":
       return "bg-emerald-500";
+    case "diagnosed":
+      return "bg-yellow-400";
     case "failed":
     case "error":
       return "bg-red-500";
@@ -229,4 +244,162 @@ export function displayProgressLabel(
     return PROGRESS_STAGE_LABELS[stage] ?? label ?? "";
   }
   return label ?? "";
+}
+
+/**
+ * One line for a file whose output was written with admission diagnostics
+ * (status `diagnosed`): the output is on disk, and this says how many
+ * findings it carries. Never phrased as a success or as an error.
+ */
+export function diagnosedSummary(
+  diagnostics: FileOutputDiagnostics | null | undefined,
+): string {
+  if (!diagnostics) return "written, diagnostics not recorded";
+  const n = diagnostics.findings?.finding_count ?? 0;
+  let line = `written, ${n} ${n === 1 ? "diagnostic" : "diagnostics"}`;
+  const shortfalls = diagnostics.shortfalls ?? [];
+  const stages = shortfalls.filter(
+    (shortfall) => shortfall.kind === "stage_skipped" || shortfall.kind === "stage_not_applied",
+  ).length;
+  if (stages > 0) {
+    line += `, ${stages} requested stage${stages === 1 ? "" : "s"} not applied`;
+  }
+  for (const shortfall of shortfalls) {
+    if (shortfall.kind === "timing_incomplete") {
+      line += `, ${shortfall.untimed_words} of ${shortfall.required_words} words untimed`;
+    } else if (shortfall.kind === "stage_held_out") {
+      line += `, ${stageName(shortfall.stage)} left out of ${shortfall.held_out_utterances} utterance${shortfall.held_out_utterances === 1 ? "" : "s"}`;
+    }
+  }
+  return line;
+}
+
+/**
+ * The lines a diagnosed file reports: the bar and its first findings (with
+ * the code), how many more there are and where the full list is, then each
+ * shortfall. The same lines the CLI prints (`FileOutputDiagnostics::lines`).
+ */
+export function diagnosticLines(diagnostics: FileOutputDiagnostics): string[] {
+  const lines: string[] = [];
+  const findings = diagnostics.findings;
+  if (findings) {
+    lines.push(`judged against: ${judgementBarText(findings.bar)}`);
+    const first = findings.first_findings ?? [];
+    for (const finding of first) {
+      lines.push(finding.code ? `${finding.code} ${finding.message}` : finding.message);
+    }
+    if (findings.finding_count > first.length) {
+      lines.push(moreFindingsLine(findings.finding_count - first.length, findings.full_findings));
+    }
+  }
+  for (const shortfall of diagnostics.shortfalls ?? []) {
+    lines.push(shortfallText(shortfall));
+  }
+  return lines;
+}
+
+/** One shortfall as a line: the server's `OutputShortfallRecord` Display. */
+function shortfallText(shortfall: OutputShortfallRecord): string {
+  switch (shortfall.kind) {
+    case "stage_skipped":
+      return `skipped ${stageName(shortfall.stage)}: it requires an admitted document, and the generated output was written with its diagnostics instead`;
+    case "stage_not_applied":
+      return `${stageName(shortfall.stage)} not applied: its output could not be admitted (${stageRefusalText(shortfall.refusal)}); the admitted document from before it was written instead`;
+    case "stage_held_out": {
+      const first = shortfall.first_held_out[0];
+      const firstText = first !== undefined ? ` (first: utterance ${first})` : "";
+      return `${stageName(shortfall.stage)} applied except to ${shortfall.held_out_utterances} utterance(s) that carry the findings, which keep their generated form${firstText}`;
+    }
+    case "timing_incomplete": {
+      const first = shortfall.first_untimed[0];
+      const firstText = first
+        ? ` (first: utterance ${first.utterance}, ${first.untimed_words} of ${first.words} words, ${untimedCauseText(first.cause)})`
+        : "";
+      return `timing incomplete: ${shortfall.untimed_words} of ${shortfall.required_words} words in ${shortfall.untimed_utterances} utterance(s) have no timing and were written without it${firstText}`;
+    }
+  }
+}
+
+/** The server's `OptionalStage::name`. */
+function stageName(stage: OptionalStage): string {
+  switch (stage) {
+    case "utterance_segmentation":
+      return "utterance segmentation";
+    case "morphosyntax":
+      return "morphosyntax";
+  }
+}
+
+/** The server's `UntimedCauseRecord` Display. */
+function untimedCauseText(cause: UntimedCauseRecord): string {
+  switch (cause.kind) {
+    case "not_placed":
+      return "no alignment request, the audio left for it could not contain its words";
+    case "no_usable_timing":
+      return "no usable timing";
+    case "window_refused":
+      return `no alignment request, its audio window was refused (${refusedWindowText(cause.window)})`;
+    case "not_in_recording":
+      return `not in the recording: [+ ${cause.postcode}]`;
+  }
+}
+
+/** The cause phrase of the server's `UntimedCauseRecord` Display. */
+function refusedWindowText(window: RefusedWindowTrace): string {
+  switch (window.cause) {
+    case "over_budget":
+      return "longer than the alignment budget";
+    case "empty":
+      return "empty";
+    case "inverted":
+      return "inverted";
+    case "past_recording":
+      return "past the end of the recording";
+    case "anchor_gap":
+      return "over budget, with a gap between recovered anchors longer than the budget";
+    case "anchors_unusable":
+      return "over budget, with no usable recovered anchor to split at";
+  }
+}
+
+/** The line saying how many findings are not shown and where they are. */
+function moreFindingsLine(more: number, full: FullFindings): string {
+  switch (full.kind) {
+    case "inline":
+      return `... and ${more} more finding(s)`;
+    case "sidecar":
+      return `... and ${more} more finding(s); the full list is in ${full.path}`;
+    case "unwritten":
+      return `... and ${more} more finding(s); the full list could not be written to ${full.path}: ${full.error}`;
+  }
+}
+
+/**
+ * A stage refusal as one phrase: the bar and how many findings with the
+ * first one, or the producer's statement. The same text as the server's
+ * `StageRefusalRecord` Display.
+ */
+function stageRefusalText(refusal: StageRefusalRecord): string {
+  switch (refusal.kind) {
+    case "judged": {
+      const bar = judgementBarText(refusal.bar);
+      const first = refusal.first_findings[0];
+      const firstText = first
+        ? `, first: ${first.code ? `${first.code} ${first.message}` : first.message}`
+        : "";
+      return `${bar}: ${refusal.finding_count} finding(s)${firstText}`;
+    }
+    case "unestablished":
+      return refusal.reason;
+  }
+}
+
+/** The server's `JudgementBar` Display. */
+function judgementBarText(bar: JudgementBar): string {
+  switch (bar) {
+    case "construction":
+      return "complete CHAT construction required";
+    case "preservation":
+      return "complete CHAT construction and preservation required";
+  }
 }

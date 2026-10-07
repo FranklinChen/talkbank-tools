@@ -60,6 +60,14 @@ pub(super) async fn dispatch_job_with_execution_context(
     let cache = &execution.cache;
     let all_chat = file_list.iter().all(|file| file.has_chat);
 
+    // Native work shares the managed runner's admission and supervision, but
+    // cannot pass through test echo or probing an invented worker task.
+    if command_runner_dispatch_kind(command) == RunnerDispatchKind::NativeAudioExport {
+        crate::execution::native_media::dispatch_audio_export(&job, host, &file_list, num_workers)
+            .await;
+        return Ok(());
+    }
+
     if command_requires_chat_infer(command) && !all_chat {
         fail_job(
             &job,
@@ -126,6 +134,14 @@ pub(super) async fn dispatch_job_with_execution_context(
     );
 
     match runner_dispatch_kind {
+        RunnerDispatchKind::NativeAudioExport => {
+            fail_job(
+                &job,
+                host,
+                "native command reached worker-backed dispatch".into(),
+            )
+            .await;
+        }
         // Audio-first commands: they take audio input, not CHAT.
         RunnerDispatchKind::TranscribeAudioInfer => {
             dispatch_transcribe_command(&job, host, pool, cache, num_workers).await;
@@ -590,7 +606,8 @@ mod tests {
                 | ReleasedCommand::Avqi
                 | ReleasedCommand::Diarize
                 | ReleasedCommand::SpeakerIdentify
-                | ReleasedCommand::Align => false,
+                | ReleasedCommand::Align
+                | ReleasedCommand::Convert => false,
             };
 
             if command_runner_dispatch_kind(command) == RunnerDispatchKind::BatchedTextInfer {

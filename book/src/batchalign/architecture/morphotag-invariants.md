@@ -1,12 +1,60 @@
 # Morphotag Reconciliation Invariants
 
 **Status:** Current
-**Last updated:** 2026-10-02 14:16 EDT
+**Last updated:** 2026-10-03 22:04 EDT
 
 This page documents the **1-to-1 invariant** that the morphotag pipeline
 relies on, the three stages that together make it hold deterministically,
 the two legitimate modes that intentionally skip it, and the typed
 outcome model that replaces the old silent-skip pattern.
+
+## Input admission and replacement ownership
+
+Chatter admits every retained header, main tier and dependent tier before
+collection or inference. Its source-bound, header-aware plan parses once and
+lowers each construct once. Only an analysis plan physically removes `%mor`
+and `%gra`, so corruption confined to those removed tiers may be accepted.
+Under the default CA policy, pass-through preserves and validates every tier;
+`--ca-policy analyze` selects actual morphology replacement instead.
+`NoAlign` does not bypass morphotag. Parser or producer failure never certifies
+either invalid CHAT or successful admission.
+
+The returned ownership state carries admission into preparation; no weaker
+main-tier-only admission or preliminary language parse competes with it.
+Language is resolved from the admitted file, not a separately supplied job
+value. Incremental processing fully admits the before-file before copying any
+of its tiers. The after-file's old morphology is replaced by admitted prior
+tiers or fresh analysis. A full-regeneration fallback consumes the existing
+admission rather than parsing the after-file again.
+
+Text-diff eligibility is not analysis completeness. The incremental reuse
+producer borrows a complete `%mor`/`%gra` pair from the admitted prior before
+it can copy either tier. A missing pair or isolated `%mor` leaves fresh analysis
+owed even for unchanged text. After eligible complete pairs are installed,
+the canonical payload collector selects all remaining analyzable utterances;
+an additional changed-text filter must not discard these obligations. CHAT
+permits absent annotation tiers, so ordinary CHAT validity alone cannot prove
+that the requested morphotag work was completed.
+
+Completion alone is not compatibility. `MorphologyInput` binds the canonical
+payload to its originating utterance; both collection and incremental reuse
+use this producer. Prior tiers can be installed only through a consumed
+destination-bound permission after typed language, terminator, word-role,
+POS-hint and grammatical-evidence comparison. Matching cleaned words cannot
+authorize stale analysis after changing a precode, own/span language mark, special form,
+sentence ending or meaningful pause. This is a structural input contract,
+not a claim that an arbitrary prior has the current model's producing identity
+or that structural CHAT validity establishes linguistic accuracy.
+
+`InjectionResult` is minted only after every requested utterance has completed
+injection. Mutable accumulation uses a private progress state, never a
+premature completed result. Its real secondary-language payload is private:
+`l2()` permits read-only inspection and `into_parts()` consumes completion into
+retokenization traces and secondary-language evidence for the next stage.
+Callers cannot fabricate completion or replace its L2 evidence independently.
+There is no private unit marker or lint suppression standing in for this
+construction boundary. This changes Rust field access, not worker wire data
+or CHAT output.
 
 ## The invariant
 

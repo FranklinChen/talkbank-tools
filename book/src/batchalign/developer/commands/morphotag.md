@@ -1,7 +1,7 @@
 # morphotag: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-03 08:50 EDT
 
 Implementation guide for the `morphotag` command. For user-facing
 documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.md).
@@ -14,12 +14,12 @@ documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.m
 |-------|----------|----------------|
 | CLI args | `crates/batchalign/src/cli/args/commands.rs`: `MorphotagArgs`, `MorphotagPolicyArgs` | I/O, tokenization, multilingual handling, lexicon, and analysis policy (`--no-l2-morphotag`, `--no-pos-hints`, `--ca-policy`) |
 | Options builder | `crates/batchalign/src/cli/args/options.rs` (inline dispatch) | Maps CLI values to wire-compatible `MorphotagOptions` |
-| Command definition | `crates/batchalign/src/commands/morphotag.rs` | `CommandDefinition` impl, pre-validation gate |
+| Job dispatch | `crates/batchalign/src/execution/morphotag/mod.rs` | Bounded per-file fanout and durable writeback |
 | Runtime policy | `crates/batchalign/src/types/params.rs`: `MorphotagExecutionPolicy` | Lowers wire booleans into typed L2, `$POS`, and CA policies |
-| CA disposition | `crates/batchalign/src/morphosyntax/mod.rs`: `MorphotagDisposition` | Produces `Analyze` or `PassThroughCa` once from the parsed header and submitted policy |
-| Morphosyntax orchestration | `crates/batchalign/src/morphosyntax/` | Cross-file batching, worker dispatch, result injection |
-| Batch dispatch | `crates/batchalign/src/runner/dispatch/infer_batched.rs` | Pools all files into a single ML call |
-| Injection | `crates/batchalign-transform/src/morphosyntax/injection.rs` | `inject_results()`: writes `%mor`/`%gra` from typed UD annotations |
+| Input admission and CA policy | `crates/batchalign/src/pipeline/morphosyntax/states.rs`: `ParsedFile` | Consumes Chatter's header-aware source admission into whole-file pass-through or admitted analysis |
+| Morphosyntax orchestration | `crates/batchalign/src/morphosyntax/` | Per-file collection, multilingual worker dispatch, result injection |
+| Worker boundary | `crates/batchalign/src/execution/worker_gateway.rs` | Delegates each file to the consuming pipeline, without a separate language parse |
+| Injection | `talkbank-transform::morphosyntax` | Writes `%mor`/`%gra` from matched typed UD annotations |
 | Retokenization | `crates/batchalign/src/retokenize/` | Character-level DP for Stanza word splits/merges |
 | Payload collection & injection | `crates/batchalign-transform/src/morphosyntax/`: `collect_payloads()`, `clear_morphosyntax()`, `inject_results()`, `remove_empty_morphosyntax_placeholders()` | Cross-crate: domain logic lives in talkbank-transform model layer |
 | Worker IPC | `batchalign/inference/morphosyntax.py`: `batch_infer_morphosyntax()` | Loads Stanza, returns raw `to_dict()` UD annotations |
@@ -36,12 +36,10 @@ The single-file path in `pipeline/morphosyntax.rs` uses consuming transitions:
 
 ```mermaid
 flowchart LR
-    P["ParsedFile"] --> CA["CA pass-through"]
+    P["One source-bound parse and header plan"] --> CA["Fully admitted CA pass-through"]
     CA --> CS["Strip legacy decision tiers and serialize"]
-    P --> A["Analysis of Parsed input"]
-    A --> V["Admitted main tiers"]
-    V --> C["Prepared: stale morphology cleared"]
-    C --> B["Collected payloads and hint evidence"]
+    P --> A["MOR/GRA removed; all retained CHAT admitted"]
+    A --> B["Collected payloads and hint evidence"]
     B --> I["Inferred: matching responses or NoWork"]
     I --> R["Applied morphology"]
     R --> K["PostChecked"]
@@ -68,9 +66,10 @@ representations needed by the worker and model APIs are resolved once.
 
 CA pass-through remains a separate policy outcome. It does not claim analysis
 admission, resolve an inference language, or traverse six no-op analysis stages.
-Its existing lenient parse/recovery behavior remains unchanged. `PostChecked`
-means the existing non-fatal output checks ran; it does not claim the output
-was admitted as valid. Neither branch stores optional final output.
+It does require complete retained-input admission. `PostChecked` means the
+existing output gate and command-specific completion checks passed; it is
+distinct from the complete input proof. Neither branch stores optional final
+output. See [input admission ownership](../../architecture/morphotag-invariants.md#input-admission-and-replacement-ownership).
 
 The shared generic `observe_stage` helper retains the existing start/completion
 trace fields and duration measurement for transitions that execute. It accepts
@@ -80,17 +79,12 @@ use the dynamic planner and share the same observation helper.
 
 ---
 
-## Cross-file batching
+## Per-file scheduling and inference batching
 
-`morphotag` is the canonical `CrossFileBatchTransform` command. All utterances
-from all input files are pooled into a single Stanza inference call. This
-eliminates per-file model warm-up overhead.
-
-After the worker responds, results are repartitioned by file and injected
-per-file.
-
-`infer_batched.rs` is the shared dispatch helper for all cross-file batch
-commands (morphotag, utseg, translate).
+The dispatcher fans files out through the job's memory-aware worker limit and
+writes each completed file independently. Each file's admitted utterances are
+collected and batched for inference through the shared managed worker pool.
+It does not pool the entire corpus into a single cross-file inference request.
 
 ---
 
@@ -278,10 +272,11 @@ contract.
 
 ## Pre-validation gate
 
-`morphotag` requires CHAT Level 2 (parseable + headers + valid main tiers) before
-batching. Invalid files are rejected immediately. A file with malformed headers
-or invalid main tiers would produce mis-keyed cache entries and corrupt downstream
-morphosyntax assignments.
+The authoritative contract is [input admission and replacement
+ownership](../../architecture/morphotag-invariants.md#input-admission-and-replacement-ownership):
+all retained CHAT must be valid, not merely Level 2. CA pass-through cannot
+claim a regeneration exemption, and incremental tier reuse requires full
+admission of the before-file.
 
 ---
 

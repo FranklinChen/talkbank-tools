@@ -56,6 +56,7 @@ where
              SET status = ?,
                  error = ?,
                  error_category = ?,
+                 diagnostics = ?,
                  started_at = ?,
                  finished_at = ?,
                  next_eligible_at = ?,
@@ -63,7 +64,7 @@ where
              WHERE job_id = ? AND filename = ?",
         ),
         phase.columns(),
-    )
+    )?
     .bind(content_type)
     .bind(job_id)
     .bind(filename)
@@ -72,20 +73,28 @@ where
     Ok(())
 }
 
-/// Bind a phase's six `file_statuses` columns, in the order every phase
-/// writer's SQL names them: `status, error, error_category, started_at,
-/// finished_at, next_eligible_at`.
+/// Bind a phase's seven `file_statuses` columns, in the order every phase
+/// writer's SQL names them: `status, error, error_category, diagnostics,
+/// started_at, finished_at, next_eligible_at`.
 pub(super) fn bind_phase_columns<'q>(
     query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     columns: crate::store::FilePhaseColumns<'q>,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
-    query
+) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>, ServerError> {
+    let diagnostics = columns
+        .diagnostics
+        .map(crate::api::FileOutputDiagnostics::to_column_json)
+        .transpose()
+        .map_err(|error| {
+            ServerError::Persistence(format!("could not encode file output diagnostics: {error}"))
+        })?;
+    Ok(query
         .bind(columns.status.to_string())
         .bind(columns.error)
         .bind(columns.error_category.map(|category| category.to_string()))
+        .bind(diagnostics)
         .bind(columns.started_at)
         .bind(columns.finished_at)
-        .bind(columns.next_eligible_at)
+        .bind(columns.next_eligible_at))
 }
 
 impl JobDB {

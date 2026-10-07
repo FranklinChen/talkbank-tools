@@ -130,55 +130,23 @@ pub(crate) async fn dispatch_morphotag_job(
                     .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Parsing)
                     .await;
 
-                // Resolve language per-file from the CHAT file's own
-                // `@Languages:` header. No job-level lang, no eng fallback
-                // a missing or malformed header surfaces as a typed file-level
-                // error in the job's status.
-                let parser = crate::chat_parser();
-                let (parsed_chat, _parse_errors) = batchalign_transform::parse::parse_lenient(
-                    &parser,
-                    file_input.chat_text.as_ref(),
-                );
-                let file_lang =
-                    match crate::pipeline::morphosyntax::resolve_per_file_lang(&parsed_chat) {
-                        Ok(code) => code,
-                        Err(err) => {
-                            let file_result = TextBatchFileResult::err(
-                                file_input.filename.clone(),
-                                crate::text_batch::TextWorkflowFileError::from_server_error(&err),
-                            );
-                            write_morphotag_results(
-                                &job_for_task,
-                                &host_for_task,
-                                &plan_for_task,
-                                vec![file_result],
-                                options_for_task.should_merge_abbrev,
-                            )
-                            .await;
-                            lifecycle
-                                .fail(
-                                    &err.to_string(),
-                                    crate::scheduling::FailureCategory::Validation,
-                                )
-                                .await;
-                            return;
-                        }
-                    };
-
-                // Parse done, language resolved: the file is now in inference, which
-                // is the stage its utterance counts are published under.
-                lifecycle.stage(FileStage::Analyzing).await;
-
-                let result = gateway_for_task
-                    .morphotag_single(
+                // The pipeline owns source admission and per-file language
+                // resolution. No preliminary lenient parse can establish a
+                // competing language or discard diagnostics here.
+                // A saturated checkout shows on this file's progress.
+                let result = crate::runner::util::observing_file_waits(
+                    &sink_for_task,
+                    &job_id_for_task,
+                    [file_input.filename.to_string()],
+                    gateway_for_task.morphotag_single(
                         &file_input.chat_text,
                         before_text.as_deref(),
-                        &file_lang,
                         options_for_task.clone(),
                         progress_port.as_ref(),
                         crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 let file_result = match result {
                     Ok(output) => TextBatchFileResult::ok(file_input.filename.clone(), output),
                     // `from_server_error`, not `to_string()`: a post-validation

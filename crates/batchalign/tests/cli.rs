@@ -20,6 +20,26 @@ use crate::{cli_common, common};
 
 use predicates::prelude::*;
 
+#[test]
+fn native_export_cli_requires_format_before_dispatch() {
+    cmd()
+        .args(["convert", "recording.wav"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--format"));
+}
+
+#[test]
+fn native_export_cli_refuses_in_place_before_reading_sources_or_starting_models() {
+    cmd()
+        .args(["convert", "absent.wav", "--format", "wav", "--in-place"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "convert always creates a new recording",
+        ));
+}
+
 use batchalign::media::tools::MediaTool;
 use cli_common::{
     CliHarness, MEDIA_CHAT, MINIMAL_CHAT, RemoteStub, RemoteStubOutcome, cli_cmd as cmd,

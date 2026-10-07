@@ -148,7 +148,7 @@ pub async fn start(
             // `recommend_max_total_workers` clamps to `[2, 32]` so the
             // `as usize` cast is always well-defined.
             max_total_workers: effective.max_total_workers as usize,
-            checkout_wait_timeout: None,
+            checkout_wait_report_interval: None,
             task_timeouts: cfg.task_timeouts(),
             ensure_task_timeout: cfg.ensure_task_timeout_s,
             worker_registry_path: cfg.worker_registry_path.clone(),

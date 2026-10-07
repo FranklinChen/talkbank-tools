@@ -3,6 +3,7 @@ import type { FileCounts, FilterTab } from "../hooks/useFileFilters";
 const TABS: Array<{ key: FilterTab; label: string }> = [
   { key: "all", label: "All" },
   { key: "error", label: "Errors" },
+  { key: "diagnosed", label: "Diagnosed" },
   { key: "processing", label: "Processing" },
   { key: "done", label: "Done" },
   { key: "queued", label: "Queued" },

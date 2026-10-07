@@ -1,7 +1,7 @@
 # utseg: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-06 10:48 EDT
 
 Implementation guide for the `utseg` command. For user-facing documentation,
 see [User Guide: utseg](../../user-guide/commands/utseg.md).
@@ -21,7 +21,8 @@ see [User Guide: utseg](../../user-guide/commands/utseg.md).
 | Canonical IPC evidence | `crates/batchalign-types/src/worker_v2/utseg_evidence.rs` | Rust wire enums and validated probability newtype |
 | Evidence artifacts | `crates/batchalign/src/utseg_evidence.rs` | Versioned pre/post-CHAT transcribe traces, atomic sink, and the admission that reads one back |
 | Evidence replay | `crates/batchalign/src/cli/eval_cmd/utseg_replay.rs` | `eval utseg-replay`: reapplies a retained sidecar and compares the result with the retained output |
-| Boundary application | `crates/batchalign-transform/src/utseg.rs` | Maps admitted assignments back to typed CHAT structure |
+| Structural partition | Chatter's `talkbank-transform::utterance_split` | Source-bound admission, content/metadata partition and explicit tier-invalidation receipts |
+| Boundary application | `crates/batchalign-transform/src/utseg.rs` | Preflights the whole file through that owner, then applies all admitted partitions atomically |
 
 Local submissions (auto-daemon or loopback `--server`) use `paths_mode=true`
 as of 2026-04-14: the CLI posts source/output path lists instead of CHAT
@@ -89,6 +90,26 @@ Because admission already refuses a non-parallel prediction, the batch
 application has no length check and no "keeping original" branch. That branch
 was unreachable, and had it ever run it would have produced silently
 unsegmented output where admission produces a failure.
+
+Worker admission and source-structure admission are separate. Chatter's
+`UtteranceSplitPlan::for_morphology` binds the proposal to this exact source and
+refuses indivisible-content boundaries, disjoint child runs and separator
+stranding. It preserves corroborated `%wor` and complete measured child hulls;
+other boundary-dependent analysis produces explicit invalidation receipts.
+BA3 preflights every selected source utterance before changing any file lines.
+A later refusal therefore leaves earlier utterances untouched. Both per-file
+and pooled text pipelines require successful application before provenance or
+checked output admission can run. A typed partition refusal is a failed
+transform, not a declaration that valid input CHAT is invalid.
+
+Successful application records invalidated tier labels and original input
+utterance ordinals in an `@Comment`; it does not overwrite contributor `%com`.
+The rebuilt file still passes checked construction before writing. Consumers
+of the Rust adapter must handle its `Result` and retain its invalidation report.
+
+Offline post-CHAT replay calls the same application owner, including the
+deterministic tier-invalidation comment. Only processing provenance is set
+aside by the existing provenance codec; analysis-loss evidence is compared.
 
 `engine=` carries no placeholder. A boundary model is written
 `<model id>@<revision>` and never by its id alone; the Stanza fallback is

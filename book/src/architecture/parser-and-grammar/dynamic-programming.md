@@ -1,7 +1,7 @@
 # Dynamic Programming
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:14 EDT
+**Last updated:** 2026-10-06 20:55 EDT
 
 Where dynamic programming is used at runtime across the workspace,
 which uses are intrinsically necessary, and which are
@@ -47,7 +47,11 @@ that no new runtime DP appears outside the allowlisted call sites.
   ASR tokens). A local/windowed matcher can starve later
   utterances of tokens that earlier utterances consumed, exactly
   what happened in the 407-style hand-edited transcript regression.
-  UTR uses a single global Hirschberg alignment for this reason.
+  UTR uses one joint Hirschberg alignment for this reason. The joint
+  problem is partitioned only where the transcript itself separates
+  it: at its retained utterance bullets (anchored regions), each of
+  which owns its own ASR onset window, so no region can consume
+  another's tokens and each is solved within its own budget.
   Same category as WER/compare, not the avoidable-runtime-remap
   category.
 

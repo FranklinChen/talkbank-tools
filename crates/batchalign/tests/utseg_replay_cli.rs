@@ -52,7 +52,7 @@ fn retained_output(assignments: Vec<usize>) -> String {
     assert!(errors.is_empty(), "fixture must parse cleanly");
     let mut map = HashMap::new();
     map.insert(0, assignments);
-    apply_utseg_results(&mut chat, &map);
+    apply_utseg_results(&mut chat, &map).expect("admitted replay partition");
     to_chat_string(&chat)
 }
 

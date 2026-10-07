@@ -7,7 +7,7 @@ expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestam
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
-@Comment:	[fc-ba3 translate | engine=googletrans-v1 ; lang=eng | <timestamp>]
+@Comment:	[fc-ba3 translate | build=<build> ; engine=googletrans-v1 ; lang=eng | <timestamp>]
 *PAR:	hello world .
 %xtra:	hello world .
 @End

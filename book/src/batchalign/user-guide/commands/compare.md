@@ -1,7 +1,7 @@
 # compare
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:04 EDT
+**Last updated:** 2026-10-04 20:06 EDT
 
 Compare CHAT transcripts against gold-standard references to compute word
 error rate (WER) and produce annotated output. For each primary `.cha` input,
@@ -9,9 +9,13 @@ the command first looks for a `FILE.gold.cha` companion in the same directory.
 If that is absent, it falls back to `template.gold.cha` in the same directory.
 
 Outputs two files per input:
+
 1. A projected reference `.cha`: the gold transcript with `%xsrep` /
    `%xsmor` annotation tiers showing substitutions, insertions, and deletions
 2. A `.compare.csv` sidecar with aggregate and per-POS metrics
+
+The managed job also writes a combined `compare.csv` in the output directory,
+with one row per successful input and metric names as columns.
 
 Text-only, no audio involved.
 
@@ -40,10 +44,10 @@ flowchart TD
     discover --> pair[Pair FILE.cha with FILE.gold.cha]
     pair --> found{Gold companion or template found?}
     found -->|No| fail[Report file error]
-    found -->|Yes| morph[process_morphosyntax\nmain transcript only\n→ validated document, carried as a proof]
-    pair --> parse_gold[parse_lenient raw gold\n→ gold AST]
+    found -->|Yes| admit_gold[Complete reference admission\n→ AdmittedComparisonReference]
+    admit_gold --> morph[process_morphosyntax\nmain transcript only\n→ validated document, carried as a proof]
     morph --> bundle[compare()\nconform + one whole-file alignment\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
-    parse_gold --> bundle
+    admit_gold --> bundle
     bundle --> released[materialize_released\nproject_gold_structurally]
     bundle --> internal_main[materialize_main_annotated\ninternal/benchmark\ninject %xsrep / %xsmor on main]
     released --> safe{Exact structural match?}
@@ -53,7 +57,8 @@ flowchart TD
     copy --> goldannot[Inject %xsrep / %xsmor on gold]
     mor_only --> goldannot
     keep --> goldannot
-    goldannot --> merge_check
+    goldannot --> strip[Strip ordinary %mor / %gra]
+    strip --> merge_check
     internal_main --> internal_done([Internal main-annotated view])
     merge_check{--merge-abbrev?}
     merge_check -->|Yes| merge[merge_abbreviations]
@@ -96,6 +101,31 @@ For each `FILE.cha` input, compare first looks for `FILE.gold.cha` in the
 automatically treated as companions and skipped as primary inputs. If neither
 gold file is found, the file is reported as failed.
 
+An existing but unreadable companion is an error, not permission to use the
+template instead. The companion always takes precedence when present.
+
+Both inputs must satisfy their command-specific CHAT admission contracts. The
+reference requires complete validity, with no dependent-tier exemption, and is
+admitted before inference starts. The main transcript may replace only the
+morphology and grammar tiers that the command commits to regenerating.
+
+## Scoring contract
+
+The released command treats the reference as **complete**, not as a selected
+excerpt. One whole-file alignment accounts for all compared main and reference
+words; an unmatched main utterance is not silently dropped from the denominator.
+The typed CHAT morphology word domain includes every replacement target word
+and excludes retraced material. Displayed spelling is not a separate tokenizer.
+
+For example, `I want dog [: a cookie] .` and
+`I <want a> [/] want a cookie .` both compare as `I want a cookie .`.
+Two separate occurrences of that turn against one reference occurrence score
+four insertions, not a perfect match. `cats sleep .` against `dogs bark .`
+scores two insertions and two deletions, with both two-word totals retained.
+The legacy `wer` column counts a substitution as an insertion plus a deletion;
+see [the metric definitions](../../reference/benchmarks.md#what-is-wer) before
+comparing it with conventional substitution-counted WER.
+
 ---
 
 ## Output: `%xsrep` and `%xsmor` tiers
@@ -107,7 +137,9 @@ The projected reference `.cha` output uses:
 
 The output is the **projected reference transcript**, not the main hypothesis.
 The gold transcript's structure is preserved; morphosyntactic information from
-the main transcript is projected onto it structurally where safe.
+the main transcript supplies comparison POS labels. The released output strips
+ordinary `%mor` and `%gra` after projection; it is not a replacement morphology
+transcript.
 
 ### Where the part of speech comes from
 
@@ -150,12 +182,19 @@ than an accident.
 
 A companion `.compare.csv` is written alongside each output `.cha` file. It
 contains:
-- Aggregate metrics row: WER, accuracy, match/insertion/deletion counts, total
-  words
-- Per-POS breakdown rows
+
+- `metric,value` rows for WER, accuracy, match/insertion/deletion counts and word
+  totals
+- Per-POS count rows
 - Substitution-paired WER and scores by language: per-language error counts,
   utterance and word language agreement, and code-switch precision and recall.
   See [Benchmarks: scoring by language](../../reference/benchmarks.md#scoring-by-language).
+
+The combined `compare.csv` transposes these metric names into columns. A blank
+cell means the file did not supply that metric; it is not an observed zero.
+CSV escaping preserves source filenames containing commas, quotes or line breaks.
+Failure to write required CHAT or CSV outputs is reported as failure; partially
+written artifacts do not mean the file completed successfully.
 
 ---
 
@@ -174,8 +213,9 @@ transcript and then compares the document that morphotag produced, which is the
 document its own validation gate judged. The main side used to be serialized
 and parsed again with the lenient parser before being compared, so the compared
 document was the parser's recovery of those bytes and a parse failure on that
-path was a log line rather than a failure. The gold companion is still parsed
-leniently, because it is read off disk as it is and nothing vouched for it.
+path was a log line rather than a failure. The gold companion now enters through
+complete source admission, before inference. Materialization consumes both
+admitted documents without reparsing either one.
 
 ---
 

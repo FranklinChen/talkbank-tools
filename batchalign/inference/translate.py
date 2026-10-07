@@ -14,12 +14,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from typing import Annotated
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from batchalign.inference.provider_retry import ProviderRefusal
 from batchalign.providers import (
-    BatchInferRequest,
     BatchInferResponse,
     InferResponse,
     ItemFailed,
@@ -44,6 +44,30 @@ class TranslateBatchItem(BaseModel):
     text: str
 
 
+class TranslateInferenceRequest(BaseModel):
+    """Translation-only host request: both checked languages are mandatory.
+
+    Generic NLP requests have no target; accepting one here used to discard
+    the wire target and allow an implicit English source. Malformed items
+    remain item-local failures, independently of route admission.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    source_lang: Annotated[
+        str,
+        StringConstraints(
+            pattern=r"^[a-z]{3}$", min_length=3, max_length=3, strict=True
+        ),
+    ]
+    target_lang: Annotated[
+        str,
+        StringConstraints(
+            pattern=r"^[a-z]{3}$", min_length=3, max_length=3, strict=True
+        ),
+    ]
+    items: tuple[object, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class LoadedTranslation:
     """The translation engine one worker loaded, as ONE value.
@@ -57,22 +81,22 @@ class LoadedTranslation:
     """
 
     engine: str
-    translate: Callable[[str, str], str]
+    translate: Callable[[str, str, str], str]
 
     def __post_init__(self) -> None:
         reported_engine_name(self.engine)
 
 
 def batch_infer_translate(
-    req: BatchInferRequest,
+    req: TranslateInferenceRequest,
     translation: LoadedTranslation,
 ) -> BatchInferResponse:
     """Batch translation inference: text -> translation.
 
     Parameters
     ----------
-    req : BatchInferRequest
-        Batch of TranslateBatchItem payloads.
+    req : TranslateInferenceRequest
+        Checked source and target plus TranslateBatchItem payloads.
     translation : LoadedTranslation
         The loaded engine: its callable, its reported identity, and the
         backend whose rate limits this loop honours.
@@ -93,7 +117,6 @@ def batch_infer_translate(
     job's deadline and cancellation.
     """
     t0 = time.monotonic()
-    src_lang = req.lang if req.lang else "eng"
 
     results: list[InferResponse] = []
     for raw_item in req.items:
@@ -115,7 +138,7 @@ def batch_infer_translate(
 
         # Each item reports the time of its own translation call only.
         results.append(
-            InferResponse.timed(partial(_translate_one, item, src_lang, translation))
+            InferResponse.timed(partial(_translate_one, item, req, translation))
         )
 
     # The batch total is a fact about the batch, so it goes to the log, never
@@ -129,14 +152,14 @@ def batch_infer_translate(
 
 def _translate_one(
     item: TranslateBatchItem,
-    src_lang: str,
+    req: TranslateInferenceRequest,
     translation: LoadedTranslation,
 ) -> ItemOutcome:
     """Translate one item, folding every engine answer into its outcome."""
     try:
         # Text arrives pre-processed from Rust (Chinese space removal etc.).
         # Return raw translation output, Rust handles post-processing.
-        translated = translation.translate(item.text, src_lang)
+        translated = translation.translate(item.text, req.source_lang, req.target_lang)
         return _produced(
             TranslationTranslatedItemV2(
                 raw_translation=translated, engine=translation.engine

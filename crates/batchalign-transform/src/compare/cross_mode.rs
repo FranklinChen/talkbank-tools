@@ -4,20 +4,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::Serialize;
-use talkbank_model::ErrorCollector;
-use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::alignment::{
     WorSlotTiming, WorTimingBinding, WorTimingCorrespondence, corroborate_wor_timing,
 };
-use talkbank_model::model::ChatFile;
+use talkbank_model::model::{ChatFile, TranscriptName};
+use talkbank_model::validation::{AlignmentValidation, ValidChatFile, ValidationPolicy};
+use talkbank_model::{ErrorCollector, RuleSelection};
 use talkbank_parser::TreeSitterParser;
 
-use crate::extract;
+use crate::{ValidatedParseError, parse_validated_with_parser};
 
-use super::artifact::{
-    ValidatedAlignmentPlan, ValidatedArtifactPair, ValidatedMorphotagPlan,
-    ValidatedTranscriptionPlan,
+mod morphotag;
+pub use morphotag::{
+    AnnotationPresence, MorphotagDifference, MorphotagPairResult, MorphotagTokenDifference,
+    compare_validated_morphotag_plan,
 };
+
+use super::artifact::{ValidatedAlignmentPlan, ValidatedArtifactPair, ValidatedTranscriptionPlan};
 use super::cross_run::{
     CrossRunTranscriptionReport, SpeakerCorrespondence, SpeakerMap, compare_transcripts_by_speaker,
     compare_transcripts_with_exclusions,
@@ -43,84 +46,24 @@ pub enum PairFailureReason {
     ArtifactRead { side: String, detail: String },
     /// CHAT parsing emitted diagnostics.
     ArtifactParse { side: String, diagnostics: String },
+    /// Retained CHAT failed full validation, including tier alignment.
+    ArtifactInvalid { side: String, diagnostics: String },
+    /// A producer failed; this is not a CHAT-invalidity verdict.
+    ProducerFailure { side: String, detail: String },
     /// Speaker correspondence was absent or ambiguous.
     SpeakerCorrespondence { detail: String },
     /// An explicit speaker map named an absent speaker.
     InvalidSpeakerMap { detail: String },
+    /// Token-level comparison cannot omit either document's speakers.
+    IncompleteSpeakerMap {
+        unmatched_left: Vec<String>,
+        unmatched_right: Vec<String>,
+    },
     /// Alignment requires identical normalized token identities.
     TokenIdentityMismatch {
         left_tokens: usize,
         right_tokens: usize,
     },
-}
-
-/// What differs between two morphotag analyses at one token.
-///
-/// A named set rather than seven parallel `bool` fields. The bools were
-/// boolean blindness in its plainest form: nothing stopped a row asserting
-/// every difference at once on a token that had none, `if row.lemma` read the
-/// same as `if row.pos` at a glance, and adding an eighth axis meant editing
-/// the struct, the constructor and the "is this row a difference" disjunction
-/// in three separate places. As a set, "no differences" is `is_empty()`, the
-/// axes are exhaustively `match`-able, and the wide-struct audit stops firing
-/// because there is nothing wide left to audit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MorphotagDifference {
-    /// The main-tier token text itself differs.
-    Tokenization,
-    /// Lemma differs.
-    Lemma,
-    /// Part of speech differs.
-    Pos,
-    /// Feature set differs (order-insensitive).
-    FeatureSet,
-    /// Clitic/chunk structure differs.
-    CliticChunk,
-    /// Mapped dependency-head token identity differs.
-    DependencyHead,
-    /// Dependency relation differs.
-    Relation,
-}
-
-/// One structured morphotag difference at a main-tier token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MorphotagTokenDifference {
-    /// Left speaker code.
-    pub left_speaker: String,
-    /// Right speaker code.
-    pub right_speaker: String,
-    /// Zero-based utterance ordinal within the mapped speaker.
-    pub utterance: usize,
-    /// Zero-based main-token position.
-    pub token: usize,
-    /// Normalized left main-tier token, if present.
-    pub left_text: Option<String>,
-    /// Normalized right main-tier token, if present.
-    pub right_text: Option<String>,
-    /// Every axis on which the two analyses disagree here.
-    ///
-    /// Empty means the two agree at this token, which is the state the seven
-    /// bools could only express as "all of them are false".
-    pub differences: std::collections::BTreeSet<MorphotagDifference>,
-}
-
-impl MorphotagTokenDifference {
-    /// Whether the two analyses disagree at this token on any axis.
-    pub fn differs(&self) -> bool {
-        !self.differences.is_empty()
-    }
-}
-
-/// Complete morphotag result for one artifact pair.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MorphotagPairResult {
-    /// One stable row per paired speaker/main-token position.
-    pub tokens: Vec<MorphotagTokenDifference>,
-    /// Difference rows only; identical tokens are intentionally omitted from review evidence.
-    pub differences: Vec<MorphotagTokenDifference>,
-    /// Number of aligned token positions examined.
-    pub compared_tokens: usize,
 }
 
 /// Timing representation for one side of an aligned token.
@@ -296,15 +239,6 @@ pub struct AlignmentPairResult {
     pub right_order_violations: usize,
 }
 
-/// Compare every pair in a validated morphotag plan, continuing after pair failures.
-pub fn compare_validated_morphotag_plan(
-    plan: &ValidatedMorphotagPlan,
-) -> Vec<PairOutcome<MorphotagPairResult>> {
-    compare_pairs(plan.runs(), plan.artifact_pairs(), |left, right, pair| {
-        compare_morph_pair(left, right, pair)
-    })
-}
-
 /// Compare every pair in a validated alignment plan, continuing after pair failures.
 pub fn compare_validated_alignment_plan(
     plan: &ValidatedAlignmentPlan,
@@ -333,8 +267,8 @@ pub fn compare_validated_transcription_pairs(
             None => None,
         };
         match compare_transcripts_with_exclusions(
-            left,
-            right,
+            left.document(),
+            right.document(),
             plan.exclusion_tokens(),
             explicit_map,
         ) {
@@ -351,7 +285,7 @@ pub fn compare_validated_transcription_pairs(
 fn compare_pairs<T>(
     runs: &[super::artifact::ValidatedProducedRun; 2],
     pairs: &[ValidatedArtifactPair],
-    compare: impl Fn(&ChatFile, &ChatFile, &ValidatedArtifactPair) -> PairOutcome<T>,
+    compare: impl Fn(&ValidChatFile, &ValidChatFile, &ValidatedArtifactPair) -> PairOutcome<T>,
 ) -> Vec<PairOutcome<T>> {
     let parser = match TreeSitterParser::new() {
         Ok(parser) => parser,
@@ -359,9 +293,9 @@ fn compare_pairs<T>(
             return pairs
                 .iter()
                 .map(|_| PairOutcome::Unpairable {
-                    reason: PairFailureReason::ArtifactParse {
+                    reason: PairFailureReason::ProducerFailure {
                         side: "both".to_string(),
-                        diagnostics: error.to_string(),
+                        detail: error.to_string(),
                     },
                 })
                 .collect();
@@ -389,7 +323,7 @@ fn parse(
     parser: &TreeSitterParser,
     path: &Path,
     side: &str,
-) -> Result<ChatFile, PairFailureReason> {
+) -> Result<ValidChatFile, PairFailureReason> {
     let bytes = std::fs::read(path).map_err(|error| PairFailureReason::ArtifactRead {
         side: side.to_string(),
         detail: error.to_string(),
@@ -399,39 +333,77 @@ fn parse(
         detail: error.to_string(),
     })?;
     let errors = ErrorCollector::new();
-    let file = parser.parse_chat_file_streaming(&text, &errors);
-    let diagnostics = errors.into_vec();
-    if diagnostics.is_empty() {
-        Ok(file)
-    } else {
-        Err(PairFailureReason::ArtifactParse {
+    parse_validated_with_parser(
+        parser,
+        &text,
+        ValidationPolicy::new(
+            RuleSelection::new(),
+            AlignmentValidation::IncludeTierAlignment,
+        ),
+        TranscriptName::for_path(path),
+        &errors,
+    )
+    .map_err(|error| match error {
+        ValidatedParseError::InternalFailure { failure, .. } => {
+            PairFailureReason::ProducerFailure {
+                side: side.to_string(),
+                detail: failure.to_string(),
+            }
+        }
+        ValidatedParseError::Validation(failure) if failure.has_internal_failure() => {
+            PairFailureReason::ProducerFailure {
+                side: side.to_string(),
+                detail: failure.to_string(),
+            }
+        }
+        ValidatedParseError::Parse(_) => PairFailureReason::ArtifactParse {
             side: side.to_string(),
-            diagnostics: format!("{diagnostics:?}"),
-        })
+            diagnostics: format!("{:?}", errors.into_vec()),
+        },
+        ValidatedParseError::Validation(failure) => PairFailureReason::ArtifactInvalid {
+            side: side.to_string(),
+            diagnostics: format!("{:?}", failure.diagnostics()),
+        },
+    })
+}
+
+/// A total speaker map bound to the admitted documents it was established for.
+/// Neither token comparator can receive a merely injective, partial map.
+struct CompleteSpeakerCorrespondence<'a> {
+    left: &'a ValidChatFile,
+    right: &'a ValidChatFile,
+    map: SpeakerMap,
+}
+
+impl CompleteSpeakerCorrespondence<'_> {
+    fn assignments(&self) -> &BTreeMap<String, String> {
+        self.map.assignments()
     }
 }
 
-fn correspondence(
-    left: &ChatFile,
-    right: &ChatFile,
+fn correspondence<'a>(
+    left: &'a ValidChatFile,
+    right: &'a ValidChatFile,
     pair: &ValidatedArtifactPair,
-) -> Result<SpeakerMap, PairFailureReason> {
-    if let Some(assignments) = pair.speaker_map() {
+) -> Result<CompleteSpeakerCorrespondence<'a>, PairFailureReason> {
+    let left_set: BTreeSet<String> = left
+        .document()
+        .unique_utterance_speakers()
+        .into_iter()
+        .map(|speaker| speaker.as_str().to_string())
+        .collect();
+    let right_set: BTreeSet<String> = right
+        .document()
+        .unique_utterance_speakers()
+        .into_iter()
+        .map(|speaker| speaker.as_str().to_string())
+        .collect();
+    let map = if let Some(assignments) = pair.speaker_map() {
         let map = SpeakerMap::try_from_assignments(assignments.clone()).map_err(|error| {
             PairFailureReason::InvalidSpeakerMap {
                 detail: error.to_string(),
             }
         })?;
-        let left_set: BTreeSet<String> = left
-            .unique_utterance_speakers()
-            .into_iter()
-            .map(|speaker| speaker.as_str().to_string())
-            .collect();
-        let right_set: BTreeSet<String> = right
-            .unique_utterance_speakers()
-            .into_iter()
-            .map(|speaker| speaker.as_str().to_string())
-            .collect();
         for (left_speaker, right_speaker) in map.assignments() {
             if !left_set.contains(left_speaker) || !right_set.contains(right_speaker) {
                 return Err(PairFailureReason::InvalidSpeakerMap {
@@ -441,199 +413,36 @@ fn correspondence(
                 });
             }
         }
-        return Ok(map);
-    }
-    match compare_transcripts_by_speaker(left, right)
-        .correspondence()
-        .clone()
-    {
-        SpeakerCorrespondence::Established(map) => Ok(map),
-        SpeakerCorrespondence::Unavailable => Err(PairFailureReason::SpeakerCorrespondence {
-            detail: "unavailable".to_string(),
-        }),
-        SpeakerCorrespondence::Ambiguous(candidates) => {
-            Err(PairFailureReason::SpeakerCorrespondence {
-                detail: format!("ambiguous ({} candidates)", candidates.candidates().len()),
-            })
-        }
-    }
-}
-
-#[derive(Clone)]
-struct MorToken {
-    text: String,
-    lemma: Option<String>,
-    pos: Option<String>,
-    features: BTreeSet<String>,
-    chunk_count: usize,
-    head_identity: Option<String>,
-    relation: Option<String>,
-}
-
-fn morph_tokens(file: &ChatFile) -> BTreeMap<String, Vec<Vec<MorToken>>> {
-    let extracted = extract::extract_words(file, PositionalDomain::Mor);
-    let utterances: Vec<_> = file.utterances().collect();
-    let mut per_speaker: BTreeMap<String, Vec<Vec<MorToken>>> = BTreeMap::new();
-    for entry in extracted {
-        let Some(utterance) = utterances.get(entry.utterance_index.raw()) else {
-            continue;
-        };
-        let mors = utterance.mor_tier().map(|tier| tier.items()).unwrap_or(&[]);
-        let gras = utterance
-            .gra_tier()
-            .map(|tier| tier.relations())
-            .unwrap_or(&[]);
-        let mut chunk_starts = Vec::with_capacity(mors.len());
-        let mut next_chunk = 0usize;
-        for mor in mors {
-            chunk_starts.push(next_chunk);
-            next_chunk += mor.count_chunks();
-        }
-        let tokens = entry
-            .words
-            .iter()
-            .enumerate()
-            .map(|(index, word)| {
-                let mor = mors.get(index);
-                let relation = chunk_starts.get(index).and_then(|start| gras.get(*start));
-                let head_identity = relation.and_then(|relation| {
-                    if relation.head == 0 {
-                        Some("ROOT".to_string())
-                    } else {
-                        chunk_starts
-                            .iter()
-                            .position(|start| *start + 1 == relation.head)
-                            .map(|token| {
-                                format!(
-                                    "{}#{token}",
-                                    word_identity(
-                                        entry.speaker.as_str(),
-                                        per_speaker.get(entry.speaker.as_str()).map_or(0, Vec::len)
-                                    )
-                                )
-                            })
-                    }
+        map
+    } else {
+        match compare_transcripts_by_speaker(left.document(), right.document())
+            .correspondence()
+            .clone()
+        {
+            SpeakerCorrespondence::Established(map) => map,
+            SpeakerCorrespondence::Unavailable => {
+                return Err(PairFailureReason::SpeakerCorrespondence {
+                    detail: "unavailable".to_string(),
                 });
-                MorToken {
-                    text: normalize(word.text.as_str()),
-                    lemma: mor.map(|value| value.main.lemma.as_str().to_string()),
-                    pos: mor.map(|value| value.main.pos.as_str().to_string()),
-                    features: mor
-                        .map(|value| {
-                            value
-                                .main
-                                .features
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    chunk_count: mor.map_or(0, |value| value.count_chunks()),
-                    head_identity,
-                    relation: relation.map(|value| value.relation.as_str().to_string()),
-                }
-            })
-            .collect();
-        per_speaker
-            .entry(entry.speaker.as_str().to_string())
-            .or_default()
-            .push(tokens);
-    }
-    per_speaker
-}
-
-fn compare_morph_pair(
-    left: &ChatFile,
-    right: &ChatFile,
-    pair: &ValidatedArtifactPair,
-) -> PairOutcome<MorphotagPairResult> {
-    let map = match correspondence(left, right, pair) {
-        Ok(map) => map,
-        Err(reason) => return PairOutcome::Unpairable { reason },
-    };
-    let left_tokens = morph_tokens(left);
-    let right_tokens = morph_tokens(right);
-    let mut differences = Vec::new();
-    let mut tokens = Vec::new();
-    let mut compared_tokens = 0;
-    for (left_speaker, right_speaker) in map.assignments() {
-        let left_utts = left_tokens
-            .get(left_speaker)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let right_utts = right_tokens
-            .get(right_speaker)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        for utterance in 0..left_utts.len().max(right_utts.len()) {
-            let left_utt = left_utts.get(utterance).map(Vec::as_slice).unwrap_or(&[]);
-            let right_utt = right_utts.get(utterance).map(Vec::as_slice).unwrap_or(&[]);
-            for token in 0..left_utt.len().max(right_utt.len()) {
-                compared_tokens += 1;
-                let l = left_utt.get(token);
-                let r = right_utt.get(token);
-                let mut kinds = std::collections::BTreeSet::new();
-                let mut note = |differs: bool, kind: MorphotagDifference| {
-                    if differs {
-                        kinds.insert(kind);
-                    }
-                };
-                note(
-                    l.map(|value| &value.text) != r.map(|value| &value.text),
-                    MorphotagDifference::Tokenization,
-                );
-                note(
-                    l.and_then(|value| value.lemma.as_ref())
-                        != r.and_then(|value| value.lemma.as_ref()),
-                    MorphotagDifference::Lemma,
-                );
-                note(
-                    l.and_then(|value| value.pos.as_ref())
-                        != r.and_then(|value| value.pos.as_ref()),
-                    MorphotagDifference::Pos,
-                );
-                note(
-                    l.map(|value| &value.features) != r.map(|value| &value.features),
-                    MorphotagDifference::FeatureSet,
-                );
-                note(
-                    l.map(|value| value.chunk_count) != r.map(|value| value.chunk_count),
-                    MorphotagDifference::CliticChunk,
-                );
-                note(
-                    l.and_then(|value| value.head_identity.as_ref())
-                        != r.and_then(|value| value.head_identity.as_ref()),
-                    MorphotagDifference::DependencyHead,
-                );
-                note(
-                    l.and_then(|value| value.relation.as_ref())
-                        != r.and_then(|value| value.relation.as_ref()),
-                    MorphotagDifference::Relation,
-                );
-
-                let row = MorphotagTokenDifference {
-                    left_speaker: left_speaker.clone(),
-                    right_speaker: right_speaker.clone(),
-                    utterance,
-                    token,
-                    left_text: l.map(|value| value.text.clone()),
-                    right_text: r.map(|value| value.text.clone()),
-                    differences: kinds,
-                };
-                if row.differs() {
-                    differences.push(row.clone());
-                }
-                tokens.push(row);
+            }
+            SpeakerCorrespondence::Ambiguous(candidates) => {
+                return Err(PairFailureReason::SpeakerCorrespondence {
+                    detail: format!("ambiguous ({} candidates)", candidates.candidates().len()),
+                });
             }
         }
+    };
+    let assigned_left: BTreeSet<_> = map.assignments().keys().cloned().collect();
+    let assigned_right: BTreeSet<_> = map.assignments().values().cloned().collect();
+    let unmatched_left: Vec<_> = left_set.difference(&assigned_left).cloned().collect();
+    let unmatched_right: Vec<_> = right_set.difference(&assigned_right).cloned().collect();
+    if !unmatched_left.is_empty() || !unmatched_right.is_empty() {
+        return Err(PairFailureReason::IncompleteSpeakerMap {
+            unmatched_left,
+            unmatched_right,
+        });
     }
-    PairOutcome::Compared {
-        result: MorphotagPairResult {
-            tokens,
-            differences,
-            compared_tokens,
-        },
-    }
+    Ok(CompleteSpeakerCorrespondence { left, right, map })
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -733,16 +542,16 @@ fn alignment_tokens(
 }
 
 fn compare_align_pair(
-    left: &ChatFile,
-    right: &ChatFile,
+    left: &ValidChatFile,
+    right: &ValidChatFile,
     pair: &ValidatedArtifactPair,
 ) -> PairOutcome<AlignmentPairResult> {
     let map = match correspondence(left, right, pair) {
         Ok(map) => map,
         Err(reason) => return PairOutcome::Unpairable { reason },
     };
-    let left_tokens = alignment_tokens(left, Some(map.assignments()));
-    let right_tokens = alignment_tokens(right, None);
+    let left_tokens = alignment_tokens(map.left.document(), Some(map.assignments()));
+    let right_tokens = alignment_tokens(map.right.document(), None);
     let left_identities: Vec<_> = left_tokens
         .iter()
         .map(|token| (&token.speaker, token.utterance, token.token, &token.text))
@@ -841,7 +650,4 @@ fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
 
 fn normalize(value: &str) -> String {
     value.to_lowercase()
-}
-fn word_identity(speaker: &str, utterance: usize) -> String {
-    format!("{speaker}:{utterance}")
 }

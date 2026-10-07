@@ -73,7 +73,7 @@ async fn direct_morphotag_strips_ca_segment_repetition_before_tagging() {
     assert_completed_without_errors("ca_segment_repetition_morphotag", &info, &results);
     assert_eq!(results.len(), 1, "Should produce 1 output file");
 
-    let out = &results[0].content;
+    let out = &results[0].content.as_text().expect("text command result");
     let mor = find_mor_line_for(out, "schaap")
         .expect("the utterance containing 'schaap' should have a %mor tier");
 
@@ -127,8 +127,14 @@ async fn direct_morphotag_multi_file_batching() {
     assert_completed_without_errors("multi_file_morphotag", &info, &results);
     assert_eq!(results.len(), 2, "Should produce 2 output files");
 
-    let file_a = parse_output(&results[0].content, "file_a");
-    let file_b = parse_output(&results[1].content, "file_b");
+    let file_a = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "file_a",
+    );
+    let file_b = parse_output(
+        &results[1].content.as_text().expect("text command result"),
+        "file_b",
+    );
 
     assert_eq!(
         count_ast_mor_tiers(&file_a),
@@ -181,8 +187,14 @@ async fn direct_morphotag_multi_speaker_batching() {
     assert_completed_without_errors("multi_speaker_morphotag", &info, &results);
     assert_eq!(results.len(), 2, "Should produce 2 output files");
 
-    let file_a = parse_output(&results[0].content, "speaker_a");
-    let file_b = parse_output(&results[1].content, "speaker_b");
+    let file_a = parse_output(
+        &results[0].content.as_text().expect("text command result"),
+        "speaker_a",
+    );
+    let file_b = parse_output(
+        &results[1].content.as_text().expect("text command result"),
+        "speaker_b",
+    );
     assert!(has_mor_tier(&file_a), "speaker_a should have %mor tier");
     assert!(has_mor_tier(&file_b), "speaker_b should have %mor tier");
     assert_eq!(count_ast_mor_tiers(&file_a), 3, "speaker_a: 3 utterances");

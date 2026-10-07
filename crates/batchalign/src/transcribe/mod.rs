@@ -23,7 +23,6 @@ pub use types::*;
 
 use std::path::Path;
 
-use crate::error::ServerError;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::transcribe::run_transcribe_pipeline;
 use crate::runner::util::ProgressSender;
@@ -43,14 +42,21 @@ use crate::runner::util::ProgressSender;
 /// 3. **CHAT assembly**: build `ChatFile` AST from utterances
 /// 4. **Utterance segmentation** (optional), BERT-based re-segmentation
 /// 5. **Morphosyntax** (optional): POS/dependency tagging
-pub(crate) async fn process_transcribe(
-    audio_path: &Path,
-    services: PipelineServices<'_>,
-    opts: &TranscribeOptions,
+///
+/// The returned future is heap-owned at this producer boundary: the
+/// transcribe pipeline's state machine is large, and a caller that polls it
+/// inline copies it onto its own stack (the 2026-10-06 production stack
+/// overflow). Every caller now receives a pointer-sized handle.
+pub(crate) fn process_transcribe<'a>(
+    audio_path: &'a Path,
+    services: PipelineServices<'a>,
+    opts: &'a TranscribeOptions,
     progress: Option<ProgressSender>,
-    debug_dir: Option<&Path>,
-) -> Result<String, ServerError> {
-    run_transcribe_pipeline(audio_path, services, opts, progress, debug_dir).await
+    debug_dir: Option<&'a Path>,
+) -> crate::pipeline::plan::StageFuture<'a, crate::pipeline::transcribe::TranscribeOutput> {
+    Box::pin(run_transcribe_pipeline(
+        audio_path, services, opts, progress, debug_dir,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -945,5 +951,56 @@ mod tests {
                 last.text
             );
         }
+    }
+
+    /// Task 6 (b), end to end: an ASR word mixing letters and digits ("B2")
+    /// and one spelled like CHAT's untranscribed marker ("Www") reach the
+    /// transcript as words CHAT holds, so the generated document is
+    /// admitted. Before, the first was written as `b2` (E220) and the second
+    /// as `Www` (E241), and each made its whole file diagnosed. The
+    /// utterances are invented; the token shapes are the ones observed.
+    #[test]
+    fn letter_digit_and_reserved_marker_tokens_become_admitted_chat_words() {
+        let token = |text: &str, start: f64, speaker: &str| AsrToken {
+            text: text.into(),
+            start_s: at(start),
+            end_s: at(start + 0.2),
+            speaker: Some(speaker.into()),
+            confidence: Some(0.9),
+        };
+        let response = AsrResponse {
+            tokens: vec![
+                token("we", 0.0, "0"),
+                token("took", 0.3, "0"),
+                token("B2", 0.6, "0"),
+                token("home.", 0.9, "0"),
+                token("Www.", 2.0, "1"),
+            ],
+            lang: LanguageCode3::eng(),
+            model: None,
+            source_monologues: None,
+        };
+        let asr_output = convert_asr_response(&response);
+        let utterances = asr_postprocess::process_raw_asr(&asr_output, response.lang.as_ref())
+            .expect("post-processing");
+        let desc = build_chat::NamedAsrUtterances::numbered(&utterances)
+            .into_transcript(&[response.lang.to_string()], Some("test.mp3"), false)
+            .expect("transcript")
+            .description;
+        let chat_file = build_chat::build_chat(&desc).expect("build_chat");
+        let produced = crate::pipeline::post_validate::PostValidated::produced(
+            chat_file,
+            crate::api::ReleasedCommand::Transcribe,
+        );
+        let text = produced.as_str().to_owned();
+        assert!(text.contains("We took B_two home ."), "{text}");
+        assert!(text.contains(":\twww@k ."), "{text}");
+        assert!(
+            matches!(
+                produced,
+                crate::pipeline::post_validate::ProducedOutput::Admitted(_)
+            ),
+            "both words are legal CHAT now: {text}"
+        );
     }
 }

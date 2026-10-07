@@ -68,14 +68,35 @@ async fn option_morphotag_no_l2_switch_controls_code_switched_words() {
     assert_completed_without_errors("l2_enabled", &info_enabled, &results_enabled);
     assert_completed_without_errors("l2_disabled", &info_disabled, &results_disabled);
 
-    let tienda_on = find_mor_line_for(&results_enabled[0].content, "tienda@s:spa")
-        .expect("tienda MOR with L2 enabled");
-    let tienda_off = find_mor_line_for(&results_disabled[0].content, "tienda@s:spa")
-        .expect("tienda MOR with L2 disabled");
+    let tienda_on = find_mor_line_for(
+        results_enabled[0]
+            .content
+            .as_text()
+            .expect("text command result"),
+        "tienda@s:spa",
+    )
+    .expect("tienda MOR with L2 enabled");
+    let tienda_off = find_mor_line_for(
+        results_disabled[0]
+            .content
+            .as_text()
+            .expect("text command result"),
+        "tienda@s:spa",
+    )
+    .expect("tienda MOR with L2 disabled");
 
     assert!(!tienda_on.contains("L2|xxx"));
     assert!(tienda_off.contains("L2|xxx"));
-    assert_ne!(results_enabled[0].content, results_disabled[0].content);
+    assert_ne!(
+        results_enabled[0]
+            .content
+            .as_text()
+            .expect("text command result"),
+        results_disabled[0]
+            .content
+            .as_text()
+            .expect("text command result")
+    );
 }
 
 #[tokio::test]
@@ -103,8 +124,11 @@ async fn option_morphotag_unsupported_inline_language_falls_back_to_l2_xxx() {
     .await;
 
     assert_completed_without_errors("unsupported_inline_l2", &info, &results);
-    let blorx_mor = find_mor_line_for(&results[0].content, "blorx@s:xyz")
-        .expect("should have MOR for unsupported inline word");
+    let blorx_mor = find_mor_line_for(
+        &results[0].content.as_text().expect("text command result"),
+        "blorx@s:xyz",
+    )
+    .expect("should have MOR for unsupported inline word");
     assert!(blorx_mor.contains("L2|xxx"));
 }
 
@@ -150,10 +174,25 @@ async fn option_morphotag_unsupported_inline_language_does_not_poison_neighbor_f
         .find(|result| result.filename == "neighbor_unsupported.cha")
         .expect("unsupported neighbor result");
 
-    assert!(clean.content.contains("%mor:"));
-    assert!(!clean.content.contains("L2|xxx"));
+    assert!(
+        clean
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%mor:")
+    );
+    assert!(
+        !clean
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("L2|xxx")
+    );
 
-    let blorx_mor = find_mor_line_for(&unsupported.content, "blorx@s:xyz")
-        .expect("unsupported inline file should still have a MOR line");
+    let blorx_mor = find_mor_line_for(
+        unsupported.content.as_text().expect("text command result"),
+        "blorx@s:xyz",
+    )
+    .expect("unsupported inline file should still have a MOR line");
     assert!(blorx_mor.contains("L2|xxx"));
 }

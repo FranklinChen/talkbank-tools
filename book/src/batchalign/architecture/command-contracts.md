@@ -1,480 +1,196 @@
-# Command Contracts: Input Preconditions and Output Guarantees
-
-**Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
-
-This document specifies, for each batchalign3 command that operates
-on CHAT files, the minimum input validity required, what the command
-reads and writes, and what guarantees the output provides. Each
-command applies a **pre-validation gate** so that invalid input is
-rejected early rather than wasting compute and producing silently
-corrupt output.
-
-Pre-validation and post-validation gates are enforced for the
-following commands:
-
-- `morphotag` (`crates/batchalign/src/morphosyntax/`)
-- `utseg` (`crates/batchalign/src/utseg.rs`)
-- `translate` (`crates/batchalign/src/translate/mod.rs`)
-- `coref` (`crates/batchalign/src/coref.rs`)
-- `align` (`crates/batchalign/src/fa/`)
-
-These commands call `validate_to_level(...)` before inference and
-`validate_output(...)` before serialization. Media-path preflight
-validation runs in `crates/batchalign/src/runner/util/` for commands
-that consume audio.
-
----
-
-## Motivation
-
-This contract was introduced to prevent wasted compute and silent corruption
-caused by running expensive inference on structurally invalid CHAT content.
-
-`parse_lenient()` still intentionally parses best-effort ASTs, but current server
-commands now apply command-specific gates before inference. The remaining task is
-to keep this document synchronized with implementation and close any uncovered
-command paths.
-
-Representative failure modes that motivated this contract:
-
-1. A file with missing terminators proceeds through forced alignment (92s of GPU),
-   only to be rejected by the post-serialization validation gate.
-2. A file with a corrupted main tier (e.g., `to+...` parsed as `to+` + `.`) gets
-   silently mangled during roundtrip serialization.
-3. No command validates that the parts of the file it *reads* are structurally sound
-   before investing compute.
-
-The fix: each command should validate exactly what it needs, no more, no less.
-
----
-
-## Validity Levels
-
-We define four cumulative levels of CHAT validity:
-
-### Level 0: Parseable
-
-The file parses without ERROR nodes in the tree-sitter CST.
-
-- `@UTF8` header present
-- `@Begin` / `@End` headers present
-- No unrecognized line types (no `unsupported_line` nodes)
-- All brackets balanced
-- No tokenization errors (no ERROR nodes)
-
-This is the **minimum for any command**. If a file doesn't reach Level 0, it
-should be rejected outright with a diagnostic pointing to the parse errors.
-
-### Level 1: Structurally Complete
-
-Level 0, plus:
-
-- `@Participants` header present with at least one participant
-- `@Languages` header present with at least one language code
-- Every speaker code in utterances is declared in `@Participants`
-- Every utterance has a terminator (E304)
-- No empty main tiers
-
-This is the minimum for commands that read main tier content.
-
-### Level 2: Main Tier Valid
-
-Level 1, plus:
-
-- No word-level structural errors (E2xx): balanced compound markers (E233),
-  valid shortening notation, valid special form markers
-- No annotation structural errors: balanced retracing/repetition markers,
-  valid overlap notation
-- Timing bullets (if present) are well-formed
-
-This is the minimum for commands that extract words for NLP processing.
-
-### Level 3: Fully Valid
-
-Level 2, plus all validation rules pass:
-
-- Tier alignment (E7xx): %mor/%gra/%pho/%sin/%wor word counts match main tier
-- Temporal validity (E362, E701, E704): monotonic timestamps, no self-overlap
-- Cross-utterance validity: quotation linker pairing, completion annotations
-- Header field formats: @Date, @ID fields, @Media format
-
-This is the ideal state, but no command requires it as a precondition.
-
----
-
-## Command Contracts
-
-### `morphotag`: Morphosyntactic Analysis
-
-**Input:** CHAT file with main tier utterances
-
-**Reads:**
-- Main tier words (via `collect_utterance_content()` in `TierDomain::Mor`)
-- `@Languages` header (determines Stanza model language)
-- Per-utterance language markers (`[- spa]`) for multilingual filtering
-- Special form markers (`@s`, `@c`, `@b`) on words for POS override
-- Existing `%mor` tiers (to skip already-tagged utterances, unless `--override-media-cache`)
-
-**Writes:**
-- `%mor` tier: morphological analysis (POS, lemma, features) per utterance
-- `%gra` tier: grammatical dependency relations per utterance
-- Main tier words (only when `retokenize=true`): replaces with UD tokenization
-
-**Minimum input validity: Level 2**
-
-The main tier must be fully parseable with valid word structure. Invalid words
-(e.g., malformed compound markers) produce garbage NLP input. Existing `%mor`
-and `%gra` tiers may be absent or invalid, they will be replaced.
-
-**What may be invalid in the input:**
-- `%mor`, `%gra` tiers (will be overwritten)
-- `%pho`, `%sin`, `%wor` tiers (untouched, validity irrelevant)
-- `%xtra`, `%xcoref` tiers (untouched)
-- Timing bullets (untouched, validity irrelevant)
-- Temporal ordering (untouched)
-- `@Date`, `@ID` field formats (not read)
-
-**Output guarantees:**
-- Every utterance with extractable words has a `%mor` and `%gra` tier
-- `%mor` word count equals main tier alignable word count
-  (enforced by `validate_mor_alignment()`)
-- All other tiers and headers are preserved unchanged
-- File remains at its input validity level or higher (no new errors introduced
-  in parts the command doesn't touch)
-
-**Invariants:**
-- Speaker codes are preserved exactly
-- Utterance order is preserved exactly
-- Terminators are preserved exactly
-- Timing bullets are preserved exactly
-- Annotations (retracing, repetition, overlap) are preserved exactly
-
----
-
-### `utseg`: Utterance Segmentation
-
-**Input:** CHAT file with main tier utterances (typically a single long utterance
-per speaker turn from ASR output)
-
-**Reads:**
-- Main tier words (via `collect_utterance_content()` in `TierDomain::Mor`)
-
-**Writes:**
-- Utterance structure: splits multi-word utterances into multiple utterances
-  based on constituency-parse-derived sentence boundaries
-- Each split utterance gets a period terminator (`.`)
-- **All dependent tiers on split utterances are dropped** (fresh utterances
-  have no `%mor`, `%gra`, `%wor`, etc.)
-
-**Minimum input validity: Level 1**
-
-Only needs structurally complete utterances with parseable words. Since all
-dependent tiers are dropped during splitting, their validity is irrelevant.
-
-**What may be invalid in the input:**
-- All dependent tiers (will be dropped on split utterances)
-- Timing bullets (dropped on split utterances)
-- Word-level details beyond basic parseability (NLP operates on cleaned text)
-
-**Output guarantees:**
-- Every output utterance has a terminator (period)
-- Single-word utterances are never split (passed through unchanged with all
-  tiers preserved)
-- Non-utterance lines (headers, comments) are preserved in original positions
-- A prediction whose assignments are not parallel to the request words is
-  refused when the worker result is admitted, and the file fails: there is no
-  path that quietly keeps the original utterance and reports success
-
-**Invariants:**
-- Speaker codes are preserved
-- Header structure is preserved
-- Utterance order is preserved (splits are in-place)
-
-**Caveats:**
-- Splitting destroys dependent tiers, `utseg` should typically be run
-  *before* `morphotag` and `align`, not after
-- Original terminators on split utterances are replaced with period (`.`)
-
----
-
-### `translate`: Translation
-
-**Input:** CHAT file with main tier utterances
-
-**Reads:**
-- Main tier words the speaker produced, in order, with the utterance's
-  terminator (retraced words and filled pauses included; omissions, nonwords,
-  fragments and untranscribed markers left out)
-
-**Writes:**
-- `%xtra` tier: translated text as a `UserDefined` dependent tier
-- Replaces existing `%xtra` if present
-
-**Minimum input validity: Level 1**
-
-Only needs parseable main tier text. Word-level structural validity is not
-critical since words are joined into a plain text string for the translation API.
-
-**What may be invalid in the input:**
-- All dependent tiers (untouched except `%xtra`)
-- Timing bullets (untouched)
-- Word-level markers (joined into text, model handles gracefully)
-
-**Output guarantees:**
-- Every utterance that produced words has a `%xtra` tier
-- An empty translation is refused when the worker result is admitted, so a
-  written file never has an utterance silently missing its tier; the file fails
-  instead, with a typed per-item failure that names the engine and the remedy.
-  The verdict is terminal: an identical request gets an identical answer
-- All other tiers and headers are preserved unchanged
-
-**Invariants:**
-- Main tier content is never modified
-- All non-`%xtra` dependent tiers are preserved
-- Utterance order and structure preserved
-
----
-
-### `coref`: Coreference Resolution
-
-**Input:** CHAT file with main tier utterances (English only)
-
-**Reads:**
-- Main tier words from all utterances (document-level context)
-- `@Languages` header (English-only gate)
-
-**Writes:**
-- `%xcoref` tier: bracket-notation coreference annotations (sparse, only
-  utterances with actual chains)
-- Replaces existing `%xcoref` if present
-
-**Minimum input validity: Level 1**
-
-Only needs parseable main tier text. Non-English files pass through unchanged.
-
-**What may be invalid in the input:**
-- All dependent tiers (untouched except `%xcoref`)
-- Everything else (untouched)
-
-**Output guarantees:**
-- English files get `%xcoref` tiers on utterances with coreference chains
-- Non-English files are returned unchanged
-- All other content is preserved
-
-**Invariants:**
-- Main tier content is never modified
-- Not cached (document-level context makes per-utterance caching meaningless)
-
----
-
-### `align`: Forced Alignment
-
-**Input:** CHAT file with main tier utterances + corresponding audio file
-
-**Reads:**
-- Main tier words (for transcript-to-audio alignment)
-- Existing timing bullets on utterances (for audio window grouping)
-- Audio file (resolved from same-stem sibling: `.wav`, `.mp3`, etc.)
-- Audio duration via `ffprobe`: measured (packet walk) or read from a
-  container that states it exactly, never a bitrate estimate; see
-  [Recording Duration](../reference/media-conversion.md#recording-duration-mediaprobe)
-- `@Options: NoAlign` (to skip files that opt out)
-
-**Writes:**
-- Word-level timing bullets on `Word` nodes in the main tier
-- Utterance-level timing bullet (first-word-start to last-word-end)
-- `%wor` tier: regenerated from scratch (mirrors main tier words with
-  individual timing bullets)
-
-**Minimum input validity: Level 2**
-
-The main tier must be structurally valid with correct word structure. Invalid
-words produce incorrect alignment transcripts. Terminators must be present and
-correct (the `to+...` bug demonstrated that terminator corruption propagates
-through FA serialization). Existing timing bullets should be well-formed if
-present (they're used for audio window grouping).
-
-**Additional preconditions:**
-- Audio file must exist and be accessible
-- Audio file must be a known format (`.wav`, `.mp3`, `.mp4`)
-- Audio file must be non-empty
-
-**What may be invalid in the input:**
-- `%mor`, `%gra` tiers (untouched)
-- `%xtra`, `%xcoref` tiers (untouched)
-- Existing `%wor` tier (will be regenerated)
-- `@Date`, `@ID` field formats (not read)
-
-**Output guarantees:**
-- Every alignable word has a timing bullet (or `None` if alignment failed)
-- Utterance-level bullets span first-to-last word timing
-- `%wor` tier mirrors main tier words 1:1 with timing
-- Temporal monotonicity enforced (`enforce_monotonicity()` strips timing from
-  backwards utterances)
-- Same-speaker self-overlap stripped (`strip_e704_same_speaker_overlaps()`)
-- Untimed words get interpolated timing (proportional fill)
-
-**Invariants:**
-- Main tier word content is never modified (only timing added)
-- Speaker codes preserved
-- Annotations preserved
-- Non-`%wor` dependent tiers preserved
-- Utterance order preserved
-
----
-
-### `transcribe`: ASR Transcription
-
-**Input:** Audio file (NOT a CHAT file)
-
-**Reads:**
-- Audio file content
-
-**Writes:**
-- Creates an entirely new CHAT file from scratch:
-  - `@UTF8`, `@Begin`, `@End` headers
-  - `@Languages`, `@Participants`, `@ID` headers
-  - `@Media` header referencing the audio file
-  - Main tier utterances with speaker codes and timing bullets
-  - `%wor` tiers with word-level timing
-  - Utterance terminators
-
-**Minimum input validity:** N/A (no CHAT input)
-
-**Preconditions:**
-- Audio file must exist, be non-empty, have a known extension
-- For Rev.AI: valid API key configured
-
-**Output guarantees:**
-- Output is a complete, valid CHAT file
-- Pre-serialization validation runs both alignment and semantic gates
-- If validation fails, the file is not written; its error names the
-  validation errors
-
----
-
-### `benchmark`: ASR Evaluation
-
-**Input:** Audio file (NOT a CHAT file)
-
-Same contract as `transcribe` plus evaluation metrics output.
-
----
-
-### `opensmile`: Audio Feature Extraction
-
-**Input:** Audio file
-
-**Reads:** Audio content only
-**Writes:** JSON metrics (not CHAT)
-
-No CHAT contract applies.
-
----
-
-### `avqi`: Acoustic Voice Quality Index
-
-**Input:** Paired `.cs`/`.sv` audio files
-
-**Reads:** Audio content only
-**Writes:** JSON metrics (not CHAT)
-
-No CHAT contract applies.
-
----
-
-## Pre-Validation Gate Design
-
-### Current Implementation
-
-Each command declares its minimum validity level. Before dispatching to the
-orchestrator, the runner validates the parsed CHAT file to that level
-(call sites: `coref.rs`, `pipeline/text_infer.rs`, `pipeline/morphosyntax.rs`,
-`morphosyntax/mod.rs`):
-
-```text
-Runner receives file
-  → parse_lenient() (always, for error recovery diagnostics)
-  → check parse errors (Level 0)
-  → if command needs Level 1+: check structural completeness
-  → if command needs Level 2+: check main tier word validity
-  → if preconditions fail: reject with diagnostics, skip file, continue job
-  → if preconditions pass: dispatch to orchestrator
-```
-
-### Command → Validity Level Mapping
-
-| Command | Min Level | Additional Preconditions |
-|---------|-----------|--------------------------|
-| `morphotag` | Level 2 | `@Languages` present |
-| `utseg` | Level 1 |, |
-| `translate` | Level 1 |, |
-| `coref` | Level 1 | English language |
-| `align` | Level 2 | Audio file exists |
-| `transcribe` | N/A | Audio file exists |
-| `benchmark` | N/A | Audio file exists |
-| `opensmile` | N/A | Audio file exists |
-| `avqi` | N/A | Paired audio exists |
-
-### Rejection Behavior
-
-When a file fails pre-validation:
-
-1. The file is marked as `error` in the job status with category `"validation"`
-2. The specific validation errors are reported (e.g., "E304: Missing terminator
-   on line 15", "E233: Empty compound trailing part on line 22")
-3. Processing continues with the next file in the job (partial job completion)
-4. No compute is wasted on the invalid file
-5. The validation errors are the file's error, whether they come from the
-   input or from a pipeline defect; nothing else is filed
-
-### Lenient vs Strict Parsing
-
-We keep `parse_lenient()` as the parsing mode, it provides better error
-recovery and diagnostics than `parse_strict()` (which just fails on first
-error). The pre-validation gate inspects the parse errors and the resulting
-AST to determine if the file meets the command's minimum validity level.
-
-This is different from switching to `parse_strict()`: we parse leniently but
-validate strictly against the command's requirements.
-
----
-
-## Post-Processing Validation
-
-All server-side orchestrators run a post-processing validation gate
-before returning the serialized CHAT. The gate checks:
-
-1. **Alignment validation**: tier word counts match (for commands that write
-   dependent tiers)
-2. **Temporal validation**: monotonic timestamps, no self-overlap (for commands
-   that write timing)
-3. **Structural validity**: the output file meets at least its input validity
-   level (no degradation)
-
-Call sites: `crates/batchalign/src/coref.rs:193`, `:371`;
-`crates/batchalign/src/pipeline/text_infer.rs:95`, `:291`;
-`crates/batchalign/src/pipeline/morphosyntax.rs:461`;
-`crates/batchalign/src/morphosyntax/mod.rs:208`. The underlying
-functions (`validate_to_level`, `validate_output`) live in
-`../chatter/crates/talkbank-transform/src/validate.rs`.
-
-On failure: mark the file as error with the validation errors, and write no
-output for it (never corrupt output).
-
----
-
-## Appendix: What Each Command Preserves
-
-A command's **preservation set** is every part of the CHAT file it does not
-modify. The pre-validation gate does NOT check the preservation set, those
-parts can be invalid without affecting the command's operation.
-
-| Command | Preservation Set |
-|---------|-----------------|
-| `morphotag` | Headers, timing, annotations, `%pho`/`%sin`/`%wor`/`%xtra`/`%xcoref`, `%com` |
-| `utseg` | Headers, non-utterance lines (dependent tiers on split utterances are NOT preserved) |
-| `translate` | Headers, main tier, timing, all tiers except `%xtra` |
-| `coref` | Headers, main tier, timing, all tiers except `%xcoref` |
-| `align` | Headers, main tier words/annotations, `%mor`/`%gra`/`%pho`/`%sin`/`%xtra`/`%xcoref` |
+# Command Contracts: Input Admission and Output Guarantees
+
+**Status:** Current policy; command-admission migration in progress
+**Last updated:** 2026-10-06 23:58 EDT
+
+## One validity owner
+
+Chatter defines CHAT validity. Batchalign defines what a command will replace.
+Every retained part of an input must be valid before inference. A command may
+accept a defective generated tier only when its actual selected plan discards
+and regenerates that tier. Being uninterested in a field is not an exemption:
+preserved headers, timing and dependent tiers still belong to the output.
+
+Legacy `ValidityLevel` checks are limited workflow checks, not certificates of
+full CHAT validity. In particular, `StructurallyComplete` and `MainTierValid`
+do not run every main-tier, header, timing or alignment rule. Raising a level
+does not implement complete admission.
+
+## Required command policy
+
+| Command/plan | Permitted replacement exemption | Retained input |
+| --- | --- | --- |
+| `morphotag`, replacing analysis | `%mor` and `%gra` actually replaced by that plan | Everything else must be valid |
+| `morphotag`, keeping existing analysis | None for preserved `%mor`/`%gra` | Everything preserved must be valid |
+| `align`, regenerating word timing | `%wor` actually replaced by that plan | Everything else must be valid |
+| `align`, keeping `%wor` or skipping alignment | None for preserved `%wor` | Everything preserved must be valid |
+| `utseg` | No blanket dependent-tier exemption | Complete valid CHAT before payload collection |
+| `translate` | No blanket dependent-tier exemption | Complete valid CHAT before payload collection |
+| `coref`, including non-English pass-through | No blanket dependent-tier exemption | Complete valid CHAT before inference or pass-through |
+| `compare` / `benchmark`, reference transcript | None | Complete valid reference before model inference |
+| `align`, incremental prior | None | Complete valid prior before timing can be copied |
+
+An exemption is bound to the file and its selected plan, not merely the command
+name. A no-op, `dummy`, CA or `NoAlign` path does not gain authority to write
+invalid CHAT because another path could replace its defective tier. Invalid
+headers, main tiers and retraces are never regeneration exemptions.
+
+Recovery remains useful for diagnostics and inspection. A recovered model is
+not an admitted inference input. Admit through the actual parser and validator;
+do not strip source lines, reparse a cleaned substitute or add a parallel parser.
+
+## Current enforcement
+
+The shared text pipeline in `crates/batchalign/src/pipeline/text_infer.rs`
+uses Chatter's source-bound admission with model rules and dependent-tier
+alignment enabled. This covers the single-file and cross-file `utseg` paths
+and the cross-file `translate` path. Batch inputs carry their actual transcript
+name for filename-dependent checks. String-only entry points are explicitly
+anonymous. Parse recovery and internal producer failures cannot create a
+`ValidChatFile` capability.
+
+Admission precedes payload collection and the dummy/no-payload pass-through
+branches. Batch refusal keeps the producing failure category even if another
+file's inference fails. The admitted document is stored with its payload slice;
+editing consumes the immutable Chatter proof with `into_unchecked`.
+
+The separate `coref` pipeline uses the same full retained-input admission before
+the dummy and non-English pass-through branches. Each pending request owns its
+admitted document and collected sentence mapping. Completion checks annotation
+positions, per-sentence word counts and duplicate sentence ownership before
+mutation. A `no_sentences` result for a non-empty dispatched document is a
+protocol failure, not successful empty coreference. Resolved sparse output with
+no chains remains legitimate.
+
+Morphology selects its replacement plan from the headers of the same parse:
+normal analysis discards `%mor`/`%gra` before retained admission, while honored
+CA files retain and validate them. Incremental reuse fully admits its prior
+document before copying analysis. No source substitution or second parse is
+used to establish the removal exemption.
+
+Comparison references carry an opaque `AdmittedComparisonReference`, created
+only by complete source admission. The comparison recipe admits its reference
+before calling the morphology gateway; benchmark admits its reference before
+media preparation and ASR. Neither path reparses the reference downstream.
+
+Alignment's unchanged-source branch requires complete source admission;
+`NoAlign` is not an invalidity exemption. Active incremental alignment also
+admits its prior once, before media preparation or UTR, and retains that
+`RetainedFaPrior` across retries. An unreadable or invalid declared prior is a
+refusal, not permission to silently switch to full alignment. A no-op branch
+does not consume the optional prior.
+
+Active alignment selects Chatter's adaptive word-timing plan from the headers
+of the same source parse, before media preparation or UTR. Complete original
+admission retains valid `%wor`, including partial timing. Otherwise concrete
+source-bound word tiers are discarded, and every retained region must pass
+normal structure and alignment checks. If recorded timing in those actual
+discarded tiers was the only linkage evidence, a distinct pending timing state
+carries the retained `@Media` obligation through regeneration. It does not
+assert complete CHAT validity, filter diagnostics or modify headers. Final
+output requires complete checked construction, including fulfilled linkage.
+If that pending attempt produces no alignment requests because grouping refused
+its acoustic window, it reports the typed window/budget refusal as unavailable
+evidence before finalization. This is not a verdict that the submitted CHAT is
+invalid. Chatter's shared, source-borrowing timing observer prevents this refusal
+when UTR or checked prior-file reuse has already restored timing. Observation
+is not validity. An unexplained missing-timing result still fails complete output
+admission as an internal producer failure. Admitting a request plan does not
+discharge the timing obligation or authorize writing.
+CA retains all tiers;
+NoAlign retains all tiers and its exact source bytes. Internal producer failures
+never grant a regeneration exemption.
+
+The owned working disposition produces active retry attempts or preserved-source
+attempts. Only its active payload permits UTR mutation; no constructor pairs an
+arbitrary recovered model with unrelated diagnostics or source bytes. Output
+admission remains separate and complete after mutation. Media-error reporting
+for align reads the already-produced headers rather than reparsing fragments.
+
+## Completion and publication
+
+Inference success is not successful application. Every required lexical item
+must be covered by an admitted response and a completed transform before the
+file can be published. Morphological injection returns a producer-issued
+completion result or a typed refusal: empty ordinary lexical analysis, malformed
+UD, count mismatch or failed retokenization cannot advance to applied analysis.
+Explicit special-form synthesis and reported secondary-language placeholders
+are separate, intentional outcomes; they are not silent missing morphology.
+
+After mutation, validate the actual output structure and command guarantees.
+
+For normal `align`, source admission owns the required lexical population.
+Final output must retain correspondence with those source words and positive
+timing for each, including after monotonicity and other finalization changes.
+The producer's complete-result payload is required alongside CHAT admission;
+restored media linkage or one timed word cannot substitute for completion.
+Missing timing is an unavailable-evidence refusal, not invalid input or a
+successful partial file. Valid declined-alignment paths retain their separate
+unchanged-source capability. Timing coverage does not certify acoustic accuracy.
+
+Do not retain a validity proof across edits. On failure of a command that
+transforms submitted CHAT, write no partial CHAT file. Successful no-work input
+retains its original bytes without inference or an invented processing stamp.
+
+Output a generating producer built itself (transcription) is judged by the same
+complete admission through `PostValidated::produced`, which never refuses: a
+document that does not pass is a `DiagnosedOutput` (a different type from the
+admitted `PostValidated`), written with every finding, and the file is reported
+`diagnosed` (terminal, not retried, not a failure). Stages that require
+admission take a `PostValidated` and so cannot receive it. An optional stage
+whose own output is refused leaves the admitted pre-stage document, recorded as
+a shortfall with a bounded record of the refusal; a file with any shortfall is
+reported `diagnosed`. See
+[CHAT validation failures](../developer/chat-validation-failures.md).
+
+`PostValidated` is the write capability. Its transformed variants retain
+Chatter's immutable checked-construction payload, with complete rules and tier
+alignment. Applied analysis adds the command's completion checks; comparison
+adds preservation checks. Neither preservation nor declined analysis can waive
+CHAT validity, and callers cannot select an output `ValidityLevel`.
+
+Unchanged output instead retains `AdmittedSourceChat`: original bytes and the
+immutable model from that exact admitted parse. Independently supplied text
+and model evidence cannot construct this capability. Editing consumes the
+previous proof and requires fresh admission before writing. Test doubles use a
+separate test-only state, not fabricated Chatter evidence.
+
+Input invalidity, provider failure, incomplete model analysis and internal tool
+failure are distinct. A failed model-to-CHAT transition is not evidence that the
+submitted CHAT was invalid. Internal Chatter failures establish neither validity
+nor invalidity. Preserve the producing category through per-file reporting and
+retry decisions.
+
+## Media-only commands
+
+`transcribe` starts from audio rather than CHAT. It judges its assembled typed
+transcript, and its final document, with complete admission through the
+producer transition: an admitted transcript is published as done; one that is
+not is published diagnosed, with every finding; segmentation and morphosyntax
+still run on the utterances the findings do not belong to, and stages it cannot
+run are skipped and recorded. Valid CHAT does not certify ASR accuracy; human review
+remains necessary either way.
+`benchmark` also has a reference-transcript contract in addition to ASR.
+Audio-only feature commands have no CHAT-input exemption to apply.
+
+Transcription carries its admitted model through optional post-CHAT segmentation,
+morphology and benchmark handoff; a diagnosed model reaches segmentation and
+morphology only outside the utterances its findings are confined to, and
+benchmark, whose deliverable is a comparison that needs an admitted transcript,
+refuses that file with the findings. These stages consume typed output rather than
+serializing CHAT as their next stage's parser input. Diagnostic/debug dumps are
+observations, not pipeline inputs. The final writer receives the output proof.
+
+Media commands separately require admitted accessible media, supported engines,
+measured duration where timing is produced and checked model/provider results.
+These preconditions do not substitute for CHAT admission.
+
+## Verification boundaries
+
+Keep tests at the source-to-admitted-input, worker-to-completed-transform and
+output-write boundaries. Required negative cases include invalid retraces,
+retained corrupt generated tiers, invalid no-work/dummy inputs and failures in
+one member of a mixed batch. Use inference doubles that fail if called for a
+refused input; do not use timing or sleeps to infer that work was skipped.
+Actual CLI/managed-server runs verify that outer dispatch paths preserve these
+same guarantees.

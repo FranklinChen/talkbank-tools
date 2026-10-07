@@ -374,6 +374,14 @@ impl FaStrategy {
 pub enum UtrStrategy {
     /// Untimed utterance matched a zero-duration span and was left alone.
     ZeroDurationSkipped,
+    /// A positive matched interval was exhausted by non-overlap projection.
+    ProjectionExhausted,
+    /// No selected match was common to every optimal lexical alignment.
+    AmbiguousCorrespondence,
+    /// Correspondence proof exceeded its bounded work budget.
+    CorrespondenceBudgetExhausted,
+    /// Proved interior words cannot authorize an entire utterance crop.
+    IncompleteBoundary,
     /// No ASR alignment found for an untimed utterance.
     Unmatched,
 }
@@ -383,6 +391,10 @@ impl UtrStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ZeroDurationSkipped => "zero_duration_skipped",
+            Self::ProjectionExhausted => "projection_exhausted",
+            Self::AmbiguousCorrespondence => "ambiguous_correspondence",
+            Self::CorrespondenceBudgetExhausted => "correspondence_budget_exhausted",
+            Self::IncompleteBoundary => "incomplete_boundary",
             Self::Unmatched => "unmatched",
         }
     }

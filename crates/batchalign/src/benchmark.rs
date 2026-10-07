@@ -8,11 +8,13 @@
 //! This module composes those two existing Rust pipelines so the `benchmark`
 //! command no longer depends on a fictitious Python worker benchmark path.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 
-use crate::api::{ChatText, LanguageCode3};
+use crate::api::LanguageCode3;
 use crate::error::ServerError;
 use crate::pipeline::PipelineServices;
 use crate::runner::util::ProgressSender;
@@ -20,12 +22,17 @@ use crate::transcribe::TranscribeOptions;
 
 pub(crate) use crate::compare::MainAnnotatedCompareOutputs as BenchmarkOutputs;
 
+/// The producer owns the composite state machine on the heap before callers
+/// poll it. Its two heavy sub-pipelines are likewise separate pinned owners.
+type BenchmarkFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BenchmarkOutputs, ServerError>> + Send + 'a>>;
+
 /// Borrowed request bundle for one benchmark execution.
 pub(crate) struct BenchmarkRequest<'a> {
     /// Audio file to transcribe before comparison.
     pub audio_path: &'a Path,
     /// Gold-standard CHAT transcript to compare against.
-    pub gold_text: ChatText<'a>,
+    pub reference: crate::compare::AdmittedComparisonReference,
     /// Primary language used for comparison and downstream NLP shaping.
     pub lang: &'a LanguageCode3,
     /// Shared worker/cache services used by the transcribe and compare phases.
@@ -40,27 +47,49 @@ pub(crate) struct BenchmarkRequest<'a> {
 
 /// Run the benchmark pipeline for one audio file and one gold CHAT transcript.
 ///
-/// Returns a [`BenchmarkOutputs`] containing the benchmark CHAT and CSV metrics.
-pub(crate) async fn process_benchmark(
-    request: BenchmarkRequest<'_>,
-) -> Result<BenchmarkOutputs, ServerError> {
-    let transcribed_chat = crate::transcribe::process_transcribe(
-        request.audio_path,
-        request.services,
-        request.transcribe_options,
-        request.progress.cloned(),
-        None,
-    )
-    .await?;
+/// Returns a heap-owned future resolving to [`BenchmarkOutputs`] with CHAT and metrics.
+pub(crate) fn process_benchmark(request: BenchmarkRequest<'_>) -> BenchmarkFuture<'_> {
+    Box::pin(async move {
+        let transcribed = crate::transcribe::process_transcribe(
+            request.audio_path,
+            request.services,
+            request.transcribe_options,
+            request.progress.cloned(),
+            None,
+        )
+        .await?;
+        // Benchmark's deliverable is the comparison, and comparing needs an
+        // admitted transcript (it morphotags the main side). A transcript
+        // written with diagnostics is transcribe's output, not benchmark's:
+        // there is nothing admitted to compare, so benchmark reports the
+        // diagnosis as the refusal it is for this command, exactly as it did
+        // before transcription kept such output.
+        let crate::pipeline::transcribe::TranscribeOutput {
+            document,
+            shortfalls,
+        } = transcribed;
+        let transcribed_chat = match document {
+            crate::pipeline::post_validate::ProducedOutput::Admitted(admitted) => admitted,
+            crate::pipeline::post_validate::ProducedOutput::Diagnosed(diagnosed) => {
+                return Err(diagnosed.into_failure().into_server_error());
+            }
+        };
+        // An admitted transcript whose optional stages did not apply is still
+        // comparable: compare morphotags the main side itself. The shortfall
+        // is not part of benchmark's own outputs, so it is logged here.
+        for shortfall in &shortfalls {
+            tracing::warn!(%shortfall, "benchmark's transcript does not carry a requested stage");
+        }
 
-    crate::compare::process_compare_main_annotated(
-        &transcribed_chat,
-        request.gold_text.as_ref(),
-        request.lang,
-        request.services,
-        request.mwt,
-    )
-    .await
+        Box::pin(crate::compare::process_compare_constructed_main(
+            transcribed_chat,
+            request.reference,
+            request.lang,
+            request.services,
+            request.mwt,
+        ))
+        .await
+    })
 }
 
 /// Derive the companion gold CHAT path for one audio file.
@@ -81,7 +110,17 @@ pub(crate) fn gold_chat_path_for_audio(audio_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::gold_chat_path_for_audio;
+    use super::{BenchmarkFuture, BenchmarkRequest, gold_chat_path_for_audio, process_benchmark};
+
+    #[test]
+    fn composite_future_is_heap_owned_at_its_producer_boundary() {
+        fn require_boxed_producer(_: for<'a> fn(BenchmarkRequest<'a>) -> BenchmarkFuture<'a>) {}
+        require_boxed_producer(process_benchmark);
+        assert_eq!(
+            std::mem::size_of::<BenchmarkFuture<'static>>(),
+            2 * std::mem::size_of::<usize>(),
+        );
+    }
 
     #[test]
     fn derives_gold_chat_path_from_audio() {

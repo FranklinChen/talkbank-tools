@@ -9,9 +9,6 @@ use tracing::{error, info, warn};
 use crate::api::WorkerLanguage;
 use crate::cache::UtteranceCache;
 use crate::ensure_wav;
-use crate::recipe_runner::runtime::{
-    ChatOutputTarget, result_display_path_for_command, write_text_output_artifact,
-};
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::runner::util::{
@@ -35,9 +32,13 @@ use crate::worker::opensmile_request_v2::{
 };
 use crate::worker::pool::WorkerPool;
 
+use super::audio_output::{
+    ChatOutput, FileOutput, MergeAbbreviations, write_primary_output_artifact,
+};
+use super::diarize_chat::MappedDiarizeSource;
 use super::diarize_turns::{SpeakerTurnsSource, format_turns_json};
 
-use crate::api::{ContentType, NumWorkers};
+use crate::api::NumWorkers;
 
 use super::MediaAnalysisDispatchPlan;
 use super::asr_media::resolve_paths_mode_or_staging_input;
@@ -91,14 +92,23 @@ pub(crate) async fn dispatch_media_analysis_v2(
         let file = file.clone();
         let filename = file.filename.clone();
         let plan = plan.clone();
+        let host = host.clone();
 
         tasks.push(spawn_supervised_file_task(
             filename,
             "media-analysis V2 file task",
             async move {
                 let _permit = permit;
-                process_one_media_analysis_file_v2(&job, sink.clone(), &pool, &cache, &file, &plan)
-                    .await
+                process_one_media_analysis_file_v2(
+                    &job,
+                    &host,
+                    sink.clone(),
+                    &pool,
+                    &cache,
+                    &file,
+                    &plan,
+                )
+                .await
             },
         ));
     }
@@ -121,6 +131,7 @@ pub(crate) async fn dispatch_media_analysis_v2(
 
 async fn process_one_media_analysis_file_v2(
     job: &RunnerJobSnapshot,
+    host: &DispatchHostContext,
     sink: Arc<dyn RunnerEventSink>,
     pool: &Arc<WorkerPool>,
     cache: &Arc<UtteranceCache>,
@@ -140,6 +151,82 @@ async fn process_one_media_analysis_file_v2(
     let original_audio_path =
         resolve_paths_mode_or_staging_input(&job.filesystem, file_index, filename);
 
+    if let MediaAnalysisDispatchPlan::Diarize { output_mode, .. } = plan
+        && !output_mode.accepts_source_name(filename)
+    {
+        lifecycle
+            .fail(
+                "diarize source does not match its admitted mode; use --speaker-map for timed CHAT",
+                FailureCategory::Validation,
+            )
+            .await;
+        return FileTaskOutcome::TerminalStateRecorded;
+    }
+
+    // Parse once, outside worker retries. Retain the same immutable source and
+    // its admitted timing/identity decisions until inference succeeds.
+    let mapping = match plan {
+        MediaAnalysisDispatchPlan::Diarize {
+            output_mode: crate::options::DiarizeOutputMode::MappedChat { mapping },
+            ..
+        } => Some(mapping),
+        _ => None,
+    };
+    let transcript = if mapping.is_some() {
+        lifecycle.stage(FileStage::Reading).await;
+        let text = match tokio::fs::read_to_string(&original_audio_path).await {
+            Ok(text) => text,
+            Err(error) => {
+                lifecycle
+                    .fail(
+                        &format!("Failed to read CHAT input: {error}"),
+                        FailureCategory::InputMissing,
+                    )
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        };
+        lifecycle.stage(FileStage::Parsing).await;
+        match crate::pipeline::text_infer::admit_retained_text(
+            &crate::chat_parser(),
+            &text,
+            talkbank_model::model::TranscriptName::for_path(&original_audio_path),
+        ) {
+            Ok(source) => Some(source.into_valid_file()),
+            Err(error) => {
+                lifecycle
+                    .fail(&error.to_string(), classify_server_error(&error))
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        }
+    } else {
+        None
+    };
+    let mapped_source = match (transcript.as_ref(), mapping) {
+        (Some(transcript), Some(mapping)) => {
+            match MappedDiarizeSource::admit(transcript, mapping) {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    lifecycle.fail(&error.to_string(), error.category()).await;
+                    return FileTaskOutcome::TerminalStateRecorded;
+                }
+            }
+        }
+        _ => None,
+    };
+    let mut attempt = MediaAnalysisAttempt {
+        job,
+        host,
+        pool,
+        cache,
+        file_index,
+        filename,
+        original_path: &original_audio_path,
+        plan,
+        mapped_source,
+    };
+
     let retry_policy = RetryPolicy::default();
     for attempt_number in 1..=retry_policy.max_attempts {
         if attempt_number > 1 {
@@ -150,31 +237,28 @@ async fn process_one_media_analysis_file_v2(
             lifecycle.stage(FileStage::Processing).await;
         }
 
-        match dispatch_one_media_analysis_attempt(
-            job,
-            pool,
-            cache,
-            file_index,
-            filename,
-            &original_audio_path,
-            plan,
-        )
-        .await
-        {
-            Ok((result_filename, output_text, output_type)) => {
+        match attempt.run().await {
+            Ok(output) => {
                 lifecycle.stage(FileStage::Writing).await;
-                let result_display_path = result_filename.clone().into();
-                let target =
-                    ChatOutputTarget::new(&job.filesystem, file_index, &result_display_path);
-                if let Err(error) = write_text_output_artifact(&target, &output_text).await {
-                    let err_msg = format!("Failed to write output for {filename}: {error}");
-                    lifecycle.fail(&err_msg, FailureCategory::System).await;
-                    return FileTaskOutcome::TerminalStateRecorded;
-                }
-
-                lifecycle
-                    .complete_with_result(result_filename.clone().into(), output_type)
-                    .await;
+                let written = match write_primary_output_artifact(
+                    &job.filesystem,
+                    job.dispatch.command,
+                    &job.dispatch.options,
+                    file_index,
+                    filename,
+                    output,
+                )
+                .await
+                {
+                    Ok(written) => written,
+                    Err(error) => {
+                        lifecycle
+                            .fail(&error.operator_message("Analysis"), error.category())
+                            .await;
+                        return FileTaskOutcome::TerminalStateRecorded;
+                    }
+                };
+                written.record(&lifecycle).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
             Err(DispatchFailure::RetryableWorker(error, category)) => {
@@ -228,66 +312,201 @@ enum DispatchFailure {
     Terminal(String, FailureCategory),
 }
 
-async fn dispatch_one_media_analysis_attempt(
-    job: &RunnerJobSnapshot,
-    pool: &Arc<WorkerPool>,
-    cache: &Arc<UtteranceCache>,
+struct MediaAnalysisAttempt<'runtime, 'source> {
+    job: &'runtime RunnerJobSnapshot,
+    host: &'runtime DispatchHostContext,
+    pool: &'runtime Arc<WorkerPool>,
+    cache: &'runtime Arc<UtteranceCache>,
     file_index: usize,
-    filename: &str,
-    original_audio_path: &Path,
-    plan: &MediaAnalysisDispatchPlan,
-) -> Result<(String, String, ContentType), DispatchFailure> {
-    let audio_path = ensure_wav::ensure_wav(original_audio_path, None)
-        .await
-        .map_err(|error| {
+    filename: &'runtime str,
+    original_path: &'runtime Path,
+    plan: &'runtime MediaAnalysisDispatchPlan,
+    // Consumed only after worker/cache success. A retry retains the same proof.
+    mapped_source: Option<MappedDiarizeSource<'source>>,
+}
+
+impl MediaAnalysisAttempt<'_, '_> {
+    async fn run(&mut self) -> Result<FileOutput, DispatchFailure> {
+        let Self {
+            job,
+            host,
+            pool,
+            cache,
+            file_index,
+            filename,
+            original_path,
+            plan,
+            mapped_source,
+        } = self;
+        let job = *job;
+        let host = *host;
+        let pool = *pool;
+        let cache = *cache;
+        let file_index = *file_index;
+        let filename = *filename;
+        let original_audio_path = *original_path;
+        match *plan {
+            MediaAnalysisDispatchPlan::Opensmile {
+                kernel_plan: _,
+                feature_set,
+            } => {
+                let audio_path = prepare_analysis_audio(original_audio_path).await?;
+                dispatch_opensmile_attempt(job, pool, file_index, &audio_path, feature_set)
+                    .await
+                    .map(|body| FileOutput::Evidence { body })
+            }
+            MediaAnalysisDispatchPlan::Avqi { kernel_plan: _ } => {
+                dispatch_avqi_attempt(job, pool, file_index, original_audio_path)
+                    .await
+                    .map(|body| FileOutput::Evidence { body })
+            }
+            MediaAnalysisDispatchPlan::Diarize {
+                kernel_plan: _,
+                backend,
+                expected_speakers,
+                cache_policy,
+                output_mode,
+            } => {
+                if let crate::options::DiarizeOutputMode::MappedChat { .. } = output_mode {
+                    let source = mapped_source.as_ref().ok_or_else(|| {
+                        DispatchFailure::Terminal(
+                            "mapped diarization source proof was already consumed".to_owned(),
+                            FailureCategory::System,
+                        )
+                    })?;
+                    if !source.needs_inference() {
+                        let source = mapped_source.take().ok_or_else(|| {
+                            DispatchFailure::Terminal(
+                                "mapped diarization source proof was already consumed".to_owned(),
+                                FailureCategory::System,
+                            )
+                        })?;
+                        let document = source.apply(&[]).map_err(|error| {
+                            DispatchFailure::Terminal(error.to_string(), error.category())
+                        })?;
+                        return Ok(FileOutput::Chat(ChatOutput {
+                            document: document.into(),
+                            shortfalls: Vec::new(),
+                            merge_abbreviations: MergeAbbreviations::Leave,
+                        }));
+                    }
+                    let recording = super::media_search::resolve_transcript_media(
+                        job,
+                        host,
+                        filename,
+                        original_audio_path,
+                        || crate::media::DeclaredMedia::from_document(source.document()),
+                        None,
+                    )
+                    .await
+                    .map_err(|error| {
+                        DispatchFailure::Terminal(error.message, FailureCategory::Validation)
+                    })?;
+                    let audio_path = prepare_analysis_audio(&recording).await?;
+                    let resolution = resolve_diarize_evidence(
+                        job,
+                        pool,
+                        cache,
+                        SpeakerEvidenceRunParams {
+                            audio_path: &audio_path,
+                            backend: *backend,
+                            expected_speakers: *expected_speakers,
+                            cache_policy: *cache_policy,
+                        },
+                    )
+                    .await?;
+                    let source = mapped_source.take().ok_or_else(|| {
+                        DispatchFailure::Terminal(
+                            "mapped diarization source proof was already consumed".to_owned(),
+                            FailureCategory::System,
+                        )
+                    })?;
+                    let document = source.apply(resolution.segments()).map_err(|error| {
+                        DispatchFailure::Terminal(error.to_string(), error.category())
+                    })?;
+                    return Ok(FileOutput::Chat(ChatOutput {
+                        document: document.into(),
+                        shortfalls: Vec::new(),
+                        merge_abbreviations: MergeAbbreviations::Leave,
+                    }));
+                }
+                let audio_path = prepare_analysis_audio(original_audio_path).await?;
+                dispatch_diarize_attempt(
+                    job,
+                    pool,
+                    cache,
+                    filename,
+                    SpeakerEvidenceRunParams {
+                        audio_path: &audio_path,
+                        backend: *backend,
+                        expected_speakers: *expected_speakers,
+                        cache_policy: *cache_policy,
+                    },
+                )
+                .await
+                .map(|body| FileOutput::Evidence { body })
+            }
+        }
+    }
+}
+
+async fn prepare_analysis_audio(source: &Path) -> Result<PathBuf, DispatchFailure> {
+    ensure_wav::ensure_wav(source, None).await.map_err(|error| {
+        DispatchFailure::Terminal(
+            format!("Media conversion failed for {}: {error}", source.display()),
+            FailureCategory::Validation,
+        )
+    })
+}
+
+/// Pair the original recordings before conversion can replace their names.
+struct AvqiSourcePair {
+    cs: PathBuf,
+    sv: PathBuf,
+}
+
+impl AvqiSourcePair {
+    fn resolve(cs: &Path) -> Result<Self, DispatchFailure> {
+        let sv = resolve_avqi_sv_path(cs).ok_or_else(|| {
             DispatchFailure::Terminal(
-                format!("Media conversion failed for {filename}: {error}"),
+                format!(
+                    "AVQI input {} is missing a paired .sv. audio file name",
+                    cs.display()
+                ),
                 FailureCategory::Validation,
             )
         })?;
-
-    match plan {
-        MediaAnalysisDispatchPlan::Opensmile {
-            kernel_plan: _,
-            feature_set,
-        } => {
-            dispatch_opensmile_attempt(job, pool, file_index, filename, &audio_path, feature_set)
-                .await
-        }
-        MediaAnalysisDispatchPlan::Avqi { kernel_plan: _ } => {
-            dispatch_avqi_attempt(job, pool, file_index, filename, &audio_path).await
-        }
-        MediaAnalysisDispatchPlan::Diarize {
-            kernel_plan: _,
-            backend,
-            expected_speakers,
-            cache_policy,
-        } => {
-            dispatch_diarize_attempt(
-                job,
-                pool,
-                cache,
-                filename,
-                SpeakerEvidenceRunParams {
-                    audio_path: &audio_path,
-                    backend: *backend,
-                    expected_speakers: *expected_speakers,
-                    cache_policy: *cache_policy,
-                },
-            )
-            .await
-        }
+        Ok(Self {
+            cs: cs.to_owned(),
+            sv,
+        })
     }
+
+    async fn prepare(self) -> Result<PreparedAvqiPair, DispatchFailure> {
+        let cs_audio = prepare_analysis_audio(&self.cs).await?;
+        let sv_audio = prepare_analysis_audio(&self.sv).await?;
+        Ok(PreparedAvqiPair {
+            source: self,
+            cs_audio,
+            sv_audio,
+        })
+    }
+}
+
+/// Converted paths remain bound to their original, name-resolved source pair.
+struct PreparedAvqiPair {
+    source: AvqiSourcePair,
+    cs_audio: PathBuf,
+    sv_audio: PathBuf,
 }
 
 async fn dispatch_opensmile_attempt(
     job: &RunnerJobSnapshot,
     pool: &Arc<WorkerPool>,
     file_index: usize,
-    filename: &str,
     audio_path: &Path,
     feature_set: &str,
-) -> Result<(String, String, ContentType), DispatchFailure> {
+) -> Result<String, DispatchFailure> {
     let artifacts = PreparedArtifactRuntimeV2::new("opensmile_v2").map_err(|error| {
         DispatchFailure::Terminal(
             format!("failed to create openSMILE V2 artifact runtime: {error}"),
@@ -360,34 +579,16 @@ async fn dispatch_opensmile_attempt(
         ));
     }
 
-    Ok((
-        opensmile_result_filename(filename),
-        format_opensmile_csv(result),
-        ContentType::Csv,
-    ))
+    Ok(format_opensmile_csv(result))
 }
 
 async fn dispatch_avqi_attempt(
     job: &RunnerJobSnapshot,
     pool: &Arc<WorkerPool>,
     file_index: usize,
-    filename: &str,
     cs_audio_path: &Path,
-) -> Result<(String, String, ContentType), DispatchFailure> {
-    let sv_audio_path = resolve_avqi_sv_path(cs_audio_path).ok_or_else(|| {
-        DispatchFailure::Terminal(
-            format!("AVQI input {filename} is missing a paired .sv. audio file name"),
-            FailureCategory::Validation,
-        )
-    })?;
-    let sv_audio_path = ensure_wav::ensure_wav(&sv_audio_path, None)
-        .await
-        .map_err(|error| {
-            DispatchFailure::Terminal(
-                format!("Media conversion failed for AVQI pair {filename}: {error}"),
-                FailureCategory::Validation,
-            )
-        })?;
+) -> Result<String, DispatchFailure> {
+    let pair = AvqiSourcePair::resolve(cs_audio_path)?.prepare().await?;
 
     let artifacts =
         PreparedArtifactRuntimeV2::new(format!("avqi_v2_{file_index}")).map_err(|error| {
@@ -404,8 +605,8 @@ async fn dispatch_avqi_attempt(
                 format!("avqi-v2-cs-{file_index}"),
                 format!("avqi-v2-sv-{file_index}"),
             ),
-            cs_audio_path,
-            sv_audio_path: &sv_audio_path,
+            cs_audio_path: &pair.cs_audio,
+            sv_audio_path: &pair.sv_audio,
         },
     )
     .await
@@ -449,21 +650,9 @@ async fn dispatch_avqi_attempt(
             ));
         }
     };
-    if !result.success {
-        return Err(DispatchFailure::Terminal(
-            result
-                .error
-                .clone()
-                .unwrap_or_else(|| "AVQI V2 runtime failed without detail".into()),
-            FailureCategory::ProviderTerminal,
-        ));
-    }
+    let report = AdmittedAvqiReport::admit(result, &pair.source)?;
 
-    Ok((
-        avqi_result_filename(filename),
-        format_avqi_report(result, pool_key.as_ref()),
-        ContentType::Text,
-    ))
+    Ok(report.format(pool_key.as_ref()))
 }
 
 /// Serialize an openSMILE result to CSV using BA2's
@@ -530,24 +719,65 @@ fn format_opensmile_csv(result: &OpenSmileResultV2) -> String {
 /// labels with colon-space separator, three-decimal precision for the
 /// seven numeric metrics, and trailing newline per line. BA3 emits the
 /// same shape so BA2-era parsers of `.avqi.txt` keep working.
-fn format_avqi_report(result: &AvqiResultV2, language: &str) -> String {
-    let metrics = [
-        ("AVQI", result.avqi),
-        ("CPPS", result.cpps),
-        ("HNR", result.hnr),
-        ("Shimmer Local", result.shimmer_local),
-        ("Shimmer Local dB", result.shimmer_local_db),
-        ("LTAS Slope", result.slope),
-        ("LTAS Tilt", result.tilt),
-    ];
-    let mut lines = Vec::with_capacity(metrics.len() + 3);
-    for (label, value) in metrics {
-        lines.push(format!("{label}: {value:.3}"));
+struct AdmittedAvqiReport<'a> {
+    result: &'a AvqiResultV2,
+    source: &'a AvqiSourcePair,
+}
+
+impl<'a> AdmittedAvqiReport<'a> {
+    fn admit(
+        result: &'a AvqiResultV2,
+        source: &'a AvqiSourcePair,
+    ) -> Result<Self, DispatchFailure> {
+        if !result.success || result.error.is_some() {
+            return Err(DispatchFailure::Terminal(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "AVQI V2 runtime failed without detail".into()),
+                FailureCategory::ProviderTerminal,
+            ));
+        }
+        if [
+            result.avqi,
+            result.cpps,
+            result.hnr,
+            result.shimmer_local,
+            result.shimmer_local_db,
+            result.slope,
+            result.tilt,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
+            return Err(DispatchFailure::Terminal(
+                "AVQI V2 returned non-finite metrics".into(),
+                FailureCategory::ProviderTerminal,
+            ));
+        }
+        Ok(Self { result, source })
     }
-    lines.push(format!("CS File: {}", result.cs_file));
-    lines.push(format!("SV File: {}", result.sv_file));
-    lines.push(format!("Language: {language}"));
-    lines.join("\n") + "\n"
+
+    fn format(&self, language: &str) -> String {
+        let result = self.result;
+        let metrics = [
+            ("AVQI", result.avqi),
+            ("CPPS", result.cpps),
+            ("HNR", result.hnr),
+            ("Shimmer Local", result.shimmer_local),
+            ("Shimmer Local dB", result.shimmer_local_db),
+            ("LTAS Slope", result.slope),
+            ("LTAS Tilt", result.tilt),
+        ];
+        let mut lines = Vec::with_capacity(metrics.len() + 3);
+        for (label, value) in metrics {
+            lines.push(format!("{label}: {value:.3}"));
+        }
+        lines.push(format!("CS File: {}", self.source.cs.display()));
+        lines.push(format!("SV File: {}", self.source.sv.display()));
+        lines.push(format!("Language: {language}"));
+        lines.join("\n") + "\n"
+    }
 }
 
 async fn dispatch_diarize_attempt(
@@ -556,7 +786,29 @@ async fn dispatch_diarize_attempt(
     cache: &Arc<UtteranceCache>,
     filename: &str,
     params: SpeakerEvidenceRunParams<'_>,
-) -> Result<(String, String, ContentType), DispatchFailure> {
+) -> Result<String, DispatchFailure> {
+    let backend = params.backend;
+    let resolution = resolve_diarize_evidence(job, pool, cache, params).await?;
+    let turns_json = format_turns_json(
+        SpeakerTurnsSource::from_backend(backend),
+        resolution.segments(),
+    )
+    .map_err(|error| {
+        DispatchFailure::Terminal(
+            format!("diarize output for {filename} is defective: {error}"),
+            FailureCategory::ProviderTerminal,
+        )
+    })?;
+    Ok(turns_json)
+}
+
+/// Both output modes share the same worker/cache admission and retained trace.
+async fn resolve_diarize_evidence(
+    job: &RunnerJobSnapshot,
+    pool: &Arc<WorkerPool>,
+    cache: &Arc<UtteranceCache>,
+    params: SpeakerEvidenceRunParams<'_>,
+) -> Result<crate::transcribe::ResolvedSpeakerEvidence, DispatchFailure> {
     // Diarization is not language-aware, but `dispatch_execute_v2` still
     // needs a concrete worker-pool key (same contract as opensmile/avqi).
     let pool_key = job.dispatch.lang.as_resolved().cloned().ok_or_else(|| {
@@ -605,34 +857,7 @@ async fn dispatch_diarize_attempt(
         ),
     }
 
-    let turns_json = format_turns_json(
-        SpeakerTurnsSource::from_backend(backend),
-        resolution.segments(),
-    )
-    .map_err(|error| {
-        DispatchFailure::Terminal(
-            format!("diarize output for {filename} is defective: {error}"),
-            FailureCategory::ProviderTerminal,
-        )
-    })?;
-
-    Ok((
-        diarize_result_filename(filename),
-        turns_json,
-        ContentType::Json,
-    ))
-}
-
-fn diarize_result_filename(filename: &str) -> String {
-    result_display_path_for_command(crate::api::ReleasedCommand::Diarize, filename).to_string()
-}
-
-fn opensmile_result_filename(filename: &str) -> String {
-    result_display_path_for_command(crate::api::ReleasedCommand::Opensmile, filename).to_string()
-}
-
-fn avqi_result_filename(filename: &str) -> String {
-    result_display_path_for_command(crate::api::ReleasedCommand::Avqi, filename).to_string()
+    Ok(resolution)
 }
 
 fn resolve_avqi_sv_path(cs_audio_path: &Path) -> Option<PathBuf> {
@@ -657,16 +882,14 @@ mod tests {
     }
 
     #[test]
-    fn avqi_output_filename_strips_cs_marker() {
-        assert_eq!(avqi_result_filename("sample.cs.wav"), "sample.avqi.txt");
-    }
-
-    #[test]
-    fn opensmile_output_filename_replaces_extension() {
-        assert_eq!(
-            opensmile_result_filename("sample.mp3"),
-            "sample.opensmile.csv"
-        );
+    fn avqi_source_pair_retains_container_names_before_conversion() {
+        let pair = match AvqiSourcePair::resolve(Path::new("recording.cs.mp4")) {
+            Ok(pair) => pair,
+            Err(_) => panic!("source pair should resolve"),
+        };
+        assert_eq!(pair.cs, PathBuf::from("recording.cs.mp4"));
+        assert_eq!(pair.sv, PathBuf::from("recording.sv.mp4"));
+        assert!(AvqiSourcePair::resolve(Path::new("cache-fingerprint.wav")).is_err());
     }
 
     /// BA2's opensmile CSV (`batchalign/cli/cli.py:546`) writes the
@@ -749,12 +972,20 @@ mod tests {
             shimmer_local_db: 1.2345,
             slope: -2.3456,
             tilt: 0.6789,
-            cs_file: "foo.cs.wav".to_string(),
-            sv_file: "foo.sv.wav".to_string(),
+            cs_file: "temporary/prepared-cs.pcm".to_string(),
+            sv_file: "temporary/prepared-sv.pcm".to_string(),
             success: true,
             error: None,
         };
-        let report = format_avqi_report(&result, "eng");
+        let pair = match AvqiSourcePair::resolve(Path::new("foo.cs.wav")) {
+            Ok(pair) => pair,
+            Err(_) => panic!("source pair should resolve"),
+        };
+        let admitted = match AdmittedAvqiReport::admit(&result, &pair) {
+            Ok(report) => report,
+            Err(_) => panic!("successful finite metrics should admit"),
+        };
+        let report = admitted.format("eng");
         let expected = "AVQI: 5.123\n\
                         CPPS: 67.890\n\
                         HNR: 12.346\n\
@@ -766,5 +997,14 @@ mod tests {
                         SV File: foo.sv.wav\n\
                         Language: eng\n";
         assert_eq!(report, expected);
+        let mut refused = result.clone();
+        refused.success = false;
+        assert!(AdmittedAvqiReport::admit(&refused, &pair).is_err());
+        refused.success = true;
+        refused.error = Some("analysis failed".into());
+        assert!(AdmittedAvqiReport::admit(&refused, &pair).is_err());
+        refused.error = None;
+        refused.avqi = f64::NAN;
+        assert!(AdmittedAvqiReport::admit(&refused, &pair).is_err());
     }
 }

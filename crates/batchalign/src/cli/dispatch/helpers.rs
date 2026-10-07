@@ -1,6 +1,6 @@
 //! Shared helper functions for dispatch modes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -64,6 +64,10 @@ impl DirectProgressTracker {
                     progress.log_done(entry.filename.as_ref());
                     self.seen_terminal_files.insert(filename);
                 }
+                FileStatusKind::Diagnosed => {
+                    progress.log_diagnosed(entry.filename.as_ref(), entry.diagnostics.as_ref());
+                    self.seen_terminal_files.insert(filename);
+                }
                 FileStatusKind::Error => {
                     let error_msg = entry
                         .error
@@ -72,7 +76,9 @@ impl DirectProgressTracker {
                     progress.log_error(entry.filename.as_ref(), &error_msg);
                     self.seen_terminal_files.insert(filename);
                 }
-                _ => {}
+                FileStatusKind::Queued
+                | FileStatusKind::Processing
+                | FileStatusKind::Interrupted => {}
             }
         }
     }
@@ -102,8 +108,7 @@ pub(super) async fn poll_and_write_incrementally(
     server_url: &str,
     job_id: &JobId,
     total_files: u64,
-    result_map: &HashMap<String, PathBuf>,
-    out_dir: &Path,
+    destinations: &output::ResultDestinations,
     _command: &str,
     progress: &dyn ProgressDisplay,
 ) -> Result<(), CliError> {
@@ -154,28 +159,41 @@ pub(super) async fn poll_and_write_incrementally(
                         continue;
                     }
 
-                    if entry.status == FileStatusKind::Done {
+                    // A diagnosed file has written output too: it is fetched
+                    // and written like a clean one, and logged with its
+                    // diagnostics rather than as a success or a failure.
+                    if entry.status.wrote_output() {
                         match client.get_file_result(server_url, job_id, fn_).await {
-                            Ok(result) => {
-                                match output::write_result(&result, result_map, out_dir) {
-                                    Ok(true) => {
-                                        written_count += 1;
+                            Ok(result) => match output::write_remote_result(
+                                &result,
+                                destinations,
+                                client,
+                                server_url,
+                                job_id,
+                            )
+                            .await
+                            {
+                                Ok(true) => {
+                                    written_count += 1;
+                                    if entry.status == FileStatusKind::Diagnosed {
+                                        progress.log_diagnosed(fn_, entry.diagnostics.as_ref());
+                                    } else {
                                         progress.log_done(fn_);
                                     }
-                                    Ok(false) => {
-                                        let error_msg = result.error.unwrap_or_default();
-                                        progress.log_error(fn_, &error_msg);
-                                        error_details
-                                            .push(FileErrorDetail::new(fn_.clone(), error_msg));
-                                    }
-                                    Err(e) => {
-                                        let error_msg = format!("{e}");
-                                        progress.log_error(fn_, &error_msg);
-                                        error_details
-                                            .push(FileErrorDetail::new(fn_.clone(), error_msg));
-                                    }
                                 }
-                            }
+                                Ok(false) => {
+                                    let error_msg = result.error.unwrap_or_default();
+                                    progress.log_error(fn_, &error_msg);
+                                    error_details
+                                        .push(FileErrorDetail::new(fn_.clone(), error_msg));
+                                }
+                                Err(e) => {
+                                    let error_msg = format!("{e}");
+                                    progress.log_error(fn_, &error_msg);
+                                    error_details
+                                        .push(FileErrorDetail::new(fn_.clone(), error_msg));
+                                }
+                            },
                             Err(e) => {
                                 let error_msg = format!("{e}");
                                 progress.log_error(fn_, &error_msg);
@@ -204,7 +222,12 @@ pub(super) async fn poll_and_write_incrementally(
                         progress.send_cancelled_receipt(receipt);
                     }
                     progress.finish();
-                    return finish_terminal_job(&info, &error_details, total_files, out_dir);
+                    return finish_terminal_job(
+                        &info,
+                        &error_details,
+                        total_files,
+                        &destinations.reporting_directory()?,
+                    );
                 }
 
                 let current = info.completed_files;
@@ -351,7 +374,22 @@ pub(super) fn finish_terminal_job(
         && info.error.as_ref().is_none_or(|s| s.trim().is_empty());
     if clean_success {
         print_failure_summary(&info.file_statuses, error_details, total_files, out_dir);
-        return Ok(());
+        // Completed with nothing failed is still not a clean success when a
+        // file was written with diagnostics: a script reading exit 0 would
+        // take uncertified output as certified.
+        let diagnosed = info
+            .file_statuses
+            .iter()
+            .filter(|entry| entry.status == FileStatusKind::Diagnosed)
+            .count();
+        return match std::num::NonZeroUsize::new(diagnosed) {
+            None => Ok(()),
+            Some(diagnosed) => Err(CliError::WrittenWithDiagnostics {
+                job_id: info.job_id.clone(),
+                diagnosed,
+                total: total_files,
+            }),
+        };
     }
 
     let detail = terminal_job_detail(info, error_details);
@@ -476,7 +514,8 @@ pub(super) fn order_files_for_command(
         | ReleasedCommand::Compare
         | ReleasedCommand::Avqi
         | ReleasedCommand::Diarize
-        | ReleasedCommand::SpeakerIdentify => return Ok((files, outputs)),
+        | ReleasedCommand::SpeakerIdentify
+        | ReleasedCommand::Convert => return Ok((files, outputs)),
     }
     let parser = batchalign_transform::parse::TreeSitterParser::new()
         .map_err(|e| CliError::InvalidArgument(format!("parser init: {e}")))?;
@@ -560,6 +599,9 @@ pub(super) fn inject_lexicon(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TerminalCounts {
     pub succeeded: u64,
+    /// Files whose output was written with admission diagnostics: neither
+    /// a clean success nor a failure.
+    pub diagnosed: u64,
     pub failed: u64,
     pub not_started: u64,
     pub total: u64,
@@ -573,18 +615,23 @@ impl TerminalCounts {
     /// server only reported a subset before cancel).
     pub(super) fn from_statuses(file_statuses: &[FileStatusEntry], total_files: u64) -> Self {
         let mut succeeded: u64 = 0;
+        let mut diagnosed: u64 = 0;
         let mut failed: u64 = 0;
         for entry in file_statuses {
             match entry.status {
                 FileStatusKind::Done => succeeded += 1,
+                FileStatusKind::Diagnosed => diagnosed += 1,
                 FileStatusKind::Error => failed += 1,
-                _ => {}
+                FileStatusKind::Queued
+                | FileStatusKind::Processing
+                | FileStatusKind::Interrupted => {}
             }
         }
-        let accounted = succeeded + failed;
+        let accounted = succeeded + diagnosed + failed;
         let not_started = total_files.saturating_sub(accounted);
         Self {
             succeeded,
+            diagnosed,
             failed,
             not_started,
             total: total_files,
@@ -596,14 +643,21 @@ impl TerminalCounts {
     /// for every submitted file, so a clean run still prints the
     /// familiar "N succeeded, 0 failed (of N files)".
     pub(super) fn results_line(&self) -> String {
+        // The diagnosed segment appears only when a file was written with
+        // diagnostics, so a run without any keeps its familiar line.
+        let diagnosed = if self.diagnosed == 0 {
+            String::new()
+        } else {
+            format!(", {} written with diagnostics", self.diagnosed)
+        };
         if self.not_started == 0 {
             format!(
-                "{} succeeded, {} failed (of {} files)",
+                "{} succeeded{diagnosed}, {} failed (of {} files)",
                 self.succeeded, self.failed, self.total
             )
         } else {
             format!(
-                "{} succeeded, {} failed, {} not started (of {} files)",
+                "{} succeeded{diagnosed}, {} failed, {} not started (of {} files)",
                 self.succeeded, self.failed, self.not_started, self.total
             )
         }
@@ -636,7 +690,11 @@ pub(super) fn print_failure_summary(
     total_files: u64,
     out_dir: &Path,
 ) {
-    if errors.is_empty() {
+    let diagnosed: Vec<&FileStatusEntry> = file_statuses
+        .iter()
+        .filter(|entry| entry.status == FileStatusKind::Diagnosed)
+        .collect();
+    if errors.is_empty() && diagnosed.is_empty() {
         eprintln!(
             "\nAll done! {total_files} file(s) written to {}",
             out_dir.display()
@@ -649,6 +707,21 @@ pub(super) fn print_failure_summary(
     eprintln!("\n{bar}");
     eprintln!("  RESULTS: {}", counts.results_line());
     eprintln!("{bar}");
+
+    // Written, so listed apart from failures: each with what admission found
+    // and which stages were skipped because of it.
+    for entry in diagnosed {
+        eprintln!(
+            "  ! {}: {}",
+            entry.filename,
+            crate::cli::progress::diagnosed_summary(entry.diagnostics.as_ref())
+        );
+        if let Some(diagnostics) = &entry.diagnostics {
+            for line in diagnostics.lines() {
+                eprintln!("    {line}");
+            }
+        }
+    }
 
     for error in errors {
         let filename = error.filename.as_ref();
@@ -752,6 +825,7 @@ mod tests {
                 status: FileStatusKind::Error,
                 error: Some("worker failed".into()),
                 error_category: None,
+                diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
@@ -784,6 +858,7 @@ mod tests {
         updates: Mutex<Vec<u64>>,
         done: Mutex<Vec<String>>,
         errors: Mutex<Vec<(String, String)>>,
+        diagnosed: Mutex<Vec<String>>,
         finished: Mutex<u32>,
     }
 
@@ -806,6 +881,17 @@ mod tests {
                 .push((filename.to_string(), msg.to_string()));
         }
 
+        fn log_diagnosed(
+            &self,
+            filename: &str,
+            _diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+        ) {
+            self.diagnosed
+                .lock()
+                .expect("diagnosed lock")
+                .push(filename.to_string());
+        }
+
         fn finish(&self) {
             *self.finished.lock().expect("finished lock") += 1;
         }
@@ -820,6 +906,7 @@ mod tests {
             status,
             error: None,
             error_category: None,
+            diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
@@ -889,6 +976,27 @@ mod tests {
 
         let line = TerminalCounts::from_statuses(&statuses, 3).results_line();
         assert_eq!(line, "2 succeeded, 1 failed (of 3 files)");
+    }
+
+    /// A diagnosed file is written output: counted on its own, never as a
+    /// success, a failure or a file that did not start.
+    #[test]
+    fn diagnosed_files_are_counted_apart_from_successes_and_failures() {
+        let statuses = vec![
+            status_entry("a.cha", FileStatusKind::Done),
+            status_entry("b.cha", FileStatusKind::Diagnosed),
+            status_entry("c.cha", FileStatusKind::Error),
+        ];
+        let counts = TerminalCounts::from_statuses(&statuses, 3);
+        assert_eq!(
+            (counts.succeeded, counts.diagnosed, counts.failed),
+            (1, 1, 1)
+        );
+        assert_eq!(counts.not_started, 0);
+        assert_eq!(
+            counts.results_line(),
+            "1 succeeded, 1 written with diagnostics, 1 failed (of 3 files)"
+        );
     }
 
     /// `Processing` and `Interrupted` belong in `not_started` (i.e.,
@@ -1115,6 +1223,25 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// A completed job with a file written with diagnostics is not a clean
+    /// success: it exits with its own code, never 0.
+    #[test]
+    fn finish_terminal_job_reports_diagnosed_output_with_its_own_exit_code() {
+        let mut info = test_job_info(JobStatus::Completed, None);
+        info.file_statuses[0].status = FileStatusKind::Diagnosed;
+        info.file_statuses[0].error = None;
+        info.completed_files = 1;
+        let out_dir = tempfile::tempdir().unwrap();
+
+        let result = finish_terminal_job(&info, &[], 1, out_dir.path());
+
+        let Err(error @ CliError::WrittenWithDiagnostics { .. }) = result else {
+            panic!("expected WrittenWithDiagnostics, got {result:?}");
+        };
+        assert_eq!(error.exit_code(), CliError::EXIT_DIAGNOSED);
+        assert!(error.to_string().contains("1 of 1 file(s)"), "{error}");
+    }
+
     #[test]
     fn finish_terminal_job_rejects_failed_job_status() {
         let info = test_job_info(JobStatus::Failed, Some("worker pool exploded"));
@@ -1168,6 +1295,7 @@ mod tests {
             status: FileStatusKind::Processing,
             error: None,
             error_category: None,
+            diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
             finished_at: None,
@@ -1188,6 +1316,7 @@ mod tests {
                 status: FileStatusKind::Done,
                 error: None,
                 error_category: None,
+                diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,
@@ -1203,6 +1332,7 @@ mod tests {
                 status: FileStatusKind::Error,
                 error: Some("decoder failed".into()),
                 error_category: None,
+                diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
                 finished_at: None,

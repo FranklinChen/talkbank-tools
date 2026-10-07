@@ -12,17 +12,19 @@ Stanza's ``tokenize_postprocessor`` uses a tuple convention::
 
     (text, True): MWT: let the MWT processor expand (e.g. "don't" → do + n't)
     (text, False), NOT an MWT: suppress expansion (e.g. merged "ice-cream")
-    plain string: let Stanza's model decide (equivalent to model's own choice)
+    plain string: retain the token; this wrapper restores unchanged native hints
+    (text, components): retain these checked native components within one word
 
-This module replicates Python master's ``tokenizer_processor`` logic:
+The realigner distinguishes spelling boundaries from analysis boundaries:
 
 * **Default (all languages)**: merged spurious splits → ``(text, False)``
   Prevents a merge like "ice-cream" from being expanded again by the MWT model.
 * **English contractions**: merged text that contains ``'``, *unless* the
   prefix before the first ``'`` is ``"o"`` (e.g. o'clock, o'er) → ``(text, True)``
   Allows "don't", "Claus'" etc. to be handled by Stanza's MWT model.
-
-This matches the Python master rules (``ud.py`` lines 680-685) exactly.
+* **French native elisions**: retain the tokenizer's components as an explicit
+  expansion only after Rust binds their exact concatenation to one input word.
+  No component spelling, lemma or POS is guessed by the realigner.
 
 Thread safety: :class:`TokenizerContext` uses ``threading.local()`` to store
 ``original_words`` per-thread.  On free-threaded Python (3.14t+), multiple
@@ -48,7 +50,7 @@ from batchalign.inference._italian_mwt import (
 L = logging.getLogger("batchalign")
 
 
-TokenizerToken: TypeAlias = str | tuple[str, bool]
+TokenizerToken: TypeAlias = str | tuple[str, bool | list[str]]
 
 
 class TokenizerContext:
@@ -103,14 +105,15 @@ def make_tokenizer_postprocessor(
     ) -> list[list[TokenizerToken]]:
         if not ctx.original_words:
             return tokenized_batch
+        if len(tokenized_batch) != len(ctx.original_words):
+            raise ValueError(
+                "token realignment: native sentence count differs from bound input"
+            )
 
         result: list[list[TokenizerToken]] = []
         for sent_idx, sent_tokens in enumerate(tokenized_batch):
-            if sent_idx < len(ctx.original_words):
-                original = ctx.original_words[sent_idx]
-                result.append(_realign_sentence(sent_tokens, original, alpha2))
-            else:
-                result.append(sent_tokens)
+            original = ctx.original_words[sent_idx]
+            result.append(_realign_sentence(sent_tokens, original, alpha2))
 
         # Applied to the WHOLE batch, not per sentence: the decision needs a
         # second Stanza pass over the candidate words, and doing that once per
@@ -170,11 +173,10 @@ def _realign_sentence(
 ) -> list[TokenizerToken]:
     """Merge Stanza tokens that map to the same original CHAT word.
 
-    Delegates to ``batchalign_core.align_tokens()`` (Rust) for the
-    character-position mapping algorithm. Per-language MWT override rules
-    were retired on 2026-04-21 after a paired empirical audit, the
-    character-DP alone satisfies the morphotag 1-to-1 invariant for all
-    previously-patched languages.
+    Delegates to ``batchalign_core.align_tokens()`` (Rust) for checked
+    character-position grouping. French native elision components survive
+    as Stanza's explicit-component tuple, retaining one CHAT word without
+    suppressing the article/pronoun analysis inside it.
 
     Stanza may return tokens with embedded spaces (rare edge case). These
     are flattened before passing to Rust so the character sequences match.
@@ -195,19 +197,18 @@ def _realign_sentence(
     processor sees only plain strings and silently skips expansion, the
     direct cause of the 2026-04-13 Preserve-mode regression.
     """
-    if not stanza_tokens or not original_words:
-        return stanza_tokens
-
     # Flatten tokens that Stanza may have returned with embedded spaces
-    flat_tokens: list[str] = []
+    flat_tokens: list[TokenizerToken] = []
     for tok in stanza_tokens:
         text = _conform(tok)
         parts = text.split(" ")
-        flat_tokens.extend(parts if len(parts) > 1 else [text])
+        flat_tokens.extend(parts if len(parts) > 1 else [tok])
 
     from batchalign_core import align_tokens
 
-    merged = align_tokens(original_words, flat_tokens, alpha2)
+    merged = align_tokens(
+        original_words, [_conform(tok) for tok in flat_tokens], alpha2
+    )
 
     # Restore Stanza's own MWT hint tuples wherever a merged/aligned token
     # still corresponds 1:1 to one original Stanza token. This matters even
@@ -221,16 +222,14 @@ def _realign_sentence(
         target = _conform(new)
         start = orig_idx
         buf = ""
-        while orig_idx < len(stanza_tokens) and len(buf) < len(target):
-            buf += _conform(stanza_tokens[orig_idx])
+        while orig_idx < len(flat_tokens) and len(buf) < len(target):
+            buf += _conform(flat_tokens[orig_idx])
             orig_idx += 1
             if buf == target:
                 break
 
-        # If we cannot reconcile the aligned token sequence back onto the
-        # original Stanza sequence, return the aligner output unchanged.
         if buf != target:
-            return merged
+            raise RuntimeError("checked realignment lost its native token binding")
 
         if isinstance(new, tuple):
             restored.append(new)
@@ -238,15 +237,15 @@ def _realign_sentence(
 
         if (
             orig_idx - start == 1
-            and isinstance(stanza_tokens[start], tuple)
-            and _conform(stanza_tokens[start]) == target
+            and isinstance(flat_tokens[start], tuple)
+            and _conform(flat_tokens[start]) == target
         ):
-            restored.append(stanza_tokens[start])
+            restored.append(flat_tokens[start])
         else:
             restored.append(new)
 
-    if orig_idx != len(stanza_tokens):
-        return merged
+    if orig_idx != len(flat_tokens):
+        raise RuntimeError("checked realignment omitted native tokens")
 
     return restored
 

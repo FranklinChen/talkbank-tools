@@ -47,8 +47,10 @@ fn phase_index(stage: FileProgressStage) -> Option<usize> {
         | FileProgressStage::BuildingChat
         | FileProgressStage::Finalizing
         | FileProgressStage::Writing => Some(4),
-        // No phase mapping for generic/retry
-        FileProgressStage::Processing | FileProgressStage::RetryScheduled => None,
+        // No phase mapping for generic/retry/waiting
+        FileProgressStage::Processing
+        | FileProgressStage::RetryScheduled
+        | FileProgressStage::WaitingForWorker => None,
     }
 }
 
@@ -126,11 +128,12 @@ fn draw_header(f: &mut Frame, state: &AppState, area: Rect) {
     };
 
     // Status breakdown across all groups
-    let (done, active, errors, queued) = state.directories.groups.iter().fold(
-        (0usize, 0usize, 0usize, 0usize),
-        |(d, a, e, q), g| {
+    let (done, diagnosed, active, errors, queued) = state.directories.groups.iter().fold(
+        (0usize, 0usize, 0usize, 0usize, 0usize),
+        |(d, g_, a, e, q), g| {
             (
                 d + g.done_count,
+                g_ + g.diagnosed_count,
                 a + g.active_count,
                 e + g.error_count,
                 q + g.queued_count,
@@ -138,10 +141,13 @@ fn draw_header(f: &mut Frame, state: &AppState, area: Rect) {
         },
     );
 
-    let breakdown = if done + active + errors + queued > 0 {
+    let breakdown = if done + diagnosed + active + errors + queued > 0 {
         let mut parts = Vec::new();
         if done > 0 {
             parts.push(format!("{done}✓"));
+        }
+        if diagnosed > 0 {
+            parts.push(format!("{diagnosed}!"));
         }
         if active > 0 {
             parts.push(format!("{active}⠋"));
@@ -246,17 +252,19 @@ fn draw_groups(f: &mut Frame, state: &AppState, area: Rect) {
 
         let title = if all_terminal && !is_focused {
             // Collapsed summary for completed groups
-            let check = if group.error_count > 0 {
-                format!("{}✓ {}✗", group.done_count, group.error_count)
-            } else {
-                format!("{}✓", group.done_count)
-            };
+            let mut check = format!("{}✓", group.done_count);
+            if group.diagnosed_count > 0 {
+                check.push_str(&format!(" {}!", group.diagnosed_count));
+            }
+            if group.error_count > 0 {
+                check.push_str(&format!(" {}✗", group.error_count));
+            }
             format!(" {} ({check}) ", group.dir)
         } else {
             format!(
                 " {} ({}/{}) ",
                 group.dir,
-                group.done_count + group.error_count,
+                group.done_count + group.diagnosed_count + group.error_count,
                 group.files.len()
             )
         };
@@ -394,6 +402,21 @@ fn render_file_line(
             Line::from(Span::styled(
                 pad_or_truncate(&text, w),
                 Style::default().fg(Color::Green),
+            ))
+        }
+        FileStatusKind::Diagnosed => {
+            // Written output, never an error and never a clean success: the
+            // file is on disk with the findings its admission reported.
+            let detail = match file.diagnostic_count {
+                Some(1) => "written, 1 diagnostic".to_string(),
+                Some(count) => format!("written, {count} diagnostics"),
+                // A row restored from storage that did not record them.
+                None => "written, diagnostics not recorded".to_string(),
+            };
+            let text = format!("  ! {}   {detail}", file.name);
+            Line::from(Span::styled(
+                pad_or_truncate(&text, w),
+                Style::default().fg(Color::Yellow),
             ))
         }
         FileStatusKind::Error => {
@@ -658,6 +681,7 @@ mod tests {
                 None
             },
             error_category: None,
+            diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: if status == FileStatusKind::Done {
                 Some(crate::unix_time(0.0))

@@ -55,6 +55,8 @@ pub enum WorkUnitKind {
     FileProcess,
     /// A per-file infer-path orchestration handled by the Rust server.
     FileInfer,
+    /// Native media encoding without a Python infer request.
+    NativeMedia,
     /// A per-file forced-alignment orchestration.
     FileForcedAlignment,
     /// A cross-file batched text inference unit.
@@ -67,6 +69,7 @@ impl std::fmt::Display for WorkUnitKind {
             Self::FileSetup => write!(f, "file_setup"),
             Self::FileProcess => write!(f, "file_process"),
             Self::FileInfer => write!(f, "file_infer"),
+            Self::NativeMedia => write!(f, "native_media"),
             Self::FileForcedAlignment => write!(f, "file_forced_alignment"),
             Self::BatchInfer => write!(f, "batch_infer"),
         }
@@ -81,6 +84,7 @@ impl std::str::FromStr for WorkUnitKind {
             "file_setup" => Ok(Self::FileSetup),
             "file_process" => Ok(Self::FileProcess),
             "file_infer" => Ok(Self::FileInfer),
+            "native_media" => Ok(Self::NativeMedia),
             "file_forced_alignment" => Ok(Self::FileForcedAlignment),
             "batch_infer" => Ok(Self::BatchInfer),
             other => Err(format!("unknown WorkUnitKind: {other}")),
@@ -104,6 +108,8 @@ pub enum FailureCategory {
     InputMissing,
     /// A cache-only request could not be satisfied from reusable evidence.
     EvidenceUnavailable,
+    /// Valid input requests analysis unavailable from the configured backend.
+    AnalysisUnavailable,
     /// Worker process died unexpectedly.
     WorkerCrash,
     /// Worker or provider exceeded an expected time budget.
@@ -147,6 +153,7 @@ impl std::fmt::Display for FailureCategory {
             Self::ParseError => write!(f, "parse_error"),
             Self::InputMissing => write!(f, "input_missing"),
             Self::EvidenceUnavailable => write!(f, "evidence_unavailable"),
+            Self::AnalysisUnavailable => write!(f, "analysis_unavailable"),
             Self::WorkerCrash => write!(f, "worker_crash"),
             Self::WorkerTimeout => write!(f, "worker_timeout"),
             Self::WorkerProtocol => write!(f, "worker_protocol"),
@@ -170,6 +177,7 @@ impl std::str::FromStr for FailureCategory {
             "parse_error" => Ok(Self::ParseError),
             "input_missing" => Ok(Self::InputMissing),
             "evidence_unavailable" => Ok(Self::EvidenceUnavailable),
+            "analysis_unavailable" => Ok(Self::AnalysisUnavailable),
             "worker_crash" => Ok(Self::WorkerCrash),
             "worker_timeout" => Ok(Self::WorkerTimeout),
             "worker_protocol" => Ok(Self::WorkerProtocol),
@@ -506,6 +514,7 @@ mod tests {
             FailureCategory::ParseError,
             FailureCategory::InputMissing,
             FailureCategory::EvidenceUnavailable,
+            FailureCategory::AnalysisUnavailable,
             FailureCategory::WorkerCrash,
             FailureCategory::WorkerTimeout,
             FailureCategory::WorkerProtocol,

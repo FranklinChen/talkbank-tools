@@ -11,6 +11,26 @@ use super::recipe::{
     ExecutionMode, Recipe, RecipeStage, RecipeStageId, RecipeStagePresence, StageExecutionKind,
 };
 
+pub(super) const CONVERT_RECIPE: Recipe = Recipe::new(
+    ExecutionMode::SequentialPerUnit,
+    &[
+        RecipeStage::new(
+            RecipeStageId::PlanWorkUnits,
+            RecipeStagePresence::Required,
+            StageExecutionKind::PerWorkUnit,
+            FileStage::Reading,
+            &[],
+        ),
+        RecipeStage::new(
+            RecipeStageId::MaterializeOutputs,
+            RecipeStagePresence::Required,
+            StageExecutionKind::PerWorkUnit,
+            FileStage::Writing,
+            &[RecipeStageId::PlanWorkUnits],
+        ),
+    ],
+);
+
 pub(super) const TRANSCRIBE_RECIPE: Recipe = Recipe::new(
     ExecutionMode::SequentialPerUnit,
     &[

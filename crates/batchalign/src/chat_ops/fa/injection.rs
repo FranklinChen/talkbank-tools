@@ -200,7 +200,7 @@ fn inject_timing_on_word(word: &mut Word, cursor: &mut TimingCursor<'_>) -> Opti
     if parts <= 1 {
         // Normal word: consume one timing, and keep its provenance intact.
         let t = cursor.take()?;
-        word.inline_bullet = Some(Bullet::new(t.start_ms, t.end_ms));
+        word.inline_bullet = Some(t.bullet());
         return Some(t.clone());
     }
 
@@ -225,8 +225,9 @@ fn inject_timing_on_word(word: &mut Word, cursor: &mut TimingCursor<'_>) -> Opti
         }
     }
     let (start, end) = (min_start?, max_end?);
-    word.inline_bullet = Some(Bullet::new(start, end));
-    WordTiming::new(
+    // The merged envelope is admitted as a positive timing FIRST, and the
+    // bullet is built from that proof, never from the two numbers.
+    let timing = WordTiming::new(
         start,
         end,
         Origin::MergedFromParts { parts: merged },
@@ -235,7 +236,18 @@ fn inject_timing_on_word(word: &mut Word, cursor: &mut TimingCursor<'_>) -> Opti
     .map(|timing| match merged_score.finish() {
         Some(score) => timing.with_model_score(score),
         None => timing,
-    })
+    })?;
+    word.inline_bullet = Some(timing.bullet());
+    Some(timing)
+}
+
+impl WordTiming {
+    /// THE construction of a forced-alignment word bullet: from a positive
+    /// word timing only. Every FA site that writes a word bullet (injection,
+    /// timing post-processing, the bound clamp) goes through here.
+    pub(super) fn bullet(&self) -> Bullet {
+        Bullet::new(self.start_ms, self.end_ms)
+    }
 }
 
 /// Return the number of FA words this CHAT word was split into during extraction.

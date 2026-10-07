@@ -17,6 +17,9 @@ use crate::ReleasedCommand;
 use crate::cli::args::InputKind;
 use crate::cli::error::CliError;
 
+mod plan;
+pub use plan::{PlannedServerInput, ServerInputPlan, plan_server_inputs};
+
 /// Check whether a CHAT file is a "dummy" placeholder that should be copied,
 /// not processed.
 ///
@@ -71,26 +74,9 @@ pub fn discover_client_files(
             .unwrap_or("")
             .to_lowercase();
 
-        // Skip dummy CHAT files
+        // Discovery is read-only. Pass-through copying happens only after
+        // the complete processing destination plan has been admitted.
         if ext == "cha" && is_dummy_chat(path) {
-            // Copy to output (unless in-place)
-            if in_dir != out_dir {
-                let rel = path.strip_prefix(in_dir).map_err(|err| {
-                    invalid_data(format!(
-                        "failed to derive path relative to {} for {}: {err}",
-                        in_dir.display(),
-                        path.display()
-                    ))
-                })?;
-                let dest = out_dir.join(rel);
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent).map_err(|err| {
-                        io_with_path("create dummy output directory", parent, err)
-                    })?;
-                }
-                fs::copy(path, &dest)
-                    .map_err(|err| io_with_path("copy dummy CHAT file", &dest, err))?;
-            }
             continue;
         }
 
@@ -254,16 +240,9 @@ pub fn infer_base_dir(inputs: &[PathBuf]) -> Result<PathBuf, CliError> {
     Ok(PathBuf::from("."))
 }
 
-/// Build unique relative names for server payload and a result mapping.
-///
-/// Returns `(server_names, result_map)` where `result_map[server_name] = output_path`.
-pub fn build_server_names(
-    files: &[PathBuf],
-    outputs: &[PathBuf],
-    inputs: &[PathBuf],
-) -> Result<(Vec<String>, std::collections::HashMap<String, PathBuf>), CliError> {
-    use std::collections::HashMap;
-
+/// Derive source-relative names; admission of uniqueness and destinations
+/// belongs to the owning [`ServerInputPlan`] producer.
+fn build_server_names(files: &[PathBuf], inputs: &[PathBuf]) -> Result<Vec<String>, CliError> {
     let dir_inputs: Vec<PathBuf> = inputs
         .iter()
         .filter(|p| p.is_dir())
@@ -306,9 +285,7 @@ pub fn build_server_names(
     };
 
     let mut server_names = Vec::with_capacity(files.len());
-    let mut result_map = HashMap::with_capacity(files.len());
-
-    for (fpath, opath) in files.iter().zip(outputs.iter()) {
+    for fpath in files {
         let abs = canonicalize_path(fpath, "canonicalize input file for dispatch")?;
 
         // Check if this file is under a directory input
@@ -335,11 +312,10 @@ pub fn build_server_names(
         } else {
             rel
         };
-        server_names.push(rel.clone());
-        result_map.insert(rel, opath.clone());
+        server_names.push(rel);
     }
 
-    Ok((server_names, result_map))
+    Ok(server_names)
 }
 
 /// Commands that create new files from media input.
@@ -489,7 +465,10 @@ pub fn copy_nonmatching(
         // A record describing the input directory is withheld BEFORE the
         // input-kind gate, so a command whose input kind accepts every
         // extension can never take the record as one of its inputs.
-        if !input_kind.accepts(&ext) || is_input_directory_record(path) {
+        if !input_kind.accepts(&ext)
+            || is_input_directory_record(path)
+            || (ext == "cha" && is_dummy_chat(path))
+        {
             let rel = path.strip_prefix(in_dir).map_err(|err| {
                 invalid_data(format!(
                     "failed to derive non-matching relative path from {} for {}: {err}",

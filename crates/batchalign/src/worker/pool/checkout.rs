@@ -26,39 +26,64 @@ use super::WorkerGroup;
 /// instead and no permit is released -- the worker slot is permanently
 /// freed so a fresh worker can be spawned later.
 pub struct CheckedOutWorker {
-    /// The worker handle, wrapped in `Option` so [`take()`](Self::take)
-    /// can extract it. `None` only after `take()` -- the `Deref` impl
-    /// panics if accessed in this state.
-    pub(super) handle: Option<WorkerHandle>,
+    /// The worker and the guard that accounts for it, wrapped in `Option`
+    /// so [`take()`](Self::take) can extract the worker. `None` only after
+    /// `take()`, the `Deref` impl panics if accessed in this state. Holding
+    /// the two together means a worker leaves this guard either back into
+    /// the idle queue or retired from the group, never with its accounting
+    /// left behind.
+    held: Option<HeldWorker>,
     /// Back-reference to the group this worker belongs to, used by `Drop`
     /// to return the worker to the correct idle queue and semaphore.
-    pub(super) group: Arc<WorkerGroup>,
+    group: Arc<WorkerGroup>,
+}
+
+/// A worker out of its group's idle queue, with the guard counting it in
+/// the group's `away` while it is out.
+struct HeldWorker {
+    handle: WorkerHandle,
+    away: super::AwayFromQueue,
 }
 
 impl CheckedOutWorker {
+    /// Check out `handle`, just popped from `group`'s idle queue (its
+    /// permit already consumed): the only way to build this guard, so every
+    /// checked-out worker is accounted for from the moment it leaves the
+    /// queue.
+    pub(super) fn from_idle(group: &Arc<WorkerGroup>, handle: WorkerHandle) -> Self {
+        Self {
+            held: Some(HeldWorker {
+                handle,
+                away: super::AwayFromQueue::new(group, 1),
+            }),
+            group: Arc::clone(group),
+        }
+    }
+
     /// Take the worker out of this guard (e.g., because it died).
     ///
     /// The taken worker will be dropped normally (triggering `WorkerHandle::Drop`
-    /// which sends SIGTERM+SIGKILL). `total` is decremented and no permit is
-    /// released (the worker slot is gone).
+    /// which sends SIGTERM+SIGKILL). The slot is retired from the group:
+    /// `total` is decremented and the global permit refunded, and no idle
+    /// permit is released (the worker slot is gone).
     #[allow(dead_code)]
     pub fn take(&mut self) -> Option<WorkerHandle> {
-        let handle = self.handle.take()?;
-        self.discard_slot();
+        let HeldWorker { handle, away } = self.held.take()?;
+        away.retire();
         Some(handle)
     }
 
-    /// Decrement `total` and refund the spawn-admission permit for a
-    /// worker slot that is gone: crashed (`take()`, called explicitly by
-    /// `dispatch_batch_infer` after an Io/ProcessExited error), or
-    /// discarded because its request/response framing cannot be trusted
-    /// (`Drop`, when a cancellation left a request in flight). One owner
-    /// for this accounting so the two callers cannot drift apart.
-    fn discard_slot(&self) {
-        self.group
-            .total
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        self.group.spawn_permits.add_permits(1);
+    fn handle(&self) -> &WorkerHandle {
+        // Caller-contract invariant (see the `Deref` impl): callers must not
+        // dereference a guard after `.take()`. Reaching this expect
+        // indicates a bug in the calling code, not a recoverable runtime
+        // condition.
+        #[allow(clippy::expect_used)]
+        let held = self.held.as_ref().expect(
+            "BUG: CheckedOutWorker dereferenced after take() -- \
+             the worker handle has been consumed and is no longer available",
+        );
+        &held.handle
     }
 }
 
@@ -71,16 +96,9 @@ impl CheckedOutWorker {
 impl Deref for CheckedOutWorker {
     type Target = WorkerHandle;
     fn deref(&self) -> &WorkerHandle {
-        // Caller-contract invariant (see doc comment above): callers
-        // must not dereference a guard after `.take()`. The `Deref`
-        // trait cannot return `Result`, so a panic is the only signal
-        // available. Reaching this expect indicates a bug in the
-        // calling code, not a recoverable runtime condition.
-        #[allow(clippy::expect_used)]
-        self.handle.as_ref().expect(
-            "BUG: CheckedOutWorker dereferenced after take() -- \
-             the worker handle has been consumed and is no longer available",
-        )
+        // The `Deref` trait cannot return `Result`, so a panic is the only
+        // signal available for the caller-contract violation.
+        self.handle()
     }
 }
 
@@ -92,21 +110,24 @@ impl DerefMut for CheckedOutWorker {
     fn deref_mut(&mut self) -> &mut WorkerHandle {
         // Same caller-contract invariant as `Deref::deref` above.
         #[allow(clippy::expect_used)]
-        self.handle.as_mut().expect(
+        let held = self.held.as_mut().expect(
             "BUG: CheckedOutWorker dereferenced after take() -- \
              the worker handle has been consumed and is no longer available",
-        )
+        );
+        &mut held.handle
     }
 }
 
 impl Drop for CheckedOutWorker {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
+        if let Some(HeldWorker { handle, away }) = self.held.take() {
             match handle.request_flight() {
                 RequestFlight::Idle => {
-                    // Return the worker to the idle queue and release a permit.
+                    // Return the worker to the idle queue and release a
+                    // permit; only then does its guard stop counting it.
                     super::lock_recovered(&self.group.idle).push_back(handle);
                     self.group.available.add_permits(1);
+                    drop(away);
                 }
                 RequestFlight::InFlight => {
                     // A request was written and its response was never
@@ -120,7 +141,7 @@ impl Drop for CheckedOutWorker {
                     // response and misattribute it to an unrelated
                     // request. Discard exactly like `dispatch_batch_infer`
                     // already does for an Io/Protocol-broken worker: the
-                    // slot is freed via `discard_slot`, and `handle`
+                    // slot is retired through its guard, and `handle`
                     // drops here, triggering `WorkerHandle::Drop`'s
                     // SIGTERM+SIGKILL teardown of the process. Its late
                     // response, if any, can never reach a later request.
@@ -129,12 +150,12 @@ impl Drop for CheckedOutWorker {
                         "discarding worker with a cancelled in-flight request \
                          rather than returning it to the idle queue"
                     );
-                    self.discard_slot();
+                    away.retire();
                 }
             }
         }
-        // If handle was `None` (taken via `take()`), total was already
-        // decremented -- nothing to do.
+        // If the worker was taken via `take()`, its slot was already
+        // retired: nothing to do.
 
         // Wake ONE task parked on `WorkerPool::worker_returned`
         // typically a cross-key spawn attempt waiting for an eviction
@@ -143,8 +164,9 @@ impl Drop for CheckedOutWorker {
         // documented in BUG-028. If the woken waiter's key turns out
         // to be uneviable for this particular return, it re-parks on
         // the same Notify and the next return wakes the next-in-line
-        // waiter. Bounded retry is enforced by the dispatch slow
-        // path's `wait_deadline`.
+        // waiter. The waiter re-probes at least once per report
+        // interval as well (see `checkout_wait`), so a lost wakeup costs
+        // one interval, never the request.
         self.group.worker_returned.notify_one();
     }
 }
@@ -245,10 +267,7 @@ mod tests {
         let group = make_group();
         group.total.fetch_add(1, Ordering::Relaxed);
 
-        let mut worker = CheckedOutWorker {
-            handle: Some(handle),
-            group: group.clone(),
-        };
+        let mut worker = CheckedOutWorker::from_idle(&group, handle);
 
         let request = minimal_asr_request();
         {
@@ -270,7 +289,10 @@ mod tests {
             // the losing branch's future in the real retry loop.
         }
         assert_eq!(
-            worker.handle.as_ref().map(|h| h.request_flight()),
+            worker
+                .held
+                .as_ref()
+                .map(|held| held.handle.request_flight()),
             Some(RequestFlight::InFlight),
             "the write must have gone through (request genuinely in flight) for this test to \
              prove anything"
@@ -298,12 +320,12 @@ mod tests {
         let group = make_group();
         group.total.fetch_add(1, Ordering::Relaxed);
 
-        let worker = CheckedOutWorker {
-            handle: Some(handle),
-            group: group.clone(),
-        };
+        let worker = CheckedOutWorker::from_idle(&group, handle);
         assert_eq!(
-            worker.handle.as_ref().map(|h| h.request_flight()),
+            worker
+                .held
+                .as_ref()
+                .map(|held| held.handle.request_flight()),
             Some(RequestFlight::Idle)
         );
 
@@ -311,5 +333,31 @@ mod tests {
 
         assert_eq!(lock_recovered(&group.idle).len(), 1);
         assert_eq!(group.total.load(Ordering::Relaxed), 1);
+    }
+
+    /// A taken worker is retired with its accounting at once: while the
+    /// emptied guard is still alive it counts nothing, so it cannot mask a
+    /// worker lost elsewhere in the group.
+    #[tokio::test]
+    async fn a_taken_worker_leaves_no_guard_counting_it() {
+        let handle = WorkerHandle::spawn_stub_for_test(&never_responds_script()).await;
+        let group = make_group();
+        group.total.fetch_add(1, Ordering::Relaxed);
+        let mut worker = CheckedOutWorker::from_idle(&group, handle);
+        assert_eq!(group.away.load(Ordering::Relaxed), 1);
+
+        let taken = worker.take();
+        assert!(taken.is_some());
+        assert_eq!(group.total.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            group.away.load(Ordering::Relaxed),
+            0,
+            "the guard must not outlive the slot it accounted for"
+        );
+        // A worker lost from the same group is now visible, not masked.
+        group.total.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(group.unaccounted(), 1);
+        drop(worker);
+        assert_eq!(group.unaccounted(), 1);
     }
 }

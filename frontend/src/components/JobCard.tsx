@@ -18,6 +18,8 @@ export function JobCard({ job }: { job: JobListItem }) {
   const isRunning = job.status === "running";
   const errorFiles = job.error_files ?? 0;
   const hasErrors = errorFiles > 0;
+  // Written with diagnostics: output on disk, not certified complete.
+  const diagnosedFiles = job.diagnosed_files ?? 0;
   const multiServer = useStore((s) => s.wsConnectedMap.size > 1);
   const pct = progressPercent(job.completed_files, job.total_files);
   const [cmdBg, cmdText] = commandStyle(job.command);
@@ -48,6 +50,12 @@ export function JobCard({ job }: { job: JobListItem }) {
         {hasErrors && (
           <span className="text-[11px] text-red-500 font-medium">
             {errorFiles} failed
+          </span>
+        )}
+
+        {diagnosedFiles > 0 && (
+          <span className="text-[11px] text-amber-600 font-medium">
+            {diagnosedFiles} diagnosed
           </span>
         )}
 

@@ -1,7 +1,7 @@
 # Server Dispatch Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-02 14:49 EDT
+**Last updated:** 2026-10-06 19:57 EDT
 
 This page describes the implemented `batchalign3` runtime:
 
@@ -192,7 +192,15 @@ transition builds the whole phase it moves to, so nothing from the previous
 phase can survive by being forgotten. A file awaiting a retry is
 `RetryPending`: still `processing` on the API, with its deadline and the
 failure that caused it, and with no finish time or duration, since it has not
-finished. Progress (`FileProgress`) is separate, ephemeral display state.
+finished. A file whose own producer generated output that failed admission is
+`Diagnosed`: terminal like `Done`, its output written and downloadable, its
+admission findings (and any skipped stages) carried as
+`FileOutputDiagnostics`; it is never retried, never requeued by a restart and
+never counted as failed, so a job of done and diagnosed files completes. The
+runner reaches `Done` and `Diagnosed` through one transition,
+`mark_file_done(FileCompletion)`, whose `Clean` and `Diagnosed` arms the writer
+decides from the proof it wrote. Progress (`FileProgress`) is separate,
+ephemeral display state.
 
 ```mermaid
 stateDiagram-v2
@@ -200,7 +208,8 @@ stateDiagram-v2
     Queued --> Processing: mark_file_processing / start_file_attempt
     Processing --> RetryPending: mark_file_retry_pending
     RetryPending --> Processing: clear_file_retry_state / start_file_attempt
-    Processing --> Done: mark_file_done
+    Processing --> Done: mark_file_done (Clean)
+    Processing --> Diagnosed: mark_file_done (Diagnosed)
     Processing --> Error: mark_file_error
     Queued --> Error: setup refusal
     Processing --> Interrupted: server stopped (recovery)
@@ -211,10 +220,13 @@ stateDiagram-v2
 
 A phase and its `file_statuses` row are converted by one pair of functions.
 `FilePhase::columns` is the column image of a phase (`status`, `error`,
-`error_category`, `started_at`, `finished_at`, `next_eligible_at`), with
-`None` written as NULL; `JobDB::update_file_status` takes the phase and writes
-that whole image, so every file transition replaces all six columns and none
-survives from an earlier phase. A pending retry stores its failed attempt's end
+`error_category`, `diagnostics`, `started_at`, `finished_at`,
+`next_eligible_at`), with `None` written as NULL; `JobDB::update_file_status`
+takes the phase and writes that whole image, so every file transition replaces
+all seven columns and none survives from an earlier phase. `diagnostics` holds a
+diagnosed file's findings as JSON, decoded at the database boundary
+(`recover_file_phase`); unreadable JSON makes the row foreign rather than being
+guessed at. A pending retry stores its failed attempt's end
 in `finished_at` beside its deadline. At startup, each file of an interrupted
 job is read as its phase and moved through `FilePhase::interrupted`; a row the
 move changes (an in-flight phase) is written from the interrupted phase's image

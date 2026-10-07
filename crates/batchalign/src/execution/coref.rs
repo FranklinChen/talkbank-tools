@@ -55,9 +55,17 @@ pub(crate) async fn dispatch_coref_job(
         return Ok(());
     }
 
-    let results = gateway
-        .coref_batch(&inputs.file_texts, Cancellation::Token(&job.cancel_token))
-        .await;
+    // One batch over every file: a saturated checkout shows on all of them.
+    let results = crate::runner::util::observing_file_waits(
+        &sink,
+        &job.identity.job_id,
+        inputs
+            .file_texts
+            .iter()
+            .map(|file| file.filename.to_string()),
+        gateway.coref_batch(&inputs.file_texts, Cancellation::Token(&job.cancel_token)),
+    )
+    .await;
 
     write_text_results(job, host, &plan, results, should_merge_abbrev, "Coref").await;
     Ok(())
@@ -110,7 +118,6 @@ mod tests {
             &self,
             _chat_text: &str,
             _before_text: Option<&str>,
-            _lang: &LanguageCode3,
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
@@ -132,8 +139,7 @@ mod tests {
         async fn translate_file(
             &self,
             _file: &TextBatchFileInput,
-            _lang: &LanguageCode3,
-            _engine: &crate::types::engines::TranslateEngineName,
+            _route: &crate::translate::TranslationRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             unreachable!()

@@ -39,6 +39,14 @@ pub trait ProgressDisplay: Send + Sync {
     fn log_done(&self, filename: &str);
     /// Log a failed file with error message.
     fn log_error(&self, filename: &str, msg: &str);
+    /// Log a file whose output was written with admission diagnostics:
+    /// neither a clean success nor a failure. `None` when the server did not
+    /// record them (a status restored from an older database row).
+    fn log_diagnosed(
+        &self,
+        filename: &str,
+        diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+    );
     /// Mark processing as complete.
     fn finish(&self);
     /// Update server health snapshot. Default no-op for non-TUI sinks.
@@ -122,6 +130,18 @@ impl BatchProgress {
         self.overall.println(format!("  \u{2713} {filename}"));
     }
 
+    /// Log a file written with diagnostics (printed above the progress bar).
+    pub fn log_diagnosed(
+        &self,
+        filename: &str,
+        diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+    ) {
+        self.overall.println(format!(
+            "  ! {filename}: {}",
+            diagnosed_summary(diagnostics)
+        ));
+    }
+
     /// Log a failed file (printed above the progress bar).
     pub fn log_error(&self, filename: &str, msg: &str) {
         let first_line = msg.split('\n').next().unwrap_or("unknown error");
@@ -151,7 +171,60 @@ impl ProgressDisplay for BatchProgress {
         self.log_error(filename, msg);
     }
 
+    fn log_diagnosed(
+        &self,
+        filename: &str,
+        diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+    ) {
+        self.log_diagnosed(filename, diagnostics);
+    }
+
     fn finish(&self) {
         self.finish();
     }
+}
+
+/// One line describing a file written with diagnostics: how many findings and
+/// the first of them, how many stages were not applied, and how many words
+/// forced alignment left untimed.
+pub(crate) fn diagnosed_summary(diagnostics: Option<&crate::api::FileOutputDiagnostics>) -> String {
+    let Some(diagnostics) = diagnostics else {
+        return "written with diagnostics (not recorded)".to_string();
+    };
+    let count = diagnostics.finding_count();
+    let noun = if count == 1 {
+        "diagnostic"
+    } else {
+        "diagnostics"
+    };
+    let mut line = format!("written with {count} {noun}");
+    if let Some(first) = diagnostics.first_findings().first() {
+        line.push_str(&format!(" (first: {first})"));
+    }
+    let mut stages = 0;
+    for shortfall in &diagnostics.shortfalls {
+        match shortfall {
+            crate::api::OutputShortfallRecord::StageSkipped { .. }
+            | crate::api::OutputShortfallRecord::StageNotApplied { .. } => stages += 1,
+            crate::api::OutputShortfallRecord::StageHeldOut {
+                stage,
+                held_out_utterances,
+                ..
+            } => line.push_str(&format!(
+                "; {} left out of {held_out_utterances} utterance(s)",
+                stage.name()
+            )),
+            crate::api::OutputShortfallRecord::TimingIncomplete {
+                required_words,
+                untimed_words,
+                ..
+            } => line.push_str(&format!(
+                "; {untimed_words} of {required_words} words untimed"
+            )),
+        }
+    }
+    if stages > 0 {
+        line.push_str(&format!("; {stages} requested stage(s) not applied"));
+    }
+    line
 }

@@ -1,7 +1,7 @@
 # Morphotag Retokenization
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:57 EDT
+**Last updated:** 2026-10-04 17:48 EDT
 
 ## Purpose and audience
 
@@ -119,6 +119,48 @@ We chose this split because the two goals, "preserve the transcript" and
 tasks. CLAN-style workflows want Preserve; UD-trained parsers and treebank
 comparisons want Retokenize. Neither is a default "for everyone."
 
+### Scoped annotations and complete expansion
+
+An annotation belongs to its entire source word, not just the first token of
+a model split. Retokenizing `I can't [= cannot] go .` produces
+`I <ca n't> [= cannot] go .`. The original explanation scopes over both output
+words. Existing group and quotation boundaries remain intact; an annotation
+inside a group may become an inner annotated group.
+
+Replacement targets use the same complete-expansion operation. For example,
+`I cannot [: can't] go .` becomes `I cannot [: ca n't] go .`: the transcriber's
+displayed `cannot` is retained, and only the selected target is expanded.
+Alignment-excluded `[e]` material consumes no model positions and is unchanged.
+Preserve mode does not make these main-tier changes.
+
+`retokenize/rebuild/scoped.rs` admits all mapped words before committing any
+model position. Its admitted expansion owns a nonempty set of output words
+and borrows its producing context; a consumer cannot redirect its indices or
+replace it with a first-token approximation. Main-tier and bracketed callers
+consume that same operation. New model words use the existing grammar-backed
+word-fragment constructor, not a second CHAT parser or a whole-file reparse.
+
+The admitted UD walk retains each MWT range's surface spelling and component
+ownership. A text-bound source mapping follows those components through any
+lexicon expansion; it is not reconstructed from their concatenated spellings.
+For example, `decírmelo [= infinitive] .` can become
+`<decir me lo> [= infinitive] .` even though the component spelling loses the
+accent. This does not license accent stripping or arbitrary spelling changes:
+the source must match the model's surface token, and every expansion position
+must be admitted before rewriting. Ordered expansion never upgrades a
+length-guessed mapping into a text-bound one.
+
+Length-guessed correspondences and tokens crossing the source annotation's
+word boundary cannot establish scope and are refused. A word whose suffix,
+content markings, identity or timing cannot be retained during a changed
+expansion is also refused rather than stripped or copied onto a guessed token.
+An unchanged single word keeps all its original structured evidence.
+
+Any refused rebuild restores the original main tier and returns a typed
+injection failure, even when counts happen to match. Final tier admission must
+also succeed before the main-tier rewrite is retained. No partial expansion
+certifies `InjectionResult`; the file's output boundary remains fail-closed.
+
 ## Pipeline diagram (end-to-end, both modes)
 
 The flowchart below traces a single CHAT utterance from Rust parse to CHAT
@@ -150,7 +192,7 @@ flowchart TD
 
     Serial --> Out["CHAT file with %mor / %gra"]
 
-    Retok -.->|"on mismatch"| Taint["mark_parse_taint(Main)\n(talkbank-transform/src/retokenize.rs)"]
+    Retok -.->|"on refusal"| Refuse["Restore original main tier\nReturn injection failure\n(batchalign-transform/src/retokenize.rs)"]
 ```
 
 Both branches end with `inject_morphosyntax()`: the tier-insertion machinery is mode-agnostic.

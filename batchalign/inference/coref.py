@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from functools import partial
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
@@ -23,6 +24,9 @@ from batchalign.providers import (
 )
 from batchalign.worker._batch import ItemWork, Unexecuted, answer_batch
 from batchalign.worker._types import reported_engine_name
+
+if TYPE_CHECKING:
+    from stanza.models.common.doc import Document
 
 L = logging.getLogger("batchalign.worker")
 
@@ -90,6 +94,61 @@ class CorefRawResponse(BaseModel):
     annotations: list[CorefRawAnnotation]
 
 
+class _CompletedCorefAnalysis:
+    """Bind native model coverage before producing sparse wire annotations.
+
+    Sparse chains do not imply sparse analysis. Construction verifies every
+    request sentence and word, including those with no chains, so truncation
+    cannot become a successful empty response.
+    """
+
+    __slots__ = ("_annotations",)
+
+    def __init__(self, request: CorefBatchItem, document: Document) -> None:
+        if len(document.sentences) != len(request.sentences):
+            raise ValueError(
+                "coref sentence coverage mismatch: "
+                f"expected {len(request.sentences)}, got {len(document.sentences)}"
+            )
+        annotations: list[CorefRawAnnotation] = []
+        for sentence_idx, (expected, sentence) in enumerate(
+            zip(request.sentences, document.sentences, strict=True)
+        ):
+            actual = [word.text for word in sentence.words]
+            if actual != expected:
+                raise ValueError(
+                    f"coref word binding mismatch in sentence {sentence_idx}: "
+                    f"expected {len(expected)} words, got {len(actual)} "
+                    "or different word identities"
+                )
+            words = [
+                [
+                    ChainRef(
+                        chain_id=chain.chain.index,
+                        is_start=chain.is_start,
+                        is_end=chain.is_end,
+                    )
+                    for chain in word.coref_chains
+                ]
+                for word in sentence.words
+            ]
+            if any(words):
+                annotations.append(
+                    CorefRawAnnotation(sentence_idx=sentence_idx, words=words)
+                )
+        self._annotations = tuple(annotations)
+
+    def resolved(self, engine: str) -> ItemProduced:
+        """Only a completed, source-bound analysis emits a resolved item."""
+        return ItemProduced(
+            result={
+                "kind": "resolved",
+                **CorefRawResponse(annotations=list(self._annotations)).model_dump(),
+                "engine": engine,
+            }
+        )
+
+
 def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
     """Batch Stanza coref inference: sentences -> structured chain annotations.
 
@@ -149,47 +208,7 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
             text = "\n\n".join(" ".join(s) for s in item.sentences)
             result = pipeline(text)
 
-            annotations: list[CorefRawAnnotation] = []
-            sent_idx = 0
-            for sent in result.sentences:
-                if sent_idx >= len(item.sentences):
-                    break
-
-                word_chains: list[list[ChainRef]] = []
-                has_coref = False
-
-                for word in sent.words:
-                    if word.coref_chains:
-                        has_coref = True
-                        refs: list[ChainRef] = [
-                            ChainRef(
-                                chain_id=chain.chain.index,
-                                is_start=chain.is_start,
-                                is_end=chain.is_end,
-                            )
-                            for chain in word.coref_chains
-                        ]
-                        word_chains.append(refs)
-                    else:
-                        word_chains.append([])
-
-                if has_coref:
-                    annotations.append(
-                        CorefRawAnnotation(
-                            sentence_idx=sent_idx,
-                            words=word_chains,
-                        )
-                    )
-
-                sent_idx += 1
-
-            return ItemProduced(
-                result={
-                    "kind": "resolved",
-                    **CorefRawResponse(annotations=annotations).model_dump(),
-                    "engine": engine,
-                }
-            )
+            return _CompletedCorefAnalysis(item, result).resolved(engine)
         except Exception as e:
             L.warning("Coref infer failed for item %d: %s", item_idx, e)
             return ItemFailed(error=f"Coref failed: {e}")

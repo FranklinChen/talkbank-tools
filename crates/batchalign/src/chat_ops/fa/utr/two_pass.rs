@@ -18,7 +18,7 @@
 //! remains the tiebreaker when grouping context is unavailable or group counts
 //! are equal.
 
-use talkbank_model::model::{Bullet, ChatFile, Line};
+use talkbank_model::model::{ChatFile, Line};
 
 use std::str::FromStr;
 
@@ -28,8 +28,8 @@ use crate::chat_ops::fa::utr::AnchorIndex;
 use batchalign_transform::dp_align::{self, MatchMode};
 
 use super::{
-    AsrTimingToken, GlobalUtrParticipation, UtrResult, UtrStrategy, UtrUtteranceInfo,
-    collect_utr_utterance_info, run_global_utr,
+    AsrTimingToken, GlobalUtrParticipation, PositiveUtrInterval, UtrResult, UtrStrategy,
+    UtrUtteranceInfo, collect_utr_utterance_info, run_global_utr,
 };
 
 /// Parameters needed to compare FA grouping outcomes between strategies.
@@ -428,7 +428,7 @@ fn run_two_pass_inner(
     let total_utts = pre_infos.len();
     let overlap_utts = pre_infos
         .iter()
-        .filter(|i| i.has_lazy_overlap || (config.ca_markers.is_enabled() && i.has_ca_overlap))
+        .filter(|i| is_recoverable_overlap(i, config))
         .count();
     let overlap_fraction = if total_utts > 0 {
         overlap_utts as f64 / total_utts as f64
@@ -496,13 +496,14 @@ fn run_two_pass_inner(
         .collect();
 
     // Track which +< utterances we successfully time in pass 2.
-    let mut pass2_bullets: Vec<(usize, u64, u64)> = Vec::new();
+    let mut pass2_bullets: Vec<RecoveredOverlapBullet> = Vec::new();
 
     for (utt_idx, info) in utt_infos.iter().enumerate() {
         // Recover timing for +< utterances and ⌊-bearing (CA overlap) utterances.
-        let is_overlap =
-            info.has_lazy_overlap || (config.ca_markers.is_enabled() && info.has_ca_overlap);
-        if !is_overlap || info.has_bullet || info.words.is_empty() {
+        if !is_recoverable_overlap(info, config)
+            || info.retained_timing.is_some()
+            || info.words.is_empty()
+        {
             continue;
         }
 
@@ -515,7 +516,7 @@ fn run_two_pass_inner(
         };
 
         // Adaptive window: try narrow first, widen on failure.
-        if let Some((start_ms, end_ms)) = recover_with_adaptive_window(
+        if let Some(interval) = recover_with_adaptive_window(
             &info.words,
             asr_tokens,
             utt_idx,
@@ -523,7 +524,10 @@ fn run_two_pass_inner(
             pred_onset_fraction,
             config,
         ) {
-            pass2_bullets.push((utt_idx, start_ms, end_ms));
+            pass2_bullets.push(RecoveredOverlapBullet {
+                utterance_index: super::UtrUtteranceOrdinal(utt_idx),
+                interval,
+            });
             result.discard_recovered_unmatched_decision(utt_line_indices[utt_idx]);
         }
     }
@@ -534,10 +538,10 @@ fn run_two_pass_inner(
         let mut bullet_iter = pass2_bullets.iter().peekable();
         for line in &mut chat_file.lines {
             if let Line::Utterance(utt) = line {
-                if let Some(&&(target_idx, start_ms, end_ms)) = bullet_iter.peek()
-                    && utt_idx == target_idx
+                if let Some(recovered) = bullet_iter.peek()
+                    && utt_idx == recovered.utterance_index.index()
                 {
-                    utt.main.content.bullet = Some(Bullet::new(start_ms, end_ms));
+                    utt.main.content.bullet = Some(recovered.interval.into_hint());
                     bullet_iter.next();
                 }
                 utt_idx += 1;
@@ -548,33 +552,103 @@ fn run_two_pass_inner(
     // Derive the final counts from the before/after bullet states. This avoids
     // increment/decrement bookkeeping that could underflow or drift when a
     // future recovery path changes which pass supplied a bullet.
-    let final_counts = before_bullets.transition_to(UtrBulletPopulation::from_chat(chat_file))?;
+    let final_counts = before_bullets.transition_to(UtrBulletsAfter::from_chat(chat_file))?;
     result.skipped = final_counts.skipped;
     result.injected = final_counts.injected;
     result.unmatched = final_counts.unmatched;
 
     let recoveries = pass2_bullets
         .into_iter()
-        .map(
-            |(utterance_index, start_ms, end_ms)| super::UtrOverlapRecovery {
-                utterance_index: super::UtrUtteranceOrdinal(utterance_index),
-                start_ms,
-                end_ms,
-            },
-        )
+        .map(|recovered| super::UtrOverlapRecovery {
+            utterance_index: recovered.utterance_index,
+            start_ms: recovered.interval.start_ms(),
+            end_ms: recovered.interval.end_ms(),
+        })
         .collect();
     Ok(result.with_overlap_recoveries(recoveries))
 }
 
-/// Bullet presence for the complete main-tier population at one pipeline state.
+/// Whether pass 2 recovers this utterance on its own: a `+<` utterance, or a
+/// bottom CA overlap when CA markers are enabled. An utterance not in the
+/// recording never is, so it neither counts toward the overlap density nor
+/// is searched for.
+fn is_recoverable_overlap(info: &UtrUtteranceInfo, config: &TwoPassConfig) -> bool {
+    match info.presence {
+        crate::chat_ops::fa::RecordingPresence::NotInRecording(_) => false,
+        crate::chat_ops::fa::RecordingPresence::InRecording => {
+            info.has_lazy_overlap || (config.ca_markers.is_enabled() && info.has_ca_overlap)
+        }
+    }
+}
+
+/// A local recovery ready for projection; its producer admitted its interval.
+struct RecoveredOverlapBullet {
+    utterance_index: super::UtrUtteranceOrdinal,
+    interval: PositiveUtrInterval,
+}
+
+/// What one utterance was to recovery before it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UtrSlot {
+    /// Timed already: skipped.
+    Timed,
+    /// Untimed speech: recovery's to time.
+    Untimed,
+    /// Not in the recording: not recovery's to time, and never counted.
+    NotInRecording,
+}
+
+/// The complete main-tier population before recovery, by utterance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UtrBulletPopulation(Vec<bool>);
+struct UtrBulletPopulation(Vec<UtrSlot>);
+
+/// Bullet presence for the complete main-tier population after recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UtrBulletsAfter(Vec<bool>);
 
 impl UtrBulletPopulation {
     fn from_infos(infos: &[UtrUtteranceInfo]) -> Self {
-        Self(infos.iter().map(|info| info.has_bullet).collect())
+        Self(
+            infos
+                .iter()
+                .map(|info| match (info.presence, &info.retained_timing) {
+                    (crate::chat_ops::fa::RecordingPresence::NotInRecording(_), _) => {
+                        UtrSlot::NotInRecording
+                    }
+                    (crate::chat_ops::fa::RecordingPresence::InRecording, Some(_)) => {
+                        UtrSlot::Timed
+                    }
+                    (crate::chat_ops::fa::RecordingPresence::InRecording, None) => UtrSlot::Untimed,
+                })
+                .collect(),
+        )
     }
 
+    fn transition_to(self, after: UtrBulletsAfter) -> Result<UtrFinalCounts, UtrPopulationChanged> {
+        if self.0.len() != after.0.len() {
+            return Err(UtrPopulationChanged::Count {
+                before: self.0.len(),
+                after: after.0.len(),
+            });
+        }
+
+        let mut counts = UtrFinalCounts::default();
+        for (utterance, (before, after)) in self.0.into_iter().zip(after.0).enumerate() {
+            match (before, after) {
+                (UtrSlot::NotInRecording, false) => {}
+                (UtrSlot::NotInRecording, true) => {
+                    return Err(UtrPopulationChanged::OffRecordTimed { utterance });
+                }
+                (UtrSlot::Timed, _) => counts.skipped += 1,
+                (UtrSlot::Untimed, true) => counts.injected += 1,
+                (UtrSlot::Untimed, false) => counts.unmatched += 1,
+            }
+        }
+        Ok(counts)
+    }
+}
+
+impl UtrBulletsAfter {
     fn from_chat(chat_file: &ChatFile) -> Self {
         Self(
             chat_file
@@ -587,25 +661,6 @@ impl UtrBulletPopulation {
                 .collect(),
         )
     }
-
-    fn transition_to(self, after: Self) -> Result<UtrFinalCounts, UtrPopulationChanged> {
-        if self.0.len() != after.0.len() {
-            return Err(UtrPopulationChanged {
-                before: self.0.len(),
-                after: after.0.len(),
-            });
-        }
-
-        let mut counts = UtrFinalCounts::default();
-        for (before, after) in self.0.into_iter().zip(after.0) {
-            match (before, after) {
-                (true, _) => counts.skipped += 1,
-                (false, true) => counts.injected += 1,
-                (false, false) => counts.unmatched += 1,
-            }
-        }
-        Ok(counts)
-    }
 }
 
 /// Final UTR counts derived from a population-preserving bullet transition.
@@ -616,12 +671,14 @@ struct UtrFinalCounts {
     unmatched: usize,
 }
 
-/// A UTR pass unexpectedly inserted or removed main-tier utterances.
+/// A UTR pass changed the main-tier population it was given: inserted or
+/// removed utterances, or timed one that is not in the recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("main-tier population changed during UTR: before={before}, after={after}")]
-struct UtrPopulationChanged {
-    before: usize,
-    after: usize,
+enum UtrPopulationChanged {
+    #[error("main-tier population changed during UTR: before={before}, after={after}")]
+    Count { before: usize, after: usize },
+    #[error("UTR timed utterance {utterance}, which is not in the recording")]
+    OffRecordTimed { utterance: usize },
 }
 
 /// Count utterances that have a bullet (timed) in the chat file.
@@ -667,7 +724,7 @@ fn recover_with_adaptive_window(
     utt_bullets: &[Option<(u64, u64)>],
     pred_onset_fraction: Option<f64>,
     config: &TwoPassConfig,
-) -> Option<(u64, u64)> {
+) -> Option<PositiveUtrInterval> {
     // Find predecessor bullet
     let (pred_start, pred_end) = find_predecessor_bullet(utt_idx, utt_bullets)?;
     let pred_duration = pred_end.saturating_sub(pred_start);
@@ -751,7 +808,7 @@ fn find_predecessor_onset_fraction(utt_idx: usize, utt_infos: &[UtrUtteranceInfo
 
         // Stop after first different-speaker utterance with a bullet
         // (don't search too far back).
-        if prev.has_bullet {
+        if prev.retained_timing.is_some() {
             break;
         }
     }
@@ -762,7 +819,7 @@ fn find_predecessor_onset_fraction(utt_idx: usize, utt_infos: &[UtrUtteranceInfo
             if let Some(fraction) = utt_infos[prev_idx].overlap_onset_fraction {
                 return Some(fraction);
             }
-            if utt_infos[prev_idx].has_bullet {
+            if utt_infos[prev_idx].retained_timing.is_some() {
                 break;
             }
         }
@@ -798,7 +855,7 @@ pub fn recover_overlap_timing(
     window_start_ms: u64,
     window_end_ms: u64,
     dp_match_mode: MatchMode,
-) -> Option<(u64, u64)> {
+) -> Option<PositiveUtrInterval> {
     let windowed =
         super::lexical::UtrLexicalStream::within_window(asr_tokens, window_start_ms, window_end_ms);
 
@@ -808,37 +865,47 @@ pub fn recover_overlap_timing(
 
     let windowed_texts = windowed.texts();
 
-    let alignment = dp_align::align(words, &windowed_texts, dp_match_mode);
-
-    let mut min_start: Option<u64> = None;
-    let mut max_end: Option<u64> = None;
-
-    for result_item in &alignment {
-        if let dp_align::AlignResult::Match { reference_idx, .. } = result_item {
-            let token = windowed.timing_token(*reference_idx);
-            match min_start {
-                Some(s) if token.start_ms < s => min_start = Some(token.start_ms),
-                None => min_start = Some(token.start_ms),
-                _ => {}
-            }
-            match max_end {
-                Some(e) if token.end_ms > e => max_end = Some(token.end_ms),
-                None => max_end = Some(token.end_ms),
-                _ => {}
-            }
-        }
-    }
-
-    match (min_start, max_end) {
-        (Some(start), Some(end)) => Some((start, end)),
-        _ => None,
+    let alignment =
+        dp_align::CorrespondenceAnalysis::observe(words, &windowed_texts, dp_match_mode);
+    let dp_align::CorrespondenceAdmission::Complete(common) = alignment.admission() else {
+        return None;
+    };
+    let payload = words
+        .iter()
+        .enumerate()
+        .map(|(index, text)| super::UtrPayloadWord {
+            text: text.clone(),
+            address: super::UtrWordAddress {
+                utterance_index: super::UtrUtteranceOrdinal(0),
+                word_index: super::evidence::UtrWordOrdinal(index),
+            },
+        })
+        .collect::<Vec<_>>();
+    let admitted =
+        super::NonEmptyAdmittedUtrWordMatches::from_vec(windowed.common_matches(common, &payload))?;
+    // This windowed proof observes common correspondences only.
+    let super::lexical::BoundaryAdmission::Bound(admitted) =
+        admitted.admit_endpoints(words.len(), super::lexical::EndpointExtents::UNOBSERVED)
+    else {
+        return None;
+    };
+    match admitted.proposal() {
+        super::UtrTimingProposal::Positive { interval } => Some(interval),
+        super::UtrTimingProposal::NonPositive { .. } => None,
     }
 }
+
+#[cfg(test)]
+mod timing_hull_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat_ops::fa::coordinates::Ms;
+
+    fn expected_interval(start_ms: u64, end_ms: u64) -> PositiveUtrInterval {
+        PositiveUtrInterval::admit(start_ms, end_ms).expect("positive expected interval")
+    }
 
     /// The recording the grouping-comparison fixtures group against.
     fn sixty_second_recording() -> Recording {
@@ -850,7 +917,7 @@ mod tests {
         let tokens = make_asr_tokens(&[("outside", 0, 50), ("hello world", 100, 900)]);
         assert_eq!(
             recover_overlap_timing(&["world".to_owned()], &tokens, 400, 600, MatchMode::Exact),
-            Some((100, 900)),
+            Some(expected_interval(100, 900)),
         );
     }
 
@@ -872,12 +939,38 @@ mod tests {
 
     #[test]
     fn rejects_a_changed_utterance_population_instead_of_truncating_counts() {
-        let error = UtrBulletPopulation(vec![false, true])
-            .transition_to(UtrBulletPopulation(vec![true]))
+        let error = UtrBulletPopulation(vec![UtrSlot::Untimed, UtrSlot::Timed])
+            .transition_to(UtrBulletsAfter(vec![true]))
             .expect_err("population changes must be explicit");
 
-        assert_eq!(error.before, 2);
-        assert_eq!(error.after, 1);
+        assert_eq!(
+            error,
+            UtrPopulationChanged::Count {
+                before: 2,
+                after: 1
+            }
+        );
+    }
+
+    /// An utterance not in the recording is never counted: neither skipped,
+    /// injected nor unmatched (an unmatched count asks for fallback recovery).
+    #[test]
+    fn an_utterance_not_in_the_recording_is_not_counted() {
+        let counts = UtrBulletPopulation(vec![
+            UtrSlot::Timed,
+            UtrSlot::NotInRecording,
+            UtrSlot::Untimed,
+        ])
+        .transition_to(UtrBulletsAfter(vec![true, false, true]))
+        .expect("same population");
+        assert_eq!(
+            counts,
+            UtrFinalCounts {
+                skipped: 1,
+                injected: 1,
+                unmatched: 0,
+            }
+        );
     }
     use talkbank_parser::TreeSitterParser;
 
@@ -897,7 +990,7 @@ mod tests {
         let words = vec!["mhm".to_string()];
         let tokens = make_asr_tokens(&[("mhm", 1800, 2200)]);
         let result = recover_overlap_timing(&words, &tokens, 0, 3000, MatchMode::CaseInsensitive);
-        assert_eq!(result, Some((1800, 2200)));
+        assert_eq!(result, Some(expected_interval(1800, 2200)));
     }
 
     #[test]
@@ -913,7 +1006,7 @@ mod tests {
         let words = vec!["oh".to_string(), "okay".to_string()];
         let tokens = make_asr_tokens(&[("oh", 1500, 1700), ("okay", 1800, 2200)]);
         let result = recover_overlap_timing(&words, &tokens, 0, 3000, MatchMode::CaseInsensitive);
-        assert_eq!(result, Some((1500, 2200)));
+        assert_eq!(result, Some(expected_interval(1500, 2200)));
     }
 
     #[test]
@@ -973,7 +1066,7 @@ mod tests {
             None,
             &TwoPassConfig::default(),
         );
-        assert_eq!(result, Some((1800, 2200)));
+        assert_eq!(result, Some(expected_interval(1800, 2200)));
     }
 
     #[test]
@@ -994,7 +1087,7 @@ mod tests {
             None,
             &TwoPassConfig::default(),
         );
-        assert_eq!(result, Some((6500, 6800)));
+        assert_eq!(result, Some(expected_interval(6500, 6800)));
     }
 
     #[test]
@@ -1035,7 +1128,7 @@ mod tests {
             Some(0.6),
             &TwoPassConfig::default(),
         );
-        assert_eq!(result, Some((13200, 13500)));
+        assert_eq!(result, Some(expected_interval(13200, 13500)));
     }
 
     /// Without onset fraction, a token near the end of a long predecessor
@@ -1073,7 +1166,7 @@ mod tests {
             &TwoPassConfig::default(),
         );
         assert!(without.is_some(), "should find without onset fraction too");
-        assert_eq!(with, Some((16000, 16300)));
+        assert_eq!(with, Some(expected_interval(16000, 16300)));
     }
 
     /// When pass 2 leaves more unmatched than global would, the best-of-both

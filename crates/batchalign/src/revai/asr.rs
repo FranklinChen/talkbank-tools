@@ -50,7 +50,7 @@ async fn infer_revai_evidence(
                 lang.clone()
             }
             crate::api::AsrLanguageRequest::Detect => {
-                let client = RevAiClient::new(api_key.as_str());
+                let client = RevAiClient::new(api_key.as_str())?;
                 match client.identify_language_bytes_blocking(
                     &media.bytes,
                     &media.upload_file_name,
@@ -228,7 +228,7 @@ pub(super) fn fetch_revai_transcript(
     lang: &RevLanguage,
     num_speakers: Option<NumSpeakers>,
 ) -> crate::revai::Result<TranscriptResult> {
-    let client = RevAiClient::new(api_key.as_str());
+    let client = RevAiClient::new(api_key.as_str())?;
     let options = rev_submit_options(lang, num_speakers, &media.metadata);
     client.transcribe_bytes_blocking(
         &media.bytes,

@@ -27,6 +27,30 @@ from batchalign.worker._types import (
 )
 
 
+def test_whisper_loader_reports_observed_window_algorithm_identity(monkeypatch) -> None:
+    from batchalign.inference.fa import WHISPER_FA_ENGINE_ID
+    from batchalign.worker._model_loading.forced_alignment import load_fa_engine
+    from batchalign.worker._types import WorkerBootstrapRuntime
+
+    handle = object()
+    monkeypatch.setattr(_state, "fa_model_name", None)
+    monkeypatch.setattr(_state, "whisper_fa_model", None)
+    monkeypatch.setattr(
+        "batchalign.inference.fa.load_whisper_fa", lambda **_kwargs: handle
+    )
+    load_fa_engine(
+        WorkerBootstrapRuntime(
+            task=InferTask.FA,
+            lang="eng",
+            num_speakers=1,
+            engine_overrides={"fa": "whisper"},
+        )
+    )
+    assert _state.whisper_fa_model is handle
+    assert _reported_engine(InferTask.FA) == WHISPER_FA_ENGINE_ID
+    assert WHISPER_FA_ENGINE_ID != "whisper-fa-large-v2"
+
+
 def test_stanza_version_reads_the_installed_package() -> None:
     """The one accessor reads ``stanza.__version__``, never the engine name."""
     import stanza
@@ -118,7 +142,7 @@ def test_a_loaded_translation_refuses_an_unreportable_engine() -> None:
     with pytest.raises(InvalidReportedEngineName):
         LoadedTranslation(
             engine="models|nllb",
-            translate=lambda text, _lang: text,
+            translate=lambda text, _source, _target: text,
         )
 
 

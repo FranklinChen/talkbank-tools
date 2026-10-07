@@ -1,7 +1,7 @@
 # avqi
 
 **Status:** Current
-**Last updated:** 2026-04-08 07:40 EDT
+**Last updated:** 2026-10-05 17:00 EDT
 
 Calculate the Acoustic Voice Quality Index (AVQI) from paired audio files.
 Requires paired **continuous speech** (`.cs.*`) and **sustained vowel**
@@ -63,6 +63,9 @@ For each speaker, place two files in `INPUT_DIR`:
 The pair is matched by the common stem before `.cs.` / `.sv.`. Missing
 partners are reported as an error.
 
+Pairing uses the original recording names before media conversion. Converted
+cache paths and prepared PCM artifacts cannot become source identities.
+
 ---
 
 ## Output format
@@ -71,6 +74,12 @@ Each speaker pair produces `SPEAKER.avqi.txt` with AVQI metrics including:
 harmonics-to-noise ratio (HNR), jitter, shimmer, and the composite AVQI
 score. BA3 uses the same metrics and text format as BA2 while moving audio
 preprocessing behind the typed media-analysis worker boundary.
+
+The report's `CS File` and `SV File` fields identify the original recordings,
+not temporary worker artifacts. A successful response with finite metrics is
+required before a report can be written. Failed or silent-input analysis does
+not produce a zero-valued success report; terminal local-analysis details are
+reported without assuming an external service or API-key problem.
 
 ---
 

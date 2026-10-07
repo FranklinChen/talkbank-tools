@@ -5,6 +5,547 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Align leaves `[+ diary]` utterances untimed
+
+- An utterance marked `[+ diary]` is a written diary note, not speech in the
+  recording (ruling of 2026-10-07). Align no longer looks for one in the
+  audio: UTR offers none of its words for matching (it used to match a note's
+  words to the nearest similar speech and give the note a bullet, a
+  placement of something the recording does not contain), interpolation gives
+  it no share of a gap, grouping makes no request for it, a bullet on it is
+  never an anchor for its neighbours, and a file whose only untimed utterances
+  are notes runs no UTR. It is reported untimed with the new cause
+  `not_in_recording` (`postcode: diary`), so the file is `diagnosed`.
+- A bullet the input gave a note follows `--main-bullets`: `derive` (the
+  default) writes the note without one, since it has no aligned word to derive
+  one from; `keep` and `exact` keep it exactly as given, restored only after
+  bullet repair and monotonicity have run, so no neighbour is cut or ordered
+  against it; if timing aligned around it then conflicts with it, the file is
+  refused as `KeptOffRecordBulletConflict` (validation), naming the notes.
+  Any other timing on a note in the output is an internal fault
+  (`OffRecordUtteranceTimed`), and nothing is written. UTR does not count a
+  note as unmatched (which used to trigger a fallback recovery pass), and a
+  fully word-timed file with notes still takes the `%wor` reuse fast path.
+- The postcode is read from Chatter's typed postcodes. The CHAT manual defines
+  no fixed postcode set, so no other postcode excludes an utterance.
+- Wire: `UntimedCauseRecord::NotInRecording { postcode }` and
+  `OffRecordPostcode`; `openapi.json` and the dashboard types regenerated.
+
+### Chatter 0.29.0
+
+- The CHAT crates are pinned to the published Chatter 0.29.0 commit
+  (`5e895791`). Behaviour changes BA3 now inherits: only the `%wor` tiers
+  Chatter cannot read are removed at align admission (a readable tier beside
+  them is reused, not regenerated); a reversed `%wor` word interval is invalid
+  (E362) and its tier is regenerated, while a zero-length one stays legal;
+  utterance splitting reports an unchanged utterance as such (its line, with
+  every dependent tier, is left in place) and diarization relabels a turn
+  whose words all belong to one speaker instead of rebuilding it. A CA,
+  `NoAlign` or dummy transcript with a reversed `%wor` interval, which align
+  writes back unchanged, is now refused rather than passed through.
+- A tier-replacement admission that selects a replacement other than the one
+  BA3 planned is the internal fault `ReplacementPlanContradicted` (HTTP 500);
+  morphotag now checks the selection against its plan in both directions.
+
+### Transcribe tags a diagnosed transcript everywhere but its faulty utterances
+
+- `transcribe --morphotag` on a generated transcript diagnosed for findings
+  confined to some utterances now analyzes every other utterance, as
+  utterance segmentation already did; the faulty ones are never sent to a
+  worker, keep their generated form without `%mor`/`%gra`, and are listed as
+  `stage_held_out` for morphosyntax. Before, the whole file went untagged
+  (`stage_skipped`). Findings about the document as a whole still skip the
+  stage.
+- The result is judged afresh. If the analysis adds a finding of its own
+  outside the held-out utterances, its output is refused as an admitted
+  document's would be, and the transcript from before the stage is written
+  (`stage_not_applied`).
+
+### Align admits a never-aligned transcript; `@Media` is decided before any work
+
+- A transcript with `@Media: name, audio` (or `video`) and no timing at all
+  is now aligned. It used to be refused at input with E544 ("linkage
+  declared, no timing"), which is the condition align exists to remove, so
+  only `, unlinked` could get a never-aligned file through. It is admitted
+  through Chatter's timing-regeneration validation, which applies every other
+  rule; the output must then carry timing, and if alignment produces none the
+  file is refused with a message naming the fix (add `, unlinked` to write it
+  untimed). `, unlinked` input is unchanged: aligned, and `unlinked` is
+  removed once the output carries timing.
+- A transcript with no `@Media` header is refused at input admission, before
+  media resolution or any inference, with the line to add
+  (`@Media: name, audio, unlinked`, or `video`). It used to run UTR and FA in
+  full and then fail "timed CHAT has no @Media declaration", reported as an
+  internal error with the advice to restart the job, which could never help.
+  A `missing` or `notrans` declaration is refused the same way, before any
+  work, and so is a linked never-aligned transcript under
+  `--main-bullets exact`, which keeps untimed utterances untimed and so could
+  never write the timing the header requires. Decision: align does not write the missing
+  header itself; its media type is a declaration about the recording that the
+  media search does not establish, and writing it would change the transcript
+  beyond the timing requested.
+- These refusals are classified as input (`validation`), with the change to
+  make in the message. The post-alignment media/timing transition now runs in
+  one place, against the declaration admission accepted, so a failure there
+  is an internal fault and is reported as one.
+
+### Forced-alignment engine choice, documented; how the default got here
+
+- The book's forced-alignment page now states who chooses the FA engine
+  (the default `wav2vec`; `--fa-engine`; an `fa` engine override; no
+  per-language routing, and a language-restricted engine is refused, never
+  swapped), what each engine reports, what an onset-only engine's derived
+  ends mean for `%wor`, and what happens to a word with no positive timing.
+  It also corrects a contradiction: onset-to-end chaining for Whisper FA always
+  runs; it is not a step that can be off.
+- History, for reading older output. The FA default was Wave2Vec until
+  2026-07-01 (`56131d2c`), when it became Whisper FA because Wave2Vec's CTC
+  decoder refused long groups. Whisper FA reports token onsets only, and
+  `align` output written with the default in that period carries zero-length
+  `%wor` word bullets for words the aligner did not locate, almost all at the
+  next located word's start. The default returned to Wave2Vec on 2026-08-13
+  (`eef72552`), and from 2026-08-14 (`dd96e330`) a word timing must have
+  positive extent: a word without one is left untimed. Output written that way
+  between 2026-07-01 and 2026-08-14 should be re-aligned.
+
+### A UTR token claimed across an anchor by two regions is withdrawn
+
+- Neighbouring UTR regions share the anchor between them, so a token inside
+  the anchor's span is in both regions' windows. When owned words of both
+  regions claim it (an untimed turn on each side, in an interleaved file),
+  neither claim is admitted: the regional search cannot tell which one the
+  whole file would admit. The regions involved are planned again with the
+  claim withdrawn; their utterances keep all other evidence. Rule chosen over
+  the alternatives: giving the token to one region by position would invent a
+  decision no evidence makes, and merging the two regions' searches would
+  undo the bounded work that regions exist for.
+- Offline UTR reports (schema 10) list each region's `withdrawn_claims`.
+
+### UTR endpoints bounded by every candidate; region plans paired with their census
+
+- A UTR hint needs both endpoint words bounded. An endpoint matched in every
+  optimum, though not always to the same token (two overlapping turns that end
+  and begin with the same word), is now bounded by the extent of every token it
+  may match, and the hint covers that extent. An endpoint some optimum leaves
+  unmatched still gives no hint.
+- Offline UTR reports use schema 10: a `matched` endpoint may be bounded rather
+  than proved, and its `proposal` covers the bound.
+- Each region's plan pairs every searched utterance's evidence with its
+  search envelope and carries its region, so a plan cannot be shorter than its
+  region or published under another's. A region's leading anchor span stays
+  inside its window even when the trailing anchor's bullet is zero-length.
+
+### ASR tokens written in the CHAT form the manual gives
+
+- A spelling of a reserved marker (`www`, `xxx`, `yyy`, any case) from ASR is
+  a spoken string of letters, written `www@k`, never CHAT's untranscribed
+  marker. Before, `Www` was refused (E241) and `www` silently became the
+  marker.
+- A letter-led token whose digits stand alone is linked with each digit
+  spelled, as the CHAT manual writes R_two_D_two: `b2` to `b_two` (Latin
+  script only). A run of several digits inside a word (`abc123`) has no
+  reading its surface gives and stays as recognized, reported for review.
+- **Rust API change:** `asr_postprocess::write_word_forms` replaces
+  `expand_numbers_in_words`; `split_words_with_whitespace` is removed.
+
+### A diagnosed transcript is segmented outside its faulty utterances
+
+- When a generated transcript's findings belong to identified utterances,
+  utterance segmentation runs on every other utterance; the faulty ones keep
+  their generated form and are recorded as a `stage_held_out` shortfall. A
+  finding about the document as a whole still skips segmentation. Before, one
+  invalid word left the whole transcript unsegmented.
+
+### Align writes partial timing, diagnosed
+
+- A file whose words cannot all be timed is written with every measured
+  timing; untimed words stay in the transcript without bullets, and the file is
+  reported `diagnosed` with a `timing_incomplete` shortfall (required and
+  untimed counts, and the first utterances with their cause: the refused audio
+  window, a run grouping could not place, or no usable timing). A file with no timed word is written the same
+  way. Before, one untimed word refused the whole file and wrote nothing.
+- **Rust API change:** `AlignmentCompletionFailure::MissingTimings` is removed.
+
+### Diagnosed files: typed, bounded records with the judgement bar
+
+- A generated transcript that fails admission is written with its diagnostics
+  and reported `diagnosed` (terminal, never retried, not a failure), instead
+  of being discarded. An optional stage whose own output is refused keeps the
+  admitted document from before it (`stage_not_applied`).
+- The record is typed and bounded: findings carry their code and level
+  (`construction` for complete construction admission), with a per-code tally
+  and the first 20; a longer list is written once to a sidecar beside the
+  job's staged outputs, and a sidecar that cannot be written is recorded, never
+  turned into a write failure. The bar the output was judged against is
+  recorded with the findings (`findings.bar`), and only with them. Records
+  stored in the earlier flat shape are still read; a record with neither
+  findings nor shortfalls, or with a field neither shape has, is refused.
+- A job with diagnosed files exits `7`, never `0`; `JobListItem` gains
+  `diagnosed_files`. The TUI restores the terminal before a job exits with an
+  error code.
+
+### Saturated worker pools are waited on, visibly
+
+- A checkout that finds every worker busy waits instead of failing the file
+  after 300 s, and the file shows `waiting_for_worker` while it waits. A wait
+  on a worker count nothing holds (broken pool accounting, seen twice for the
+  same group and count) ends as a typed `PoolAccountingBroken` error. Workers
+  removed for memory pressure or taken out of service are accounted through
+  their guard. Every command's files report their waits.
+
+### Generated bullets only from positive intervals; stamps name their build
+
+- Transcription's CHAT builder takes timing as `DescribedTiming` (a
+  `PositiveInterval` proof or an untimed cause), never two optional numbers.
+  Word and utterance bullets are built only by `PositiveInterval::bullet`; a
+  zero-width, inverted or out-of-range pair keeps its word, untimed. The
+  utterance bullet is the hull of its positive words (it was the first timed
+  word's start and the last timed word's end). The JSON bridge keeps its flat
+  `start_ms`/`end_ms` fields and admits them the same way.
+- Forced-alignment word bullets are built only by `WordTiming::bullet`; a
+  compound filler's merged span is admitted before its bullet is written.
+- Every provenance stamp carries `build=<build identity>`, in the stamp's
+  alphabetical field order. Older stamps without it still read back; the no-op
+  write gate sets it aside like the timestamp.
+- **Rust API change:** `WordDesc` and `UtteranceDesc` replace `start_ms` and
+  `end_ms` with `timing: DescribedTiming`; `asr_postprocess` adds
+  `PositiveInterval` and `WordTiming::positive`; `build_hash` is a `const fn`.
+
+### Anchored UTR regions: a budget refusal covers one region, never the file
+
+- UTR partitions the transcript at its own retained bullets: a region owns the
+  utterances between two anchors (timed, unmarked, longest non-decreasing chain)
+  and the ASR tokens whose onsets lie between them, and each region is solved
+  within its own proof budget. A whole-file search over budget used to refuse
+  every utterance, timed ones included; now only the region over budget is
+  refused, its untimed utterances naming the region and the budget, and its
+  timed utterances are `retained_unsearched` with their bullets kept.
+- Interior-only evidence in a monotonic region yields an `order_corridor` FA
+  search envelope bounded by the neighbouring proved timings, never a hint.
+- Offline UTR reports use schema 9: `strategy` is the pass's order model,
+  `regions` records each region, and budget refusals carry
+  `{"budget_exhausted": {"region", "budget"}}`. `ambiguous` is unchanged.
+- **Rust API change:** `UtrCorrespondenceRefusal::BudgetExhausted` carries a
+  `UtrBudgetRefusal`; `UtrAlignmentPlan.strategy` is a `UtrOrderModel`; the
+  evidence enum gains `RetainedUnsearched`.
+  `batchalign_transform::dp_align::CorrespondenceAdmission::BudgetExhausted`
+  carries the `CorrespondenceBudget` reached, and `LocalInterleavingRefusal`
+  reports its `limit()`.
+
+### Checked standalone audio export
+
+- `convert --format wav|mp3` selects native managed audio export. Format is
+  required on the CLI and wire; naming, encoding and binary result type derive
+  from the same submitted options. Output is `<stem>.converted.<format>`,
+  always new-only; `--in-place`, existing outputs and source-stem collisions refuse.
+- Native media shares scheduling, memory admission, progress and cancellation,
+  without worker probing, a Python inference task or a model profile.
+- **Rust API change:** resource `CommandSpec.profile` is `Option<WorkerProfile>`;
+  native commands return `None`. `JobDetail` retains typed command options so
+  result lookup and restored jobs do not guess the selected encoding.
+  Public `plan_server_inputs` now takes `&CommandOptions`, not a command alone.
+
+- **Rust API change:** `FileResult.content` is `ResultContent`, distinguishing
+  inline text from a binary artifact descriptor. Text JSON remains a string;
+  binary results use bounded-memory streaming and checked no-clobber writeback,
+  never UTF-8 conversion or base64. Shared-filesystem reuse requires byte identity.
+- The command catalog distinguishes native media from inference. Worker keys
+  require catalog-owned inference admission, shared with targeting and model
+  selection; native requirements cannot acquire a fabricated fallback task.
+- A source-bound Rust WAV/MP3 export API preserves sample rate and channels,
+  independently inspects encoded output, and permits only new-only publication
+  to its admitted destination. Corrupt input and existing destinations refuse;
+  MP3-incompatible layouts require WAV instead of an implicit lossy layout change.
+- Completion requires both the user output and staged download artifact to
+  publish. The staged artifact publishes first; failure cannot report success.
+  This is not a cross-directory transaction: a later user-destination conflict
+  may leave an internal staged artifact, but never overwrite existing data.
+- Async media tool subprocesses are killed when their owning operation is dropped.
+
+### Explicit timed-CHAT diarization
+
+- `diarize --speaker-map PAR0=CHI,PAR1=MOT` selects timed CHAT input and
+  word-level speaker splitting. Every target must already be declared in the
+  admitted transcript. Participant names, ages and roles are retained unchanged;
+  anonymous acoustic tracks never create or copy participant facts.
+- Complete, lexically corroborated `%wor` timing is admitted before model work.
+  Missing timing, acoustic gaps/ties and boundaries inside indivisible annotated
+  groups refuse output. Chatter owns partitioning and measured child hulls;
+  boundary-dependent analysis losses are explicitly reported. The finished typed
+  document must pass complete construction admission before the writer runs.
+- Without a mapping, standalone media-to-turns JSON retains its existing behavior.
+  Planning, submission, dispatch and output naming share the selected mode.
+
+### Source-bound CHAT partitions
+
+- Chatter owns the shared utterance partition policy. Utseg now admits every
+  proposed split against its producing source before changing any document lines.
+  A count mismatch, disjoint child run or boundary inside an indivisible
+  annotated group/replacement refuses processing rather than silently changing
+  the proposed boundary. No shortened assignment vector can create a phantom
+  child or claim the parent's measured timing.
+- **Rust API change:** `apply_utseg_results` returns a typed refusal or explicit
+  dependent-tier invalidations. The old generic `split_utterance` implementation
+  is replaced by Chatter's source-bound `UtteranceSplitPlan`. Analysis losses are
+  recorded in the output as a typed-constructed `@Comment`; contributor comments
+  are retained. A refused transform is not reported as invalid input CHAT.
+
+### Stock Whisper word timestamp production
+
+- Stock Whisper ASR and UTR request acoustic word timestamps rather than
+  segments. UTR can admit exact, unambiguous single-word anchors without
+  inventing per-word times from a sentence interval. Missing spans remain
+  missing; requesting word timestamps does not certify correspondence or
+  complete alignment.
+- Fine-tuned Whisper Hub models explicitly retain segment mode. The timing
+  policy is typed at loading; stock Whisper UTR has a new cache namespace so
+  older segment evidence cannot be reused as the changed producer's output.
+- The instance-local ASR token-timestamp callback excludes the generation
+  conditioning rows before normalization, places lexical timestamps at their
+  admitted decoder offset, and repeats the last observed boundary for the
+  terminal prediction, matching the upstream generation contract.
+- UTR lexical projection removes terminal ASR sentence punctuation for matching,
+  retains raw provider text and coordinates, and reports punctuation equivalence
+  distinctly. Internal apostrophes/hyphens remain unchanged; normalization never
+  resolves repeated-word ambiguity or creates a word timing from a segment.
+
+### Lexical Whisper alignment grid
+
+- Whisper FA excludes tokenizer-conditioning rows before normalization and DTW.
+  One source-bound window owns acoustic extent, decoder-label correspondence and
+  timed-token projection; the terminal label remains an end sentinel. Prefix
+  labels keep zero times, rather than forcing lexical words to the recording end.
+- The changed algorithm has a distinct cache identity. Complete-timing output
+  admission remains required; conditioning exclusion does not certify accuracy.
+- Evidence refusals say the command could not complete, without incorrectly
+  claiming that inference never ran.
+
+### Complete alignment output admission
+
+- Normal `align` output requires positive final timing for every required source
+  word. A valid CHAT file with only some words timed no longer reports successful
+  alignment. Completion retains its exact result and source-bound obligations;
+  dropping words or utterances cannot reduce the requirement.
+- Missing timing produces an actionable, nonretryable evidence refusal; changed
+  lexical correspondence is a producer fault, not invalid submitted CHAT. Valid
+  retained timing and explicit unchanged-output paths remain supported. Complete
+  coverage does not certify acoustic accuracy or erase timing review evidence.
+- Rust API: `ServerError` gains `AlignmentCompletion`, carrying the typed
+  `AlignmentCompletionFailure` distinction. Successful output formats are unchanged.
+
+### Local recovery hint provenance
+
+- Global and local overlap recovery publish timing through one admitted-interval
+  operation, always marked provisional UTR evidence. Local hints no longer look
+  like original transcript timing that can replace an onset-only final word end.
+- Retained UTR regression fixtures explicitly declare unlinked media and match
+  their transcript stems. Complete named source admission now precedes the
+  real-data regression; lexical content and provider tokens are unchanged.
+
+### Endpoint-bound UTR hints
+
+- Global and local UTR hints require proved correspondence for the first and
+  last alignable utterance words. Interior-only evidence retains eligible FA
+  anchors, but cannot create a crop window that excludes unresolved speech.
+  Missing interior words alone do not prevent endpoint-proved recovery.
+- Offline UTR reports use schema 5, distinguishing `interior_only` and its
+  missing endpoints from absent correspondence. Existing reports are not
+  upgraded in place. Lexical certainty does not certify acoustic identity.
+- Rust API change: `UtrUtteranceAlignmentEvidence::Matched.admitted_matches`
+  now carries private-construction `EndpointBoundUtrWordMatches`; the evidence
+  and decision enums gain explicit incomplete-boundary variants.
+
+### Source-bound UTR timing projection
+
+- A private prepared pass owns the source borrow and its census, lexical plan,
+  anchors and retained timing bounds; projection consumes that pass rather than
+  accepting independently paired observations.
+- Non-overlap hints now intersect provider timing with both preceding timing
+  and following retained non-overlap starts. Exhausted proposals remain untimed
+  with a review decision; no interval is extended or manufactured. Original
+  bullets and marked-overlap exemptions are unchanged. Selected lexical plans
+  remain available and do not claim uniqueness or acoustic accuracy.
+
+### Bounded lint repairs
+
+- Scoped retokenization carries its large annotated-word variant boxed, moving
+  that allocation earlier rather than adding a second one; output shapes and
+  typed word/group distinction are unchanged.
+- Two test-only pipeline/catalog helpers are compiled only for tests. Production
+  text workflows continue through checked typed admission without reparsing.
+
+### Offline UTR source admission
+
+- `eval utr-alignment` now requires complete named CHAT admission, not merely
+  a clean parse. All retained tiers and filename/media agreement are checked
+  before reading token evidence; refused input produces no report.
+- Typed CLI failures distinguish invalid CHAT (exit 2) from parser setup or
+  internal admission faults (exit 6). Matching policy is unchanged; a selected
+  lexical path is not a uniqueness proof.
+- `--source-name` declares the original filename for renamed debug snapshots,
+  with no suffix guessing or filename-check exemption. Report schema 3 records
+  the checked stem and whether it came from the input path or caller declaration;
+  this does not certify historical provenance. The Rust args and CLI error
+  enums gain the corresponding fields and typed admission failures.
+
+### Typed speaker failures
+
+- Speaker embedding retains original worker and response-contract errors.
+  Dispatch failures enter the existing worker retry/memory-pressure path;
+  invalid enrollment, protocol, setup and producer failures remain distinct.
+  Model/setup failure no longer claims that input CHAT is invalid.
+- The Rust embedding/run error enums now carry typed owned failures and no
+  longer implement `Clone` or `PartialEq`. Successful artifact formats and
+  acoustic policy are unchanged.
+
+### Typed merge verification
+
+- `merge-verify` now requires complete named CHAT admission and pairs each
+  draft with unique, in-range verdicts. Case/Unicode-equivalent session aliases
+  and duplicate verdicts refuse instead of overwriting earlier decisions.
+  Session filename stems containing path separators are refused.
+- The pass edits typed comment text segments, preserving structured bullets,
+  pictures and other contributor content. Chatter's writer normalizes CHAT
+  formatting; byte-identical untouched lines are no longer promised. Checked
+  typed-construction admission is required before writing, without reparsing.
+  All sessions are checked before creating output. Verdict/queue wire formats
+  and tier policy are unchanged; typed tool failures are not invalid input.
+- The Rust `MergeVerifyError` variants now carry source and output admission
+  failures rather than parser prose or raw-line splice failures.
+
+### Speaker transcript admission
+
+- Speaker identification requires complete named CHAT admission before media
+  resolution or conversion. Its task owns Chatter's immutable validity proof,
+  replacing raw text and attempt-time strict parsing. Retained dependent tiers
+  have no regeneration exemption. Source refusal preserves Chatter's internal
+  versus validation distinction and writes no evidence; artifact schema and
+  acoustic unscored policies are unchanged.
+
+### Acoustic-window admission
+
+- Whisper forced alignment restricts its attention grid to the actual waveform
+  before normalization and DTW. Fixed encoder padding is no longer treated as
+  recorded speech. Unsupported audio extents and out-of-window DTW positions
+  refuse instead of producing fabricated endpoints.
+  Its algorithm-versioned cache namespace excludes earlier padded-grid evidence.
+- Onset-only postprocessing without a transcript bullet retains the producer's
+  admitted end and origin. It no longer repeats a fallback duration that can
+  undo an earlier recording-end clamp.
+- When source-bound word-timing regeneration produces no retained timing,
+  align reports unavailable evidence before complete output admission. It does
+  not misclassify that expected refusal as an internal CHAT-construction error,
+  alter linked-media declarations or weaken the final write boundary.
+
+### Checked utterance-timing recovery
+
+- UTR no longer extends an exhausted ASR interval by 1 ms after non-overlap
+  projection. It leaves the interval unresolved, records a review decision,
+  and counts only hints actually applied. Existing bullets and marked-overlap
+  exemptions are unchanged. Experimental local overlap recovery also refuses
+  zero/reversed spans at its producer.
+- `UtrTimingProposal::Positive` now contains a producer-admitted
+  `PositiveUtrInterval` with read-only accessors, replacing unchecked Rust
+  scalar fields. Its serialized status/start/end shape is unchanged. A hint
+  remains distinct from final alignment evidence and checked output permission.
+
+### Scoped retokenization
+
+- Retokenization preserves every token of an annotated contraction. An
+  explanation on `can't [= cannot]` becomes `<ca n't> [= cannot]`, retaining
+  its complete scope rather than keeping only the first model token.
+  Replacement targets expand completely while the displayed source word
+  remains unchanged. Main-tier and bracketed callers use the same operation.
+- A source-bound expansion admits all words before committing model positions.
+  Ambiguous mappings, cross-scope merges and unsafe decorated-word rewrites
+  refuse; a failed rewrite or tier injection restores the original main tier
+  and cannot certify morphology completion. Default token preservation,
+  alignment exclusions and CHAT/worker formats are unchanged.
+
+### CLI result destinations
+
+- Shared-filesystem submission and result copy-back now use one source-bound
+  destination plan instead of recreating a second directory layout. Duplicate
+  server identities and colliding command-named outputs are refused before
+  submission. Primary outputs and sidecars share the command's naming policy;
+  mixed-root in-place inputs retain their own parents. Unknown result names or
+  mismatched content types cannot acquire write permission through a fallback.
+- Rust CLI helpers replace `build_server_names` and the raw map/root writer
+  arguments with `plan_server_inputs`, immutable `ServerInputPlan` accessors
+  and an owned `ResultDestinations` write capability. CHAT and HTTP formats
+  are unchanged. Discovery defers dummy-file copies until plan admission.
+
+### Morphology capability admission
+
+- Unsupported primary headers and unavailable effective utterance languages
+  now report typed `analysis_unavailable` refusals (HTTP 412), not invalid
+  CHAT or generic empty-response failures. A payload/runtime-bound dispatch
+  plan admits every required language before inference; it cannot fabricate
+  unsupported-language responses. Truthful language declarations remain intact.
+  CA pass-through, complete compatible incremental reuse, and explicit
+  secondary-word `L2|xxx` policies remain distinct. The dashboard failure
+  category schema gains `analysis_unavailable`; CHAT/worker payloads are unchanged.
+
+### Morphology hints
+
+- Transcriber `$POS` hints now follow Chatter's canonical morphology positions.
+  Fillers, fragments and `xxx` no longer shift a hint onto another word;
+  selected replacement targets supply their own hints. Comma slots,
+  retokenization mapping and `--no-pos-hints` remain explicit policies.
+  Incremental reuse also detects edits to selected replacement hints.
+  Public APIs and CHAT/worker formats are unchanged.
+
+### Morphology completion API
+
+- Completed injection is constructed only after the full requested traversal,
+  separately from mutable progress. `InjectionResult::l2()` exposes read-only
+  secondary-language evidence; `into_parts()` consumes it with its traces.
+  Direct `l2` field access is replaced by these methods while completion remains
+  producer-only. CHAT and worker formats are unchanged.
+
+### Incremental morphology
+
+- `morphotag --before` now reuses only complete, source-admitted `%mor`/`%gra`
+  pairs. Unchanged utterances with absent or partial prior analysis are sent
+  for fresh analysis instead of reporting success with incomplete annotation.
+  Complete prior pairs keep their no-inference fast path, and contributor
+  dependent tiers remain untouched.
+- Incremental reuse also requires compatible canonical morphology inputs:
+  language, sentence terminator, word roles and transcriber evidence. Edits
+  that preserve cleaned words but change these inputs are regenerated rather
+  than silently retaining stale analysis or failing only at output admission.
+
+### Development builds
+
+- Wheel builds accept an explicit `dev` profile for both native artifacts;
+  optimized `release` remains the default. Development builds cannot reuse
+  a pre-staged release CLI, and failed native compilation cannot package an
+  older binary.
+
+### Alignment admission
+
+- Pending timing regeneration with no acoustic request and no restored timing
+  reports the producer's typed window refusal as unavailable evidence. Chatter's
+  shared observation preserves timing restored by UTR or checked prior reuse;
+  complete output validation remains mandatory in full and incremental FA.
+- Synthetic UTR drift scenarios now require complete source admission and carry
+  source, acoustic tokens and expected windows together. Failure messages retain
+  bounded counts rather than dumping complete DP plans.
+- Source-bound regeneration can carry an outstanding linked-media timing
+  obligation when the discarded `%wor` supplied the only timing. This checked
+  working state cannot authorize unchanged or untimed output. Its obligation
+  survives retries until complete output admission succeeds; NoAlign stays
+  strict, and no header changes or diagnostic filters are used.
+- Align admits its source-bound disposition before media preparation or timing
+  recovery, retaining valid partial `%wor` timing or selecting actual word-tier
+  removal with checked regeneration obligations. Invalid retained tiers still refuse; CA and
+  NoAlign have no replacement exemption. Admission uses the actual transcript
+  filename for media-name checks.
+- Source-produced working states bind main-bullet authority and own the model
+  and recovery anchors across retries. Preserved-source payloads cannot receive
+  UTR mutation, and original-byte output proof cannot be built from unrelated
+  text and model values. Media-error reporting reuses the admitted headers.
+
 ### Server construction
 
 - The prepared-worker app constructors take one named `AppStorageOverrides`

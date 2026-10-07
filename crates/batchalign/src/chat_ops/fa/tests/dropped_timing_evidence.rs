@@ -53,7 +53,6 @@ fn timeline_trace_for(input: &str) -> FaTimelineTrace {
         "test_engine",
         &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
     )
-    .expect("an empty untimed CHAT model can be retained as evidence")
     .with_written_decisions(written)
     .into_timeline_trace()
 }

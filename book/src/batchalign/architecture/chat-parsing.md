@@ -1,7 +1,7 @@
 # CHAT Parsing (Rust)
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-10-02 20:51 EDT
 
 All CHAT parsing and serialization is handled by Rust. The CHAT lifecycle
 (parsing, word extraction, result injection, validation, serialization)
@@ -9,18 +9,15 @@ runs in Rust both on the server side (`batchalign` crate) and
 through the PyO3 bridge (`batchalign_core`). Python handles only ML
 inference, Whisper, Stanza, wav2vec, translation models.
 
-**Status:** Current
-**Last verified:** 2026-03-11
-
 ## Architecture
 
-CHAT processing follows the same pattern on both runtime paths:
+The required CHAT lifecycle is:
 
 ```text
 CHAT text (.cha file)
   │
   ▼
-parse_lenient() → ChatFile AST
+Chatter parser → complete, command-bound admission → typed CHAT AST
   │
   ├── extract words/payloads   → structured data for ML inference
   ├── inject %mor/%gra         → from morphosyntax results
@@ -32,7 +29,7 @@ parse_lenient() → ChatFile AST
 to_chat_string() / handle.serialize()
   │
   ▼
-CHAT text (valid, correctly formatted)
+CHAT text (only after checked application and output admission)
 ```
 
 These operations happen in the Rust server crate (`batchalign`) using
@@ -47,12 +44,17 @@ serialization.
 Two parse modes:
 
 - **`parse(text)`** -- strict mode. Rejects files with parse errors.
-- **`parse_lenient(text)`** -- error-recovery mode. Marks unparseable
-  utterances with `ParseHealth` flags but continues. Used by the server
-  orchestrators, which must handle messy real-world CHAT files.
+- **`parse_lenient(text)`** -- recovery/inspection mode. Recovery does not
+  authorize inference or publication. Its historical `%mor`/`%gra` diagnostic
+  exemption is inappropriate for workflows that retain those tiers.
 
-Both parsers use a tree-sitter grammar from the
-`talkbank-tools` workspace (`grammar/grammar.js`)
+The shared `utseg`/`translate` pipeline and the separate `coref` pipeline use Chatter's
+`parse_validated_with_parser`, obtaining an immutable `ValidChatFile` before
+collecting payloads. Editing consumes that proof. See the authoritative
+[command contracts](command-contracts.md) for regeneration exemptions and
+the current migration scope.
+
+Both parsers use the tree-sitter grammar owned by Chatter
 to produce a concrete syntax tree, which is then walked into typed Rust model
 structures (`ChatFile`, `MainTier`, `WorTier`, `Terminator`, etc.).
 
@@ -87,9 +89,8 @@ morphosyntax).
 
 ### Serialization
 
-The `WriteChat` trait
-(`../chatter/crates/talkbank-model/src/model/write_chat.rs:41`) produces valid
-CHAT text from the AST.  It handles all formatting concerns:
+The `WriteChat` trait renders CHAT text from the AST; serialization alone does
+not establish validity or transform completion. It handles formatting concerns:
 continuation lines, escaping, bullet timestamp encoding, tier
 alignment, and header ordering. Rust callers invoke `chat_file.to_chat_string()`;
 there is no PyO3 `handle.serialize()` surface today (the ParsedChat
@@ -97,12 +98,12 @@ binding was retired in the 2026-03-21 pyo3 slimdown).
 
 ### Validation
 
-Server-side validation runs through `validate_to_level` and
-`validate_output` in `../chatter/crates/talkbank-transform/src/validate.rs`,
-covering the full suite of CHAT validation checks (E362 monotonicity,
-E701/E704 temporal, tier alignment, header correctness). These return
-typed error lists used by the pre-serialization validation gate. On
-the Python side, structured validation results reach callers as
+Chatter's full model validator owns CHAT rules and alignment validation.
+`validate_to_level` and `validate_output` are narrower workflow checks; they do
+not cover the full suite of CHAT validity rules. The
+[command contracts](command-contracts.md) specify retained-input admission,
+completion, output checks and failure categories without treating these levels
+as full-validity certificates. On the Python side, structured validation results reach callers as
 `CHATValidationException.errors` (a `list[ValidationErrorEntry]`),
 see [Errors, Batchalign Runtime](../../architecture/errors-and-validation/batchalign-errors.md).
 

@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use talkbank_model::model::TranscriptName;
+use talkbank_model::validation::ValidChatFile;
 use tracing::warn;
 
 use crate::chat_ops::speaker_identity::{
@@ -30,8 +32,8 @@ use crate::worker::speaker_embedding_request_v2::{
 };
 
 use super::super::util::{
-    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, drain_supervised_file_tasks,
-    spawn_supervised_file_task,
+    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
+    drain_supervised_file_tasks, spawn_supervised_file_task,
 };
 use super::audio_output::FileOutput;
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
@@ -64,27 +66,36 @@ impl SpeakerEmbeddingInference for WorkerEmbedding {
             .pool
             .dispatch_execute_v2(&self.pool_key, &self.recording.request_for(&request))
             .await
-            .map_err(|error| EmbeddingInferenceFailure::Dispatch {
-                detail: error.to_string(),
-            })?;
+            .map_err(EmbeddingInferenceFailure::from)?;
 
-        parse_speaker_embedding_response_v2(&response, &request).map_err(|error| {
-            EmbeddingInferenceFailure::InvalidResponse {
-                detail: error.to_string(),
-            }
-        })
+        parse_speaker_embedding_response_v2(&response, &request)
+            .map_err(EmbeddingInferenceFailure::from)
     }
 }
 
 /// Per-file task: read the transcript, score it, hand back the evidence.
 struct SpeakerIdentityTask {
     filename: String,
-    chat_text: String,
+    transcript: ValidChatFile,
     audio_path: PathBuf,
     media_display: String,
     pool: Arc<WorkerPool>,
     pool_key: crate::api::LanguageCode3,
     options: crate::options::SpeakerIdentifyOptions,
+}
+
+/// Retained transcript content has no generated-tier exemption. The producer
+/// admits the named source once; attempts only borrow its immutable proof.
+fn admit_speaker_transcript(
+    source: &str,
+    path: &std::path::Path,
+) -> Result<ValidChatFile, ServerError> {
+    crate::pipeline::text_infer::admit_retained_text(
+        &crate::chat_parser(),
+        source,
+        TranscriptName::for_path(path),
+    )
+    .map(|source| source.into_valid_file())
 }
 
 #[async_trait]
@@ -96,30 +107,19 @@ impl AudioFileTask for SpeakerIdentityTask {
         &mut self,
         _progress_tx: crate::runner::util::ProgressSender,
     ) -> Result<Self::AttemptOutput, ServerError> {
-        let parser = crate::chat_parser();
-        let chat_file = batchalign_transform::parse::parse_strict(&parser, &self.chat_text)
-            .map_err(|errors| {
-                ServerError::Validation(format!(
-                    "speaker-identify requires a parseable CHAT transcript: {errors}"
-                ))
-            })?;
-
         let tiers = TierSelection::from_option(&self.options.tiers);
-        let utterances = read_utterances(&chat_file, &tiers);
+        let utterances = read_utterances(self.transcript.document(), &tiers);
 
-        let model_revision = pinned_embedding_revision()
-            .map_err(|error| ServerError::Validation(error.to_string()))?;
+        let model_revision = pinned_embedding_revision()?;
 
         // Decoded ONCE. Every enrolled span and every utterance indexes into
         // this one decode, which is what makes their vectors comparable: two
         // embeddings from separately decoded files can differ for reasons that
         // have nothing to do with who was speaking.
         let artifacts =
-            crate::worker::artifacts_v2::PreparedArtifactRuntimeV2::new("speaker_embedding_v2")
-                .map_err(|error| ServerError::Validation(error.to_string()))?;
-        let recording = prepare_recording_for_embedding(artifacts.store(), &self.audio_path)
-            .await
-            .map_err(|error| ServerError::Validation(error.to_string()))?;
+            crate::worker::artifacts_v2::PreparedArtifactRuntimeV2::new("speaker_embedding_v2")?;
+        let recording =
+            prepare_recording_for_embedding(artifacts.store(), &self.audio_path).await?;
         let prepared = recording.prepared;
 
         let inference = WorkerEmbedding {
@@ -148,8 +148,7 @@ impl AudioFileTask for SpeakerIdentityTask {
             self.options.permutation,
             &inference,
         )
-        .await
-        .map_err(|error| ServerError::Validation(error.to_string()))?;
+        .await?;
 
         serde_json::to_string_pretty(&evidence)
             .map(|mut json| {
@@ -282,19 +281,36 @@ async fn process_one_file(
         }
     };
 
+    lifecycle.stage(FileStage::Parsing).await;
+    let transcript = match admit_speaker_transcript(&chat_text, read_path.as_path()) {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            lifecycle
+                .fail(&error.to_string(), classify_server_error(&error))
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+
     lifecycle.stage(FileStage::ResolvingAudio).await;
-    let original_audio_path =
-        match resolve_transcript_media(job, host, filename, read_path.as_path(), &chat_text, None)
-            .await
-        {
-            Ok(path) => path,
-            Err(unresolved) => {
-                lifecycle
-                    .fail(&unresolved.message, FailureCategory::Validation)
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
-            }
-        };
+    let original_audio_path = match resolve_transcript_media(
+        job,
+        host,
+        filename,
+        read_path.as_path(),
+        || crate::media::DeclaredMedia::from_document(transcript.document()),
+        None,
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(unresolved) => {
+            lifecycle
+                .fail(&unresolved.message, FailureCategory::Validation)
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
 
     let audio_path = match crate::ensure_wav::ensure_wav(&original_audio_path, None).await {
         Ok(path) => path,
@@ -312,7 +328,7 @@ async fn process_one_file(
     let media_display = original_audio_path.to_string_lossy().to_string();
     let mut task = SpeakerIdentityTask {
         filename: filename.to_owned(),
-        chat_text,
+        transcript,
         audio_path,
         media_display,
         pool,
@@ -333,4 +349,66 @@ async fn process_one_file(
         &mut task,
     )
     .await
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    const SOURCE: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+        @Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n\
+        @Media:\tsample, audio\n*PAR:\thello . \u{15}0_1000\u{15}\n@End\n";
+
+    #[test]
+    fn complete_named_source_is_the_task_input() {
+        let admitted = admit_speaker_transcript(SOURCE, std::path::Path::new("sample.cha"))
+            .expect("complete source");
+        let utterances = read_utterances(admitted.document(), &TierSelection::AllTiers);
+        assert_eq!(utterances.len(), 1);
+        assert!(matches!(
+            utterances[0].timing,
+            crate::chat_ops::speaker_identity::UtteranceTiming::Window(_)
+        ));
+        assert!(matches!(
+            crate::media::DeclaredMedia::from_document(admitted.document()),
+            crate::media::DeclaredMedia::Expected
+        ));
+    }
+
+    #[test]
+    fn parseability_does_not_admit_missing_required_headers() {
+        let source = SOURCE.replace("@Languages:\teng\n", "");
+        assert!(batchalign_transform::parse::parse_strict(&crate::chat_parser(), &source).is_ok());
+        let error = admit_speaker_transcript(&source, std::path::Path::new("sample.cha"))
+            .expect_err("parseable does not mean valid");
+        assert!(matches!(error, ServerError::ChatAdmission(_)));
+        assert_eq!(classify_server_error(&error), FailureCategory::Validation);
+    }
+
+    /// Align may admit a source whose `%wor` is corrupt because it
+    /// regenerates that tier; speaker identification regenerates nothing, so
+    /// the same corruption refuses the file. The corruption is an unreadable
+    /// bullet, invalid under every validity policy. (A reversed bullet was
+    /// used until the pinned Chatter made `%wor` intervals lenient, as CHECK
+    /// is, which turned this test red for a reason unrelated to its claim.)
+    #[test]
+    fn retained_dependent_tier_corruption_has_no_regeneration_exemption() {
+        let source = SOURCE.replace("@End\n", "%wor:\thello \u{15}invalid\u{15} .\n@End\n");
+        let error = admit_speaker_transcript(&source, std::path::Path::new("sample.cha"))
+            .expect_err("speaker evidence does not regenerate word timing");
+        assert!(matches!(error, ServerError::ChatAdmission(_)));
+        assert_eq!(classify_server_error(&error), FailureCategory::Validation);
+    }
+
+    #[test]
+    fn filename_and_main_interval_are_part_of_complete_admission() {
+        for (source, path) in [
+            (SOURCE.to_owned(), "other.cha"),
+            (SOURCE.replace("0_1000", "1000_0"), "sample.cha"),
+        ] {
+            let error = admit_speaker_transcript(&source, std::path::Path::new(path))
+                .expect_err("named structure must be valid before resolving media");
+            assert_eq!(classify_server_error(&error), FailureCategory::Validation);
+        }
+    }
 }

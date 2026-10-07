@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::command_model;
-use crate::pipeline::post_validate::PostValidated;
 use crate::store::{PendingJobFile, RunnerFilesystemConfig, RunnerJobSnapshot};
 
 use super::materialize::{
@@ -15,6 +14,30 @@ use super::materialize::{
 };
 use super::planner::{PlanningError, plan_work_units};
 use super::work_unit::{DiscoveredInput, PlannedWorkUnit};
+
+/// Options used by legacy naming controls only, not production admission.
+/// Commands with mandatory user choices must supply those explicitly.
+#[cfg(test)]
+pub(crate) fn test_options(command: ReleasedCommand) -> crate::options::CommandOptions {
+    use crate::chat_ops::speaker_identity::{
+        EnrollmentSet, EnrollmentSpec, MatchThreshold, documented_permutation_plan,
+    };
+    use crate::options::{CommandOptions, CommonOptions, SpeakerIdentifyOptions};
+    match command {
+        ReleasedCommand::Convert => panic!("export controls must choose their format explicitly"),
+        ReleasedCommand::SpeakerIdentify => {
+            CommandOptions::SpeakerIdentify(SpeakerIdentifyOptions {
+                common: CommonOptions::default(),
+                enrollments: EnrollmentSet::new(vec![EnrollmentSpec::parse("0-1000:INV").unwrap()])
+                    .unwrap(),
+                threshold: MatchThreshold::try_from(0.7).unwrap(),
+                tiers: vec![],
+                permutation: documented_permutation_plan(),
+            })
+        }
+        _ => serde_json::from_value(serde_json::json!({"command": command.as_str()})).unwrap(),
+    }
+}
 
 /// Derive one discovered input from the runner's current filesystem layout.
 pub(crate) fn discover_input_for_pending_file(
@@ -69,37 +92,36 @@ pub(crate) fn plan_work_units_for_job(
 /// Plan all materialized artifacts for one released command and source path.
 pub(crate) fn planned_output_artifacts(
     command: ReleasedCommand,
+    options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
-) -> Vec<PlannedMaterializedFile> {
-    plan_materialized_files(
+) -> Result<Vec<PlannedMaterializedFile>, PlanningError> {
+    Ok(plan_materialized_files(
         source_display_path,
-        command_model::command_spec(command).output_policy,
-    )
+        command_model::command_spec(command).selected_output_policy(options)?,
+    ))
 }
 
 /// Return the primary result artifact for one command/input pair.
 pub(crate) fn primary_output_artifact(
     command: ReleasedCommand,
+    options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
-) -> PlannedMaterializedFile {
-    // Recipe-catalog invariant: every command has exactly one
-    // `MaterializedArtifactRole::Primary` artifact in its
-    // `OutputPolicy`. The catalog test in
-    // `recipe_runner/catalog.rs::tests` enforces this; reaching the
-    // expect would mean a catalog drift caught before merge.
-    #[allow(clippy::expect_used)]
-    planned_output_artifacts(command, source_display_path)
+) -> Result<PlannedMaterializedFile, PlanningError> {
+    planned_output_artifacts(command, options, source_display_path)?
         .into_iter()
         .find(|artifact| artifact.role == MaterializedArtifactRole::Primary)
-        .expect("recipe runner output policy must include a primary artifact")
+        .ok_or(PlanningError::MissingPrimary(options.command()))
 }
 
 /// Return all sidecar artifacts for one command/input pair.
-pub(crate) fn sidecar_output_artifacts(
+#[cfg(test)]
+fn sidecar_output_artifacts(
     command: ReleasedCommand,
+    options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
 ) -> Vec<PlannedMaterializedFile> {
-    planned_output_artifacts(command, source_display_path)
+    planned_output_artifacts(command, options, source_display_path)
+        .unwrap()
         .into_iter()
         .filter(|artifact| artifact.role == MaterializedArtifactRole::Sidecar)
         .collect()
@@ -108,9 +130,10 @@ pub(crate) fn sidecar_output_artifacts(
 /// Derive only the primary result display path for one command/input pair.
 pub(crate) fn result_display_path_for_command(
     command: ReleasedCommand,
+    options: &crate::options::CommandOptions,
     filename: &str,
-) -> DisplayPath {
-    primary_output_artifact(command, &DisplayPath::from(filename)).display_path
+) -> Result<DisplayPath, PlanningError> {
+    Ok(primary_output_artifact(command, options, &DisplayPath::from(filename))?.display_path)
 }
 
 /// Resolve the concrete write path for one planned output artifact.
@@ -218,8 +241,9 @@ pub(crate) async fn write_text_output_artifact(
 /// under either stamp name (`[fc-ba3 <command> | ...]` or the legacy
 /// `[ba3 <command> | ...]`), in name and timestamp only.
 ///
-/// This is the seam that touches disk, so it takes the [`PostValidated`]
-/// proof rather than the bytes: a caller cannot gate one document and write
+/// This is the seam that touches disk, so it takes a judged proof
+/// ([`WritableChat`]: an admitted `PostValidated` or a producer's
+/// `ProducedOutput`) rather than the bytes: a caller cannot gate one document and write
 /// another, and there is no signature here for an ungated `String` to travel
 /// through. The command comes off the proof for the same reason, so the
 /// provenance line this suppresses is the one the gated command wrote.
@@ -246,12 +270,14 @@ pub(crate) async fn write_text_output_artifact(
 /// triggers a write; the primary path is the one the gate effectively
 /// guards. We still apply the same logic to both for symmetry, there
 /// is no scenario where it is correct to update one and not the other.
+///
+/// [`WritableChat`]: crate::pipeline::post_validate::WritableChat
 pub(crate) async fn write_chat_output_artifact_with_provenance_gate(
     target: &ChatOutputTarget<'_>,
-    document: &PostValidated,
+    document: &impl crate::pipeline::post_validate::WritableChat,
 ) -> std::io::Result<()> {
-    let content = document.as_str();
-    let command = document.command();
+    let content = document.chat_text();
+    let command = document.chat_command();
     let write_path = target.primary_path();
     write_chat_if_meaningful_diff(&write_path, content, command).await?;
 
@@ -347,6 +373,7 @@ mod tests {
     use super::*;
     use crate::api::{CorrelationId, JobId, LanguageSpec, NumSpeakers};
     use crate::options::{CommandOptions, CommonOptions, CompareOptions};
+    use crate::pipeline::post_validate::PostValidated;
     use crate::store::{
         PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
         RunnerJobSnapshot,
@@ -509,27 +536,50 @@ mod tests {
     #[test]
     fn result_display_paths_follow_recipe_catalog() {
         assert_eq!(
-            result_display_path_for_command(ReleasedCommand::Transcribe, "sub/nested.wav"),
+            result_display_path_for_command(
+                ReleasedCommand::Transcribe,
+                &test_options(ReleasedCommand::Transcribe),
+                "sub/nested.wav"
+            )
+            .unwrap(),
             DisplayPath::from("sub/nested.cha")
         );
         assert_eq!(
-            result_display_path_for_command(ReleasedCommand::Benchmark, "sub/nested.wav"),
+            result_display_path_for_command(
+                ReleasedCommand::Benchmark,
+                &test_options(ReleasedCommand::Benchmark),
+                "sub/nested.wav"
+            )
+            .unwrap(),
             DisplayPath::from("sub/nested.cha")
         );
         assert_eq!(
-            result_display_path_for_command(ReleasedCommand::Opensmile, "sub/nested.wav"),
+            result_display_path_for_command(
+                ReleasedCommand::Opensmile,
+                &test_options(ReleasedCommand::Opensmile),
+                "sub/nested.wav"
+            )
+            .unwrap(),
             DisplayPath::from("sub/nested.opensmile.csv")
         );
         assert_eq!(
-            result_display_path_for_command(ReleasedCommand::Avqi, "sub/nested.cs.wav"),
+            result_display_path_for_command(
+                ReleasedCommand::Avqi,
+                &test_options(ReleasedCommand::Avqi),
+                "sub/nested.cs.wav"
+            )
+            .unwrap(),
             DisplayPath::from("sub/nested.avqi.txt")
         );
     }
 
     #[test]
     fn compare_sidecars_follow_recipe_catalog() {
-        let sidecars =
-            sidecar_output_artifacts(ReleasedCommand::Compare, &DisplayPath::from("a/b.cha"));
+        let sidecars = sidecar_output_artifacts(
+            ReleasedCommand::Compare,
+            &test_options(ReleasedCommand::Compare),
+            &DisplayPath::from("a/b.cha"),
+        );
         assert_eq!(sidecars.len(), 1);
         assert_eq!(
             sidecars[0].display_path,

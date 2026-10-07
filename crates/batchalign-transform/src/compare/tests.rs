@@ -53,6 +53,112 @@ fn identical_transcripts() {
     assert_eq!(result.metrics.total_main_words(), 4);
 }
 
+/// Complete-reference accounting and the CHAT morphology word domain are
+/// independent of utterance placement and displayed replacement spelling.
+#[test]
+fn complete_reference_chat_word_domain_contracts() {
+    let parser = TreeSitterParser::new().unwrap();
+    type WordDomainCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
+    let cases: &[WordDomainCase<'_>] = &[
+        (
+            "exact",
+            &[("CHI", "I want a cookie .")],
+            "I want a cookie .",
+        ),
+        (
+            "omission",
+            &[("CHI", "I want cookie .")],
+            "I want a cookie .",
+        ),
+        (
+            "replacement",
+            &[("CHI", "I want dog [: a cookie] .")],
+            "I want a cookie .",
+        ),
+        (
+            "retrace",
+            &[("CHI", "I <want a> [/] want a cookie .")],
+            "I want a cookie .",
+        ),
+        (
+            "repeated",
+            &[("CHI", "I want a cookie ."), ("CHI", "I want a cookie .")],
+            "I want a cookie .",
+        ),
+        ("no_overlap", &[("CHI", "cats sleep .")], "dogs bark ."),
+    ];
+    let observations: Vec<_> = cases
+        .iter()
+        .map(|(name, utterances, reference)| {
+            let (main, main_errors) = parse_lenient(&parser, &make_chat(utterances));
+            let (gold, gold_errors) = parse_lenient(&parser, &make_chat(&[("CHI", reference)]));
+            assert!(main_errors.is_empty(), "{name}: {main_errors:?}");
+            assert!(gold_errors.is_empty(), "{name}: {gold_errors:?}");
+            let metrics = compare(&main, &gold, GoldCoverage::Complete).metrics;
+            serde_json::json!({
+                "case": name,
+                "matches": metrics.matches(),
+                "insertions": metrics.insertions(),
+                "deletions": metrics.deletions(),
+                "gold_words": metrics.total_gold_words(),
+                "main_words": metrics.total_main_words(),
+            })
+        })
+        .collect();
+    insta::assert_json_snapshot!(observations, @r#"
+    [
+      {
+        "case": "exact",
+        "deletions": 0,
+        "gold_words": 4,
+        "insertions": 0,
+        "main_words": 4,
+        "matches": 4
+      },
+      {
+        "case": "omission",
+        "deletions": 1,
+        "gold_words": 4,
+        "insertions": 0,
+        "main_words": 3,
+        "matches": 3
+      },
+      {
+        "case": "replacement",
+        "deletions": 0,
+        "gold_words": 4,
+        "insertions": 0,
+        "main_words": 4,
+        "matches": 4
+      },
+      {
+        "case": "retrace",
+        "deletions": 0,
+        "gold_words": 4,
+        "insertions": 0,
+        "main_words": 4,
+        "matches": 4
+      },
+      {
+        "case": "repeated",
+        "deletions": 0,
+        "gold_words": 4,
+        "insertions": 4,
+        "main_words": 8,
+        "matches": 4
+      },
+      {
+        "case": "no_overlap",
+        "deletions": 2,
+        "gold_words": 2,
+        "insertions": 2,
+        "main_words": 2,
+        "matches": 0
+      }
+    ]
+    "#);
+}
+
 /// Main tokens outside the matched stretch must be reported as insertions, not
 /// dropped.
 ///

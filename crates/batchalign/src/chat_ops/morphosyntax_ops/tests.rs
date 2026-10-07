@@ -761,12 +761,8 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
         &empty_mwt,
     )
     .expect("primary injection should succeed");
-    assert!(
-        injection.decisions.is_empty(),
-        "primary L2-placeholder injection should not degrade the fixture: {:?}",
-        injection.decisions
-    );
-    let deferred = injection.l2.into_reported_positions();
+    let (_, l2) = injection.into_parts();
+    let deferred = l2.into_reported_positions();
     assert_eq!(
         deferred.len(),
         2,
@@ -1031,21 +1027,7 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
     );
 
     // The injection must succeed, no retokenization_failed decision.
-    let injection = result.expect("inject_results should not return Err");
-    let failed_decisions: Vec<_> = injection
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.strategy.strategy_name() == "retokenization_failed"
-                || d.strategy.strategy_name() == "injection_failed"
-                || d.strategy.strategy_name() == "mapping_failed"
-        })
-        .collect();
-    assert!(
-        failed_decisions.is_empty(),
-        "Retokenize with MWT Range tokens should not produce failure decisions, \
-         got: {failed_decisions:?}"
-    );
+    result.expect("inject_results must complete all requested morphology");
 
     // The output should have a %mor tier.
     let utt = chat_file
@@ -1066,6 +1048,44 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
 
 #[test]
 fn inject_results_preserve_coraal_units_keeps_mor_gra() {
+    assert_coraal_injection_complete(
+        r#"[
+      {"id":1,"text":"now","lemma":"now","upos":"ADV","xpos":"RB","feats":"PronType=Dem","head":9,"deprel":"advmod"},
+      {"id":2,"text":"the","lemma":"the","upos":"DET","xpos":"DT","feats":"Definite=Def|PronType=Art","head":3,"deprel":"det"},
+      {"id":3,"text":"building's","lemma":"building'","upos":"NOUN","xpos":"NNS","feats":"Number=Plur","head":0,"deprel":"root"},
+      {"id":4,"text":"only","lemma":"only","upos":"ADV","xpos":"RB","head":5,"deprel":"advmod"},
+      {"id":5,"text":"four","lemma":"four","upos":"NUM","xpos":"CD","feats":"NumForm=Word|NumType=Card","head":6,"deprel":"nummod"},
+      {"id":6,"text":"hundred","lemma":"hundred","upos":"NUM","xpos":"CD","feats":"NumForm=Word|NumType=Card","head":9,"deprel":"nummod"},
+      {"id":7,"text":"and","lemma":"and","upos":"CCONJ","xpos":"CC","head":8,"deprel":"cc"},
+      {"id":8,"text":"ninety","lemma":"ninety","upos":"NUM","xpos":"CD","feats":"NumForm=Word|NumType=Card","head":6,"deprel":"conj"},
+      {"id":9,"text":"units","lemma":"unit","upos":"NOUN","xpos":"NNS","feats":"Number=Plur","head":3,"deprel":"conj"},
+      {"id":10,"text":".","lemma":".","upos":"PUNCT","xpos":".","head":3,"deprel":"punct"}
+    ]"#,
+    );
+}
+
+#[test]
+fn inject_results_preserve_coraal_mwt_does_not_alias_subject_and_predicate() {
+    // A controlled complete UD response, not an asserted model observation.
+    assert_coraal_injection_complete(
+        r#"[
+      {"id":1,"text":"now","lemma":"now","upos":"ADV","head":10,"deprel":"advmod"},
+      {"id":2,"text":"the","lemma":"the","upos":"DET","head":3,"deprel":"det"},
+      {"id":[3,4],"text":"building's","lemma":"","upos":"X","head":0,"deprel":"dep"},
+      {"id":3,"text":"building","lemma":"building","upos":"NOUN","feats":"Number=Sing","head":10,"deprel":"nmod:poss","misc":"VerbReadingLemma=build"},
+      {"id":4,"text":"'s","lemma":"'s","upos":"PART","head":3,"deprel":"case"},
+      {"id":5,"text":"only","lemma":"only","upos":"ADV","head":6,"deprel":"advmod"},
+      {"id":6,"text":"four","lemma":"four","upos":"NUM","head":7,"deprel":"nummod"},
+      {"id":7,"text":"hundred","lemma":"hundred","upos":"NUM","head":10,"deprel":"nummod"},
+      {"id":8,"text":"and","lemma":"and","upos":"CCONJ","head":9,"deprel":"cc"},
+      {"id":9,"text":"ninety","lemma":"ninety","upos":"NUM","head":7,"deprel":"conj"},
+      {"id":10,"text":"units","lemma":"unit","upos":"NOUN","head":0,"deprel":"root"},
+      {"id":11,"text":".","lemma":".","upos":"PUNCT","head":10,"deprel":"punct"}
+    ]"#,
+    );
+}
+
+fn assert_coraal_injection_complete(raw_words: &str) {
     use crate::chat_ops::morphosyntax_ops::inject_results;
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
 
@@ -1086,23 +1106,10 @@ fn inject_results_preserve_coraal_units_keeps_mor_gra() {
 
     assert_eq!(batch_items.len(), 1, "should have one payload");
 
-    let ud_response = ud_response_from_words(
-        r#"[
-          {"id":1,"text":"now","lemma":"now","upos":"ADV","xpos":"RB","feats":"PronType=Dem","head":9,"deprel":"advmod"},
-          {"id":2,"text":"the","lemma":"the","upos":"DET","xpos":"DT","feats":"Definite=Def|PronType=Art","head":3,"deprel":"det"},
-          {"id":3,"text":"building's","lemma":"building'","upos":"NOUN","xpos":"NNS","feats":"Number=Plur","head":0,"deprel":"root"},
-          {"id":4,"text":"only","lemma":"only","upos":"ADV","xpos":"RB","head":5,"deprel":"advmod"},
-          {"id":5,"text":"four","lemma":"four","upos":"NUM","xpos":"CD","feats":"NumForm=Word|NumType=Card","head":6,"deprel":"nummod"},
-          {"id":6,"text":"hundred","lemma":"hundred","upos":"NUM","xpos":"CD","feats":"NumForm=Word|NumType=Card","head":9,"deprel":"nummod"},
-          {"id":7,"text":"and","lemma":"and","upos":"CCONJ","xpos":"CC","head":8,"deprel":"cc"},
-          {"id":8,"text":"ninety","lemma":"ninety","upos":"NUM","xpos":"CD","feats":"NumForm=Word|NumType=Card","head":6,"deprel":"conj"},
-          {"id":9,"text":"units","lemma":"unit","upos":"NOUN","xpos":"NNS","feats":"Number=Plur","head":3,"deprel":"conj"},
-          {"id":10,"text":".","lemma":".","upos":"PUNCT","xpos":".","head":3,"deprel":"punct"}
-        ]"#,
-    );
+    let ud_response = ud_response_from_words(raw_words);
 
     let empty_mwt = std::collections::BTreeMap::new();
-    let injection = inject_results(
+    let _injection = inject_results(
         &parser,
         &mut chat_file,
         batch_items,
@@ -1112,20 +1119,6 @@ fn inject_results_preserve_coraal_units_keeps_mor_gra() {
         &empty_mwt,
     )
     .expect("preserve injection should not return Err");
-
-    let failed_decisions: Vec<_> = injection
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.strategy.strategy_name() == "mapping_failed"
-                || d.strategy.strategy_name() == "injection_failed"
-                || d.strategy.strategy_name() == "retokenization_failed"
-        })
-        .collect();
-    assert!(
-        failed_decisions.is_empty(),
-        "coraal units should not be dropped; got decisions: {failed_decisions:?}"
-    );
 
     let utt = chat_file
         .lines
@@ -1147,6 +1140,11 @@ fn inject_results_preserve_coraal_units_keeps_mor_gra() {
             .any(|t| matches!(t.tier, talkbank_model::model::DependentTier::Gra(_))),
         "preserve injection should write %gra for the units case"
     );
+    talkbank_model::validate_chat_file_with_options(
+        &mut chat_file,
+        &talkbank_model::ParseValidateOptions::default().with_alignment(),
+    )
+    .expect("completed morphology must leave fully valid CHAT");
 }
 
 #[test]
@@ -1183,7 +1181,7 @@ fn inject_results_preserve_minga_because_keeps_mor_gra() {
     );
 
     let empty_mwt = std::collections::BTreeMap::new();
-    let injection = inject_results(
+    let _injection = inject_results(
         &parser,
         &mut chat_file,
         batch_items,
@@ -1193,20 +1191,6 @@ fn inject_results_preserve_minga_because_keeps_mor_gra() {
         &empty_mwt,
     )
     .expect("preserve injection should not return Err");
-
-    let failed_decisions: Vec<_> = injection
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.strategy.strategy_name() == "mapping_failed"
-                || d.strategy.strategy_name() == "injection_failed"
-                || d.strategy.strategy_name() == "retokenization_failed"
-        })
-        .collect();
-    assert!(
-        failed_decisions.is_empty(),
-        "minga because should not be dropped; got decisions: {failed_decisions:?}"
-    );
 
     let utt = chat_file
         .lines
@@ -1268,7 +1252,7 @@ fn inject_results_preserve_kings_continuation_keeps_mor_gra() {
     ];
 
     let empty_mwt = std::collections::BTreeMap::new();
-    let injection = inject_results(
+    let _injection = inject_results(
         &parser,
         &mut chat_file,
         batch_items,
@@ -1278,20 +1262,6 @@ fn inject_results_preserve_kings_continuation_keeps_mor_gra() {
         &empty_mwt,
     )
     .expect("preserve injection should not return Err");
-
-    let failed_decisions: Vec<_> = injection
-        .decisions
-        .iter()
-        .filter(|d| {
-            d.strategy.strategy_name() == "mapping_failed"
-                || d.strategy.strategy_name() == "injection_failed"
-                || d.strategy.strategy_name() == "retokenization_failed"
-        })
-        .collect();
-    assert!(
-        failed_decisions.is_empty(),
-        "kings continuation should not be dropped; got decisions: {failed_decisions:?}"
-    );
 
     let utts: Vec<_> = chat_file
         .lines
@@ -1588,16 +1558,13 @@ fn first_utterance_mut(
 }
 
 // Regression guards: `inject_results` must surface injection errors
-// visibly (via DecisionRecord + tracing::warn!) rather than silently
-// drop the utterance, BUT must not kill the whole file, an isolated
-// Stanza edge case shouldn't take down an entire morphotag run.
+// visibly and refuse that file, rather than publish missing morphology.
 // See `inject::inject_morphosyntax` for the library-level error
 // check that callers rely on.
 
 /// When the UD response produces fewer Mor items than the CHAT main tier
 /// has alignable words, `inject_results` must emit a visible
-/// `DecisionRecord` (kind `injection_failed`) and continue with the
-/// next utterance, not propagate the error and kill the file.
+/// typed refusal carrying the diagnostic. Other files in a job can continue.
 #[test]
 fn inject_results_count_mismatch_propagates_error() {
     use crate::chat_ops::morphosyntax_ops::inject_results;
@@ -1648,31 +1615,17 @@ fn inject_results_count_mismatch_propagates_error() {
         TokenizationMode::Preserve,
         &empty_mwt,
     )
-    .expect("inject_results should absorb per-utterance failures at file level");
-
-    // After the outcome-typing refactor (Wave 1 of the morphotag
-    // reconciliation architecture), a count mismatch surfaces as a
-    // `misalignment_bug` DecisionRecord whose `reason` field carries
-    // typed diagnostic data (class, expected, actual, chat_words,
-    // stanza_tokens). The test still asserts what it was checking
-    // before: that mismatches are visible as review-flagged decision
-    // records, but in the new typed form.
-    let failed: Vec<_> = outcome
-        .decisions
-        .iter()
-        .filter(|d| d.strategy.strategy_name() == "misalignment_bug")
-        .collect();
-    assert!(
-        !failed.is_empty(),
-        "expected at least one `misalignment_bug` decision record when the \
-         count mismatched; got decisions: {:?}",
-        outcome.decisions
-    );
-    let reason = &failed[0].reason;
+    .expect_err("an incomplete utterance must refuse the file");
+    let batchalign_transform::morphosyntax::InjectionError::Incomplete(decision) = outcome else {
+        panic!("expected an utterance refusal");
+    };
+    assert_eq!(decision.strategy.strategy_name(), "misalignment_bug");
+    assert!(decision.needs_review);
+    let reason = &decision.reason;
     assert!(reason.contains("expected=3"), "got: {reason}");
     assert!(reason.contains("actual=2"), "got: {reason}");
     assert!(
-        failed[0].needs_review,
+        decision.needs_review,
         "misalignment bugs always require human review"
     );
 }
@@ -1867,7 +1820,7 @@ fn family_a_single_word_at_o_keeps_root_deprel_when_head_is_zero() {
     );
 
     let empty_mwt = std::collections::BTreeMap::new();
-    let injection = inject_results(
+    let _injection = inject_results(
         &parser,
         &mut chat_file,
         batch_items,
@@ -1877,14 +1830,6 @@ fn family_a_single_word_at_o_keeps_root_deprel_when_head_is_zero() {
         &empty_mwt,
     )
     .expect("inject_results must succeed for the single-@o case");
-    assert!(
-        injection
-            .decisions
-            .iter()
-            .all(|d| d.strategy.strategy_name() != "injection_failed"),
-        "injection should not fail on single-@o utterance: {:?}",
-        injection.decisions
-    );
 
     let rels = first_utt_gra_relations(&chat_file);
     let body = fmt_gra(&rels);
@@ -2342,17 +2287,25 @@ fn morphotag_inject_results_preserves_utterance_multiplicity_one_to_one() {
     )
     .batch_items;
 
-    // One synthetic UdResponse per batch item with a single placeholder
-    // root word: the morphology content is irrelevant; what matters
-    // here is that injection does not perturb the main tier.
+    // Complete synthetic responses exercise preservation after successful
+    // injection. An underlength placeholder response now correctly refuses
+    // the file and would not exercise that transition.
     let ud_responses: Vec<_> = batch_items
         .iter()
-        .map(|_| {
-            ud_response_from_words(
-                r#"[
-                  {"id":1,"text":"x","lemma":"x","upos":"NOUN","xpos":"NN","head":0,"deprel":"root"}
-                ]"#,
-            )
+        .map(|item| crate::chat_ops::nlp::UdResponse {
+            sentences: vec![
+                serde_json::from_value(serde_json::json!({
+                    "words": item.words().iter().enumerate().map(|(index, word)| {
+                        serde_json::json!({
+                            "id": index + 1, "text": word.text.as_str(),
+                            "lemma": word.text.as_str(), "upos": "NOUN",
+                            "head": if index == 0 { 0 } else { 1 },
+                            "deprel": if index == 0 { "root" } else { "dep" },
+                        })
+                    }).collect::<Vec<_>>()
+                }))
+                .expect("complete synthetic UD"),
+            ],
         })
         .collect();
 
@@ -2404,9 +2357,8 @@ fn morphotag_inject_results_preserves_utterance_multiplicity_one_to_one() {
 //      E724, or other downstream failures from the fallback shape.
 //
 // Note on what's covered here vs. elsewhere:
-//   - The partition-side fallback (`partition_groups_by_stanza_support`)
-//     has its own unit tests in `morphosyntax/worker.rs`; this matrix
-//     covers the user-observable end of the pipeline.
+//   - Runtime capability admission has its own tests in
+//     `morphosyntax/worker.rs`; primary work cannot use this fallback.
 //   - The Family C splice rollback (`validate_or_rollback_splice`)
 //     has its own unit tests in `morphosyntax/l2/splice.rs`; the
 //     construct-level coverage of "splice rolled back to L2|xxx → file
@@ -2462,8 +2414,8 @@ fn validate_or_panic(chat_file: &mut talkbank_model::ChatFile, label: &str) {
 // Row 1: `@s:UNSUPPORTEDLANG`: explicit per-word marker for a Stanza
 // language that has no morphosyntax processors.
 //
-// Production trigger: `partition_groups_by_stanza_support` filters the
-// L2 group to fallback; downstream injection leaves L2|xxx. The user
+// Production trigger: secondary dispatch declines the unavailable
+// L2 span; primary injection leaves L2|xxx. The user
 // observes a single foreign word slot as L2|xxx and the rest of the
 // utterance as real English morphology.
 //
@@ -2656,25 +2608,13 @@ fn l2_fallback_ambiguous_languages_at_s_marker_remains_l2_xxx() {
 }
 
 // ---------------------------------------------------------------------
-// Row 4: `[- UNSUPPORTEDLANG]`, whole-utterance language switch into
-// a Stanza-unsupported language. The morphotag worker's
-// `partition_groups_by_stanza_support` keeps that group out of
-// dispatch entirely, so every word in the utterance falls back to
-// L2|xxx.
-//
-// This test exercises the partition fallback shape end-to-end at the
-// inject_results layer: we feed a primary UD response containing
-// nothing but `xbxxx` placeholders (mirroring the empty UdResponse
-// the partition fills in for the unsupported group), and assert that
-// every word position resolves to L2|xxx.
-//
-// TRANSITION PATH: when we add a non-Stanza analyzer for one of the
-// currently-unsupported languages (e.g. Marathi via a separate model
-// runtime), rewrite this test's per-position assertions to the real
-// expected analysis for that language.
+// Row 4: unsupported whole-utterance precodes require primary analysis,
+// not secondary placeholders. Production refuses them before dispatch.
+// This injection-boundary test additionally proves that a fabricated empty
+// response cannot establish completion if an internal caller supplies one.
 // ---------------------------------------------------------------------
 #[test]
-fn l2_fallback_unsupported_precode_whole_utterance_remains_all_l2_xxx() {
+fn unsupported_precode_without_analysis_refuses_completion() {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
 
     let parser = TreeSitterParser::new().unwrap();
@@ -2702,15 +2642,12 @@ fn l2_fallback_unsupported_precode_whole_utterance_remains_all_l2_xxx() {
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
-    // Empty `UdResponse { sentences: vec![] }`, production
-    // `partition_groups_by_stanza_support` fills this in for every
-    // unsupported-language group, and downstream `inject_results`
-    // skips items whose response has no sentences, leaving the
-    // pre-injection state intact (no %mor written).
+    // The partition's empty response for an unsupported language cannot
+    // establish completed analysis of ordinary lexical content.
     let primary_ud = crate::chat_ops::nlp::UdResponse { sentences: vec![] };
 
     let empty_mwt = std::collections::BTreeMap::new();
-    inject_results(
+    let refusal = inject_results(
         &parser,
         &mut chat_file,
         batch_items,
@@ -2719,16 +2656,13 @@ fn l2_fallback_unsupported_precode_whole_utterance_remains_all_l2_xxx() {
         TokenizationMode::Preserve,
         &empty_mwt,
     )
-    .expect(
-        "primary injection must succeed (empty-sentences response \
-             is the production partition-fallback shape)",
-    );
+    .expect_err("unsupported lexical analysis must refuse the file");
+    let batchalign_transform::morphosyntax::InjectionError::Incomplete(decision) = refusal else {
+        panic!("expected an utterance refusal");
+    };
+    assert_eq!(decision.strategy.strategy_name(), "nlp_no_sentences");
 
-    // The post-fallback state for a `[- UNSUPPORTEDLANG]` utterance
-    // is: no `%mor` tier emitted for this utterance at all (the
-    // partition skipped it; injection had no analysis to write).
-    // Validation must still pass, a missing `%mor` for an utterance
-    // is not by itself a CHAT validity error.
+    // The rejected destination remains inspectable, but is not publishable.
     use talkbank_model::model::Line;
     let utt = chat_file
         .lines
@@ -2740,14 +2674,7 @@ fn l2_fallback_unsupported_precode_whole_utterance_remains_all_l2_xxx() {
         .expect("fixture must have an utterance");
     assert!(
         utt.mor_tier().is_none(),
-        "[- nep] (unsupported precode): expected NO %mor for the \
-         skipped utterance under the partition fallback (production \
-         shape: every word is L2|xxx-equivalent because the worker \
-         never produced an analysis). Got: {:?}. \
-         TRANSITION PATH: when we add a non-Stanza analyzer for the \
-         currently-unsupported precode language, this test should \
-         start asserting that %mor is present and contains the real \
-         analysis.",
+        "a refused utterance must not invent morphology: {:?}",
         utt.mor_tier()
     );
 
@@ -4007,7 +3934,10 @@ fn inject_retokenized(
     mwt: &MwtDict,
 ) -> (
     talkbank_model::ChatFile,
-    Vec<batchalign_transform::decisions::DecisionRecord>,
+    Result<
+        batchalign_transform::morphosyntax::InjectionResult,
+        batchalign_transform::morphosyntax::InjectionError,
+    >,
 ) {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
     let parser = TreeSitterParser::new().unwrap();
@@ -4033,9 +3963,8 @@ fn inject_retokenized(
         &primary_lang,
         TokenizationMode::StanzaRetokenize,
         mwt,
-    )
-    .expect("the batch is admitted");
-    (chat_file, injection.decisions)
+    );
+    (chat_file, injection)
 }
 
 /// The utterance's main tier as written.
@@ -4056,7 +3985,7 @@ fn main_tier(chat_file: &talkbank_model::ChatFile) -> String {
 /// reported retokenization failure, not a rewritten transcript.
 #[test]
 fn retokenize_does_not_write_contraction_table_words_into_the_main_tier() {
-    let (chat_file, decisions) = inject_retokenized(
+    let (chat_file, result) = inject_retokenized(
         "I hafta go .",
         r#"[
           {"id":1,"text":"I","lemma":"I","upos":"PRON","feats":"Case=Nom|Number=Sing|Person=1|PronType=Prs","head":2,"deprel":"nsubj"},
@@ -4067,12 +3996,12 @@ fn retokenize_does_not_write_contraction_table_words_into_the_main_tier() {
         &MwtDict::new(),
     );
     assert_eq!(main_tier(&chat_file), "*CHI:\tI hafta go .");
-    assert!(
-        decisions
-            .iter()
-            .any(|d| d.strategy.strategy_name() == "retokenization_failed"),
-        "{decisions:?}"
-    );
+    let batchalign_transform::morphosyntax::InjectionError::Incomplete(decision) =
+        result.expect_err("unplaceable retokenization must refuse the file")
+    else {
+        panic!("expected an utterance refusal");
+    };
+    assert_eq!(decision.strategy.strategy_name(), "retokenization_failed");
 }
 
 /// A token the MWT lexicon expands keeps the utterance's terminator
@@ -4086,7 +4015,7 @@ fn retokenize_with_an_mwt_lexicon_expansion_injects_a_valid_gra() {
     )]
     .into_iter()
     .collect();
-    let (mut chat_file, decisions) = inject_retokenized(
+    let (mut chat_file, result) = inject_retokenized(
         "I cannot go .",
         r#"[
           {"id":1,"text":"I","lemma":"I","upos":"PRON","feats":"Case=Nom|Number=Sing|Person=1|PronType=Prs","head":3,"deprel":"nsubj"},
@@ -4097,7 +4026,7 @@ fn retokenize_with_an_mwt_lexicon_expansion_injects_a_valid_gra() {
         &mwt,
     );
     use talkbank_model::WriteChat;
-    assert!(decisions.is_empty(), "{decisions:?}");
+    result.expect("lexicon expansion must complete");
     assert_eq!(main_tier(&chat_file), "*CHI:\tI can not go .");
     let written = chat_file.to_chat_string();
     let gra = written
@@ -4115,7 +4044,7 @@ fn retokenize_with_an_mwt_lexicon_expansion_injects_a_valid_gra() {
 #[test]
 fn retokenize_places_a_special_form_on_its_own_word() {
     use talkbank_model::WriteChat;
-    let (chat_file, decisions) = inject_retokenized(
+    let (chat_file, result) = inject_retokenized(
         "I don't like gumma@c .",
         r#"[
           {"id":1,"text":"I","lemma":"I","upos":"PRON","feats":"Case=Nom|Number=Sing|Person=1|PronType=Prs","head":4,"deprel":"nsubj"},
@@ -4128,7 +4057,7 @@ fn retokenize_places_a_special_form_on_its_own_word() {
         ]"#,
         &MwtDict::new(),
     );
-    assert!(decisions.is_empty(), "{decisions:?}");
+    result.expect("special-form retokenization must complete");
     let written = chat_file.to_chat_string();
     assert_eq!(main_tier(&chat_file), "*CHI:\tI do n't like gumma@c .");
     let mor = written

@@ -9,6 +9,9 @@ prepared handlers instead of re-deriving engine policy on every call.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from batchalign.inference.translate import TranslateInferenceRequest
 from batchalign.worker._types import (
     BatchInferHandler,
     BatchInferRequest,
@@ -90,16 +93,49 @@ def build_utseg_batch_infer_handler() -> BatchInferHandler:
     return _handler
 
 
-def build_translate_batch_infer_handler() -> BatchInferHandler:
+def build_translate_inference_handler() -> Callable[
+    [TranslateInferenceRequest], BatchInferResponse
+]:
     """Build the translation batch handler from the loaded translation engine."""
     from batchalign.inference.translate import batch_infer_translate
 
-    def _handler(req: BatchInferRequest) -> BatchInferResponse:
+    def _handler(req: TranslateInferenceRequest) -> BatchInferResponse:
         """Run translation using the engine selected during worker bootstrap."""
         translation = _state.translation
         if translation is None:
-            return unsupported_batch_infer("No translation engine loaded")(req)
+            return BatchInferResponse(
+                results=[
+                    InferResponse.unexecuted(
+                        ItemFailed(error="No translation engine loaded")
+                    )
+                    for _ in req.items
+                ]
+            )
         return batch_infer_translate(req=req, translation=translation)
+
+    return _handler
+
+
+def build_translate_batch_infer_handler() -> BatchInferHandler:
+    """Legacy batch IPC explicitly requests English; V2 carries its own target.
+
+    Admit that direction into the same translation-only request rather than
+    registering a target-aware callable in the generic NLP handler table.
+    """
+    from pydantic import ValidationError
+
+    translate = build_translate_inference_handler()
+
+    def _handler(req: BatchInferRequest) -> BatchInferResponse:
+        try:
+            request = TranslateInferenceRequest(
+                source_lang=req.lang, target_lang="eng", items=req.items
+            )
+        except ValidationError as error:
+            return unsupported_batch_infer(
+                f"Invalid legacy translation direction: {error}"
+            )(req)
+        return translate(request)
 
     return _handler
 
@@ -108,6 +144,7 @@ __all__ = [
     "BatchInferHandler",
     "build_morphosyntax_batch_infer_handler",
     "build_translate_batch_infer_handler",
+    "build_translate_inference_handler",
     "build_utseg_batch_infer_handler",
     "unsupported_batch_infer",
 ]

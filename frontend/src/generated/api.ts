@@ -85,6 +85,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/jobs/{job_id}/artifacts/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream a recorded successful binary result. This endpoint inherits the
+         *     same router/middleware boundary as job metadata and text results.
+         */
+        get: operations["get_binary_result"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/jobs/{job_id}/cancel": {
         parameters: {
             query?: never;
@@ -237,6 +257,18 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Canonical BLAKE3 identity, admitted from a digest or checked hexadecimal text. */
+        ArtifactDigest: string;
+        /** @description Nonempty artifact identity sent instead of binary bytes in a JSON response. */
+        BinaryResultDescriptor: {
+            /**
+             * Format: int64
+             * @description Exact byte count; a zero-length artifact is not an exported recording.
+             */
+            byte_len: number;
+            /** @description Identity of the bytes, verified again by the delivery consumer. */
+            digest: components["schemas"]["ArtifactDigest"];
+        };
         /**
          * @description Hostname or remote IP of the caller who issued a cancel.
          *
@@ -324,7 +356,7 @@ export interface components {
          *     MIME-like content discriminator for file results.
          * @enum {string}
          */
-        ContentType: "chat" | "csv" | "text" | "json";
+        ContentType: "chat" | "csv" | "text" | "json" | "wav" | "mp3";
         /**
          * @description Correlation ID for tracing a job across log entries (non-empty).
          *
@@ -422,7 +454,34 @@ export interface components {
          *     error strings.
          * @enum {string}
          */
-        FailureCategory: "validation" | "parse_error" | "input_missing" | "evidence_unavailable" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "provider_transient" | "provider_terminal" | "memory_pressure" | "cancelled" | "system" | "model_access_denied";
+        FailureCategory: "validation" | "parse_error" | "input_missing" | "evidence_unavailable" | "analysis_unavailable" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "provider_transient" | "provider_terminal" | "memory_pressure" | "cancelled" | "system" | "model_access_denied";
+        /**
+         * @description What a file written with diagnostics reports.
+         *
+         *     Carried by a file whose status is [`FileStatusKind::Diagnosed`]: its output
+         *     was written but is not certified complete, because its producer's admission
+         *     found something (transcription generated CHAT that Chatter did not admit),
+         *     because requested work did not apply (a shortfall), or both. Validation is
+         *     exactly as strict as for any other output; what differs is that the verdict
+         *     is reported beside the written file instead of replacing it.
+         *
+         *     Bounded: its findings carry the count, a count per error code and the
+         *     first [`Self::FIRST_FINDINGS`] findings, because the record is copied into
+         *     every file status entry on every poll. A longer list is written once, in
+         *     full, to a sidecar file ([`FullFindings::Sidecar`]).
+         *
+         *     The bar the output was judged against exists only with findings: a file
+         *     diagnosed for its shortfalls alone was admitted, and has no findings and no
+         *     bar to report. Records written before the bar was recorded (a flat
+         *     `finding_count` at the top level) are still read: every such record was
+         *     written for transcription's generated output, the only producer of
+         *     diagnosed output then, which is judged against complete construction.
+         */
+        FileOutputDiagnostics: {
+            findings?: components["schemas"]["JudgedFindingsRecord"] | null;
+            /** @description Requested work the written document does not carry. */
+            shortfalls?: components["schemas"]["OutputShortfallRecord"][];
+        };
         /** @description A single CHAT file submitted by the client. */
         FilePayload: {
             /** @description Full CHAT file text. */
@@ -441,7 +500,7 @@ export interface components {
          *     without parsing human-facing display labels.
          * @enum {string}
          */
-        FileProgressStage: "processing" | "reading" | "resolving_audio" | "recovering_utterance_timing" | "recovering_timing_fallback" | "aligning" | "transcribing" | "benchmarking" | "checking_cache" | "applying_results" | "post_processing" | "building_chat" | "segmenting_utterances" | "analyzing_morphosyntax" | "finalizing" | "writing" | "parsing" | "analyzing" | "segmenting" | "translating" | "resolving_coreference" | "comparing" | "retry_scheduled";
+        FileProgressStage: "processing" | "reading" | "resolving_audio" | "recovering_utterance_timing" | "recovering_timing_fallback" | "aligning" | "transcribing" | "benchmarking" | "checking_cache" | "applying_results" | "post_processing" | "building_chat" | "segmenting_utterances" | "analyzing_morphosyntax" | "finalizing" | "writing" | "parsing" | "analyzing" | "segmenting" | "translating" | "resolving_coreference" | "comparing" | "retry_scheduled" | "waiting_for_worker";
         /**
          * @description The provenance stamps read from one result file.
          *
@@ -467,10 +526,10 @@ export interface components {
         /** @description Result for a single processed file. */
         FileResult: {
             /**
-             * @description Processed file content (CHAT text or CSV).  Empty string when
-             *     `error` is `Some`.
+             * @description Inline text or a binary artifact descriptor. This is untrusted wire
+             *     data, not a destination or write-admission capability.
              */
-            content?: string;
+            content?: components["schemas"]["ResultContent"];
             /**
              * @description MIME-like content discriminator: `"chat"` for CHAT files (default),
              *     `"csv"` for tabular output (e.g. opensmile features).
@@ -530,6 +589,7 @@ export interface components {
          *     results, and they are included in `JobInfo.file_statuses`.
          */
         FileStatusEntry: {
+            diagnostics?: components["schemas"]["FileOutputDiagnostics"] | null;
             duration_s?: components["schemas"]["NonNegativeSeconds"] | null;
             /** @description Human-readable error message.  Present only when `status` is `Error`. */
             error?: string | null;
@@ -578,10 +638,43 @@ export interface components {
          *
          *     Each file in a job tracks its own status independently.  On job restart,
          *     only files in resumable states (`Queued`, `Processing`, `Interrupted`) are
-         *     re-queued; `Done` and `Error` files are left as-is.
+         *     re-queued; `Done`, `Diagnosed` and `Error` files are left as-is.
          * @enum {string}
          */
-        FileStatusKind: "queued" | "processing" | "done" | "error" | "interrupted";
+        FileStatusKind: "queued" | "processing" | "done" | "diagnosed" | "error" | "interrupted";
+        /** @description How many findings carried one error code. */
+        FindingCodeCount: {
+            /** @description The code; absent for findings that carry none. */
+            code?: string | null;
+            /**
+             * Format: int64
+             * @description How many findings carried it.
+             */
+            count: number;
+        };
+        /**
+         * @description Which check made a finding: a coarse gate level, or complete construction
+         *     admission.
+         * @enum {string}
+         */
+        FindingLevel: "parseable" | "structurally_complete" | "main_tier_valid" | "construction";
+        /** @description Where the complete list of a file's findings is. */
+        FullFindings: {
+            /** @enum {string} */
+            kind: "inline";
+        } | {
+            /** @enum {string} */
+            kind: "sidecar";
+            /** @description Path of the sidecar file on the server. */
+            path: string;
+        } | {
+            /** @description Why writing it failed. */
+            error: string;
+            /** @enum {string} */
+            kind: "unwritten";
+            /** @description Where the sidecar was to be written. */
+            path: string;
+        };
         /**
          * @description `GET /health` response.
          *
@@ -918,10 +1011,18 @@ export interface components {
             completed_at?: components["schemas"]["MachineTime"] | null;
             /**
              * Format: int64
-             * @description Number of files that finished successfully (`Done`).
+             * @description Number of files that reached a terminal state: done, diagnosed or
+             *     error.
              */
             completed_files: number;
             control_plane?: components["schemas"]["JobControlPlaneInfo"] | null;
+            /**
+             * Format: int64
+             * @description Number of files written with diagnostics (`Diagnosed`): their output
+             *     is on disk, but it is not certified complete. A `completed` job with a
+             *     nonzero count is not a clean success.
+             */
+            diagnosed_files?: number;
             duration_s?: components["schemas"]["NonNegativeSeconds"] | null;
             /**
              * @description Job-level error message when the job failed (the aggregated per-file
@@ -1031,6 +1132,30 @@ export interface components {
             /** @description Absolute paths to read input files from (paths_mode only). */
             source_paths?: components["schemas"]["ClientPath"][];
         };
+        /** @description What one output judgement found, bounded, with the bar it was held to. */
+        JudgedFindingsRecord: {
+            /** @description The bar the output was judged against. */
+            bar: components["schemas"]["JudgementBar"];
+            /**
+             * Format: int64
+             * @description How many findings the judgement made, in all; at least one.
+             */
+            finding_count: number;
+            /** @description How many findings carried each error code, most frequent first. */
+            findings_by_code?: components["schemas"]["FindingCodeCount"][];
+            /**
+             * @description The first findings, in the order the judgement found them, at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
+             */
+            first_findings?: components["schemas"]["OutputFindingRecord"][];
+            /** @description Where the complete list is. */
+            full_findings: components["schemas"]["FullFindings"];
+        };
+        /**
+         * @description The bar an output was judged against, as a refusal reports it.
+         * @enum {string}
+         */
+        JudgementBar: "construction" | "preservation";
         /**
          * @description Job language: `auto` (the ASR engine detects one language), `per-file` (each file's `@Languages:` header decides), an ISO 639-3 code such as `eng`, or a code-switched pair such as `eng,spa`, primary language first.
          * @example eng
@@ -1092,6 +1217,87 @@ export interface components {
          * @description Number of speakers in a recording.
          */
         NumSpeakers: number;
+        /**
+         * @description A postcode that marks an utterance as not speech in the recording, so
+         *     alignment leaves it untimed.
+         *
+         *     A closed set, read from Chatter's typed postcodes (never from the line's
+         *     text). The CHAT manual defines no fixed postcode set ("postcodes can be
+         *     designed to fit the needs of your particular project"), so membership
+         *     here is a recorded ruling, one per postcode, never inferred from a name.
+         * @enum {string}
+         */
+        OffRecordPostcode: "diary";
+        /**
+         * @description An optional later stage of a generating producer.
+         * @enum {string}
+         */
+        OptionalStage: "utterance_segmentation" | "morphosyntax";
+        /** @description One admission finding. */
+        OutputFindingRecord: {
+            /**
+             * @description The CHAT error code (for example `E220`), when the finding has one: a
+             *     command's own completion checks name none.
+             */
+            code?: string | null;
+            /** @description The validity level the finding belongs to. */
+            level: components["schemas"]["FindingLevel"];
+            /** @description What was found, without the code. */
+            message: string;
+        };
+        /** @description Requested work a written document does not carry, and why. */
+        OutputShortfallRecord: {
+            /** @enum {string} */
+            kind: "stage_skipped";
+            /** @description The stage. */
+            stage: components["schemas"]["OptionalStage"];
+        } | {
+            /** @enum {string} */
+            kind: "stage_not_applied";
+            /** @description Why, as the stage's own admission reported it, bounded. */
+            refusal: components["schemas"]["StageRefusalRecord"];
+            /** @description The stage. */
+            stage: components["schemas"]["OptionalStage"];
+        } | {
+            /**
+             * @description The first of them (positions among the file's utterances before
+             *     the stage, counting from 1), at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
+             */
+            first_held_out: number[];
+            /**
+             * Format: int64
+             * @description How many utterances it left out, at least one.
+             */
+            held_out_utterances: number;
+            /** @enum {string} */
+            kind: "stage_held_out";
+            /** @description The stage. */
+            stage: components["schemas"]["OptionalStage"];
+        } | {
+            /**
+             * @description The first of those utterances, in transcript order, at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
+             */
+            first_untimed: components["schemas"]["UntimedUtteranceRecord"][];
+            /** @enum {string} */
+            kind: "timing_incomplete";
+            /**
+             * Format: int64
+             * @description Required lexical words in the file.
+             */
+            required_words: number;
+            /**
+             * Format: int64
+             * @description How many utterances have untimed words, at least one.
+             */
+            untimed_utterances: number;
+            /**
+             * Format: int64
+             * @description How many of them have no positive interval, at least one.
+             */
+            untimed_words: number;
+        };
         /** @description One extracted provenance entry from a CHAT file. */
         ProvenanceEntry: {
             /** @description Command name (e.g., "morphotag", "align"). */
@@ -1119,6 +1325,119 @@ export interface components {
             worker_key: string;
         };
         /**
+         * @description Wire form of [`batchalign_transform::decisions::RefusedWindow`]: one
+         *     variant per cause, tagged by `cause`, each carrying only its own numbers.
+         */
+        RefusedWindowTrace: {
+            /**
+             * Format: int64
+             * @description The budget exceeded, in milliseconds.
+             */
+            budget_ms: number;
+            /** @enum {string} */
+            cause: "over_budget";
+            /**
+             * Format: int64
+             * @description End of the window, in file milliseconds.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the window, in file milliseconds.
+             */
+            start_ms: number;
+        } | {
+            /**
+             * Format: int64
+             * @description The position at which the window starts and ends.
+             */
+            at_ms: number;
+            /** @enum {string} */
+            cause: "empty";
+        } | {
+            /** @enum {string} */
+            cause: "inverted";
+            /**
+             * Format: int64
+             * @description The proposed end, which precedes the start.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description The proposed start.
+             */
+            start_ms: number;
+        } | {
+            /** @enum {string} */
+            cause: "past_recording";
+            /**
+             * Format: int64
+             * @description End of the window, in file milliseconds.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description How far past the recording's end, in milliseconds.
+             */
+            exceeds_by_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the window, in file milliseconds.
+             */
+            start_ms: number;
+        } | {
+            /**
+             * Format: int64
+             * @description The budget exceeded, in milliseconds.
+             */
+            budget_ms: number;
+            /** @enum {string} */
+            cause: "anchor_gap";
+            /**
+             * Format: int64
+             * @description End of the window, in file milliseconds.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description End of that stretch, in file milliseconds.
+             */
+            gap_end_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the widest uncrossable stretch, in file milliseconds.
+             */
+            gap_start_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the window, in file milliseconds.
+             */
+            start_ms: number;
+        } | {
+            /**
+             * Format: int64
+             * @description The budget exceeded, in milliseconds.
+             */
+            budget_ms: number;
+            /** @enum {string} */
+            cause: "anchors_unusable";
+            /**
+             * Format: int64
+             * @description End of the window, in file milliseconds.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the window, in file milliseconds.
+             */
+            start_ms: number;
+            /**
+             * @description Why the matches could not be cut at. Not `cause`, which is this
+             *     object's own tag.
+             */
+            unusable: components["schemas"]["UnusableAnchorsTrace"];
+        };
+        /**
          * @description Why a registry daemon was not adopted. Either way the remedy is to restart
          *     the daemon with this server's build (`batchalign3 worker stop`, then
          *     `batchalign3 worker start` for its profile and language).
@@ -1143,7 +1462,7 @@ export interface components {
          *     rejected at deserialization boundaries (HTTP 422, DB recovery skip).
          * @enum {string}
          */
-        ReleasedCommand: "align" | "transcribe" | "transcribe_s" | "translate" | "morphotag" | "coref" | "utseg" | "benchmark" | "opensmile" | "compare" | "avqi" | "diarize" | "speaker_identify";
+        ReleasedCommand: "align" | "transcribe" | "transcribe_s" | "translate" | "morphotag" | "coref" | "utseg" | "benchmark" | "opensmile" | "compare" | "avqi" | "diarize" | "speaker_identify" | "convert";
         /**
          * @description A path relative to a data repo root (e.g. `"French/Newcastle/Photos/13"`).
          *
@@ -1151,8 +1470,37 @@ export interface components {
          *     with a server root path to produce a [`ServerPath`] for I/O.
          */
         RepoRelativePath: string;
+        /**
+         * @description Content on the result wire: inline text or a streamed artifact descriptor.
+         *     Untagged serialization retains the existing JSON string for text results.
+         */
+        ResultContent: string | components["schemas"]["BinaryResultDescriptor"];
         /** @description A validated lowercase SHA-256 digest. */
         Sha256Digest: string;
+        /**
+         * @description Why an optional stage's own output was not admitted, bounded as
+         *     [`FileOutputDiagnostics`] is: it travels in every poll's file status.
+         */
+        StageRefusalRecord: {
+            /** @description The bar it was judged against. */
+            bar: components["schemas"]["JudgementBar"];
+            /**
+             * Format: int64
+             * @description How many findings the judgement made, in all.
+             */
+            finding_count: number;
+            /** @description How many findings carried each error code, most frequent first. */
+            findings_by_code?: components["schemas"]["FindingCodeCount"][];
+            /** @description The first findings, at most [`FileOutputDiagnostics::FIRST_FINDINGS`]. */
+            first_findings: components["schemas"]["OutputFindingRecord"][];
+            /** @enum {string} */
+            kind: "judged";
+        } | {
+            /** @enum {string} */
+            kind: "unestablished";
+            /** @description The producer's statement. */
+            reason: string;
+        };
         /**
          * @description Response body for mutating operations that return a status confirmation
          *     (e.g. cancel, delete, restart).
@@ -1172,6 +1520,49 @@ export interface components {
              */
             status: string;
         };
+        /** @description Why an utterance's words have no timing. */
+        UntimedCauseRecord: {
+            /** @enum {string} */
+            kind: "window_refused";
+            /** @description The refused window and its cause. */
+            window: components["schemas"]["RefusedWindowTrace"];
+        } | {
+            /** @enum {string} */
+            kind: "not_placed";
+        } | {
+            /** @enum {string} */
+            kind: "no_usable_timing";
+        } | {
+            /** @enum {string} */
+            kind: "not_in_recording";
+            /** @description The postcode that marks it. */
+            postcode: components["schemas"]["OffRecordPostcode"];
+        };
+        /** @description One utterance forced alignment left with untimed words. */
+        UntimedUtteranceRecord: {
+            /** @description Why. */
+            cause: components["schemas"]["UntimedCauseRecord"];
+            /**
+             * Format: int64
+             * @description How many of them are untimed, at least one.
+             */
+            untimed_words: number;
+            /**
+             * Format: int64
+             * @description The utterance's position among the file's utterances, counting from 1.
+             */
+            utterance: number;
+            /**
+             * Format: int64
+             * @description Required lexical words in it.
+             */
+            words: number;
+        };
+        /**
+         * @description Wire form of [`batchalign_transform::decisions::UnusableAnchors`].
+         * @enum {string}
+         */
+        UnusableAnchorsTrace: "no_reliable_anchors" | "anchors_refused" | "anchors_describe_other_words" | "no_interior_cut";
         /** @description What the server decided about one worker key's latest capability report. */
         WorkerCapabilityAdmission: {
             /** @description Admitted or refused. */
@@ -1335,6 +1726,40 @@ export interface operations {
             };
             /** @description Job still running */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_binary_result: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Job identifier */
+                job_id: string;
+                /** @description Exact recorded artifact identity */
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Binary recording bytes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description No successful binary result */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

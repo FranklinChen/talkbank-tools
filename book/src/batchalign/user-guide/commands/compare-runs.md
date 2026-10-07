@@ -1,6 +1,6 @@
 # `compare-runs`
 
-**Last modified:** 2026-08-03 12:42 EDT
+**Last modified:** 2026-10-06 19:25 EDT
 
 `compare-runs` is an offline comparator for two immutable, already-produced
 artifact sets. It does not run Batchalign, contact a server, or treat either
@@ -17,7 +17,7 @@ batchalign3 compare-runs manifest machine \
 
 batchalign3 compare-runs manifest human \
   --artifacts review/ --output review.manifest.json --run-id review-2026 \
-  --source-id session-17 --protocol iisrp-v1 --cohort reviewed
+  --source-id session-17 --protocol review-v1 --cohort reviewed
 ```
 
 Manifests hash every regular file with BLAKE3. Roots must contain regular
@@ -28,8 +28,11 @@ no-op, while conflicting output is rejected.
 
 Paths in the TOML plan are relative to the plan file. Artifact pair paths are
 relative to their verified roots. A run-wide `speaker_map` may be overridden
-per pair; a partial map is valid and leaves omitted speakers visibly
-unmatched. Pairs can be held out of aggregates with a required reason.
+per pair. Transcription permits a partial map and reports omitted speakers
+visibly unmatched. Morphotag and alignment require a complete one-to-one map
+covering every utterance speaker on both sides; a partial map is unpairable
+with explicit unmatched-speaker lists, never a partial metric disguised as a
+complete comparison. Pairs can be held out of aggregates with a required reason.
 
 ```toml
 schema_version = 1
@@ -67,6 +70,39 @@ clitic/chunk, dependency-head, and relation differences. Alignment first
 requires identical normalized token identities, then reports each token's
 timing state, absolute deltas, distributions, and independent order violations.
 
+Every retained artifact must pass full Chatter admission, including dependent
+tier alignment, before a mode computes metrics. Comparison does not regenerate
+tiers and therefore has no corrupt-tier exemption. Invalid CHAT is unpairable;
+a validator/producer failure is reported separately, not as CHAT invalidity.
+
+## Morphology coverage and agreement
+
+Each main-tier position carries `left_annotation` and `right_annotation`:
+`no_main_token`, `absent`, `morphology_only`, or `complete`. All word chunks,
+including post-clitics, contribute lemma, POS, feature and dependency differences.
+Heads identify local item/chunk positions, not speaker-code spelling, so an
+explicit speaker mapping does not itself create dependency differences. Chunk
+order remains meaningful: a surface-first item and a governing-head-first item
+can differ without either losing linguistic content. No side is presumed gold.
+
+`compared_tokens` counts examined positions, whereas `fully_annotated_tokens`
+counts positions with complete morphology and dependencies on both sides.
+`analysis_agreement` is true/false only for those complete pairs; otherwise it
+is null (an empty CSV cell). Two missing annotations are not an agreement.
+`summary.csv` includes `left_annotation_state`, `right_annotation_state` and
+`analysis_agreement` beside the individual difference axes. The rows and counts
+are producer-sealed in the Rust API; counts and difference subsets derive from
+the same rows rather than independently writable fields.
+
+Report schema and comparison algorithm version 3 introduce these guarantees.
+Earlier cached reports neither establish annotation completeness nor compare
+all clitic analyses; they remain historical evidence and are never reused by
+version 3.
+
+Comparison algorithm version 4 additionally requires source-bound, complete
+speaker correspondence for morphology and alignment. Earlier partial-map
+results cannot be reused by that version. The report schema is unchanged.
+
 ## Alignment timing states
 
 Every alignment token carries a timing STATE rather than a timing that may be
@@ -81,9 +117,13 @@ absent, so a token with no timing says why it has none:
 | `wor_tier_uncorroborated` | the counts agree but `mismatches` display tokens do not match the words they would time, so the bullets describe a different reading of the utterance |
 
 The three failure states are not interchangeable: a missing tier means
-alignment never ran, a drifted one means the transcript changed after it ran,
+no timing tier is available, a drifted one means the transcript changed after it ran,
 and an uncorroborated one means the tier belongs to different words than the
 ones beside it. They were one empty value until 2026-09-16.
+
+The timing-state types retain these distinctions for library callers. The
+version-3 CLI refuses a Chatter-invalid drifted or contradictory retained tier
+at admission rather than treating it as an algorithm input.
 
 `summary.csv` carries `left_timing_state` and `right_timing_state` beside the
 millisecond columns. A delta is reported only where both sides are `timed`.

@@ -5,7 +5,7 @@ import type { FileStatusEntry } from "../types";
 // Types
 // ---------------------------------------------------------------------------
 
-export type FilterTab = "all" | "error" | "processing" | "done" | "queued";
+export type FilterTab = "all" | "error" | "diagnosed" | "processing" | "done" | "queued";
 
 export type ErrorGroup = {
   category: string;        // "input" | "media" | "system" | "processing"
@@ -17,6 +17,8 @@ export type ErrorGroup = {
 export type FileCounts = {
   all: number;
   error: number;
+  /** Output written with admission diagnostics: not a success, not a failure. */
+  diagnosed: number;
   processing: number;
   done: number;
   queued: number;
@@ -26,9 +28,10 @@ const PAGE_SIZE = 50;
 
 const STATUS_ORDER: Record<string, number> = {
   error: 0,
-  processing: 1,
-  done: 2,
-  queued: 3,
+  diagnosed: 1,
+  processing: 2,
+  done: 3,
+  queued: 4,
 };
 
 /**
@@ -89,14 +92,15 @@ export function useFileFilters(files: FileStatusEntry[]) {
 
   // Counts per status
   const counts: FileCounts = useMemo(() => {
-    let error = 0, processing = 0, done = 0, queued = 0;
+    let error = 0, diagnosed = 0, processing = 0, done = 0, queued = 0;
     for (const f of files) {
       if (f.status === "error") error++;
+      else if (f.status === "diagnosed") diagnosed++;
       else if (f.status === "processing") processing++;
       else if (f.status === "done") done++;
       else if (f.status === "queued") queued++;
     }
-    return { all: files.length, error, processing, done, queued };
+    return { all: files.length, error, diagnosed, processing, done, queued };
   }, [files]);
 
   // Error groups: category -> code -> files

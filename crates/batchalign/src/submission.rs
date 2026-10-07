@@ -209,6 +209,9 @@ mod tests {
     };
     use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
 
+    #[path = "media_root_tests.rs"]
+    mod media_root_tests;
+
     fn morphotag_submission(paths_mode: bool) -> JobSubmission {
         // Morphotag has no job-level `--lang`; per-file resolution from
         // each file's `@Languages:` header is mandatory. Job-level lang

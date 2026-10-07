@@ -1,7 +1,7 @@
 # benchmark: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-07-29 18:27 EDT
+**Last updated:** 2026-10-04 21:53 EDT
 
 Implementation guide for the `benchmark` command. For user-facing
 documentation, see [User Guide: benchmark](../../user-guide/commands/benchmark.md).
@@ -16,7 +16,8 @@ documentation, see [User Guide: benchmark](../../user-guide/commands/benchmark.m
 | Catalog entry | `crates/batchalign/src/recipe_runner/catalog.rs` | the `CatalogEntry` for `benchmark` |
 | Stage recipe | `crates/batchalign/src/recipe_runner/recipes.rs` | `BENCHMARK_RECIPE` |
 | Benchmark pipeline | `crates/batchalign/src/runner/dispatch/benchmark_pipeline.rs` | Orchestrates transcribe → compare → materialize |
-| Benchmark composition | `crates/batchalign/src/benchmark.rs`: `process_benchmark()` | Calls process_transcribe(), then process_compare_main_annotated() |
+| Benchmark composition | `crates/batchalign/src/benchmark.rs`: `process_benchmark()` | Calls process_transcribe(), then process_compare_constructed_main() |
+| Output admission and persistence | `crates/batchalign/src/runner/dispatch/benchmark_pipeline/outputs.rs` | Source-bound output plan and successful-write completion |
 
 ---
 
@@ -25,13 +26,68 @@ documentation, see [User Guide: benchmark](../../user-guide/commands/benchmark.m
 `benchmark` is the canonical `Composite` command. It calls two sub-workflows
 in sequence using their shared internal dispatch helpers:
 
-1. `transcribe_pipeline.rs`: produces the hypothesis `ChatFile`
-2. `compare.rs`: produces `ComparisonBundle` from hypothesis + gold
+1. Dispatch reads and completely admits the gold source as
+   `AdmittedComparisonReference`, before media preparation or ASR.
+2. `transcribe_pipeline.rs`: produces the admitted typed hypothesis.
+3. `compare.rs`: consumes the hypothesis proof and reference capability to
+   produce `ComparisonBundle`, without serializing and reparsing either model.
+
+The reference has no regeneration exemption. Invalid retained tiers, headers
+or main content refuse the file before model work. Retries retain the admitted
+reference rather than reading or parsing it again. See
+[Command Contracts](../../architecture/command-contracts.md).
 
 The materializer for `benchmark` is `materialize_main_annotated()` function
 (injects comparison annotations on the main/hypothesis side), which is the
 **opposite** of the released `compare` command's `materialize_released()` function.
 They share the same `ComparisonBundle` type but use different output views.
+
+### Required-write completion
+
+Before reference reading, media preparation or inference, `BenchmarkOutputPlan`
+binds the pending source to its `BenchmarkWorkUnit` and admits the catalog's
+one primary CHAT artifact and one CSV sidecar. Missing or conflicting output
+roles return a typed validation failure, not a catalog `expect` after ASR.
+
+The main-annotated materializer retains a producer-built
+`CompareMetricsCsvTable`, not serialized CSV to be reconstructed later. The
+writer encodes this table once and consumes the final `PostValidated` CHAT
+proof, including any checked abbreviation merge. Both primary and sidecar use
+the existing requested-and-staged output writer.
+
+Only those successful writes construct the private `WrittenBenchmark` receipt.
+Consuming the receipt records completion for the bound source and its admitted
+primary artifact; callers cannot supply a different completion filename.
+Failure of either requested or staged write records a terminal persistence
+failure, without retrying transcription or comparison. Partial files may
+remain after failure: this is a completion guarantee, not atomic multi-file
+replacement or a filesystem durability guarantee.
+
+Deterministic boundary tests block each of the four destinations, capture
+success/error events through the shared recording sink, verify paths-mode
+byte equality, retain staged-only behavior and refuse a mismatched source.
+The CHAT proof in these persistence controls is an explicit test double over
+an independently admitted valid fixture, not a claimed model output or corpus
+coverage. Actual model execution is separate evidence.
+
+### Composite task ownership
+
+The per-file transcription/comparison future is pinned on the heap before it
+enters the generic file supervisor. Only the fixed-size `BenchmarkFileFuture`
+owning handle crosses that boundary; the composite state machine is not copied
+through the supervisor's stack frames. This is also required in unoptimized
+development builds, not just optimized builds. Existing job scope, worker
+ownership, semaphore permit and cancellation/drop behavior remain unchanged.
+A deterministic supervisor control retains a large captured payload across a
+yield and checks the fixed-size handle, without timeouts or stack-limit changes.
+
+Heap ownership also starts at the composite producer: `process_benchmark`
+returns a pinned `BenchmarkFuture`, rather than exporting its inline state
+machine. Within that producer, transcription and comparison have separate
+pinned owners. Boxing only the outer supervised task does not bound the stack
+needed to construct and poll nested unoptimized sub-pipelines. The producer
+signature and fixed-size handle are checked without starting inference; the
+managed model replay is separate verification of the full execution path.
 
 ---
 

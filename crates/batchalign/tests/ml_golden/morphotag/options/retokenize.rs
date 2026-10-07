@@ -58,8 +58,8 @@ async fn option_morphotag_retokenize_changes_tokens() {
     .await;
     assert_completed_without_errors("retokenize_true", &info_b, &results_b);
 
-    let output_a = &results_a[0].content;
-    let output_b = &results_b[0].content;
+    let output_a = results_a[0].content.as_text().expect("text command result");
+    let output_b = results_b[0].content.as_text().expect("text command result");
     assert_ne!(output_a, output_b);
     assert!(!output_b.contains("\tgonna "));
 }
@@ -108,8 +108,8 @@ async fn option_morphotag_retokenize_cantonese_collapses_character_tokens() {
     assert_completed_without_errors("yue_retokenize_false", &info_a, &results_a);
     assert_completed_without_errors("yue_retokenize_true", &info_b, &results_b);
 
-    let output_a = &results_a[0].content;
-    let output_b = &results_b[0].content;
+    let output_a = results_a[0].content.as_text().expect("text command result");
+    let output_b = results_b[0].content.as_text().expect("text command result");
     assert_ne!(output_a, output_b);
     assert!(output_a.contains("*CHI:\t故 事 係 好 ."));
     assert!(output_b.contains("*CHI:\t故事 係 好 ."));
@@ -159,8 +159,8 @@ async fn option_morphotag_retokenize_mandarin_collapses_common_compounds() {
     assert_completed_without_errors("zho_retokenize_false", &info_a, &results_a);
     assert_completed_without_errors("zho_retokenize_true", &info_b, &results_b);
 
-    let output_a = &results_a[0].content;
-    let output_b = &results_b[0].content;
+    let output_a = results_a[0].content.as_text().expect("text command result");
+    let output_b = results_b[0].content.as_text().expect("text command result");
     assert_ne!(output_a, output_b);
     assert!(output_a.contains("*PAR:\t商 店 很 大 ."));
     assert!(output_b.contains("*PAR:\t商店 很 大 ."));
@@ -198,5 +198,11 @@ async fn option_morphotag_retokenize_without_mwt_stays_reliable() {
 
     assert_completed_without_errors("nld_retokenize", &info, &results);
     assert_eq!(results.len(), 1);
-    assert!(results[0].content.contains("%mor:"));
+    assert!(
+        results[0]
+            .content
+            .as_text()
+            .expect("text command result")
+            .contains("%mor:")
+    );
 }

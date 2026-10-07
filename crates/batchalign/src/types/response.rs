@@ -2,6 +2,7 @@
 //!
 //! These are re-exported from [`super::api`] for backward compatibility.
 
+pub use super::result_content::{ArtifactDigest, BinaryResultDescriptor, ResultContent};
 use serde::{Deserialize, Serialize};
 
 use crate::options::CommandOptions;
@@ -26,10 +27,10 @@ pub struct FileResult {
     /// relative forward-slash path (`"PWA/TYO_a1.cha"`) for directory input.
     /// Backslashes are normalized to forward slashes on construction.
     pub filename: DisplayPath,
-    /// Processed file content (CHAT text or CSV).  Empty string when
-    /// `error` is `Some`.
+    /// Inline text or a binary artifact descriptor. This is untrusted wire
+    /// data, not a destination or write-admission capability.
     #[serde(default)]
-    pub content: String,
+    pub content: ResultContent,
     /// MIME-like content discriminator: `"chat"` for CHAT files (default),
     /// `"csv"` for tabular output (e.g. opensmile features).
     #[serde(default)]
@@ -175,6 +176,629 @@ pub enum RegistryWorkerRefusal {
     },
 }
 
+/// What a file written with diagnostics reports.
+///
+/// Carried by a file whose status is [`FileStatusKind::Diagnosed`]: its output
+/// was written but is not certified complete, because its producer's admission
+/// found something (transcription generated CHAT that Chatter did not admit),
+/// because requested work did not apply (a shortfall), or both. Validation is
+/// exactly as strict as for any other output; what differs is that the verdict
+/// is reported beside the written file instead of replacing it.
+///
+/// Bounded: its findings carry the count, a count per error code and the
+/// first [`Self::FIRST_FINDINGS`] findings, because the record is copied into
+/// every file status entry on every poll. A longer list is written once, in
+/// full, to a sidecar file ([`FullFindings::Sidecar`]).
+///
+/// The bar the output was judged against exists only with findings: a file
+/// diagnosed for its shortfalls alone was admitted, and has no findings and no
+/// bar to report. Records written before the bar was recorded (a flat
+/// `finding_count` at the top level) are still read: every such record was
+/// written for transcription's generated output, the only producer of
+/// diagnosed output then, which is judged against complete construction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(try_from = "FileOutputDiagnosticsWire")]
+pub struct FileOutputDiagnostics {
+    /// What output admission found, with the bar it judged against. Absent
+    /// when the document was admitted and only shortfalls diagnose the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<JudgedFindingsRecord>,
+    /// Requested work the written document does not carry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shortfalls: Vec<OutputShortfallRecord>,
+}
+
+/// What one output judgement found, bounded, with the bar it was held to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct JudgedFindingsRecord {
+    /// The bar the output was judged against.
+    pub bar: JudgementBar,
+    /// How many findings the judgement made, in all; at least one.
+    pub finding_count: u64,
+    /// How many findings carried each error code, most frequent first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings_by_code: Vec<FindingCodeCount>,
+    /// The first findings, in the order the judgement found them, at most
+    /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_findings: Vec<OutputFindingRecord>,
+    /// Where the complete list is.
+    pub full_findings: FullFindings,
+}
+
+/// Every stored shape of [`FileOutputDiagnostics`], read into the current
+/// one. Each shape refuses fields it does not have, so neither can read the
+/// other (or a misspelled record) as a different, emptier record; the flat
+/// shape alone has `finding_count` and `full_findings` at the top level.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FileOutputDiagnosticsWire {
+    Flat(FlatDiagnosticsWire),
+    Judged(JudgedDiagnosticsWire),
+}
+
+/// The flat shape build 95b74761 stored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlatDiagnosticsWire {
+    finding_count: u64,
+    #[serde(default)]
+    findings_by_code: Vec<FindingCodeCount>,
+    #[serde(default)]
+    first_findings: Vec<OutputFindingRecord>,
+    full_findings: FullFindings,
+    #[serde(default)]
+    shortfalls: Vec<OutputShortfallRecord>,
+}
+
+/// The current shape.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgedDiagnosticsWire {
+    #[serde(default)]
+    findings: Option<JudgedFindingsRecord>,
+    #[serde(default)]
+    shortfalls: Vec<OutputShortfallRecord>,
+}
+
+/// A stored record that reports nothing: a diagnosed file always has a
+/// finding or a shortfall.
+#[derive(Debug, thiserror::Error)]
+#[error("a diagnostics record must carry findings or shortfalls")]
+pub struct EmptyDiagnosticsRecord;
+
+impl TryFrom<FileOutputDiagnosticsWire> for FileOutputDiagnostics {
+    type Error = EmptyDiagnosticsRecord;
+
+    fn try_from(wire: FileOutputDiagnosticsWire) -> Result<Self, Self::Error> {
+        let record = match wire {
+            FileOutputDiagnosticsWire::Judged(JudgedDiagnosticsWire {
+                findings,
+                shortfalls,
+            }) => Self {
+                findings,
+                shortfalls,
+            },
+            FileOutputDiagnosticsWire::Flat(FlatDiagnosticsWire {
+                finding_count,
+                findings_by_code,
+                first_findings,
+                full_findings,
+                shortfalls,
+            }) => Self {
+                // Only transcription wrote flat records, judged against
+                // complete construction; see the type's documentation.
+                findings: (finding_count > 0).then_some(JudgedFindingsRecord {
+                    bar: JudgementBar::Construction,
+                    finding_count,
+                    findings_by_code,
+                    first_findings,
+                    full_findings,
+                }),
+                shortfalls,
+            },
+        };
+        match (&record.findings, record.shortfalls.as_slice()) {
+            (None, []) => Err(EmptyDiagnosticsRecord),
+            _ => Ok(record),
+        }
+    }
+}
+
+impl FileOutputDiagnostics {
+    /// How many findings are kept on the record itself.
+    pub const FIRST_FINDINGS: usize = 20;
+
+    /// The `file_statuses.diagnostics` column text: this record's own JSON.
+    pub fn to_column_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_value(self).map(|value| value.to_string())
+    }
+
+    /// How many findings the record reports, zero when only shortfalls
+    /// diagnose the file.
+    pub fn finding_count(&self) -> u64 {
+        self.findings
+            .as_ref()
+            .map_or(0, |findings| findings.finding_count)
+    }
+
+    /// The first findings on the record.
+    pub fn first_findings(&self) -> &[OutputFindingRecord] {
+        self.findings
+            .as_ref()
+            .map_or(&[], |findings| findings.first_findings.as_slice())
+    }
+
+    /// A record of `findings` (all on the record, judged against complete
+    /// construction) and `shortfalls`, for tests of the consumers. Production
+    /// records are built by recording a diagnosed output's draft.
+    #[cfg(test)]
+    pub(crate) fn of_findings(
+        findings: Vec<OutputFindingRecord>,
+        shortfalls: Vec<OutputShortfallRecord>,
+    ) -> Self {
+        Self {
+            findings: (!findings.is_empty()).then(|| JudgedFindingsRecord {
+                bar: JudgementBar::Construction,
+                finding_count: findings.len() as u64,
+                findings_by_code: FindingCodeCount::tally(&findings),
+                first_findings: findings,
+                full_findings: FullFindings::Inline,
+            }),
+            shortfalls,
+        }
+    }
+
+    /// One coded finding, for tests.
+    #[cfg(test)]
+    pub(crate) fn coded_finding(code: &str, message: &str) -> OutputFindingRecord {
+        OutputFindingRecord {
+            code: Some(code.to_owned()),
+            level: FindingLevel::StructurallyComplete,
+            message: message.to_owned(),
+        }
+    }
+
+    /// The record as operator-facing lines: the bar and the first findings,
+    /// how many more there are and where, then each shortfall.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(findings) = &self.findings {
+            lines.push(format!("judged against: {}", findings.bar));
+            lines.extend(findings.first_findings.iter().map(ToString::to_string));
+            let shown = findings.first_findings.len() as u64;
+            if findings.finding_count > shown {
+                let more = findings.finding_count - shown;
+                lines.push(match &findings.full_findings {
+                    FullFindings::Sidecar { path } => format!(
+                        "... and {more} more finding(s); the full list is in {path}"
+                    ),
+                    FullFindings::Unwritten { path, error } => format!(
+                        "... and {more} more finding(s); the full list could not be written to {path}: {error}"
+                    ),
+                    FullFindings::Inline => format!("... and {more} more finding(s)"),
+                });
+            }
+        }
+        lines.extend(self.shortfalls.iter().map(ToString::to_string));
+        lines
+    }
+}
+
+/// One admission finding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct OutputFindingRecord {
+    /// The CHAT error code (for example `E220`), when the finding has one: a
+    /// command's own completion checks name none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The validity level the finding belongs to.
+    pub level: FindingLevel,
+    /// What was found, without the code.
+    pub message: String,
+}
+
+impl std::fmt::Display for OutputFindingRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.code {
+            Some(code) => write!(f, "{code} {}", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+/// Which check made a finding: a coarse gate level, or complete construction
+/// admission.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FindingLevel {
+    /// Gate: the document does not parse.
+    Parseable,
+    /// Gate: the document is not structurally complete.
+    StructurallyComplete,
+    /// Gate: a main tier is not well formed.
+    MainTierValid,
+    /// Complete CHAT construction admission (the full validator, the
+    /// authoritative write check), which the gate levels do not grade.
+    Construction,
+}
+
+/// How many findings carried one error code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FindingCodeCount {
+    /// The code; absent for findings that carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// How many findings carried it.
+    pub count: u64,
+}
+
+impl FindingCodeCount {
+    /// Count `findings` per code, most frequent first (ties by code). The
+    /// one tally behind every bounded record of findings.
+    pub fn tally<'a>(findings: impl IntoIterator<Item = &'a OutputFindingRecord>) -> Vec<Self> {
+        let mut by_code = std::collections::BTreeMap::<Option<String>, u64>::new();
+        for finding in findings {
+            *by_code.entry(finding.code.clone()).or_default() += 1;
+        }
+        let mut tally: Vec<Self> = by_code
+            .into_iter()
+            .map(|(code, count)| Self { code, count })
+            .collect();
+        tally.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.code.cmp(&b.code)));
+        tally
+    }
+}
+
+/// The bar an output was judged against, as a refusal reports it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum JudgementBar {
+    /// Complete checked CHAT construction.
+    Construction,
+    /// Complete construction plus the facts recorded from the input.
+    Preservation,
+}
+
+impl std::fmt::Display for JudgementBar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Construction => write!(f, "complete CHAT construction required"),
+            Self::Preservation => write!(f, "complete CHAT construction and preservation required"),
+        }
+    }
+}
+
+/// Why an optional stage's own output was not admitted, bounded as
+/// [`FileOutputDiagnostics`] is: it travels in every poll's file status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StageRefusalRecord {
+    /// The stage's output was judged and failed.
+    Judged {
+        /// The bar it was judged against.
+        bar: JudgementBar,
+        /// How many findings the judgement made, in all.
+        finding_count: u64,
+        /// How many findings carried each error code, most frequent first.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        findings_by_code: Vec<FindingCodeCount>,
+        /// The first findings, at most [`FileOutputDiagnostics::FIRST_FINDINGS`].
+        first_findings: Vec<OutputFindingRecord>,
+    },
+    /// The stage could not establish an output to judge; one statement of
+    /// why, as its producer gave it.
+    Unestablished {
+        /// The producer's statement.
+        reason: String,
+    },
+}
+
+impl StageRefusalRecord {
+    /// The bounded record of a judgement's `findings` against `bar`. The
+    /// findings are walked, not collected: only the first few are kept.
+    pub fn judged<'a, I>(bar: JudgementBar, findings: I) -> Self
+    where
+        I: IntoIterator<Item = &'a OutputFindingRecord>,
+        I::IntoIter: Clone,
+    {
+        let findings = findings.into_iter();
+        Self::Judged {
+            bar,
+            finding_count: findings.clone().count() as u64,
+            findings_by_code: FindingCodeCount::tally(findings.clone()),
+            first_findings: findings
+                .take(FileOutputDiagnostics::FIRST_FINDINGS)
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for StageRefusalRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Judged {
+                bar,
+                finding_count,
+                first_findings,
+                ..
+            } => {
+                write!(f, "{bar}: {finding_count} finding(s)")?;
+                if let Some(first) = first_findings.first() {
+                    write!(f, ", first: {first}")?;
+                }
+                Ok(())
+            }
+            Self::Unestablished { reason } => f.write_str(reason),
+        }
+    }
+}
+
+/// Where the complete list of a file's findings is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FullFindings {
+    /// On the record: `first_findings` is the whole list.
+    Inline,
+    /// Too long for the record: written once, in full, as JSON to this
+    /// server-side file in the job's staging directory.
+    Sidecar {
+        /// Path of the sidecar file on the server.
+        path: String,
+    },
+    /// Too long for the record, and writing the sidecar failed: only the
+    /// first findings, the count and the tally per code are available. The
+    /// output itself was written; a diagnostics file that could not be
+    /// written does not make it an error.
+    Unwritten {
+        /// Where the sidecar was to be written.
+        path: String,
+        /// Why writing it failed.
+        error: String,
+    },
+}
+
+/// An optional later stage of a generating producer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OptionalStage {
+    /// Post-CHAT utterance segmentation.
+    UtteranceSegmentation,
+    /// Morphosyntactic analysis.
+    Morphosyntax,
+}
+
+impl OptionalStage {
+    /// The stage's name in a report.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::UtteranceSegmentation => "utterance segmentation",
+            Self::Morphosyntax => "morphosyntax",
+        }
+    }
+}
+
+/// Requested work a written document does not carry, and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputShortfallRecord {
+    /// The stage requires an admitted document, and the generated output was
+    /// diagnosed, so the stage did not run.
+    StageSkipped {
+        /// The stage.
+        stage: OptionalStage,
+    },
+    /// The stage ran and its own output could not be admitted; the admitted
+    /// document from before it was written instead.
+    StageNotApplied {
+        /// The stage.
+        stage: OptionalStage,
+        /// Why, as the stage's own admission reported it, bounded.
+        refusal: StageRefusalRecord,
+    },
+    /// A per-utterance stage ran on a diagnosed document and left out the
+    /// utterances its findings are confined to: every other utterance has
+    /// the stage's result, these keep their generated form.
+    StageHeldOut {
+        /// The stage.
+        stage: OptionalStage,
+        /// How many utterances it left out, at least one.
+        held_out_utterances: u64,
+        /// The first of them (positions among the file's utterances before
+        /// the stage, counting from 1), at most
+        /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
+        first_held_out: Vec<u64>,
+    },
+    /// Forced alignment left required words untimed. The measured timing
+    /// was written; these words are in the transcript without bullets.
+    TimingIncomplete {
+        /// Required lexical words in the file.
+        required_words: u64,
+        /// How many of them have no positive interval, at least one.
+        untimed_words: u64,
+        /// How many utterances have untimed words, at least one.
+        untimed_utterances: u64,
+        /// The first of those utterances, in transcript order, at most
+        /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
+        first_untimed: Vec<UntimedUtteranceRecord>,
+    },
+}
+
+/// One utterance forced alignment left with untimed words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct UntimedUtteranceRecord {
+    /// The utterance's position among the file's utterances, counting from 1.
+    pub utterance: u64,
+    /// Required lexical words in it.
+    pub words: u64,
+    /// How many of them are untimed, at least one.
+    pub untimed_words: u64,
+    /// Why.
+    pub cause: UntimedCauseRecord,
+}
+
+/// Why an utterance's words have no timing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UntimedCauseRecord {
+    /// Its audio window was refused, so no alignment request was made.
+    WindowRefused {
+        /// The refused window and its cause.
+        window: crate::types::traces::RefusedWindowTrace,
+    },
+    /// It was placed in no request: the audio left for a run of untimed
+    /// utterances could not contain their words.
+    NotPlaced,
+    /// No refusal names it, and no positive interval resulted for these
+    /// words: the aligner returned none, or they could not be sent to it.
+    NoUsableTiming,
+    /// The transcript marks it as not speech in the recording, so alignment
+    /// never looks for it there: no request, no bullet, untimed by design.
+    NotInRecording {
+        /// The postcode that marks it.
+        postcode: OffRecordPostcode,
+    },
+}
+
+/// A postcode that marks an utterance as not speech in the recording, so
+/// alignment leaves it untimed.
+///
+/// A closed set, read from Chatter's typed postcodes (never from the line's
+/// text). The CHAT manual defines no fixed postcode set ("postcodes can be
+/// designed to fit the needs of your particular project"), so membership
+/// here is a recorded ruling, one per postcode, never inferred from a name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OffRecordPostcode {
+    /// `[+ diary]`: a written diary note set into the transcript. It is not
+    /// speech in the recording (ruling of 2026-10-07).
+    Diary,
+}
+
+impl OffRecordPostcode {
+    /// Every member, for the one reader that matches postcode text.
+    const ALL: [Self; 1] = [Self::Diary];
+
+    /// The postcode's text, as written between `[+ ` and `]`.
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::Diary => "diary",
+        }
+    }
+
+    /// The member whose text this postcode's is, exactly.
+    pub fn of_postcode_text(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|member| member.text() == text)
+    }
+}
+
+impl std::fmt::Display for OffRecordPostcode {
+    /// The postcode as CHAT writes it: `[+ diary]`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[+ {}]", self.text())
+    }
+}
+
+impl std::fmt::Display for UntimedCauseRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::types::traces::RefusedWindowTrace;
+        match self {
+            Self::WindowRefused { window } => {
+                let cause = match window {
+                    RefusedWindowTrace::OverBudget { .. } => "longer than the alignment budget",
+                    RefusedWindowTrace::Empty { .. } => "empty",
+                    RefusedWindowTrace::Inverted { .. } => "inverted",
+                    RefusedWindowTrace::PastRecording { .. } => "past the end of the recording",
+                    RefusedWindowTrace::AnchorGap { .. } => {
+                        "over budget, with a gap between recovered anchors longer than the budget"
+                    }
+                    RefusedWindowTrace::AnchorsUnusable { .. } => {
+                        "over budget, with no usable recovered anchor to split at"
+                    }
+                };
+                write!(
+                    f,
+                    "no alignment request, its audio window was refused ({cause})"
+                )
+            }
+            Self::NotPlaced => f.write_str(
+                "no alignment request, the audio left for it could not contain its words",
+            ),
+            Self::NoUsableTiming => f.write_str("no usable timing"),
+            Self::NotInRecording { postcode } => write!(f, "not in the recording: {postcode}"),
+        }
+    }
+}
+
+impl std::fmt::Display for OutputShortfallRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StageSkipped { stage } => write!(
+                f,
+                "skipped {}: it requires an admitted document, and the generated \
+                 output was written with its diagnostics instead",
+                stage.name()
+            ),
+            Self::StageNotApplied { stage, refusal } => write!(
+                f,
+                "{} not applied: its output could not be admitted ({refusal}); the \
+                 admitted document from before it was written instead",
+                stage.name()
+            ),
+            Self::StageHeldOut {
+                stage,
+                held_out_utterances,
+                first_held_out,
+            } => {
+                write!(
+                    f,
+                    "{} applied except to {held_out_utterances} utterance(s) that carry the \
+                     findings, which keep their generated form",
+                    stage.name()
+                )?;
+                if let Some(first) = first_held_out.first() {
+                    write!(f, " (first: utterance {first})")?;
+                }
+                Ok(())
+            }
+            Self::TimingIncomplete {
+                required_words,
+                untimed_words,
+                untimed_utterances,
+                first_untimed,
+            } => {
+                write!(
+                    f,
+                    "timing incomplete: {untimed_words} of {required_words} words in \
+                     {untimed_utterances} utterance(s) have no timing and were written without it"
+                )?;
+                if let Some(first) = first_untimed.first() {
+                    write!(
+                        f,
+                        " (first: utterance {}, {} of {} words, {})",
+                        first.utterance, first.untimed_words, first.words, first.cause
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Per-file status within a job.
 ///
 /// Tracks processing state, timing, progress, and error details for a
@@ -196,6 +820,12 @@ pub struct FileStatusEntry {
     /// logic group failures without parsing free-form messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_category: Option<FailureCategory>,
+    /// What output admission found in a file written with diagnostics.
+    /// Present only when `status` is `Diagnosed`, following the `error`
+    /// field's pattern: this entry is a flat record whose status-specific
+    /// fields are optional, not a union per status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<FileOutputDiagnostics>,
     /// What the command decided about stamping this file with provenance.
     /// Absent when nothing was recorded, which is what `Unrecorded` means: a
     /// command that writes no per-file stamp, or a status restored from the
@@ -417,11 +1047,17 @@ pub struct JobListItem {
     pub source_dir: String,
     /// Total number of files in this job.
     pub total_files: i64,
-    /// Number of files that finished successfully (`Done`).
+    /// Number of files that reached a terminal state: done, diagnosed or
+    /// error.
     pub completed_files: i64,
     /// Number of files that ended in `Error` status.
     #[serde(default)]
     pub error_files: i64,
+    /// Number of files written with diagnostics (`Diagnosed`): their output
+    /// is on disk, but it is not certified complete. A `completed` job with a
+    /// nonzero count is not a clean success.
+    #[serde(default)]
+    pub diagnosed_files: i64,
     /// Job-level error message when the job failed (the aggregated per-file
     /// failure reason). Surfaces the cause in the `/jobs` list and the live
     /// dashboard/TUI feed instead of a bare "failed". `None` for non-failed

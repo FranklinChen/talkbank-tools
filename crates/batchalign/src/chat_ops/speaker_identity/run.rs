@@ -142,21 +142,18 @@ pub struct EmbeddingResponse {
 }
 
 /// Failure of the injected embedding capability.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum EmbeddingInferenceFailure {
     /// The worker request could not be completed.
-    #[error("worker dispatch failed: {detail}")]
-    Dispatch {
-        /// The transport or worker detail.
-        detail: String,
-    },
+    /// Its original kind must reach the shared retry and memory policy.
+    #[error("worker dispatch failed: {0}")]
+    Dispatch(#[from] crate::worker::error::WorkerError),
     /// The worker answered, but its payload did not satisfy the embedding
     /// response contract.
-    #[error("worker returned an invalid embedding response: {detail}")]
-    InvalidResponse {
-        /// The response-contract detail.
-        detail: String,
-    },
+    #[error("worker returned an invalid embedding response: {0}")]
+    InvalidResponse(
+        #[from] crate::worker::speaker_embedding_request_v2::SpeakerEmbeddingResultParseError,
+    ),
 }
 
 /// The capability that turns spans into vectors.
@@ -173,7 +170,7 @@ pub trait SpeakerEmbeddingInference: Send + Sync {
 ///
 /// Distinct from a per-utterance [`UnscoredReason`]: these end the run, and
 /// none of them is a fact about one utterance.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum SpeakerIdentityFailure {
     /// An enrolled span names audio the recording does not contain.
     ///
@@ -544,6 +541,122 @@ mod tests {
                 MediaWindow::new(FileMs::new(start_ms), FileMs::new(end_ms))
                     .expect("test: a non-empty utterance window"),
             ),
+        }
+    }
+
+    /// Transport faults traverse the same capability and task conversion as
+    /// production, without a model, daemon, timer or message-based classifier.
+    #[tokio::test]
+    async fn speaker_worker_failures_reach_the_existing_retry_and_memory_boundary() {
+        use crate::error::ServerError;
+        use crate::runner::util::{classify_server_error, is_retryable_worker_failure};
+        use crate::scheduling::FailureCategory;
+        use crate::worker::error::WorkerError;
+        use crate::worker::memory_guard::MemoryGuardError;
+
+        struct FailingWorker(std::sync::Mutex<Option<WorkerError>>);
+
+        #[async_trait]
+        impl SpeakerEmbeddingInference for FailingWorker {
+            async fn embed(
+                &self,
+                _request: EmbeddingRequest,
+            ) -> Result<EmbeddingResponse, EmbeddingInferenceFailure> {
+                Err(self.0.lock().unwrap().take().expect("one dispatch").into())
+            }
+        }
+
+        // Identical prose, different typed causes: the message cannot select
+        // retry policy. Memory pressure retains the original reservation data.
+        for (worker, expected, retryable) in [
+            (
+                WorkerError::Bootstrap("same detail".into()),
+                FailureCategory::WorkerBootstrap,
+                false,
+            ),
+            (
+                WorkerError::Protocol("same detail".into()),
+                FailureCategory::WorkerProtocol,
+                false,
+            ),
+            (
+                WorkerError::WorkerResponse("same detail".into()),
+                FailureCategory::ProviderTransient,
+                true,
+            ),
+            (
+                WorkerError::SpawnFailed("same detail".into()),
+                FailureCategory::System,
+                false,
+            ),
+            (
+                WorkerError::ReadyTimeout {
+                    timeout_s: crate::api::PositiveSeconds::literal::<1>(),
+                },
+                FailureCategory::WorkerTimeout,
+                true,
+            ),
+            (
+                WorkerError::ProcessExited {
+                    code: Some(77),
+                    stderr: Some("same detail".into()),
+                },
+                FailureCategory::WorkerCrash,
+                true,
+            ),
+            (
+                WorkerError::MemoryGuard(MemoryGuardError::InsufficientMemory {
+                    available_mb: 1,
+                    required_mb: 2,
+                    total_mb: 3,
+                }),
+                FailureCategory::MemoryPressure,
+                false,
+            ),
+            (
+                WorkerError::PoolShuttingDown,
+                FailureCategory::System,
+                false,
+            ),
+        ] {
+            let error = identify_speakers(
+                facts(),
+                &enrollments(&["0-5000:INV"]),
+                &[],
+                prepared(),
+                &policy(0.5),
+                documented_permutation_plan(),
+                &FailingWorker(std::sync::Mutex::new(Some(worker))),
+            )
+            .await
+            .expect_err("no evidence on dispatch failure");
+            let server = ServerError::from(error);
+            assert_eq!(classify_server_error(&server), expected);
+            assert_eq!(is_retryable_worker_failure(expected), retryable);
+            // The shared audio shell requires this variant as well as category.
+            assert!(matches!(&server, ServerError::Worker(_)));
+            if expected == FailureCategory::MemoryPressure {
+                assert!(matches!(
+                    &server,
+                    ServerError::Worker(WorkerError::MemoryGuard(
+                        MemoryGuardError::InsufficientMemory {
+                            available_mb: 1,
+                            required_mb: 2,
+                            total_mb: 3
+                        }
+                    ))
+                ));
+            }
+            if expected == FailureCategory::WorkerCrash {
+                assert!(matches!(
+                    &server,
+                    ServerError::Worker(WorkerError::ProcessExited { code: Some(77), .. })
+                ));
+            }
+            assert_eq!(
+                axum::response::IntoResponse::into_response(server).status(),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
         }
     }
 

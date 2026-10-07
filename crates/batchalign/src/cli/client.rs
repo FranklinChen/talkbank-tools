@@ -123,13 +123,30 @@ impl BatchalignClient {
         let resp = self
             .request_with_retry(
                 reqwest::Method::GET,
-                &format!("{url}/jobs/{job_id}/results/{filename}"),
+                &result_endpoint_url(url, job_id, filename, "results")?,
                 None::<&()>,
                 Duration::from_secs(30),
             )
             .await?;
         let result: FileResult = resp.json().await?;
         Ok(result)
+    }
+
+    /// Fetch binary bytes only after result metadata and destination admission.
+    /// Streaming verification owns publication; this method grants none.
+    pub async fn get_binary_result(
+        &self,
+        url: &str,
+        job_id: &JobId,
+        filename: &DisplayPath,
+    ) -> Result<reqwest::Response, CliError> {
+        self.request_with_retry(
+            reqwest::Method::GET,
+            &result_endpoint_url(url, job_id, filename, "artifacts")?,
+            None::<&()>,
+            Duration::from_secs(3600),
+        )
+        .await
     }
 
     /// `GET /jobs/{id}/results`: fetch all results for a job.
@@ -295,6 +312,29 @@ impl BatchalignClient {
     }
 }
 
+/// Preserve directory identity while percent-encoding each filename segment;
+/// `?`, `#`, `%` and non-ASCII filenames must not become URL syntax.
+fn result_endpoint_url(
+    base: &str,
+    job_id: &JobId,
+    filename: &DisplayPath,
+    endpoint: &str,
+) -> Result<String, CliError> {
+    let mut url = reqwest::Url::parse(base).map_err(|error| {
+        CliError::InvalidArgument(format!("invalid result server URL: {error}"))
+    })?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            CliError::InvalidArgument("result server URL cannot hold path segments".into())
+        })?;
+        segments
+            .pop_if_empty()
+            .extend(["jobs", job_id.as_ref(), endpoint]);
+        segments.extend(filename.as_ref().split('/'));
+    }
+    Ok(url.into())
+}
+
 async fn read_http_error_detail(resp: reqwest::Response) -> String {
     let status = resp.status();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
@@ -348,6 +388,24 @@ pub fn parse_servers(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_urls_encode_names_without_losing_nested_identity() {
+        let url = result_endpoint_url(
+            "http://127.0.0.1:8001/api/",
+            &JobId::from("job?1"),
+            &DisplayPath::from("group/naïve%?#.wav"),
+            "artifacts",
+        )
+        .unwrap();
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert!(parsed.query().is_none());
+        assert!(parsed.fragment().is_none());
+        assert_eq!(
+            parsed.path(),
+            "/api/jobs/job%3F1/artifacts/group/na%C3%AFve%25%3F%23.wav"
+        );
+    }
 
     #[test]
     fn parse_servers_basic() {

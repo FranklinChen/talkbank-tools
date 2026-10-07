@@ -21,6 +21,7 @@ import { cancelJob } from "../../api";
 import { controlPlaneOrigin } from "../../runtime";
 import { ErrorRecovery } from "./ErrorRecovery";
 import {
+  diagnosedSummary,
   formatDuration,
   statusDotColor,
   displayProgressLabel,
@@ -49,8 +50,10 @@ function fileSortKey(f: FileStatusEntry): number {
       return 1;
     case "done":
       return 2;
-    case "error":
+    case "diagnosed":
       return 3;
+    case "error":
+      return 4;
     default:
       return 4;
   }
@@ -327,7 +330,9 @@ export function ProcessingProgress({
                     </span>
                   )}
                   <span className="text-xs text-gray-400 flex-shrink-0">
-                    {displayProgressLabel(f.progress_stage, f.progress_label)}
+                    {f.status === "diagnosed"
+                      ? diagnosedSummary(f.diagnostics)
+                      : displayProgressLabel(f.progress_stage, f.progress_label)}
                   </span>
                   {f.duration_s != null && (
                     <span className="text-xs text-gray-400 flex-shrink-0 w-12 text-right tabular-nums">

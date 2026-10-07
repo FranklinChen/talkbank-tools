@@ -9,6 +9,30 @@ use clap::{CommandFactory, Parser};
 use rstest::rstest;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn native_export_requires_a_format_and_builds_format_bound_options() {
+    assert!(Cli::try_parse_from(["batchalign3", "convert", "recording.wav"]).is_err());
+    for format in ["wav", "mp3"] {
+        let cli = Cli::try_parse_from([
+            "batchalign3",
+            "convert",
+            "recording.wav",
+            "--format",
+            format,
+        ])
+        .unwrap();
+        let options = build_typed_options(&cli.command, &cli.global)
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.command(), ReleasedCommand::Convert);
+        assert_eq!(serde_json::to_value(options).unwrap()["format"], format);
+        assert_eq!(
+            CommonOpts::command_profile(&cli.command).input_kind,
+            InputKind::Media
+        );
+    }
+}
+
 fn typed_options_for(args: &[&str]) -> CommandOptions {
     let cli = Cli::parse_from(args);
     build_typed_options(&cli.command, &cli.global)
@@ -1427,7 +1451,6 @@ fn build_options_transcribe_diarize_matches_batchalign2_baseline_defaults() {
         other => panic!("expected TranscribeS, got {other:?}"),
     }
 
-    assert_eq!(profile.command, ReleasedCommand::TranscribeS);
     assert_eq!(profile.lang, "eng");
     assert_eq!(profile.num_speakers, 2);
     // The KIND, not a list. Asserting the list pinned `["mp3","mp4","wav"]`
@@ -1610,8 +1633,27 @@ fn build_options_translate() {
     match opts {
         CommandOptions::Translate(t) => {
             assert!(!t.merge_abbrev.should_merge());
+            assert_eq!(t.target, crate::api::LanguageCode3::eng());
         }
         _ => panic!("expected Translate"),
+    }
+}
+
+#[test]
+fn translate_target_is_checked_and_preserved_by_option_lowering() {
+    let cli = Cli::parse_from(["batchalign3", "translate", "input/", "--target", "SPA"]);
+    let options = build_typed_options(&cli.command, &cli.global)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        options.as_translate().unwrap().target,
+        crate::api::LanguageCode3::spa()
+    );
+    for target in ["en", "auto", "english", "eng;spa", "éñg"] {
+        assert!(
+            Cli::try_parse_from(["batchalign3", "translate", "input/", "--target", target])
+                .is_err()
+        );
     }
 }
 
@@ -2021,6 +2063,41 @@ fn standalone_diarize_accepts_explicit_pyannote_ai() {
 }
 
 #[test]
+fn standalone_diarize_mapping_selects_chat_inputs_and_checked_options() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "diarize",
+        "transcripts/",
+        "--speaker-map",
+        "PAR0=CHI,PAR1=MOT",
+    ]);
+    assert_eq!(
+        CommonOpts::command_profile(&cli.command).input_kind,
+        InputKind::Chat
+    );
+    let options = build_typed_options(&cli.command, &cli.global)
+        .unwrap()
+        .unwrap();
+    let CommandOptions::Diarize(options) = options else {
+        panic!("diarize options")
+    };
+    assert!(matches!(
+        options.output_mode,
+        crate::options::DiarizeOutputMode::MappedChat { .. }
+    ));
+    assert_parse_error_contains(
+        &[
+            "batchalign3",
+            "diarize",
+            "transcripts/",
+            "--speaker-map",
+            "PAR0=Ä",
+        ],
+        &["invalid --speaker-map"],
+    );
+}
+
+#[test]
 fn require_media_cache_conflicts_with_every_refresh_form() {
     assert_parse_error_contains(
         &[
@@ -2046,7 +2123,7 @@ fn require_media_cache_conflicts_with_every_refresh_form() {
 }
 
 // -----------------------------------------------------------------------
-// command_profile (parametrized)
+// command_profile and the options' command (parametrized)
 // -----------------------------------------------------------------------
 
 #[rstest]
@@ -2076,8 +2153,13 @@ fn command_profile_matches_expected(
 ) {
     let cli = Cli::parse_from(args);
     let profile = CommonOpts::command_profile(&cli.command);
+    // The command comes from the typed options, the only place it is decided.
+    let options = build_typed_options(&cli.command, &cli.global)
+        .expect("options validate")
+        .expect("a processing command has options");
     assert_eq!(
-        profile.command, expected_cmd,
+        options.command(),
+        expected_cmd,
         "command mismatch for {args:?}"
     );
     assert_eq!(profile.lang, expected_lang, "lang mismatch for {args:?}");

@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::ReleasedCommand;
 use crate::options::{
     AlignOptions, BenchmarkOptions, CommandOptions, CommonOptions, CompareOptions, CorefOptions,
     MorphotagOptions, OpensmileOptions, TranscribeOptions, TranslateOptions, UtrEngine,
@@ -16,21 +15,23 @@ use crate::cli::args::{BenchArgs, BenchTarget, GlobalOpts};
 use crate::cli::dispatch;
 use crate::cli::error::CliError;
 
-fn metadata(target: BenchTarget) -> (ReleasedCommand, &'static str, u32, InputKind) {
+/// Language, speaker count and input kind for a bench target. The command is
+/// not here: it is the one `build_options` names.
+fn metadata(target: BenchTarget) -> (&'static str, u32, InputKind) {
     match target {
-        BenchTarget::Align => (ReleasedCommand::Align, "eng", 1, InputKind::Chat),
-        BenchTarget::Transcribe => (ReleasedCommand::Transcribe, "eng", 1, InputKind::Media),
-        BenchTarget::TranscribeS => (ReleasedCommand::TranscribeS, "eng", 1, InputKind::Media),
+        BenchTarget::Align => ("eng", 1, InputKind::Chat),
+        BenchTarget::Transcribe => ("eng", 1, InputKind::Media),
+        BenchTarget::TranscribeS => ("eng", 1, InputKind::Media),
         // PerFile commands carry the `"per-file"` wire string, matching
         // `command_profile()` for these same commands. Bench harness uses
         // the same profile so dispatch types stay identical.
-        BenchTarget::Morphotag => (ReleasedCommand::Morphotag, "per-file", 1, InputKind::Chat),
-        BenchTarget::Translate => (ReleasedCommand::Translate, "per-file", 1, InputKind::Chat),
-        BenchTarget::Coref => (ReleasedCommand::Coref, "per-file", 1, InputKind::Chat),
-        BenchTarget::Utseg => (ReleasedCommand::Utseg, "eng", 1, InputKind::Chat),
-        BenchTarget::Benchmark => (ReleasedCommand::Benchmark, "eng", 1, InputKind::Media),
-        BenchTarget::Opensmile => (ReleasedCommand::Opensmile, "eng", 1, InputKind::Media),
-        BenchTarget::Compare => (ReleasedCommand::Compare, "eng", 1, InputKind::Chat),
+        BenchTarget::Morphotag => ("per-file", 1, InputKind::Chat),
+        BenchTarget::Translate => ("per-file", 1, InputKind::Chat),
+        BenchTarget::Coref => ("per-file", 1, InputKind::Chat),
+        BenchTarget::Utseg => ("eng", 1, InputKind::Chat),
+        BenchTarget::Benchmark => ("eng", 1, InputKind::Media),
+        BenchTarget::Opensmile => ("eng", 1, InputKind::Media),
+        BenchTarget::Compare => ("eng", 1, InputKind::Chat),
     }
 }
 
@@ -131,7 +132,9 @@ pub async fn run(global: &GlobalOpts, args: &BenchArgs) -> Result<(), CliError> 
     }
     std::fs::create_dir_all(&args.out_dir)?;
 
-    let (command, lang, num_speakers, input_kind) = metadata(args.command);
+    let (lang, num_speakers, input_kind) = metadata(args.command);
+    let options = build_options(global, args);
+    let command = options.command();
     let dataset = dataset_label(args);
     let inputs = vec![args.in_dir.clone()];
     let mut elapsed_runs = Vec::with_capacity(args.runs);
@@ -141,14 +144,13 @@ pub async fn run(global: &GlobalOpts, args: &BenchArgs) -> Result<(), CliError> 
 
         dispatch::dispatch(
             dispatch::DispatchRequest {
-                command,
                 lang,
                 num_speakers,
                 input_kind,
                 server_arg: global.server.as_deref(),
                 inputs: &inputs,
                 out_dir: Some(args.out_dir.as_path()),
-                options: Some(build_options(global, args)),
+                options: options.clone(),
                 bank: None,
                 subdir: None,
                 lexicon: None,
@@ -233,8 +235,7 @@ mod tests {
 
     #[test]
     fn metadata_align() {
-        let (cmd, lang, n, exts) = metadata(BenchTarget::Align);
-        assert_eq!(cmd, ReleasedCommand::Align);
+        let (lang, n, exts) = metadata(BenchTarget::Align);
         assert_eq!(lang, "eng");
         assert_eq!(n, 1);
         assert_eq!(exts, InputKind::Chat);

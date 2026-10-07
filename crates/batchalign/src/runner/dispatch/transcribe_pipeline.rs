@@ -25,7 +25,7 @@ use super::asr_media::{
     PreparedAsrMediaInput, prepare_asr_media_input, preserved_media_name_for_chat,
     resolve_paths_mode_or_staging_input,
 };
-use super::audio_output::{FileOutput, MergeAbbreviations};
+use super::audio_output::{ChatOutput, FileOutput, MergeAbbreviations};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
 
 /// Shared runtime dependencies for top-level transcribe dispatch.
@@ -202,7 +202,7 @@ struct TranscribeAudioTask<'a> {
 
 #[async_trait]
 impl AudioFileTask for TranscribeAudioTask<'_> {
-    type AttemptOutput = String;
+    type AttemptOutput = crate::pipeline::transcribe::TranscribeOutput;
 
     async fn run_attempt(
         &mut self,
@@ -222,19 +222,11 @@ impl AudioFileTask for TranscribeAudioTask<'_> {
         &mut self,
         output: Self::AttemptOutput,
     ) -> Result<FileOutput, crate::error::ServerError> {
-        // Transcribe BUILDS its document from audio, so there is no admitted
-        // input level to carry forward and this is where its proof is born.
-        // See `gate_built_chat_output` for why the bar is L1 here and why
-        // align does not come through it.
-        let document = crate::runner::dispatch::audio_output::gate_built_chat_output(
-            &output,
-            crate::api::ReleasedCommand::Transcribe,
-        )
-        .map_err(|failure| crate::error::ServerError::Validation(failure.to_string()))?;
-        Ok(FileOutput::Chat {
-            document,
+        Ok(FileOutput::Chat(ChatOutput {
+            document: output.document,
+            shortfalls: output.shortfalls,
             merge_abbreviations: self.merge_abbreviations,
-        })
+        }))
     }
 }
 

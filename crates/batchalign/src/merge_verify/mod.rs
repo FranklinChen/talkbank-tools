@@ -25,14 +25,22 @@
 //! verdicts JSON carries each line's category (mapped at the corpus
 //! seam), and verify flags are identified by a caller-supplied prefix.
 //!
-//! The preservation invariant (main tiers byte-identical through the
-//! pass) is CHECKED here, not assumed: a violation is a hard error.
+//! Complete named source admission precedes editing. A source-bound plan owns
+//! both the admitted draft and its unique verdicts. Only checked typed output
+//! can be written; main-tier structure is preserved, not original formatting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use talkbank_model::model::{ChatFile, ComTier, DependentTier, Line};
+use talkbank_model::model::{
+    BulletContentSegment, ComTier, DependentTier, DependentTierEntry, Line, TranscriptName,
+};
+use talkbank_model::validation::{
+    AlignmentValidation, ValidChatFile, ValidationFailure, ValidationPolicy,
+};
+use talkbank_model::{NullErrorSink, RuleSelection, WriteChat};
+use unicode_normalization::UnicodeNormalization;
 
 /// Ordinal of a main-tier utterance within one file (0-based, in
 /// document order). The verdicts JSON keys lines by this ordinal.
@@ -260,13 +268,43 @@ pub enum MergeVerifyError {
         /// Draft path that was expected to exist.
         path: PathBuf,
     },
-    /// A draft did not parse cleanly; the pass refuses partial input.
-    #[error("draft {path} failed to parse as CHAT: {details}")]
-    DraftParse {
-        /// Draft file that failed to parse.
+    /// Complete named source admission refused the draft.
+    #[error("draft {path} failed CHAT admission: {source}")]
+    SourceAdmission {
+        /// Draft that was judged.
         path: PathBuf,
-        /// Joined parser diagnostics.
-        details: String,
+        /// Typed refusal, retaining internal failure versus invalidity.
+        #[source]
+        source: batchalign_transform::ValidatedParseError,
+    },
+    /// The transform could not establish checked output admission.
+    #[error("output for session '{session}' failed CHAT admission: {source}")]
+    OutputAdmission {
+        /// Session whose typed output was judged.
+        session: String,
+        /// Producer failure, never a claim of invalid source CHAT.
+        #[source]
+        source: ValidationFailure,
+    },
+    /// A session name is not a single safe filename stem.
+    #[error("unsafe session filename stem: {session:?}")]
+    UnsafeSession {
+        /// Refused wire value.
+        session: String,
+    },
+    /// A document names the same session more than once.
+    #[error("duplicate session verdicts for '{session}'")]
+    DuplicateSession {
+        /// Conflicting session identity.
+        session: String,
+    },
+    /// An ordinal must have exactly one verdict, even if duplicates agree.
+    #[error("duplicate verdict in session '{session}' for utterance {ordinal:?}")]
+    DuplicateVerdict {
+        /// Session containing the duplicate.
+        session: String,
+        /// Duplicate ordinal.
+        ordinal: UtteranceOrdinal,
     },
     /// A verdict names an utterance ordinal past the draft's end.
     #[error(
@@ -289,29 +327,12 @@ pub enum MergeVerifyError {
     MainTierChanged {
         /// Session where the invariant broke.
         session: String,
-        /// Ordinal of the changed main tier (usize::MAX sentinel is
-        /// never used; a count mismatch reports the first divergence).
+        /// Ordinal of the changed main tier, without sentinel values.
         ordinal: UtteranceOrdinal,
-        /// The logical tier text before the pass (evidence, not prose:
-        /// a fail-closed guard must say WHAT changed).
+        /// Debug representation of the original typed main tier.
         before: String,
-        /// The logical tier text after the pass.
+        /// Debug representation of the transformed typed main tier.
         after: String,
-    },
-    /// A planned %com edit found no matching tier line in the original
-    /// text (the typed model and the line splice disagree about the
-    /// utterance's tiers): fail loud, never write a partial edit.
-    #[error(
-        "no %com tier matching the planned edit in session '{session}' \
-         utterance {ordinal:?}: expected tier text {expected:?}"
-    )]
-    ComTierNotFound {
-        /// Session where the splice failed.
-        session: String,
-        /// Utterance whose planned edit found no matching tier.
-        ordinal: UtteranceOrdinal,
-        /// The tier text the plan expected to find.
-        expected: String,
     },
     /// The review queue could not be serialized.
     #[error("review queue at {path} failed to serialize: {source}")]
@@ -322,22 +343,6 @@ pub enum MergeVerifyError {
         #[source]
         source: serde_json::Error,
     },
-}
-
-/// The plain text of a `%com` tier (concatenated text segments; bullets
-/// and pictures contribute nothing to prefix matching).
-fn com_text(tier: &ComTier) -> String {
-    use talkbank_model::model::BulletContentSegment;
-    let mut out = String::new();
-    for segment in &tier.content.segments {
-        match segment {
-            BulletContentSegment::Text(text) => out.push_str(text.text.as_str()),
-            BulletContentSegment::Bullet(_)
-            | BulletContentSegment::Picture(_)
-            | BulletContentSegment::Continuation => {}
-        }
-    }
-    out
 }
 
 /// Render a pitch band for provenance notes.
@@ -408,205 +413,195 @@ fn rewrite_flag_text(text: &str, flag_prefix: &str, verdict: &LineVerdict) -> Op
     ))
 }
 
-/// One planned edit to an utterance's %com tiers, applied later by the
-/// line splice. The pass NEVER reserializes the file: every byte outside
-/// these edits is preserved verbatim (the serializer canonicalizes
-/// constructs like attached commas, which must not churn hand-edited
-/// corpus text; found on the 2026-07-17 corpus run).
-#[derive(Clone, Debug)]
-enum TierEdit {
-    /// Replace the %com tier whose (unwrapped) text equals `old` with a
-    /// single tier line carrying `new`.
-    RewriteCom {
-        /// The tier text to find (the typed model's view of the tier).
-        old: String,
-        /// The replacement tier text.
-        new: String,
-    },
-    /// Append a new %com tier at the end of the utterance block.
-    AppendCom {
-        /// The new tier text.
-        text: String,
-    },
+/// Safe wire identity: this value can only name one file in each directory.
+struct SessionStem(String);
+
+impl SessionStem {
+    fn admit(session: String) -> Result<Self, MergeVerifyError> {
+        if session.is_empty()
+            || matches!(session.as_str(), "." | "..")
+            || session
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        {
+            return Err(MergeVerifyError::UnsafeSession { session });
+        }
+        Ok(Self(session))
+    }
+
+    fn path(&self, directory: &Path) -> PathBuf {
+        directory.join(format!("{}.cha", self.0))
+    }
 }
 
-/// The per-utterance %com edit plan, keyed by main-tier ordinal.
-type EditPlan = BTreeMap<usize, Vec<TierEdit>>;
+/// Source-bound plan: neither a raw document nor independently swappable edits
+/// can enter the transform. Verdict indices are unique and admitted in range.
+struct PreparedSession {
+    session: SessionStem,
+    source: ValidChatFile,
+    verdicts: BTreeMap<UtteranceOrdinal, LineVerdict>,
+}
 
-/// Decide every tier outcome for one parsed draft. Returns the queue
-/// entries plus the per-utterance %com edit plan; the draft itself is
-/// only read, never mutated.
-fn plan_edits(
-    file: &ChatFile,
-    session: &str,
-    verdicts: &[LineVerdict],
-    flag_prefix: &str,
-    summary: &mut VerifySummary,
-) -> Result<(Vec<QueueEntry>, EditPlan), MergeVerifyError> {
-    let by_ordinal: BTreeMap<UtteranceOrdinal, &LineVerdict> = verdicts
-        .iter()
-        .map(|verdict| (verdict.utterance_index, verdict))
-        .collect();
+impl PreparedSession {
+    fn admit(
+        session: SessionVerdicts,
+        draft_dir: &Path,
+        parser: &batchalign_transform::parse::TreeSitterParser,
+    ) -> Result<Self, MergeVerifyError> {
+        let stem = SessionStem::admit(session.session)?;
+        let mut verdicts = BTreeMap::new();
+        for verdict in session.lines {
+            let ordinal = verdict.utterance_index;
+            if verdicts.insert(ordinal, verdict).is_some() {
+                return Err(MergeVerifyError::DuplicateVerdict {
+                    session: stem.0,
+                    ordinal,
+                });
+            }
+        }
+        let path = stem.path(draft_dir);
+        let text = std::fs::read_to_string(&path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                MergeVerifyError::MissingSession {
+                    session: stem.0.clone(),
+                    path: path.clone(),
+                }
+            } else {
+                MergeVerifyError::Io {
+                    path: path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let source = batchalign_transform::parse_source_with_parser(parser, &text)
+            .admit(TranscriptName::for_path(&path), &NullErrorSink)
+            .map_err(|source| MergeVerifyError::SourceAdmission { path, source })?
+            .into_valid_file();
+        let utterance_count = source
+            .document()
+            .lines
+            .iter()
+            .filter(|line| matches!(line, Line::Utterance(_)))
+            .count();
+        if let Some(&ordinal) = verdicts.keys().find(|index| index.0 >= utterance_count) {
+            return Err(MergeVerifyError::OrdinalOutOfRange {
+                session: stem.0,
+                ordinal,
+                utterance_count,
+            });
+        }
+        Ok(Self {
+            session: stem,
+            source,
+            verdicts,
+        })
+    }
 
-    let mut queue = Vec::new();
-    let mut edits = EditPlan::new();
-    let mut ordinal = 0usize;
-    let mut utterance_count = 0usize;
-
-    for line in file.lines.iter() {
-        let Line::Utterance(utterance) = line else {
-            continue;
-        };
-        utterance_count += 1;
-        let current = UtteranceOrdinal(ordinal);
-        ordinal += 1;
-        let Some(verdict) = by_ordinal.get(&current) else {
-            continue;
-        };
-        let outcome = tier_outcome(verdict);
-        match outcome {
-            TierOutcome::AutoTrust => {
-                summary.auto_trusted += 1;
-                for tier in utterance.dependent_tiers.iter() {
-                    if let DependentTier::Com(com) = &tier.tier {
-                        let old = com_text(com);
-                        if let Some(new) = rewrite_flag_text(&old, flag_prefix, verdict) {
-                            edits
-                                .entry(current.0)
-                                .or_default()
-                                .push(TierEdit::RewriteCom { old, new });
+    fn apply(
+        self,
+        flag_prefix: &str,
+        summary: &mut VerifySummary,
+    ) -> Result<CheckedSession, MergeVerifyError> {
+        let Self {
+            session,
+            source,
+            verdicts,
+        } = self;
+        let policy = ValidationPolicy::new(
+            RuleSelection::new(),
+            AlignmentValidation::IncludeTierAlignment,
+        );
+        let mut file = source.into_unchecked();
+        let mut queue = Vec::new();
+        // This traversal exposes only dependent tiers to the edit operation.
+        // Main tiers, headers, and other dependent tiers retain their structure.
+        for (ordinal, utterance) in (&mut file.lines)
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Utterance(u) => Some(u),
+                _ => None,
+            })
+            .enumerate()
+        {
+            let Some(verdict) = verdicts.get(&UtteranceOrdinal(ordinal)) else {
+                continue;
+            };
+            let main_before = utterance.main.clone();
+            let outcome = tier_outcome(verdict);
+            match outcome {
+                TierOutcome::AutoTrust => {
+                    summary.auto_trusted += 1;
+                    for entry in &mut utterance.dependent_tiers {
+                        if let DependentTier::Com(com) = &mut entry.tier {
+                            for segment in &mut com.content.segments {
+                                if let BulletContentSegment::Text(text) = segment
+                                    && let Some(replacement) =
+                                        rewrite_flag_text(&text.text, flag_prefix, verdict)
+                                {
+                                    text.text = replacement.into();
+                                }
+                            }
                         }
                     }
                 }
-            }
-            TierOutcome::Review => {
-                summary.reviewed += 1;
-                queue.push(queue_entry(session, verdict, outcome));
-            }
-            TierOutcome::Hold => {
-                summary.held += 1;
-            }
-            TierOutcome::Demote => {
-                summary.demoted += 1;
-                edits
-                    .entry(current.0)
-                    .or_default()
-                    .push(TierEdit::AppendCom {
-                        text: demotion_note(verdict),
-                    });
-                queue.push(queue_entry(session, verdict, outcome));
-            }
-            TierOutcome::Untouched => {}
-        }
-    }
-
-    if let Some(out_of_range) = by_ordinal.keys().find(|key| key.0 >= utterance_count) {
-        return Err(MergeVerifyError::OrdinalOutOfRange {
-            session: session.to_owned(),
-            ordinal: *out_of_range,
-            utterance_count,
-        });
-    }
-
-    Ok((queue, edits))
-}
-
-/// Apply the edit plan to the ORIGINAL text by line splicing: only the
-/// planned %com tier lines change; every other byte passes through
-/// verbatim. A `%com` logical line is the `%com:` line plus its
-/// tab-indented continuations, unwrapped with single spaces (the same
-/// convention the typed model uses for tier text), so the plan's
-/// old-text match is exact whether or not the tier was wrapped.
-fn splice_edits(
-    original: &str,
-    session: &str,
-    edits: &EditPlan,
-) -> Result<String, MergeVerifyError> {
-    let lines: Vec<&str> = original.split('\n').collect();
-    let mut output: Vec<String> = Vec::with_capacity(lines.len());
-    let mut ordinal: Option<usize> = None;
-    let mut index = 0usize;
-
-    while index < lines.len() {
-        let line = lines[index];
-        if !line.starts_with('*') {
-            output.push(line.to_owned());
-            index += 1;
-            continue;
-        }
-        ordinal = Some(ordinal.map_or(0, |o| o + 1));
-        let current = ordinal.unwrap_or(0);
-
-        // Collect this utterance block: the main line, its continuations,
-        // and every dependent tier (with continuations) until the next
-        // main line or header.
-        let block_start = index;
-        index += 1;
-        while index < lines.len() {
-            let candidate = lines[index];
-            if candidate.starts_with('*') || candidate.starts_with('@') {
-                break;
-            }
-            if candidate.is_empty() && index + 1 == lines.len() {
-                // Trailing empty piece from the final newline: not part
-                // of the block.
-                break;
-            }
-            index += 1;
-        }
-        let mut block: Vec<String> = lines[block_start..index]
-            .iter()
-            .map(|piece| (*piece).to_owned())
-            .collect();
-
-        if let Some(block_edits) = edits.get(&current) {
-            for edit in block_edits {
-                match edit {
-                    TierEdit::RewriteCom { old, new } => {
-                        let found = find_com_logical_line(&block, old);
-                        let Some((tier_start, tier_end)) = found else {
-                            return Err(MergeVerifyError::ComTierNotFound {
-                                session: session.to_owned(),
-                                ordinal: UtteranceOrdinal(current),
-                                expected: old.clone(),
-                            });
-                        };
-                        block.splice(tier_start..tier_end, [format!("%com:\t{new}")]);
-                    }
-                    TierEdit::AppendCom { text } => {
-                        block.push(format!("%com:\t{text}"));
-                    }
+                TierOutcome::Review => {
+                    summary.reviewed += 1;
+                    queue.push(queue_entry(&session.0, verdict, outcome));
                 }
+                TierOutcome::Hold => summary.held += 1,
+                TierOutcome::Demote => {
+                    summary.demoted += 1;
+                    utterance
+                        .dependent_tiers
+                        .push(DependentTierEntry::new(DependentTier::Com(
+                            ComTier::from_text(demotion_note(verdict)),
+                        )));
+                    queue.push(queue_entry(&session.0, verdict, outcome));
+                }
+                TierOutcome::Untouched => {}
+            }
+            if utterance.main != main_before {
+                return Err(MergeVerifyError::MainTierChanged {
+                    session: session.0.clone(),
+                    ordinal: UtteranceOrdinal(ordinal),
+                    before: format!("{main_before:?}"),
+                    after: format!("{:?}", utterance.main),
+                });
             }
         }
-        output.extend(block);
+        let path = session.path(Path::new(""));
+        let output = file
+            .validate_construction_with_policy(
+                policy,
+                &NullErrorSink,
+                TranscriptName::for_path(&path),
+            )
+            .map_err(|source| MergeVerifyError::OutputAdmission {
+                session: session.0.clone(),
+                source,
+            })?;
+        summary.sessions += 1;
+        Ok(CheckedSession {
+            session,
+            output,
+            queue,
+        })
     }
-
-    Ok(output.join("\n"))
 }
 
-/// Locate the `%com` logical line (start..end line range) within an
-/// utterance block whose unwrapped text equals `expected`.
-fn find_com_logical_line(block: &[String], expected: &str) -> Option<(usize, usize)> {
-    let mut i = 0usize;
-    while i < block.len() {
-        if let Some(first) = block[i].strip_prefix("%com:") {
-            let mut text = first.trim_start_matches('\t').to_owned();
-            let mut end = i + 1;
-            while end < block.len() && block[end].starts_with('\t') {
-                text.push(' ');
-                text.push_str(block[end].trim_start_matches('\t'));
-                end += 1;
-            }
-            if text == expected {
-                return Some((i, end));
-            }
-            i = end;
-        } else {
-            i += 1;
-        }
+/// Only this producer-admitted state has write permission.
+struct CheckedSession {
+    session: SessionStem,
+    output: ValidChatFile,
+    queue: Vec<QueueEntry>,
+}
+
+impl CheckedSession {
+    fn write(&self, directory: &Path) -> Result<(), MergeVerifyError> {
+        let path = self.session.path(directory);
+        std::fs::write(&path, self.output.to_chat_string())
+            .map_err(|source| MergeVerifyError::Io { path, source })
     }
-    None
 }
 
 fn queue_entry(session: &str, verdict: &LineVerdict, tier: TierOutcome) -> QueueEntry {
@@ -621,35 +616,10 @@ fn queue_entry(session: &str, verdict: &LineVerdict, tier: TierOutcome) -> Queue
     }
 }
 
-/// LOGICAL main-tier lines of a CHAT text, for the preservation check.
-///
-/// CHAT wraps long tiers onto tab-indented continuation lines and the
-/// serializer may re-wrap differently (typically unwrapping), so the
-/// invariant compares logical content: each `*` line with its
-/// continuations joined by single spaces. Caught on real merged drafts
-/// where wrapped utterances round-tripped to single lines.
-fn main_tier_lines(chat: &str) -> Vec<String> {
-    let mut logical: Vec<String> = Vec::new();
-    let mut in_main = false;
-    for line in chat.lines() {
-        if line.starts_with('*') {
-            logical.push(line.to_owned());
-            in_main = true;
-        } else if in_main && line.starts_with('\t') {
-            if let Some(current) = logical.last_mut() {
-                current.push(' ');
-                current.push_str(line.trim_start_matches('\t'));
-            }
-        } else {
-            in_main = false;
-        }
-    }
-    logical
-}
-
 /// Run the pass: read every session named in the verdicts document from
-/// `draft_dir`, apply tiers, write rewritten drafts and the review
-/// queue into `out_dir`.
+/// `draft_dir`, admit and transform the complete set, then write checked
+/// drafts and the review queue into `out_dir`. Semantic refusal writes nothing;
+/// filesystem failure during persistence can still leave partial output.
 pub fn run(
     draft_dir: &Path,
     verdicts_path: &Path,
@@ -667,80 +637,31 @@ pub fn run(
             source,
         })?;
 
-    std::fs::create_dir_all(out_dir).map_err(|source| MergeVerifyError::Io {
-        path: out_dir.to_path_buf(),
-        source,
-    })?;
-
     let parser = crate::chat_parser();
     let mut summary = VerifySummary::default();
-    let mut queue = ReviewQueue {
-        entries: Vec::new(),
-    };
-
-    for session in &doc.sessions {
-        let in_path = draft_dir.join(format!("{}.cha", session.session));
-        if !in_path.is_file() {
-            return Err(MergeVerifyError::MissingSession {
-                session: session.session.clone(),
-                path: in_path,
+    let mut sessions = BTreeSet::new();
+    let mut prepared = Vec::new();
+    for session in doc.sessions {
+        // Canonically equivalent names must not overwrite each other on
+        // Unicode-normalizing or case-insensitive filesystems.
+        let collision_key: String = session.session.to_lowercase().nfc().collect();
+        if !sessions.insert(collision_key) {
+            return Err(MergeVerifyError::DuplicateSession {
+                session: session.session,
             });
         }
-        let before = std::fs::read_to_string(&in_path).map_err(|source| MergeVerifyError::Io {
-            path: in_path.clone(),
-            source,
-        })?;
-        let (file, parse_errors) = batchalign_transform::parse::parse_lenient(&parser, &before);
-        if !parse_errors.is_empty() {
-            return Err(MergeVerifyError::DraftParse {
-                path: in_path,
-                details: parse_errors
-                    .iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            });
-        }
-
-        let (session_queue, edits) = plan_edits(
-            &file,
-            &session.session,
-            &session.lines,
-            flag_prefix,
-            &mut summary,
-        )?;
-        queue.entries.extend(session_queue);
-        summary.sessions += 1;
-
-        let after = splice_edits(&before, &session.session, &edits)?;
-        let mains_before = main_tier_lines(&before);
-        let mains_after = main_tier_lines(&after);
-        if let Some(changed) = mains_before
-            .iter()
-            .zip(mains_after.iter())
-            .position(|(before_line, after_line)| before_line != after_line)
-            .or_else(|| (mains_before.len() != mains_after.len()).then_some(usize::MAX))
-        {
-            let show = |mains: &[String]| {
-                mains
-                    .get(changed)
-                    .cloned()
-                    .unwrap_or_else(|| format!("<no tier at ordinal; count {}>", mains.len()))
-            };
-            return Err(MergeVerifyError::MainTierChanged {
-                session: session.session.clone(),
-                ordinal: UtteranceOrdinal(changed),
-                before: show(&mains_before),
-                after: show(&mains_after),
-            });
-        }
-
-        let out_path = out_dir.join(format!("{}.cha", session.session));
-        std::fs::write(&out_path, after).map_err(|source| MergeVerifyError::Io {
-            path: out_path,
-            source,
-        })?;
+        prepared.push(PreparedSession::admit(session, draft_dir, &parser)?);
     }
+    let checked = prepared
+        .into_iter()
+        .map(|session| session.apply(flag_prefix, &mut summary))
+        .collect::<Result<Vec<_>, _>>()?;
+    let queue = ReviewQueue {
+        entries: checked
+            .iter()
+            .flat_map(|session| session.queue.iter().cloned())
+            .collect(),
+    };
 
     let queue_path = out_dir.join("review-queue.json");
     let queue_json = serde_json::to_string_pretty(&queue).map_err(|source| {
@@ -749,10 +670,66 @@ pub fn run(
             source,
         }
     })?;
+    std::fs::create_dir_all(out_dir).map_err(|source| MergeVerifyError::Io {
+        path: out_dir.to_path_buf(),
+        source,
+    })?;
+    for session in &checked {
+        session.write(out_dir)?;
+    }
     std::fs::write(&queue_path, queue_json).map_err(|source| MergeVerifyError::Io {
         path: queue_path,
         source,
     })?;
 
     Ok(summary)
+}
+
+impl MergeVerifyError {
+    /// Preserve producer failure taxonomy at the CLI/server presentation seam.
+    pub(crate) fn is_internal(&self) -> bool {
+        match self {
+            Self::SourceAdmission { source, .. } => {
+                crate::error::chat_admission_is_internal(source)
+            }
+            Self::Io { .. }
+            | Self::OutputAdmission { .. }
+            | Self::MainTierChanged { .. }
+            | Self::QueueSerialize { .. } => true,
+            Self::VerdictsParse { .. }
+            | Self::MissingSession { .. }
+            | Self::UnsafeSession { .. }
+            | Self::DuplicateSession { .. }
+            | Self::DuplicateVerdict { .. }
+            | Self::OrdinalOutOfRange { .. } => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_verify_failure_taxonomy_is_not_diagnostic_prose() {
+        use axum::response::IntoResponse;
+        let io = crate::error::ServerError::MergeVerification(Box::new(MergeVerifyError::Io {
+            path: PathBuf::from("output.cha"),
+            source: std::io::Error::other("validation error in an infrastructure message"),
+        }));
+        assert_eq!(
+            io.into_response().status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let verdict = crate::error::ServerError::MergeVerification(Box::new(
+            MergeVerifyError::DuplicateVerdict {
+                session: "S1".into(),
+                ordinal: UtteranceOrdinal(0),
+            },
+        ));
+        assert_eq!(
+            verdict.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
 }

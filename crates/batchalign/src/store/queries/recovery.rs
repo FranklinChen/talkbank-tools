@@ -46,6 +46,37 @@ fn append_recovery_note(existing: Option<String>, note: impl Into<String>) -> Op
     }
 }
 
+/// Decode a stored `diagnostics` column (JSON written by
+/// `FileOutputDiagnostics::to_column_json`). Text this build cannot read is
+/// not guessed at: it is dropped with a `[recovery]` note, which makes the
+/// row foreign, so it is reported and never rewritten.
+fn recover_output_diagnostics(
+    job_id: &str,
+    filename: &str,
+    raw: Option<&str>,
+) -> (Option<crate::api::FileOutputDiagnostics>, Option<String>) {
+    let Some(raw) = raw else {
+        return (None, None);
+    };
+    match serde_json::from_str(raw) {
+        Ok(diagnostics) => (Some(diagnostics), None),
+        Err(error) => {
+            warn!(
+                job_id,
+                filename,
+                %error,
+                "Unreadable persisted output diagnostics during crash recovery",
+            );
+            (
+                None,
+                Some(format!(
+                    "unreadable output diagnostics were dropped: {error}"
+                )),
+            )
+        }
+    }
+}
+
 fn recover_job_status(job_id: &str, raw_status: &str) -> (JobStatus, Option<String>) {
     match raw_status.parse() {
         Ok(status) => (status, None),
@@ -166,9 +197,14 @@ pub(crate) fn recover_file_phase(
     let (status, status_note) = recover_file_status(job_id, &row.filename, &row.status);
     let (error_category, category_note) =
         recover_failure_category(job_id, &row.filename, row.error_category.as_deref());
+    let (diagnostics, diagnostics_note) =
+        recover_output_diagnostics(job_id, &row.filename, row.diagnostics.as_deref());
     let mut error = row.error.clone();
     let mut foreign = false;
-    for note in [status_note, category_note].into_iter().flatten() {
+    for note in [status_note, category_note, diagnostics_note]
+        .into_iter()
+        .flatten()
+    {
         error = append_recovery_note(error, note);
         foreign = true;
     }
@@ -176,6 +212,7 @@ pub(crate) fn recover_file_phase(
         status,
         error: error.as_deref(),
         error_category,
+        diagnostics: diagnostics.as_ref(),
         started_at: row.started_at,
         finished_at: row.finished_at,
         next_eligible_at: row.next_eligible_at,
@@ -204,7 +241,7 @@ impl JobStore {
                 let mut recovered_updates = Vec::new();
                 let mut repairs = RowRepairs::default();
 
-                for row in rows {
+                'rows: for row in rows {
                     if row.submitted_at < ttl_cutoff {
                         continue;
                     }
@@ -218,6 +255,14 @@ impl JobStore {
                             continue;
                         }
                     };
+
+                    // Validate the row's command/options pairing before
+                    // collecting any persistence repairs, including for jobs
+                    // whose files have not yet reached a terminal state.
+                    if let Err(error) = crate::command_model::command_spec(command).selected_output_policy(&row.options) {
+                        warn!(job_id = %row.job_id, %error, "Inconsistent command options in DB, skipping job recovery");
+                        continue;
+                    }
 
                     let mut file_statuses = HashMap::new();
                     let mut results: Vec<FileResultEntry> = Vec::new();
@@ -267,17 +312,28 @@ impl JobStore {
                                 stamp: crate::api::FileStampOutcome::Unrecorded,
                                 current_attempt_id: None,
                                 progress: FileProgress::default(),
+                                worker_waits: crate::store::OpenWorkerWaits::default(),
                             },
                         );
 
                         if fs_status.is_terminal() {
                             // Persisted file-status names identify inputs, not artifacts.
-                            let artifact = crate::recipe_runner::runtime::primary_output_artifact(
+                            let artifact = match crate::recipe_runner::runtime::primary_output_artifact(
                                 command,
+                                &row.options,
                                 &DisplayPath::from(fs_row.filename.clone()),
-                            );
+                            ) {
+                                Ok(artifact) => artifact,
+                                Err(error) => {
+                                    warn!(job_id = %row.job_id, %error, "Inconsistent command options in DB, skipping job recovery");
+                                    continue 'rows;
+                                }
+                            };
                             results.push(FileResultEntry {
-                                filename: if fs_status == FileStatusKind::Done {
+                                // A file that wrote output (clean or
+                                // diagnosed) names its artifact; an error
+                                // names its input.
+                                filename: if fs_status.wrote_output() {
                                     artifact.display_path
                                 } else {
                                     DisplayPath::from(fs_row.filename.clone())
@@ -608,6 +664,66 @@ mod tests {
             assert_eq!(failed.filename.as_ref(), "nested/failed.cha");
             assert_eq!(failed.error.as_deref(), Some("no evidence"));
         }
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_preserves_explicit_native_encoding_in_both_io_modes() {
+        for paths_mode in [false, true] {
+            for (format, content_type) in [("wav", ContentType::Wav), ("mp3", ContentType::Mp3)] {
+                let (store, db, _dir) = test_store_with_db().await;
+                let mut record = make_job_record(
+                    "native-job",
+                    JobStatus::Completed,
+                    vec!["nested/source.wav".into()],
+                );
+                record.command = "convert".into();
+                record.paths_mode = paths_mode;
+                record.options = serde_json::from_value(
+                    serde_json::json!({"command":"convert", "format":format}),
+                )
+                .unwrap();
+                db.insert_job(&record).await.unwrap();
+                db.seed_file_status_row(
+                    "native-job",
+                    "nested/source.wav",
+                    "done",
+                    None,
+                    None,
+                    Some(format),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(store.load_from_db().await.unwrap(), 1);
+                let detail = store
+                    .get_job_detail(&JobId::from("native-job"))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    detail.results[0].filename.as_ref(),
+                    format!("nested/source.converted.{format}")
+                );
+                assert_eq!(detail.results[0].content_type, content_type);
+                assert_eq!(detail.options, record.options);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_refuses_inconsistent_options_before_repairing_pending_rows() {
+        let (store, db, _dir) = test_store_with_db().await;
+        let mut record =
+            make_job_record("mismatched", JobStatus::Queued, vec!["source.wav".into()]);
+        record.command = "convert".into(); // options still name the original command
+        db.insert_job(&record).await.unwrap();
+        assert_eq!(store.load_from_db().await.unwrap(), 0);
+        assert!(store.get(&JobId::from("mismatched")).await.is_none());
+        let retained = db.load_all_jobs().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].options, record.options);
+        assert_eq!(retained[0].command, "convert");
     }
 
     /// Startup recovery re-queues resumable work and persists the queued state.
