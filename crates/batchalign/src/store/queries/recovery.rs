@@ -77,6 +77,39 @@ fn recover_output_diagnostics(
     }
 }
 
+/// Decode a stored `exclusions` column (a JSON array written by
+/// `db::update::bind_phase_columns`), as [`recover_output_diagnostics`]
+/// decodes diagnostics: unreadable text is dropped with a `[recovery]` note.
+fn recover_output_exclusions(
+    job_id: &str,
+    filename: &str,
+    raw: Option<&str>,
+) -> (
+    Option<Vec<crate::api::OutputExclusionRecord>>,
+    Option<String>,
+) {
+    let Some(raw) = raw else {
+        return (None, None);
+    };
+    match serde_json::from_str(raw) {
+        Ok(exclusions) => (Some(exclusions), None),
+        Err(error) => {
+            warn!(
+                job_id,
+                filename,
+                %error,
+                "Unreadable persisted output exclusions during crash recovery",
+            );
+            (
+                None,
+                Some(format!(
+                    "unreadable output exclusions were dropped: {error}"
+                )),
+            )
+        }
+    }
+}
+
 fn recover_job_status(job_id: &str, raw_status: &str) -> (JobStatus, Option<String>) {
     match raw_status.parse() {
         Ok(status) => (status, None),
@@ -199,11 +232,18 @@ pub(crate) fn recover_file_phase(
         recover_failure_category(job_id, &row.filename, row.error_category.as_deref());
     let (diagnostics, diagnostics_note) =
         recover_output_diagnostics(job_id, &row.filename, row.diagnostics.as_deref());
+    let (exclusions, exclusions_note) =
+        recover_output_exclusions(job_id, &row.filename, row.exclusions.as_deref());
     let mut error = row.error.clone();
     let mut foreign = false;
-    for note in [status_note, category_note, diagnostics_note]
-        .into_iter()
-        .flatten()
+    for note in [
+        status_note,
+        category_note,
+        diagnostics_note,
+        exclusions_note,
+    ]
+    .into_iter()
+    .flatten()
     {
         error = append_recovery_note(error, note);
         foreign = true;
@@ -213,6 +253,7 @@ pub(crate) fn recover_file_phase(
         error: error.as_deref(),
         error_category,
         diagnostics: diagnostics.as_ref(),
+        exclusions: exclusions.as_deref(),
         started_at: row.started_at,
         finished_at: row.finished_at,
         next_eligible_at: row.next_eligible_at,

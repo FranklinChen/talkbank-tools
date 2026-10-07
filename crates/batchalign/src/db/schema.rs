@@ -187,6 +187,13 @@ pub struct FileStatusRow {
     /// phase but `"diagnosed"`.
     pub diagnostics: Option<String>,
 
+    /// Column `exclusions TEXT` (nullable).
+    /// JSON array of what a written file's producer left out on purpose
+    /// (`api::OutputExclusionRecord`). Raw here; decoded at the database
+    /// boundary (`store::queries::recover_file_phase`). `None` when there is
+    /// none, and for every phase but `"done"` and `"diagnosed"`.
+    pub exclusions: Option<String>,
+
     /// Column `content_type TEXT NOT NULL DEFAULT 'chat'`.
     /// MIME-like content descriptor for the result file. Typically
     /// `"chat"` for `.cha` output or `"csv"` for analysis results.

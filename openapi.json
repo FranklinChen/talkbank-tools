@@ -274,6 +274,33 @@
         ],
         "type": "object"
       },
+      "ExcludedUtteranceRecord": {
+        "description": "One utterance forced alignment left out because it is not in the\nrecording.",
+        "properties": {
+          "postcode": {
+            "$ref": "#/components/schemas/OffRecordPostcode",
+            "description": "The postcode that marks it."
+          },
+          "utterance": {
+            "description": "The utterance's position among the file's utterances, counting from 1.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "words": {
+            "description": "Its lexical words.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "utterance",
+          "words",
+          "postcode"
+        ],
+        "type": "object"
+      },
       "ExecutionMode": {
         "description": "How a job reaches its execution host.",
         "enum": [
@@ -624,6 +651,13 @@
                 "type": "null"
               }
             ]
+          },
+          "exclusions": {
+            "description": "Parts of the input the command left out of its work on purpose\n([`OutputExclusionRecord`]): information, never a shortfall. Present\nonly on a file whose output was written (`done` or `diagnosed`), and\nonly when there is one; a separate channel from `diagnostics`, which\na clean file does not have.",
+            "items": {
+              "$ref": "#/components/schemas/OutputExclusionRecord"
+            },
+            "type": "array"
           },
           "filename": {
             "$ref": "#/components/schemas/DisplayPath",
@@ -1643,6 +1677,48 @@
         ],
         "type": "string"
       },
+      "OutputExclusionRecord": {
+        "description": "Part of the input a command left out of its work on purpose, because the\ntranscript asks for it by a convention with a recorded ruling.\n\nInformation, never a shortfall: the command did what the transcript asks,\nso an exclusion does not make the file diagnosed, and a file whose only\nuntimed utterances are exclusions is clean. Reported beside the written\noutput, on a `done` file as on a `diagnosed` one\n([`FileStatusEntry::exclusions`]), and bounded like\n[`FileOutputDiagnostics`] because every poll copies it.",
+        "oneOf": [
+          {
+            "description": "Forced alignment did not look for these utterances in the recording,\nbecause the transcript marks them as not speech in it (a\n`[+ diary]` note). Their words are written untimed; a bullet the\ninput gave one is kept as given under `--main-bullets keep` or\n`exact`, and written without under `derive`.",
+            "properties": {
+              "excluded_utterances": {
+                "description": "How many utterances were left out, at least one.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "excluded_words": {
+                "description": "Their lexical words in all, none of which is owed timing.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "first_excluded": {
+                "description": "The first of them, in transcript order, at most\n[`FileOutputDiagnostics::FIRST_FINDINGS`].",
+                "items": {
+                  "$ref": "#/components/schemas/ExcludedUtteranceRecord"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "not_in_recording"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "excluded_utterances",
+              "excluded_words",
+              "first_excluded",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "OutputFindingRecord": {
         "description": "One admission finding.",
         "properties": {
@@ -2302,7 +2378,7 @@
             "type": "object"
           },
           {
-            "description": "The transcript marks it as not speech in the recording, so alignment\nnever looks for it there: no request, no bullet, untimed by design.",
+            "description": "The transcript marks it as not speech in the recording.\n\nRead, never written: only the build of 2026-10-07 that reported such\nan utterance as a shortfall recorded it, and records it stored are\nstill read. An utterance not in the recording is now an\n[`OutputExclusionRecord::NotInRecording`], which does not diagnose\nthe file.",
             "properties": {
               "kind": {
                 "enum": [

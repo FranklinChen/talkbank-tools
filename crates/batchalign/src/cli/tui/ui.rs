@@ -681,6 +681,7 @@ mod tests {
                 None
             },
             error_category: None,
+            exclusions: Vec::new(),
             diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: if status == FileStatusKind::Done {

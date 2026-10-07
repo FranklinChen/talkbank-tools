@@ -529,6 +529,7 @@ mod tests {
             status,
             error: None,
             error_category: None,
+            exclusions: Vec::new(),
             diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,

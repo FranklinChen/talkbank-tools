@@ -270,6 +270,7 @@ mod tests {
                 "a.cha",
                 crate::store::EventTime::fixed(crate::unix_time(10.0)),
                 FileCompletion::Clean(crate::store::CompletedFileOutput {
+                    exclusions: Vec::new(),
                     filename: DisplayPath::from("a.cha"),
                     content_type: ContentType::Chat,
                     stamp: crate::api::FileStampOutcome::Unrecorded,

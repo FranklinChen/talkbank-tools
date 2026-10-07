@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use crate::api::{
     ContentType, DisplayPath, FileOutputDiagnostics, FileProgressStage, FileStatusEntry,
-    FileStatusKind, JobStatus, MachineTime, NodeId, NonNegativeSeconds,
+    FileStatusKind, JobStatus, MachineTime, NodeId, NonNegativeSeconds, OutputExclusionRecord,
 };
 use crate::config::ServerConfig;
 use crate::host_policy::HostExecutionPolicy;
@@ -134,8 +134,9 @@ impl FileFailure {
 ///
 /// A finish time exists only on `Done`, `Diagnosed` and `Error`, a retry
 /// deadline only on `RetryPending`, a failure only where one happened,
-/// admission diagnostics only on `Diagnosed`, and a queued file has no times
-/// at all.
+/// admission diagnostics only on `Diagnosed`, a producer's exclusions only
+/// where output was written (`Done`, `Diagnosed`), and a queued file has no
+/// times at all.
 ///
 /// The times are `Option` only for rows recovered from storage written by a
 /// build that did not record them; every transition this build makes records
@@ -169,6 +170,9 @@ pub enum FilePhase {
         started_at: Option<MachineTime>,
         /// When it finished.
         finished_at: Option<MachineTime>,
+        /// What the producer left out of its work on purpose: information
+        /// beside a clean output, never a diagnosis. Empty for most files.
+        exclusions: Vec<OutputExclusionRecord>,
     },
     /// Finished, with the output written together with the diagnostics its
     /// admission found. Terminal, never retried, and not a failure: the
@@ -183,6 +187,8 @@ pub enum FilePhase {
         /// storage that did not record it, like the times; every transition
         /// this build makes records it.
         diagnostics: Option<FileOutputDiagnostics>,
+        /// What the producer left out of its work on purpose, as on `Done`.
+        exclusions: Vec<OutputExclusionRecord>,
     },
     /// Finished with an error. Terminal.
     Error {
@@ -266,6 +272,19 @@ impl FilePhase {
         }
     }
 
+    /// What the producer of a written output left out of its work on
+    /// purpose; empty for every other phase.
+    pub fn exclusions(&self) -> &[OutputExclusionRecord] {
+        match self {
+            Self::Done { exclusions, .. } | Self::Diagnosed { exclusions, .. } => exclusions,
+            Self::Queued
+            | Self::Processing { .. }
+            | Self::RetryPending { .. }
+            | Self::Error { .. }
+            | Self::Interrupted { .. } => &[],
+        }
+    }
+
     /// The phase a file is in after the server stopped under it: an
     /// in-flight phase (queued, processing, awaiting a retry) becomes
     /// `Interrupted`, keeping its start and the failure it was retrying;
@@ -344,6 +363,9 @@ impl FilePhase {
             error: failure.and_then(FileFailure::message),
             error_category: failure.and_then(FileFailure::category),
             diagnostics: self.diagnostics(),
+            // NULL for none, so every phase without exclusions writes the
+            // same image whatever built it.
+            exclusions: Some(self.exclusions()).filter(|exclusions| !exclusions.is_empty()),
             started_at: None,
             finished_at: None,
             next_eligible_at: None,
@@ -370,6 +392,7 @@ impl FilePhase {
             Self::Done {
                 started_at,
                 finished_at,
+                ..
             }
             | Self::Diagnosed {
                 started_at,
@@ -412,6 +435,7 @@ impl FilePhase {
             error,
             error_category,
             diagnostics,
+            exclusions,
             started_at,
             finished_at,
             next_eligible_at,
@@ -423,7 +447,10 @@ impl FilePhase {
             next_eligible_at: next_eligible_at.is_some(),
             failure: message.is_some() || error_category.is_some(),
             diagnostics: diagnostics.is_some(),
+            exclusions: exclusions.is_some(),
         };
+        // A written phase keeps the column's records; NULL is none.
+        let written_exclusions = || exclusions.map(<[_]>::to_vec).unwrap_or_default();
         let phase = match (kind, next_eligible_at) {
             (FileStatusKind::Processing, Some(retry_at)) => Self::RetryPending {
                 started_at,
@@ -444,11 +471,13 @@ impl FilePhase {
             (FileStatusKind::Done, _) => Self::Done {
                 started_at,
                 finished_at,
+                exclusions: written_exclusions(),
             },
             (FileStatusKind::Diagnosed, _) => Self::Diagnosed {
                 started_at,
                 finished_at,
                 diagnostics: diagnostics.cloned(),
+                exclusions: written_exclusions(),
             },
             (FileStatusKind::Queued, _) => Self::Queued,
         };
@@ -471,6 +500,7 @@ struct RowHeld {
     next_eligible_at: bool,
     failure: bool,
     diagnostics: bool,
+    exclusions: bool,
 }
 
 impl RowHeld {
@@ -493,6 +523,7 @@ impl RowHeld {
                 self.diagnostics && kept.diagnostics.is_none(),
                 "diagnostics",
             ),
+            (self.exclusions && kept.exclusions.is_none(), "exclusions"),
         ]
         .into_iter()
         .filter_map(|(dropped, column)| dropped.then_some(column))
@@ -518,6 +549,11 @@ pub(crate) struct FilePhaseColumns<'a> {
     /// findings. Its JSON text is written by `db::update::bind_phase_columns`
     /// and read back at the database boundary (`recover_file_phase`).
     pub diagnostics: Option<&'a FileOutputDiagnostics>,
+    /// The `exclusions` column, decoded: what the producer of a written
+    /// output left out on purpose, `None` when it left nothing out. Its
+    /// JSON text is written by `db::update::bind_phase_columns` and read
+    /// back at the database boundary (`recover_file_phase`).
+    pub exclusions: Option<&'a [OutputExclusionRecord]>,
     /// The `started_at` column.
     pub started_at: Option<MachineTime>,
     /// The `finished_at` column: the finish time, or a pending retry's
@@ -661,6 +697,7 @@ impl FileStatus {
             error: failure.and_then(FileFailure::message).map(str::to_owned),
             error_category: failure.and_then(FileFailure::category),
             diagnostics: self.phase.diagnostics().cloned(),
+            exclusions: self.phase.exclusions().to_vec(),
             stamp: self.stamp.clone(),
             started_at,
             finished_at,
@@ -936,6 +973,7 @@ mod worker_wait_tests {
         let mut file = processing(FileProgressStage::Writing, 1, 1);
         file.worker_waits.apply(WorkerWaitChange::Started);
         file.phase = FilePhase::Done {
+            exclusions: Vec::new(),
             started_at: None,
             finished_at: None,
         };

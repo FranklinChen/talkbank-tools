@@ -42,7 +42,9 @@ mod units;
 use input::FaAdmission;
 #[cfg(test)]
 pub(crate) use input::read_fa_source;
-pub(crate) use input::{FaWorkingDocument, ReconciledOutput, read_fa_source_named};
+pub(crate) use input::{
+    FaWorkingDocument, OutstandingTiming, ReconciledOutput, read_fa_source_named,
+};
 
 use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
@@ -165,6 +167,10 @@ impl FaAdmission {
                 AdmittedFaEvidence::Partial(partial)
             }
         };
+        if let Some(exclusions) = evidence.exclusions() {
+            // The complete account, once; the record keeps a bounded copy.
+            tracing::info!(%exclusions, "forced alignment left utterances out by design");
+        }
         let document = self.discharge(document);
         Ok(AdmittedFaResult { evidence, document })
     }
@@ -222,6 +228,19 @@ pub(crate) struct AdmittedFaResult {
     document: PostValidated,
 }
 
+/// An admitted alignment's output, with everything the writer must report
+/// beside it. The two reports are separate channels: a shortfall diagnoses
+/// the file, an exclusion is information and does not.
+pub(crate) struct AlignedOutput {
+    /// The proven bytes.
+    pub(crate) document: PostValidated,
+    /// Requested work the document does not carry: words owed timing that
+    /// have none, bounded.
+    pub(crate) shortfalls: Vec<crate::pipeline::post_validate::Shortfall>,
+    /// Utterances left out of alignment on purpose, bounded.
+    pub(crate) exclusions: Vec<crate::pipeline::post_validate::Exclusion>,
+}
+
 /// Declined alignment retains source evidence; actual timing work must retain
 /// its producer-issued completion payload, not a caller-selected success flag.
 enum AdmittedFaEvidence {
@@ -250,40 +269,54 @@ impl AdmittedFaEvidence {
             Self::Partial(partial) => vec![partial.account().record()],
         }
     }
+
+    /// The utterances alignment left out on purpose. A preserved source was
+    /// not aligned, so it left nothing out; a measured result carries the
+    /// account its admission made.
+    fn exclusions(&self) -> Option<&completion::ExclusionAccount> {
+        match self {
+            Self::Preserved(_) => None,
+            Self::Complete(complete) => complete.exclusions(),
+            Self::Partial(partial) => partial.exclusions(),
+        }
+    }
+
+    /// The bounded records of [`Self::exclusions`].
+    fn exclusion_records(&self) -> Vec<crate::pipeline::post_validate::Exclusion> {
+        self.exclusions()
+            .map(completion::ExclusionAccount::record)
+            .into_iter()
+            .collect()
+    }
 }
 
 impl AdmittedFaResult {
-    /// Take the proven bytes with their shortfalls, discarding the evidence
-    /// timeline. The shortfalls leave WITH the bytes, so a partial result
-    /// cannot reach the writer without saying what it lacks.
-    pub(crate) fn into_document(
-        self,
-    ) -> (
-        PostValidated,
-        Vec<crate::pipeline::post_validate::Shortfall>,
-    ) {
-        let shortfalls = self.evidence.shortfalls();
-        (self.document, shortfalls)
+    /// Take the proven bytes with their reports, discarding the evidence
+    /// timeline. The reports leave WITH the bytes, so a partial result
+    /// cannot reach the writer without saying what it lacks, nor an
+    /// exclusion without being listed.
+    pub(crate) fn into_document(self) -> AlignedOutput {
+        AlignedOutput {
+            shortfalls: self.evidence.shortfalls(),
+            exclusions: self.evidence.exclusion_records(),
+            document: self.document,
+        }
     }
 
-    /// Split the proven bytes and their shortfalls from the evidence timeline.
+    /// Split the proven bytes and their reports from the evidence timeline.
     ///
-    /// All three leave together because a caller that wants the timeline
-    /// still has to write the document, and handing out the timeline alone
-    /// would leave the bytes with no route to disk.
+    /// Both leave together because a caller that wants the timeline still
+    /// has to write the document, and handing out the timeline alone would
+    /// leave the bytes with no route to disk.
     pub(crate) fn into_document_and_timeline(
         self,
-    ) -> (
-        PostValidated,
-        Vec<crate::pipeline::post_validate::Shortfall>,
-        crate::types::traces::FaTimelineTrace,
-    ) {
-        let shortfalls = self.evidence.shortfalls();
-        (
-            self.document,
-            shortfalls,
-            self.evidence.into_timeline_trace(),
-        )
+    ) -> (AlignedOutput, crate::types::traces::FaTimelineTrace) {
+        let output = AlignedOutput {
+            shortfalls: self.evidence.shortfalls(),
+            exclusions: self.evidence.exclusion_records(),
+            document: self.document,
+        };
+        (output, self.evidence.into_timeline_trace())
     }
 }
 
@@ -968,7 +1001,7 @@ mod tests {
         );
 
         assert_eq!(
-            admitted.into_document().0.as_str(),
+            admitted.into_document().document.as_str(),
             DUMMY,
             "a document align declines to touch must be written back unchanged"
         );
@@ -1074,7 +1107,12 @@ mod tests {
             .await
             .expect("a partly alignable file is written, not refused");
 
-        let (document, shortfalls) = admitted.into_document();
+        let crate::fa::AlignedOutput {
+            document,
+            shortfalls,
+            exclusions,
+        } = admitted.into_document();
+        assert!(exclusions.is_empty(), "no utterance is left out on purpose");
         insta::assert_json_snapshot!(shortfalls, @r#"
         [
           {
@@ -1178,6 +1216,42 @@ mod tests {
         )
     }
 
+    /// Through the real entry point: a linked
+    /// transcript whose only timing was the bullet on a `[+ diary]` note.
+    /// Align never uses that bullet and `derive` does not write it, so when
+    /// no speech can be aligned (every window is refused here) the output
+    /// would be linked and untimed. It used to fail the output gate with a
+    /// generic E544, reported as an internal fault; it is refused before any
+    /// inference as unavailable evidence, naming the note and the remedies.
+    #[tokio::test]
+    async fn a_file_timed_only_on_a_note_bullet_is_refused_with_its_remedy() {
+        let source = never_aligned("@Media:\tsample, audio\n").replace(
+            "*CHI:\tmore words .\n",
+            "*CHI:\tmore words .\n*CHI:\tthe note . [+ diary] \u{15}1000_2000\u{15}\n",
+        );
+        let Err(refused) = run_on_a_long_recording(&source).await else {
+            panic!("a linked transcript that gains no timing cannot be written");
+        };
+        assert!(
+            matches!(
+                &refused,
+                ServerError::RequiredEvidenceUnavailable(
+                    crate::error::MissingRequiredEvidence::TimingRegeneration(_)
+                )
+            ),
+            "{refused}"
+        );
+        assert_eq!(
+            crate::runner::util::classify_server_error(&refused),
+            crate::scheduling::FailureCategory::EvidenceUnavailable
+        );
+        let message = refused.to_string();
+        for phrase in ["[+ diary]", "--main-bullets keep", ", unlinked", "E544"] {
+            assert!(message.contains(phrase), "{phrase}: {message}");
+        }
+        assert!(!message.contains("internal"), "{message}");
+    }
+
     /// THE BOUNDARY for a never-aligned transcript, through the real entry
     /// point. Neither declaration is refused at input any more; what each
     /// one owes decides the outcome when alignment finds no admissible
@@ -1190,7 +1264,11 @@ mod tests {
             run_on_a_long_recording(&never_aligned("@Media:\tsample, audio, unlinked\n"))
                 .await
                 .expect("an unlinked never-aligned transcript is written");
-        let (document, shortfalls) = unlinked.into_document();
+        let crate::fa::AlignedOutput {
+            document,
+            shortfalls,
+            ..
+        } = unlinked.into_document();
         assert!(
             document
                 .as_str()
@@ -1256,7 +1334,7 @@ mod tests {
             let admitted = attempt(&source)
                 .finish(fast_path_result(parse_aligned(&output)))
                 .expect("timed output of an admitted source is written");
-            let (document, _) = admitted.into_document();
+            let document = admitted.into_document().document;
             let text = document.as_str();
             assert!(text.contains(&format!("@Media:\t{written}\n")), "{text}");
             assert!(!text.contains("unlinked"), "{text}");

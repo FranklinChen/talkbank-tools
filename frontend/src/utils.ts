@@ -9,6 +9,7 @@ type StageRefusalRecord = components["schemas"]["StageRefusalRecord"];
 type OutputShortfallRecord = components["schemas"]["OutputShortfallRecord"];
 type OptionalStage = components["schemas"]["OptionalStage"];
 type UntimedCauseRecord = components["schemas"]["UntimedCauseRecord"];
+type OutputExclusionRecord = components["schemas"]["OutputExclusionRecord"];
 type RefusedWindowTrace = components["schemas"]["RefusedWindowTrace"];
 
 /** Formatting helpers. */
@@ -296,6 +297,36 @@ export function diagnosticLines(diagnostics: FileOutputDiagnostics): string[] {
     lines.push(shortfallText(shortfall));
   }
   return lines;
+}
+
+/**
+ * A short phrase for a file's exclusions, beside its status: what its
+ * producer left out on purpose. Information, never phrased as a fault; a
+ * `done` file with exclusions is clean.
+ */
+export function exclusionSummary(exclusions: OutputExclusionRecord[]): string {
+  let utterances = 0;
+  for (const exclusion of exclusions) {
+    switch (exclusion.kind) {
+      case "not_in_recording":
+        utterances += exclusion.excluded_utterances;
+        break;
+    }
+  }
+  return `${utterances} utterance${utterances === 1 ? "" : "s"} not in the recording, left out of alignment by design`;
+}
+
+/** One exclusion as a line: the server's `OutputExclusionRecord` Display. */
+export function exclusionText(exclusion: OutputExclusionRecord): string {
+  switch (exclusion.kind) {
+    case "not_in_recording": {
+      const first = exclusion.first_excluded[0];
+      const firstText = first
+        ? ` (first: utterance ${first.utterance}, [+ ${first.postcode}])`
+        : "";
+      return `left out of alignment by design: ${exclusion.excluded_utterances} utterance(s) (${exclusion.excluded_words} words) marked as not in the recording were not looked for in it${firstText}`;
+    }
+  }
 }
 
 /** One shortfall as a line: the server's `OutputShortfallRecord` Display. */

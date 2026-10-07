@@ -6,6 +6,8 @@ mod execution;
 pub(crate) mod file_state;
 mod lifecycle;
 mod recovery;
+#[cfg(test)]
+pub(crate) use recovery::RecoveredFilePhase;
 pub(crate) use recovery::recover_file_phase;
 mod runner;
 
@@ -439,6 +441,7 @@ mod tests {
                 EventTime::fixed(crate::unix_time(2.0)),
                 FileCompletion::Diagnosed {
                     result: CompletedFileOutput {
+                        exclusions: Vec::new(),
                         filename: DisplayPath::from("a.cha"),
                         content_type: crate::api::ContentType::Chat,
                         stamp: crate::api::FileStampOutcome::Unrecorded,
@@ -453,6 +456,7 @@ mod tests {
                 "b.cha",
                 EventTime::fixed(crate::unix_time(3.0)),
                 FileCompletion::Clean(CompletedFileOutput {
+                    exclusions: Vec::new(),
                     filename: DisplayPath::from("b.cha"),
                     content_type: crate::api::ContentType::Chat,
                     stamp: crate::api::FileStampOutcome::Unrecorded,

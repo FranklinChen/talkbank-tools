@@ -115,14 +115,17 @@ impl ProgressDisplay for TuiProgress {
         });
     }
 
-    fn log_done(&self, _filename: &str) {
-        // State already updated via update(), no additional action needed.
+    fn log_done(&self, _filename: &str, _exclusions: &[crate::api::OutputExclusionRecord]) {
+        // State already updated via update(). The TUI does not show
+        // exclusions; the run's closing summary (`print_failure_summary`)
+        // lists them under each file.
     }
 
     fn log_diagnosed(
         &self,
         _filename: &str,
         _diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+        _exclusions: &[crate::api::OutputExclusionRecord],
     ) {
         // State already updated via update(): the file line renders the
         // diagnosed status and its finding count from the poll snapshot.
@@ -286,6 +289,7 @@ mod tests {
             status,
             error: None,
             error_category: None,
+            exclusions: Vec::new(),
             diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,

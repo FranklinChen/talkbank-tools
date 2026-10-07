@@ -126,6 +126,14 @@ stateDiagram-v2
   through `OutputReport::of(document, shortfalls)` whatever the document's
   standing: a file with any shortfall is never reported clean, even when its
   document is admitted or a merge repairs it.
+- **Exclusions.** Part of the input a producer left out of its work on
+  purpose, by a recorded ruling, is an `Exclusion`
+  (`OutputExclusionRecord`), a separate channel from shortfalls: today only
+  align's `not_in_recording`, the `[+ diary]` notes it never looks for in the
+  audio. An exclusion is information. It travels beside the shortfalls
+  (`ChatOutput { document, shortfalls, exclusions, .. }`) but
+  `OutputReport::of` does not take it, so it cannot make a file diagnosed; a
+  file whose only untimed utterances are notes is `done`.
 - **Cosmetic edits on a diagnosed document.** A requested abbreviation merge is
   applied to the diagnosed model and judged afresh by the producer transition.
   It cannot be refused by the merge, because a diagnosed output is written
@@ -151,12 +159,14 @@ flowchart TD
     mor -->|"its output refused"| keep2["keep the pre-stage document,<br/>shortfall StageNotApplied"]
     keep2 --> done
     diag --> loc{"localize: findings confined<br/>to some utterances?"}
-    loc -->|"yes"| held["segmentation of every other utterance,<br/>judged afresh; shortfall StageHeldOut"]
+    loc -->|"yes"| held["segmentation of every other utterance,<br/>judged by produced_outside; shortfall StageHeldOut"]
     loc -->|"no"| skip["segmentation skipped,<br/>shortfall StageSkipped"]
-    held -->|"still diagnosed"| morskip["morphosyntax skipped (needs admission),<br/>shortfall StageSkipped"]
-    held -->|"segmentation cleared every finding"| ready
-    skip --> morskip
-    morskip --> diagw["written: file Diagnosed"]
+    held -->|"it added a finding of its own"| keep3["keep the pre-stage document,<br/>shortfall StageNotApplied"]
+    held -->|"still diagnosed"| morloc["morphosyntax outside the held-out utterances<br/>(localized afresh), or skipped"]
+    held -->|"segmentation cleared every finding"| mor
+    keep3 --> morloc
+    skip --> morloc
+    morloc --> diagw["written: file Diagnosed"]
 ```
 
 `DiagnosedOutput::localize` judges each utterance on its own (a copy of the
@@ -164,11 +174,21 @@ header-only document holding just that utterance) and holds out the ones that
 fail; it then judges the document without them, and only if that passes are the
 findings confined. The result, `LocalizedDiagnosis`, grants no admission: the
 stage (`run_localized_text_pipeline`) never sends a held-out utterance to the
-model, edits the others, and judges the whole result with the producer
-transition again, so it is written diagnosed for the held-out words (or
-admitted, if the stage removed every finding's cause, in which case it continues
-as an admitted document). An utterance that fails only in isolation is held out
-too, which costs it the stage and never its content.
+model, edits the others, and judges the result with
+`PostValidated::produced_outside`, as morphosyntax does: admitted if the stage
+removed every finding's cause (it then continues as an admitted document),
+diagnosed if every finding is still the held-out utterances', and refused if
+the stage added a finding of its own outside them, in which case transcribe
+keeps the document from before the stage (`StageNotApplied`). Segmentation
+renumbers utterances, so the held-out ones are found in its output through the
+`SegmentationLayout` the split itself returns (`apply_utseg_results`, carried
+as `AppliedLayout::Segmented` by the hook), never by matching content: a
+held-out utterance stays whole and only moves past the extra children of the
+splits before it. Output positions are their own type, `HeldOutInOutput`,
+which `produced_outside` requires: only `HeldOutUtterances::after` (or
+`in_place`, for morphosyntax, which edits utterances in place) makes one, so
+input positions cannot be judged against a renumbered output. An utterance that fails only in isolation is held out too,
+which costs it the stage and never its content.
 
 An optional stage's failure is a shortfall only when it is a refusal of the
 stage's OWN output (`ServerError::OutputAdmission`): the admitted document from
@@ -190,7 +210,7 @@ itself); the shortfall is logged, since it is not part of benchmark's outputs.
 A diagnosed output reaches the runner through the writer, which reports
 `WrittenOutput::Diagnosed` from `OutputReport::of` over the proof it actually
 wrote (after any merge) and the run's shortfalls. The runner records `FileCompletion::Diagnosed`, which the store keeps as
-`FilePhase::Diagnosed { started_at, finished_at, diagnostics }`:
+`FilePhase::Diagnosed { started_at, finished_at, diagnostics, exclusions }`:
 
 - On the API, `FileStatusKind::Diagnosed` (wire value `"diagnosed"`) is
   terminal, not resumable and not an error. `FileStatusEntry::diagnostics`
@@ -198,6 +218,14 @@ wrote (after any merge) and the run's shortfalls. The runner records `FileComple
   that status, following the existing `error` field pattern.
 - In the job database, the `file_statuses.diagnostics` column holds the same
   record as JSON; a row restores to the same phase.
+- Exclusions are reported on both written phases (`FilePhase::Done` and
+  `FilePhase::Diagnosed` each carry `exclusions`), as
+  `FileStatusEntry::exclusions` on the wire (omitted when empty, so the field
+  is additive) and the `file_statuses.exclusions` column (a JSON array, NULL
+  when empty). The CLI prints them indented under the file's line, done or
+  diagnosed, and in the results summary; the dashboard shows a neutral
+  summary beside the status and each record's line (totals and the first
+  utterance) when the row is expanded.
 - A job whose files are all done or diagnosed completes. A diagnosed file is
   never retried, never requeued by a restart and never counted as failed, but
   a completed job with diagnosed files is not a clean success: `JobListItem`

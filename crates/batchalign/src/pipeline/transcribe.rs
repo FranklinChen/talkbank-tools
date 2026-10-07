@@ -525,11 +525,7 @@ async fn finish_transcribe<P: TranscribePlan>(
                 None => ProducedOutput::Diagnosed(document),
                 Some(policy) => match document.localize() {
                     Ok(localized) => {
-                        let shortfall = held_out_shortfall(
-                            OptionalStage::UtteranceSegmentation,
-                            localized.held_out(),
-                        );
-                        let segmented = progress
+                        let (segmented, shortfall) = progress
                             .run(
                                 StageId::OptionalUtseg,
                                 Box::pin(stage_run_localized_utseg(&ctx, &asr, localized, policy)),
@@ -830,12 +826,19 @@ async fn stage_run_utseg<'a, P: TranscribePlan>(
 /// Post-CHAT segmentation of a diagnosed transcript, outside the utterances
 /// its findings belong to. The held-out utterances are not sent to the model
 /// and keep their generated form; the result is judged afresh.
+///
+/// Returns the document to continue with and what the file's outcome must
+/// say, as the morphosyntax stage does: the held-out shortfall when the
+/// stage applied; the stage's refusal, with the document from before it,
+/// when segmentation added a finding of its own outside the held-out
+/// utterances (as the strict gate refuses an admitted document's stage
+/// output).
 async fn stage_run_localized_utseg<P: TranscribePlan>(
     ctx: &TranscribePipelineContext<'_, (), P>,
     asr: &Recognized,
     localized: crate::pipeline::post_validate::LocalizedDiagnosis,
     post_chat_policy: crate::utseg::UtsegDecisionPolicy,
-) -> Result<ProducedOutput, ServerError> {
+) -> Result<(ProducedOutput, Shortfall), ServerError> {
     let route = asr.segmentation.as_ref().ok_or_else(|| {
         ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
     })?;
@@ -846,6 +849,9 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
         .unwrap_or("unknown");
     ctx.dumper.dump_pre_utseg_chat(filename, localized.as_str());
     let evidence_filename = ctx.audio_path.to_string_lossy();
+    let held_out = held_out_shortfall(OptionalStage::UtteranceSegmentation, localized.held_out());
+    // Kept so a refused segmentation leaves the document it started from.
+    let before = localized.clone().into_diagnosed();
     let segmented = crate::utseg::process_localized_utseg_with_evidence(
         crate::utseg::EvidenceRetainingUtsegRequest {
             document: localized,
@@ -860,10 +866,20 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
             },
         },
     )
-    .await?;
-    ctx.dumper
-        .dump_post_utseg_chat(filename, segmented.as_str());
-    Ok(segmented)
+    .await;
+    Ok(
+        match not_applied(OptionalStage::UtteranceSegmentation, segmented)? {
+            StageOutcome::Applied(segmented) => {
+                ctx.dumper
+                    .dump_post_utseg_chat(filename, segmented.as_str());
+                (segmented, held_out)
+            }
+            StageOutcome::NotApplied(shortfall) => {
+                tracing::warn!(%filename, %shortfall, "transcribe kept its pre-segmentation document");
+                (ProducedOutput::Diagnosed(before), shortfall)
+            }
+        },
+    )
 }
 
 /// What one optional stage did with its document: by default an admitted

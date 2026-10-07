@@ -5,6 +5,73 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### A file timed only on a diary note is refused with its remedy
+
+- A linked transcript (`@Media: name, audio`) whose only timing was the bullet
+  on a `[+ diary]` note, with its speech untimed, failed when no speech could
+  be aligned with a generic E544 from the output gate, reported as an internal
+  fault. Align never uses a note's timing and `--main-bullets derive` does not
+  write its bullet, so input admission now records that the output owes
+  timing (origin `OffRecordTimingOnly`), exactly as for a never-aligned
+  linked transcript: the file is refused as unavailable evidence
+  (`evidence_unavailable`), before inference when every window is refused,
+  with a message naming the note and the remedies (`--main-bullets keep` to
+  write the note's bullet as given, a compatible UTR backend, or `, unlinked`
+  on `@Media`). Under `keep` or `exact` the note's bullet is written, so
+  nothing more is owed; under `exact` with only word timing on the notes the
+  file is refused before any work, as a linked untimed transcript is.
+
+### Dashboard labels a failure by its own category
+
+- A file refused for its input (failure category `validation`, such as an
+  `@Media` header align cannot use) was labelled "Pipeline Bug", with a
+  banner saying it was not the user's input. Each failed file is now grouped
+  and labelled by its error's own category, from one map over the server's
+  `FailureCategory` list: Input Refused (with a banner saying the message
+  names what to change), CHAT Parse Error, Input Not Found, Evidence
+  Unavailable, Analysis Unavailable, Model Access Required, Engine Error,
+  Worker Setup Error, System Error, Cancelled. `evidence_unavailable`,
+  `analysis_unavailable` and `worker_bootstrap`, which had no entry, have
+  their own groups; a failure with no recorded category is Unclassified,
+  never folded into another group.
+
+### Segmentation of a diagnosed transcript refuses a fault of its own
+
+- Utterance segmentation of a generated transcript diagnosed for findings
+  confined to some utterances now refuses output that adds a finding of its
+  own outside them, as morphosyntax already did: the transcript from before
+  the stage is written (`stage_not_applied` for utterance segmentation)
+  instead of a segmented one whose new fault was reported as though it were
+  the transcript's. The held-out utterances are located in the segmented
+  output by the layout the split records, since segmentation renumbers
+  utterances.
+
+### A `[+ diary]` note no longer diagnoses a file
+
+- An intentional exclusion must not count against a file (ruling of
+  2026-10-07). An utterance align leaves untimed because the transcript marks
+  it as not in the recording (`[+ diary]`) is now listed as an exclusion, a
+  separate channel from shortfalls, instead of as an untimed utterance in the
+  `timing_incomplete` shortfall. Its words are no longer required words. A
+  file whose only untimed utterances are notes is clean: status `done`, CLI
+  exit code 0 (it was `diagnosed`, exit 7, even with every spoken word timed).
+  Untimed speech still diagnoses a file, and a note beside it is listed as an
+  exclusion, not counted in the shortfall.
+- Wire (additive): `FileStatusEntry.exclusions`, a list of
+  `OutputExclusionRecord` (`{"kind": "not_in_recording", "excluded_utterances",
+  "excluded_words", "first_excluded": [{utterance, words, postcode}]}`, at most
+  20 first entries), present on `done` and `diagnosed` files and omitted when
+  empty. `UntimedCauseRecord::NotInRecording` is no longer written; it is
+  still read, so diagnostics recorded by the previous build load unchanged.
+  `openapi.json` and the dashboard types regenerated.
+- Storage: the job database gains a nullable `file_statuses.exclusions` column
+  (migration `20261007000000_file_output_exclusions`); a restored file keeps
+  its exclusions.
+- The CLI prints each exclusion under its file's line and in the closing
+  summary (the TUI shows them only there); the dashboard shows a neutral summary beside the file's status and
+  each exclusion record's line (totals and the first utterance) when the row
+  is expanded.
+
 ### Align leaves `[+ diary]` utterances untimed
 
 - An utterance marked `[+ diary]` is a written diary note, not speech in the

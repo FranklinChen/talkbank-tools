@@ -57,6 +57,7 @@ where
                  error = ?,
                  error_category = ?,
                  diagnostics = ?,
+                 exclusions = ?,
                  started_at = ?,
                  finished_at = ?,
                  next_eligible_at = ?,
@@ -73,9 +74,9 @@ where
     Ok(())
 }
 
-/// Bind a phase's seven `file_statuses` columns, in the order every phase
+/// Bind a phase's eight `file_statuses` columns, in the order every phase
 /// writer's SQL names them: `status, error, error_category, diagnostics,
-/// started_at, finished_at, next_eligible_at`.
+/// exclusions, started_at, finished_at, next_eligible_at`.
 pub(super) fn bind_phase_columns<'q>(
     query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     columns: crate::store::FilePhaseColumns<'q>,
@@ -87,11 +88,19 @@ pub(super) fn bind_phase_columns<'q>(
         .map_err(|error| {
             ServerError::Persistence(format!("could not encode file output diagnostics: {error}"))
         })?;
+    let exclusions = columns
+        .exclusions
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| {
+            ServerError::Persistence(format!("could not encode file output exclusions: {error}"))
+        })?;
     Ok(query
         .bind(columns.status.to_string())
         .bind(columns.error)
         .bind(columns.error_category.map(|category| category.to_string()))
         .bind(diagnostics)
+        .bind(exclusions)
         .bind(columns.started_at)
         .bind(columns.finished_at)
         .bind(columns.next_eligible_at))

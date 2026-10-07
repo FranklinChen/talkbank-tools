@@ -172,9 +172,10 @@ pub struct MissingTimingRegenerationEvidence {
 }
 
 /// Why an admitted source owes timing before its `@Media` linkage can be
-/// written. Both leave the same obligation (the output must carry timing,
+/// written. Each leaves the same obligation (the output must carry timing,
 /// because a linked declaration without timing is E544), and the message
-/// differs: one source lost timing it had, the other never had any.
+/// differs: one source lost timing it had, one never had any, and one had
+/// timing only where alignment does not use it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingObligationOrigin {
     /// Recorded word timing was unusable and Chatter's admission removed it,
@@ -186,6 +187,57 @@ pub enum TimingObligationOrigin {
     /// could not read is removed before that check, so timing it may have
     /// carried is not seen; the obligation is the same either way.)
     NeverTimed,
+    /// The source declares linked media and its only timing was on
+    /// utterances not in the recording (a `[+ diary]` note), which alignment
+    /// never uses and does not write back, so the timing the output owes can
+    /// come only from aligning the speech. Chatter admitted the source as
+    /// timed; align establishes this one itself, after removing the notes'
+    /// timing from the working document.
+    OffRecordTimingOnly(OffRecordTiming),
+}
+
+/// What timing the notes of an [`TimingObligationOrigin::OffRecordTimingOnly`]
+/// source carried, which decides the remedy the message names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffRecordTiming {
+    /// A note carried a main-tier bullet that `--main-bullets derive` does not
+    /// write; `keep` would write it as given.
+    BulletNotKept,
+    /// The notes carried only word timing, which no policy writes on an
+    /// utterance not in the recording.
+    WordTimingOnly,
+}
+
+impl OffRecordTiming {
+    /// What the notes carried and what became of it, for the message.
+    fn account(self) -> &'static str {
+        match self {
+            Self::BulletNotKept => {
+                "the transcript's only timing was the bullet on an utterance marked as not in the \
+                 recording (such as `[+ diary]`), which alignment never uses and \
+                 `--main-bullets derive` does not write"
+            }
+            Self::WordTimingOnly => {
+                "the transcript's only timing was word timing on an utterance marked as not in \
+                 the recording (such as `[+ diary]`), which alignment never uses or writes"
+            }
+        }
+    }
+
+    /// The changes that would let the file be written.
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::BulletNotKept => {
+                "run with `--main-bullets keep` to write the note's bullet as given, recover \
+                 timing for the speech with a compatible UTR backend, or add `, unlinked` to the \
+                 @Media header to have the transcript written without timing"
+            }
+            Self::WordTimingOnly => {
+                "recover timing for the speech with a compatible UTR backend, or add `, unlinked` \
+                 to the @Media header to have the transcript written without timing"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,8 +258,7 @@ impl MissingTimingRegenerationEvidence {
     /// Only a checked pending source and an actually refused empty grouping
     /// can establish this disposition. An unexplained empty plan stays internal.
     pub(crate) fn from_refused_grouping(
-        obligation: &talkbank_model::validation::MediaTimingObligation,
-        origin: TimingObligationOrigin,
+        outstanding: &crate::fa::OutstandingTiming,
         grouping: &crate::chat_ops::fa::Grouping,
         timing: talkbank_model::model::TranscriptTimingEvidence<'_>,
     ) -> Option<Self> {
@@ -225,8 +276,8 @@ impl MissingTimingRegenerationEvidence {
             .iter()
             .find_map(|decision| match &decision.strategy {
                 DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => Some(Self {
-                    header_span: obligation.header_span(),
-                    origin,
+                    header_span: outstanding.header_span(),
+                    origin: outstanding.origin(),
                     reason: TimingRegenerationFailure::NoRequest {
                         line_idx: decision.line_idx,
                         window: *window,
@@ -239,8 +290,7 @@ impl MissingTimingRegenerationEvidence {
     /// The source-admission owner checks the actual attempted output, not a
     /// diagnostic string or a claimed inference success.
     pub(crate) fn from_untimed_output(
-        obligation: &talkbank_model::validation::MediaTimingObligation,
-        origin: TimingObligationOrigin,
+        outstanding: &crate::fa::OutstandingTiming,
         timing: talkbank_model::model::TranscriptTimingEvidence<'_>,
     ) -> Option<Self> {
         matches!(
@@ -248,8 +298,8 @@ impl MissingTimingRegenerationEvidence {
             talkbank_model::model::TranscriptTimingEvidence::Absent
         )
         .then(|| Self {
-            header_span: obligation.header_span(),
-            origin,
+            header_span: outstanding.header_span(),
+            origin: outstanding.origin(),
             reason: TimingRegenerationFailure::NoRestoredTiming,
         })
     }
@@ -299,6 +349,29 @@ impl std::fmt::Display for MissingTimingRegenerationEvidence {
                      no output was written",
                 )
             }
+            (
+                TimingRegenerationFailure::NoRequest { line_idx, window },
+                TimingObligationOrigin::OffRecordTimingOnly(notes),
+            ) => write!(
+                formatter,
+                "alignment has no admissible request at transcript entry {}: {}; {}, so the \
+                 @Media header would declare a linked transcript with no timing (E544); {}; no \
+                 output was written",
+                line_idx.raw() + 1,
+                window,
+                notes.account(),
+                notes.remedy()
+            ),
+            (
+                TimingRegenerationFailure::NoRestoredTiming,
+                TimingObligationOrigin::OffRecordTimingOnly(notes),
+            ) => write!(
+                formatter,
+                "alignment produced no timing for the speech, and {}, so the @Media header would \
+                 declare a linked transcript with no timing (E544); {}; no output was written",
+                notes.account(),
+                notes.remedy()
+            ),
         }
     }
 }
@@ -335,7 +408,8 @@ pub enum AlignmentMediaRefusal {
     /// UTR, so the timing a linked declaration requires (E544) can never be
     /// written.
     #[error(
-        "the @Media header declares the transcript linked but it has no timing, and \
+        "the @Media header declares the transcript linked but it has no timing align can use \
+         (none, or only word timing on utterances not in the recording), and \
          `--main-bullets exact` keeps every utterance without a bullet untimed, so no timing \
          could be written; run with `--main-bullets derive` or `keep`, or add `, unlinked` to \
          the @Media header"
@@ -914,8 +988,8 @@ pub enum ServerError {
     /// malformed request, and must never be reported to the caller as bad
     /// input. Before 2026-09-02 every worker-protocol V2 speaker parse
     /// failure, this one included, collapsed into `Validation`, which the
-    /// dashboard renders as "pipeline bug, filed automatically" even though
-    /// nothing about batchalign was broken.
+    /// dashboard then labelled a pipeline bug, even though nothing about
+    /// batchalign was broken.
     #[error("model access required: {0}")]
     ModelAccessDenied(String),
 

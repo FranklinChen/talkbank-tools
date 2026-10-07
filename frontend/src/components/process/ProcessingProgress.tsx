@@ -22,6 +22,7 @@ import { controlPlaneOrigin } from "../../runtime";
 import { ErrorRecovery } from "./ErrorRecovery";
 import {
   diagnosedSummary,
+  exclusionSummary,
   formatDuration,
   statusDotColor,
   displayProgressLabel,
@@ -334,6 +335,11 @@ export function ProcessingProgress({
                       ? diagnosedSummary(f.diagnostics)
                       : displayProgressLabel(f.progress_stage, f.progress_label)}
                   </span>
+                  {(f.exclusions ?? []).length > 0 && (
+                    <span className="text-xs text-gray-400 flex-shrink-0">
+                      {exclusionSummary(f.exclusions ?? [])}
+                    </span>
+                  )}
                   {f.duration_s != null && (
                     <span className="text-xs text-gray-400 flex-shrink-0 w-12 text-right tabular-nums">
                       {formatDuration(f.duration_s)}

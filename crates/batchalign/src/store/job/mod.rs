@@ -116,6 +116,7 @@ mod tests {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: Some(crate::unix_time(5.0)),
             };
@@ -176,6 +177,7 @@ mod tests {
         job.execution.error = Some("failed".into());
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: Some(crate::unix_time(5.0)),
             };
@@ -243,6 +245,7 @@ mod tests {
         job.execution.status = JobStatus::Running;
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: Some(crate::unix_time(5.0)),
             };
@@ -292,6 +295,7 @@ mod tests {
         job.execution.status = JobStatus::Interrupted;
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: Some(crate::unix_time(5.0)),
             };
@@ -397,6 +401,7 @@ mod tests {
             t(2.0),
             FileCompletion::Diagnosed {
                 result: CompletedFileOutput {
+                    exclusions: Vec::new(),
                     filename: DisplayPath::from("a.cha"),
                     content_type: ContentType::Chat,
                     stamp: crate::api::FileStampOutcome::Unrecorded,
@@ -455,6 +460,15 @@ mod tests {
             "a.cha",
             crate::unix_time(12.0),
             FileCompletion::Clean(CompletedFileOutput {
+                exclusions: vec![crate::api::OutputExclusionRecord::NotInRecording {
+                    excluded_utterances: 1,
+                    excluded_words: 3,
+                    first_excluded: vec![crate::api::ExcludedUtteranceRecord {
+                        utterance: 2,
+                        words: 3,
+                        postcode: crate::api::OffRecordPostcode::Diary,
+                    }],
+                }],
                 filename: DisplayPath::from("a.cha"),
                 content_type: ContentType::Chat,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
@@ -463,6 +477,12 @@ mod tests {
 
         let entry = job.execution.file_statuses["a.cha"].to_entry();
         assert_eq!(entry.status, FileStatusKind::Done);
+        // A clean file's exclusions move onto its phase and reach the wire.
+        assert_eq!(entry.exclusions.len(), 1, "{:?}", entry.exclusions);
+        assert!(
+            entry.diagnostics.is_none(),
+            "an exclusion is not a diagnosis"
+        );
         assert_eq!(entry.finished_at, Some(crate::unix_time(12.0)));
         assert!(entry.error.is_none(), "the retry's error is gone");
         assert!(entry.error_category.is_none());
@@ -528,6 +548,7 @@ mod tests {
         next_eligible_at: Option<crate::api::MachineTime>,
     ) -> crate::store::FilePhaseColumns<'_> {
         crate::store::FilePhaseColumns {
+            exclusions: None,
             status,
             error,
             error_category: error.map(|_| crate::scheduling::FailureCategory::WorkerTimeout),
@@ -596,10 +617,12 @@ mod tests {
                 failure: failure(),
             },
             FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: Some(t(1.0)),
                 finished_at: Some(t(2.0)),
             },
             FilePhase::Diagnosed {
+                exclusions: Vec::new(),
                 started_at: Some(t(1.0)),
                 finished_at: Some(t(2.0)),
                 diagnostics: Some(crate::api::FileOutputDiagnostics::of_findings(
@@ -613,6 +636,7 @@ mod tests {
                 )),
             },
             FilePhase::Diagnosed {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: None,
                 diagnostics: None,
@@ -682,6 +706,7 @@ mod tests {
             }
         );
         let done = FilePhase::Done {
+            exclusions: Vec::new(),
             started_at: Some(t(1.0)),
             finished_at: Some(t(2.0)),
         };

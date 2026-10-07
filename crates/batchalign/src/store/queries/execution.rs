@@ -161,6 +161,7 @@ mod tests {
         );
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: Some(crate::unix_time(5.0)),
             };

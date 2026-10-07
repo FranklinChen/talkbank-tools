@@ -418,6 +418,24 @@ export interface components {
             detail: string;
         };
         /**
+         * @description One utterance forced alignment left out because it is not in the
+         *     recording.
+         */
+        ExcludedUtteranceRecord: {
+            /** @description The postcode that marks it. */
+            postcode: components["schemas"]["OffRecordPostcode"];
+            /**
+             * Format: int64
+             * @description The utterance's position among the file's utterances, counting from 1.
+             */
+            utterance: number;
+            /**
+             * Format: int64
+             * @description Its lexical words.
+             */
+            words: number;
+        };
+        /**
          * @description How a job reaches its execution host.
          * @enum {string}
          */
@@ -594,6 +612,14 @@ export interface components {
             /** @description Human-readable error message.  Present only when `status` is `Error`. */
             error?: string | null;
             error_category?: components["schemas"]["FailureCategory"] | null;
+            /**
+             * @description Parts of the input the command left out of its work on purpose
+             *     ([`OutputExclusionRecord`]): information, never a shortfall. Present
+             *     only on a file whose output was written (`done` or `diagnosed`), and
+             *     only when there is one; a separate channel from `diagnostics`, which
+             *     a clean file does not have.
+             */
+            exclusions?: components["schemas"]["OutputExclusionRecord"][];
             /**
              * @description Display path for this file: a bare basename (`"sample.cha"`) or a
              *     relative forward-slash path (`"PWA/TYO_a1.cha"`) for directory input.
@@ -1233,6 +1259,36 @@ export interface components {
          * @enum {string}
          */
         OptionalStage: "utterance_segmentation" | "morphosyntax";
+        /**
+         * @description Part of the input a command left out of its work on purpose, because the
+         *     transcript asks for it by a convention with a recorded ruling.
+         *
+         *     Information, never a shortfall: the command did what the transcript asks,
+         *     so an exclusion does not make the file diagnosed, and a file whose only
+         *     untimed utterances are exclusions is clean. Reported beside the written
+         *     output, on a `done` file as on a `diagnosed` one
+         *     ([`FileStatusEntry::exclusions`]), and bounded like
+         *     [`FileOutputDiagnostics`] because every poll copies it.
+         */
+        OutputExclusionRecord: {
+            /**
+             * Format: int64
+             * @description How many utterances were left out, at least one.
+             */
+            excluded_utterances: number;
+            /**
+             * Format: int64
+             * @description Their lexical words in all, none of which is owed timing.
+             */
+            excluded_words: number;
+            /**
+             * @description The first of them, in transcript order, at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
+             */
+            first_excluded: components["schemas"]["ExcludedUtteranceRecord"][];
+            /** @enum {string} */
+            kind: "not_in_recording";
+        };
         /** @description One admission finding. */
         OutputFindingRecord: {
             /**

@@ -3,10 +3,13 @@ import type { FileStatusEntry } from "../types";
 import {
   diagnosedSummary,
   diagnosticLines,
+  exclusionSummary,
+  exclusionText,
   displayProgressLabel,
   statusDotColor,
 } from "../utils";
 import { PipelineStageBar } from "./PipelineStageBar";
+import { ERROR_GROUPS, errorGroupOf } from "../errorCategories";
 
 type SortCol = "file" | "status" | "duration";
 type SortDir = "asc" | "desc";
@@ -39,22 +42,6 @@ function compareFiles(a: FileStatusEntry, b: FileStatusEntry, col: SortCol, dir:
   }
   return dir === "desc" ? -cmp : cmp;
 }
-
-const CATEGORY_LABELS: Record<string, string> = {
-  input: "Parse",
-  media: "Media",
-  system: "System",
-  processing: "Engine",
-  validation: "Pipeline Bug",
-};
-
-const CATEGORY_COLORS: Record<string, string> = {
-  input: "bg-amber-50 text-amber-600",
-  media: "bg-purple-50 text-purple-600",
-  system: "bg-red-50 text-red-600",
-  processing: "bg-orange-50 text-orange-600",
-  validation: "bg-rose-50 text-rose-600",
-};
 
 function errorSnippet(error: string | null | undefined): string {
   if (!error) return "Unknown error";
@@ -276,7 +263,12 @@ function FileRow({
   // A diagnosed file's findings expand like a long error does, but are
   // styled as written output with diagnostics, never as a failure.
   const isDiagnosed = f.status === "diagnosed";
-  const canExpand = (hasErr && isLongError) || (isDiagnosed && f.diagnostics != null);
+  // What the producer left out on purpose: information on a done or a
+  // diagnosed file, expandable like diagnostics but styled neutrally.
+  const exclusions = f.exclusions ?? [];
+  const hasExclusions = exclusions.length > 0;
+  const canExpand =
+    (hasErr && isLongError) || (isDiagnosed && f.diagnostics != null) || hasExclusions;
   const isExpanded = expandedErr === f.filename;
   const isProcessing = f.status === "processing";
   const progressLabel = displayProgressLabel(f.progress_stage, f.progress_label);
@@ -300,13 +292,13 @@ function FileRow({
               }`}
             />
             <span className="text-xs text-zinc-500 capitalize">{f.status}</span>
-            {hasErr && f.error_category && (
+            {hasErr && (
               <span
                 className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                  CATEGORY_COLORS[f.error_category] ?? "bg-zinc-100 text-zinc-500"
+                  ERROR_GROUPS[errorGroupOf(f.error_category)].chip
                 }`}
               >
-                {CATEGORY_LABELS[f.error_category] ?? f.error_category}
+                {ERROR_GROUPS[errorGroupOf(f.error_category)].label}
               </span>
             )}
             {hasErr && (
@@ -317,6 +309,11 @@ function FileRow({
             {isDiagnosed && (
               <span className="text-[11px] text-yellow-700 truncate max-w-xs">
                 {diagnosedSummary(f.diagnostics)}
+              </span>
+            )}
+            {hasExclusions && (
+              <span className="text-[11px] text-zinc-500 truncate max-w-xs">
+                {exclusionSummary(exclusions)}
               </span>
             )}
             {/* Pipeline phase indicator */}
@@ -375,6 +372,16 @@ function FileRow({
             className="py-2 px-4 bg-yellow-50 text-[11px] text-yellow-800 font-mono whitespace-pre-wrap"
           >
             {diagnosticLines(f.diagnostics).join("\n")}
+          </td>
+        </tr>
+      )}
+      {hasExclusions && isExpanded && (
+        <tr>
+          <td
+            colSpan={3}
+            className="py-2 px-4 bg-zinc-50 text-[11px] text-zinc-600 font-mono whitespace-pre-wrap"
+          >
+            {exclusions.map(exclusionText).join("\n")}
           </td>
         </tr>
       )}

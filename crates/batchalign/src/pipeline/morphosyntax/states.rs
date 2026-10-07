@@ -146,7 +146,9 @@ impl AnalysisScope for OutsideHeldOut {
     ) -> Result<crate::pipeline::post_validate::ProducedOutput, ServerError> {
         PostValidated::produced_outside(
             chat,
-            &self.held_out,
+            // Morphosyntax edits utterances in place: the held-out ones are
+            // where they were.
+            &self.held_out.in_place(),
             crate::api::ReleasedCommand::Morphotag,
         )
         .map_err(|failure| failure.into_server_error())

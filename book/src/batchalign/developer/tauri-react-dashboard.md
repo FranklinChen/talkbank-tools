@@ -378,7 +378,7 @@ own.
 | `ProgressBar` | `ProgressBar.tsx` | Animated fill bar with striped/indeterminate modes |
 | `PipelineStageBar` | `PipelineStageBar.tsx` | 5-segment phase indicator (Read/Transcribe/Align/Analyze/Finalize) |
 | `StatusBadge` | `StatusBadge.tsx` | Colored status pill |
-| `ErrorPanel` | `ErrorPanel.tsx` | Error groups by code with expandable file lists |
+| `ErrorPanel` | `ErrorPanel.tsx` | Error groups by failure category with expandable file lists; groups, labels, colours and banners come from `errorCategories.ts`, a `Record` over the generated `FailureCategory` union, so a new server category fails type-checking until it has a group |
 | `ErrorCodeGroup` | `ErrorCodeGroup.tsx` | Single error code bucket |
 | `StatusSummaryStrip` | `StatusSummaryStrip.tsx` | Inline done/error/active counts |
 | `ActionButtons` | `ActionButtons.tsx` | Cancel/restart/delete controls |

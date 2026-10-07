@@ -345,6 +345,48 @@ impl UtsegTierInvalidation {
     }
 }
 
+/// What applying a segmentation did to a file: the dependent tiers its
+/// splits could not carry, and where each input utterance went.
+#[derive(Debug)]
+pub struct UtsegApplied {
+    /// Dependent tiers a split invalidated, in input order.
+    pub invalidated: Vec<UtsegTierInvalidation>,
+    /// Where each input utterance went.
+    pub layout: SegmentationLayout,
+}
+
+/// Where each utterance of a segmented file went: for each input utterance,
+/// in order, the output position of its first child and how many children it
+/// has (one when it was left whole).
+///
+/// Built only by [`apply_utseg_results`], from the splits it performed, so it
+/// describes exactly the file that function returned. A judgement of the
+/// output that must find the utterances segmentation was not asked to touch
+/// reads their output positions here, rather than inferring them from the
+/// output's content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentationLayout {
+    /// Per input utterance: (output position of its first child, children).
+    placements: Vec<(usize, usize)>,
+}
+
+impl SegmentationLayout {
+    /// The output position of input utterance `input` when it is still one
+    /// utterance; `None` when it was split or the file had no such
+    /// utterance.
+    pub fn whole_output_ordinal(&self, input: usize) -> Option<usize> {
+        match self.placements.get(input) {
+            Some(&(first, 1)) => Some(first),
+            Some(_) | None => None,
+        }
+    }
+
+    /// How many utterances the input file had.
+    pub fn input_utterances(&self) -> usize {
+        self.placements.len()
+    }
+}
+
 /// A proposed segmentation that cannot be applied without changing source structure.
 #[derive(Debug, thiserror::Error)]
 pub enum UtsegApplyRefusal {
@@ -362,7 +404,8 @@ pub enum UtsegApplyRefusal {
     UnknownUtterance(usize),
 }
 
-/// Apply all proposed splits atomically, retaining explicit tier invalidations.
+/// Apply all proposed splits atomically, retaining explicit tier invalidations
+/// and the layout of the result.
 ///
 /// No source line changes until every selected utterance has admitted its own
 /// source-bound partition. A refusal therefore cannot leave a partially split
@@ -370,9 +413,14 @@ pub enum UtsegApplyRefusal {
 pub fn apply_utseg_results(
     chat_file: &mut ChatFile,
     assignment_map: &HashMap<usize, Vec<usize>>,
-) -> Result<Vec<UtsegTierInvalidation>, UtsegApplyRefusal> {
+) -> Result<UtsegApplied, UtsegApplyRefusal> {
     let mut replacements = HashMap::new();
     let mut invalidated = Vec::new();
+    // Each input utterance's first output position and child count, in
+    // order: a split's children replace its line in place, so positions
+    // are the running sum of the counts before it.
+    let mut placements = Vec::new();
+    let mut next_output = 0usize;
     let mut ordinal = 0usize;
     for (line_index, line) in chat_file.lines.iter().enumerate() {
         let Line::Utterance(source) = line else {
@@ -391,7 +439,10 @@ pub fn apply_utseg_results(
             match outcome {
                 // One child: the source stands exactly as it is, with every
                 // dependent tier, so its line is not replaced.
-                talkbank_transform::utterance_split::SplitOutcome::Unchanged => {}
+                talkbank_transform::utterance_split::SplitOutcome::Unchanged => {
+                    placements.push((next_output, 1));
+                    next_output += 1;
+                }
                 talkbank_transform::utterance_split::SplitOutcome::Split(split) => {
                     let (children, losses) = split.into_parts();
                     invalidated.extend(losses.into_iter().map(|loss| UtsegTierInvalidation {
@@ -400,12 +451,18 @@ pub fn apply_utseg_results(
                         tier_kind: loss.tier().kind().to_owned(),
                         reason: loss.reason(),
                     }));
+                    placements.push((next_output, children.len()));
+                    next_output += children.len();
                     replacements.insert(line_index, children);
                 }
             }
+        } else {
+            placements.push((next_output, 1));
+            next_output += 1;
         }
         ordinal += 1;
     }
+    let layout = SegmentationLayout { placements };
     if let Some(&missing) = assignment_map
         .keys()
         .filter(|&&index| index >= ordinal)
@@ -414,7 +471,10 @@ pub fn apply_utseg_results(
         return Err(UtsegApplyRefusal::UnknownUtterance(missing));
     }
     if replacements.is_empty() {
-        return Ok(invalidated);
+        return Ok(UtsegApplied {
+            invalidated,
+            layout,
+        });
     }
     let old_lines = chat_file.lines.take();
     let mut new_lines = Vec::with_capacity(old_lines.len());
@@ -429,7 +489,10 @@ pub fn apply_utseg_results(
         }
     }
     chat_file.lines = ChatFileLines::new(new_lines);
-    Ok(invalidated)
+    Ok(UtsegApplied {
+        invalidated,
+        layout,
+    })
 }
 
 /// The shared CHAT owner also provides the morphology-domain content projection.
@@ -690,8 +753,15 @@ mod tests {
         let mut assignment_map = HashMap::new();
         assignment_map.insert(0, vec![0, 0, 0, 1, 1, 1, 1]);
 
-        apply_utseg_results(&mut chat, &assignment_map).expect("admitted segmentation");
+        let applied =
+            apply_utseg_results(&mut chat, &assignment_map).expect("admitted segmentation");
         assert_eq!(count_utterances(&chat), 2);
+        assert_eq!(applied.layout.input_utterances(), 1);
+        assert_eq!(
+            applied.layout.whole_output_ordinal(0),
+            None,
+            "a split utterance has no single output position"
+        );
 
         let out0 = get_utterance(&chat, 0).to_chat_string();
         let out1 = get_utterance(&chat, 1).to_chat_string();
@@ -727,6 +797,38 @@ mod tests {
             })
         ));
         assert_eq!(chat.to_chat_string(), original);
+    }
+
+    /// The layout places every input utterance where the output has it: a
+    /// split one spans its children, and each utterance after it moves down
+    /// by the extra children before it. A whole utterance has one position.
+    #[test]
+    fn the_layout_places_each_input_utterance_after_the_splits_before_it() {
+        let source = include_str!("../../../test-fixtures/live_fixture/eng_multi_utt.cha");
+        let mut chat = crate::parse_and_validate(
+            source,
+            talkbank_model::ParseValidateOptions::default().with_validation(),
+        )
+        .expect("valid existing multi-utterance CHAT");
+        let before = count_utterances(&chat);
+        assert!(before >= 2, "the fixture has a second utterance");
+        let applied = apply_utseg_results(&mut chat, &HashMap::from([(0, vec![0, 0, 1, 1])]))
+            .expect("admitted segmentation");
+        assert_eq!(count_utterances(&chat), before + 1);
+        assert_eq!(applied.layout.input_utterances(), before);
+        assert_eq!(applied.layout.whole_output_ordinal(0), None);
+        assert_eq!(applied.layout.whole_output_ordinal(1), Some(2));
+        assert_eq!(
+            get_utterance(&chat, 2).to_chat_string(),
+            crate::parse_and_validate(
+                source,
+                talkbank_model::ParseValidateOptions::default().with_validation(),
+            )
+            .map(|original| get_utterance(&original, 1).to_chat_string())
+            .expect("valid existing multi-utterance CHAT"),
+            "the second input utterance is the third output utterance, unchanged"
+        );
+        assert_eq!(applied.layout.whole_output_ordinal(before), None);
     }
 
     #[test]

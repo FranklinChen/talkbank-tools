@@ -35,8 +35,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 pub trait ProgressDisplay: Send + Sync {
     /// Update completed file count and file status entries.
     fn update(&self, done: u64, file_statuses: &[FileStatusEntry]);
-    /// Log a successfully completed file.
-    fn log_done(&self, filename: &str);
+    /// Log a successfully completed file, with what its producer left out
+    /// on purpose (information, listed whatever the file's standing).
+    fn log_done(&self, filename: &str, exclusions: &[crate::api::OutputExclusionRecord]);
     /// Log a failed file with error message.
     fn log_error(&self, filename: &str, msg: &str);
     /// Log a file whose output was written with admission diagnostics:
@@ -46,6 +47,7 @@ pub trait ProgressDisplay: Send + Sync {
         &self,
         filename: &str,
         diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+        exclusions: &[crate::api::OutputExclusionRecord],
     );
     /// Mark processing as complete.
     fn finish(&self);
@@ -125,21 +127,33 @@ impl BatchProgress {
         }
     }
 
-    /// Log a successfully completed file (printed above the progress bar).
-    pub fn log_done(&self, filename: &str) {
+    /// Log a successfully completed file (printed above the progress bar),
+    /// then each thing its producer left out on purpose.
+    pub fn log_done(&self, filename: &str, exclusions: &[crate::api::OutputExclusionRecord]) {
         self.overall.println(format!("  \u{2713} {filename}"));
+        self.log_exclusions(exclusions);
     }
 
-    /// Log a file written with diagnostics (printed above the progress bar).
+    /// Log a file written with diagnostics (printed above the progress bar),
+    /// then each thing its producer left out on purpose.
     pub fn log_diagnosed(
         &self,
         filename: &str,
         diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+        exclusions: &[crate::api::OutputExclusionRecord],
     ) {
         self.overall.println(format!(
             "  ! {filename}: {}",
             diagnosed_summary(diagnostics)
         ));
+        self.log_exclusions(exclusions);
+    }
+
+    /// One indented line per exclusion, under its file's line.
+    fn log_exclusions(&self, exclusions: &[crate::api::OutputExclusionRecord]) {
+        for exclusion in exclusions {
+            self.overall.println(format!("    {exclusion}"));
+        }
     }
 
     /// Log a failed file (printed above the progress bar).
@@ -163,8 +177,8 @@ impl ProgressDisplay for BatchProgress {
         self.update(done, file_statuses);
     }
 
-    fn log_done(&self, filename: &str) {
-        self.log_done(filename);
+    fn log_done(&self, filename: &str, exclusions: &[crate::api::OutputExclusionRecord]) {
+        self.log_done(filename, exclusions);
     }
 
     fn log_error(&self, filename: &str, msg: &str) {
@@ -175,8 +189,9 @@ impl ProgressDisplay for BatchProgress {
         &self,
         filename: &str,
         diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+        exclusions: &[crate::api::OutputExclusionRecord],
     ) {
-        self.log_diagnosed(filename, diagnostics);
+        self.log_diagnosed(filename, diagnostics, exclusions);
     }
 
     fn finish(&self) {

@@ -114,11 +114,19 @@ Every file in the job, grouped by directory. Each row shows:
 - **Stage label**: the current processing stage in italic text
 - **Duration**: how long this file took (done files)
 - **Error detail**: click to expand full error text (error files)
+- **Exclusions**: what the command left out on purpose, such as align's
+  `[+ diary]` notes, summarized in grey beside a done or diagnosed file;
+  click to expand each record's line (how many utterances and words, and the
+  first one). Information, never a fault.
 
 ### Error Panel
-If files have failed, errors are grouped by error code with counts. Each group
-shows the error category (Parse, Media, System, Engine, Pipeline Bug) and
-affected filenames.
+If files have failed, they are grouped by their error's own category, with
+counts, the input's own problems first: Input Refused (the input failed the
+command's checks; the message names what to change), CHAT Parse Error, Input
+Not Found, Evidence Unavailable, Analysis Unavailable, Model Access Required,
+Engine Error, Worker Setup Error, System Error, Cancelled, and Unclassified
+Error for a failure with no recorded category. Each group lists the affected
+files.
 
 ### Filter Tabs
 Filter the file table by status: All, Processing, Done, Error, Queued. A search

@@ -225,6 +225,8 @@ impl AudioFileTask for TranscribeAudioTask<'_> {
         Ok(FileOutput::Chat(ChatOutput {
             document: output.document,
             shortfalls: output.shortfalls,
+            // Transcription aligns nothing it could leave out.
+            exclusions: Vec::new(),
             merge_abbreviations: self.merge_abbreviations,
         }))
     }

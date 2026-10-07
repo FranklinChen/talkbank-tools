@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { FileStatusEntry } from "../types";
+import { ERROR_GROUPS, errorGroupOf, type ErrorGroupKind } from "../errorCategories";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -8,7 +9,8 @@ import type { FileStatusEntry } from "../types";
 export type FilterTab = "all" | "error" | "diagnosed" | "processing" | "done" | "queued";
 
 export type ErrorGroup = {
-  category: string;        // "input" | "media" | "system" | "processing"
+  /** The group the files' error category puts them in. */
+  category: ErrorGroupKind;
   categoryLabel: string;   // "CHAT Parse Error" etc.
   label: string;           // first line of the first file's error
   files: FileStatusEntry[];
@@ -32,53 +34,6 @@ const STATUS_ORDER: Record<string, number> = {
   processing: 2,
   done: 3,
   queued: 4,
-};
-
-/**
- * Maps backend `FailureCategory` wire values to display-friendly group names.
- *
- * Backend categories (from Rust `FailureCategory` enum) are kebab-cased:
- *   validation, parse_error, input_missing, worker_crash, worker_timeout,
- *   worker_protocol, provider_transient, provider_terminal, memory_pressure,
- *   cancelled, system, model_access_denied.
- *
- * We collapse these into 6 user-facing groups:
- *   input, media, system, processing, validation, model_access.
- *
- * `worker_bootstrap` has no entry here (a pre-existing gap, not introduced by
- * `model_access_denied`): it falls through to the raw-slug rendering the
- * fallback below describes, same as any category added without an entry.
- */
-const CATEGORY_NORMALIZE: Record<string, string> = {
-  validation: "validation",
-  parse_error: "input",
-  input_missing: "media",
-  worker_crash: "system",
-  worker_timeout: "system",
-  worker_protocol: "system",
-  provider_transient: "processing",
-  provider_terminal: "processing",
-  memory_pressure: "system",
-  cancelled: "system",
-  system: "system",
-  // A configuration/credential condition on the SERVER's machine (a gated
-  // Hugging Face model, a missing token), never the caller's bad input, so
-  // it gets its own bucket rather than folding into "validation" (which
-  // renders the "pipeline bug, not your input" banner) or "system".
-  model_access_denied: "model_access",
-  // Legacy/fallback values from older display groups
-  input: "input",
-  media: "media",
-  processing: "processing",
-};
-
-const CATEGORY_DISPLAY: Record<string, string> = {
-  input: "CHAT Parse Error",
-  media: "Media Not Found",
-  system: "System Error",
-  processing: "Processing Error",
-  validation: "Pipeline Bug",
-  model_access: "Model Access Required",
 };
 
 // ---------------------------------------------------------------------------
@@ -108,13 +63,12 @@ export function useFileFilters(files: FileStatusEntry[]) {
     const errorFiles = files.filter((f) => f.status === "error");
     if (errorFiles.length === 0) return [];
 
-    // Group by normalized display category. Backend sends fine-grained
-    // FailureCategory values (worker_crash, provider_transient, etc.);
-    // we collapse them into user-friendly groups.
-    const catMap = new Map<string, FileStatusEntry[]>();
+    // Group by the error's own category: the server's fine-grained
+    // FailureCategory values (worker_crash, provider_transient, etc.) map to
+    // user-facing groups in one place (`errorCategories.ts`).
+    const catMap = new Map<ErrorGroupKind, FileStatusEntry[]>();
     for (const f of errorFiles) {
-      const rawCat = f.error_category ?? "processing";
-      const cat = CATEGORY_NORMALIZE[rawCat] ?? "processing";
+      const cat = errorGroupOf(f.error_category);
       const list = catMap.get(cat);
       if (list) list.push(f);
       else catMap.set(cat, [f]);
@@ -126,15 +80,14 @@ export function useFileFilters(files: FileStatusEntry[]) {
       const firstError = catFiles[0]?.error ?? "Unknown error";
       groups.push({
         category: cat,
-        categoryLabel: CATEGORY_DISPLAY[cat] ?? cat,
+        categoryLabel: ERROR_GROUPS[cat].label,
         label: firstError.split("\n")[0],
         files: catFiles,
       });
     }
 
-    // Sort categories: validation first (pipeline bugs), then input, media, processing, system
-    const catOrder: Record<string, number> = { validation: 0, input: 1, media: 2, processing: 3, system: 4 };
-    groups.sort((a, b) => (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99));
+    // The input's own problems first, then the engine's, then the system's.
+    groups.sort((a, b) => ERROR_GROUPS[a.category].order - ERROR_GROUPS[b.category].order);
     return groups;
   }, [files]);
 

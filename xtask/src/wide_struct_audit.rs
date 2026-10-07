@@ -304,6 +304,14 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     },
     WideStructAllowance {
         path: "crates/batchalign/src/db/schema.rs",
+        struct_name: "FileStatusRow",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::TransportRecord,
+        reason: "database row for one file's status, one field per column; typed as FilePhase at the recovery boundary",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/db/schema.rs",
         struct_name: "JobRow",
         max_fields: 31,
         max_bool_fields: 2,

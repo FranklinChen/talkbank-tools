@@ -351,6 +351,9 @@ pub(crate) struct CompletedFileOutput {
     pub content_type: ContentType,
     /// What the command decided about stamping this file with provenance.
     pub stamp: crate::api::FileStampOutcome,
+    /// What the producer left out of its work on purpose; recorded on the
+    /// file's terminal phase, whichever it is.
+    pub exclusions: Vec<crate::api::OutputExclusionRecord>,
 }
 
 /// How a file finished without failing: what the store records as its

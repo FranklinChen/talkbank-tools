@@ -665,12 +665,86 @@ pub enum UntimedCauseRecord {
     /// No refusal names it, and no positive interval resulted for these
     /// words: the aligner returned none, or they could not be sent to it.
     NoUsableTiming,
-    /// The transcript marks it as not speech in the recording, so alignment
-    /// never looks for it there: no request, no bullet, untimed by design.
+    /// The transcript marks it as not speech in the recording.
+    ///
+    /// Read, never written: only the build of 2026-10-07 that reported such
+    /// an utterance as a shortfall recorded it, and records it stored are
+    /// still read. An utterance not in the recording is now an
+    /// [`OutputExclusionRecord::NotInRecording`], which does not diagnose
+    /// the file.
     NotInRecording {
         /// The postcode that marks it.
         postcode: OffRecordPostcode,
     },
+}
+
+/// Part of the input a command left out of its work on purpose, because the
+/// transcript asks for it by a convention with a recorded ruling.
+///
+/// Information, never a shortfall: the command did what the transcript asks,
+/// so an exclusion does not make the file diagnosed, and a file whose only
+/// untimed utterances are exclusions is clean. Reported beside the written
+/// output, on a `done` file as on a `diagnosed` one
+/// ([`FileStatusEntry::exclusions`]), and bounded like
+/// [`FileOutputDiagnostics`] because every poll copies it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputExclusionRecord {
+    /// Forced alignment did not look for these utterances in the recording,
+    /// because the transcript marks them as not speech in it (a
+    /// `[+ diary]` note). Their words are written untimed; a bullet the
+    /// input gave one is kept as given under `--main-bullets keep` or
+    /// `exact`, and written without under `derive`.
+    NotInRecording {
+        /// How many utterances were left out, at least one.
+        excluded_utterances: u64,
+        /// Their lexical words in all, none of which is owed timing.
+        excluded_words: u64,
+        /// The first of them, in transcript order, at most
+        /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
+        first_excluded: Vec<ExcludedUtteranceRecord>,
+    },
+}
+
+/// One utterance forced alignment left out because it is not in the
+/// recording.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct ExcludedUtteranceRecord {
+    /// The utterance's position among the file's utterances, counting from 1.
+    pub utterance: u64,
+    /// Its lexical words.
+    pub words: u64,
+    /// The postcode that marks it.
+    pub postcode: OffRecordPostcode,
+}
+
+impl std::fmt::Display for OutputExclusionRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInRecording {
+                excluded_utterances,
+                excluded_words,
+                first_excluded,
+            } => {
+                write!(
+                    f,
+                    "left out of alignment by design: {excluded_utterances} utterance(s) \
+                     ({excluded_words} words) marked as not in the recording were not \
+                     looked for in it"
+                )?;
+                if let Some(first) = first_excluded.first() {
+                    write!(
+                        f,
+                        " (first: utterance {}, {})",
+                        first.utterance, first.postcode
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// A postcode that marks an utterance as not speech in the recording, so
@@ -826,6 +900,13 @@ pub struct FileStatusEntry {
     /// fields are optional, not a union per status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<FileOutputDiagnostics>,
+    /// Parts of the input the command left out of its work on purpose
+    /// ([`OutputExclusionRecord`]): information, never a shortfall. Present
+    /// only on a file whose output was written (`done` or `diagnosed`), and
+    /// only when there is one; a separate channel from `diagnostics`, which
+    /// a clean file does not have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusions: Vec<OutputExclusionRecord>,
     /// What the command decided about stamping this file with provenance.
     /// Absent when nothing was recorded, which is what `Unrecorded` means: a
     /// command that writes no per-file stamp, or a status restored from the

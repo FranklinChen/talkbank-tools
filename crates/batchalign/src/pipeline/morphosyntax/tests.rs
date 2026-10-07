@@ -1127,7 +1127,7 @@ fn an_analysis_that_adds_a_finding_outside_the_held_out_utterances_is_refused() 
     assert!(matches!(
         crate::pipeline::post_validate::PostValidated::produced_outside(
             file.clone(),
-            &held_out,
+            &held_out.in_place(),
             crate::api::ReleasedCommand::Morphotag,
         ),
         Ok(crate::pipeline::post_validate::ProducedOutput::Diagnosed(_))
@@ -1142,7 +1142,7 @@ fn an_analysis_that_adds_a_finding_outside_the_held_out_utterances_is_refused() 
     }
     let Err(failure) = crate::pipeline::post_validate::PostValidated::produced_outside(
         file,
-        &held_out,
+        &held_out.in_place(),
         crate::api::ReleasedCommand::Morphotag,
     ) else {
         panic!("a finding outside the held-out utterances is the stage's own");

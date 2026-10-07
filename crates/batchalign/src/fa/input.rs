@@ -13,6 +13,7 @@
 //! | `name, audio, unlinked` | none | ordinary | nothing; untimed output stays `unlinked` |
 //! | `name, audio` (linked) | none | [`TimingObligationOrigin::NeverTimed`] | timing (E544), else no output |
 //! | linked, unusable `%wor` removed | none left | [`TimingObligationOrigin::DiscardedWordTiming`] | timing, else no output |
+//! | `name, audio` (linked) | only on `[+ diary]` notes, none kept | [`TimingObligationOrigin::OffRecordTimingOnly`] | timing, else no output |
 //! | absent, missing, notrans | any | refused ([`AlignmentMediaRefusal`]) | |
 //!
 //! Either obligation row under `--main-bullets exact` is refused too: `exact`
@@ -27,6 +28,15 @@
 //! through Chatter's own timing-regeneration validation, which runs every
 //! other rule and returns the E544 requirement as an obligation rather than a
 //! finding; nothing here filters diagnostic codes.
+//!
+//! The fifth row is CHAT-valid as input: Chatter sees the notes' timing. But
+//! align never uses timing on an utterance not in the recording and writes
+//! it back only as a bullet `--main-bullets keep` or `exact` keeps, so when
+//! no such bullet is kept the working document has no timing at all, and the
+//! output owes the same timing the third row does. Admission records that
+//! obligation itself, after removing the notes' timing, so a file that
+//! aligns no speech is refused with a message naming the notes and the
+//! remedy, not with the output gate's generic E544.
 //!
 //! Every admitted active source carries an [`AlignableMedia`]: proof that its
 //! one `@Media` declaration admits the media/timing transition. That
@@ -58,11 +68,30 @@ pub(super) struct FaAdmission {
 }
 
 /// A linked-media requirement the output must meet, and why the source owes
-/// it. Chatter issues the obligation; the origin is what the user is told.
+/// it: the declaration's location and the origin the user is told.
+///
+/// Its fields are private to this module and it is built only in
+/// [`read_fa_source_named`]: from a Chatter-issued `MediaTimingObligation`,
+/// or, for [`TimingObligationOrigin::OffRecordTimingOnly`], from the admitted
+/// declaration and what stripping the notes' timing left. The only routes to
+/// `MissingTimingRegenerationEvidence` take one, so no other code can assert
+/// an obligation from a bare span.
 #[derive(Clone)]
-struct OutstandingTiming {
-    obligation: MediaTimingObligation,
+pub(crate) struct OutstandingTiming {
+    header_span: talkbank_model::Span,
     origin: TimingObligationOrigin,
+}
+
+impl OutstandingTiming {
+    /// Where the declaration that owes timing is.
+    pub(crate) fn header_span(&self) -> talkbank_model::Span {
+        self.header_span
+    }
+
+    /// Why the source owes it.
+    pub(crate) fn origin(&self) -> TimingObligationOrigin {
+        self.origin
+    }
 }
 
 /// Proof that the source's one `@Media` declaration names a usable recording
@@ -78,6 +107,8 @@ struct OutstandingTiming {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct AlignableMedia {
     linkage: DeclaredLinkage,
+    /// Where the declaration is, for an obligation align establishes itself.
+    header_span: talkbank_model::Span,
 }
 
 /// What the admitted declaration says about linkage.
@@ -100,15 +131,14 @@ impl AlignableMedia {
         // The same scan the transition makes: every header line, not only
         // the leading block, so the two cannot disagree about which
         // declarations exist.
-        let mut declarations = document
-            .lines
-            .iter()
-            .filter_map(|line| line.as_header())
-            .filter_map(|header| match header {
-                Header::Media(media) => Some(media),
-                _ => None,
-            });
-        let Some(media) = declarations.next() else {
+        let mut declarations =
+            document
+                .headers_with_spans()
+                .filter_map(|(header, span)| match header {
+                    Header::Media(media) => Some((media, span)),
+                    _ => None,
+                });
+        let Some((media, header_span)) = declarations.next() else {
             return Err(AlignmentMediaRefusal::Undeclared {
                 suggested: match name {
                     TranscriptName::Named(stem) => {
@@ -153,7 +183,10 @@ impl AlignableMedia {
                 });
             }
         };
-        Ok(Self { linkage })
+        Ok(Self {
+            linkage,
+            header_span,
+        })
     }
 
     /// The post-alignment media/timing transition, against the declaration
@@ -210,8 +243,7 @@ impl FaAdmission {
         if let Some(outstanding) = &self.pending_timing
             && let Some(missing) =
                 crate::error::MissingTimingRegenerationEvidence::from_untimed_output(
-                    &outstanding.obligation,
-                    outstanding.origin,
+                    outstanding,
                     output.timing_evidence(),
                 )
         {
@@ -232,8 +264,7 @@ impl FaAdmission {
         if let Some(outstanding) = &self.pending_timing
             && let Some(missing) =
                 crate::error::MissingTimingRegenerationEvidence::from_refused_grouping(
-                    &outstanding.obligation,
-                    outstanding.origin,
+                    outstanding,
                     &grouping,
                     document.timing_evidence(),
                 )
@@ -252,7 +283,7 @@ impl FaAdmission {
         output: crate::pipeline::post_validate::PostValidated,
     ) -> crate::pipeline::post_validate::PostValidated {
         if let Some(outstanding) = self.pending_timing {
-            tracing::debug!(header_span = ?outstanding.obligation.header_span(),
+            tracing::debug!(header_span = ?outstanding.header_span,
                 origin = ?outstanding.origin,
                 "source timing obligation fulfilled by complete output admission");
         }
@@ -403,21 +434,60 @@ pub(crate) fn read_fa_source_named(
         AdmittedAlignmentSource::Planned(AdmittedDisposition::Regenerating(pending)) => {
             let (file, obligation) = working_parts(pending.into_pending_file());
             let origin = TimingObligationOrigin::DiscardedWordTiming;
-            (file, Some(OutstandingTiming { obligation, origin }))
+            let header_span = obligation.header_span();
+            (
+                file,
+                Some(OutstandingTiming {
+                    header_span,
+                    origin,
+                }),
+            )
         }
         AdmittedAlignmentSource::NeverTimed(pending) => {
             let (file, obligation) = working_parts(pending);
             let origin = TimingObligationOrigin::NeverTimed;
-            (file, Some(OutstandingTiming { obligation, origin }))
+            let header_span = obligation.header_span();
+            (
+                file,
+                Some(OutstandingTiming {
+                    header_span,
+                    origin,
+                }),
+            )
         }
     };
     // Every actively aligned source must name the recording its timing will
     // index, decided here rather than discovered after the work.
     let media = AlignableMedia::admit(&file, &name)?;
-    // An outstanding obligation means the source has no timing anywhere,
-    // main-tier bullets included (that is when E544 fires). `exact` keeps
-    // every utterance without a bullet untimed and admits no UTR, so the
-    // output could never meet the obligation: refuse now, not after FA.
+    // Both bindings read the input AS PARSED: the bullets the policy keeps,
+    // including any on an utterance not in the recording, and the
+    // obligations, which permit exactly those.
+    let main_bullets = crate::chat_ops::fa::MainBulletAuthority::bind(policy, &file)
+        .map_err(|error| ServerError::Validation(error.to_string()))?;
+    let required_timing = super::completion::RequiredFaTiming::bind(&file, &main_bullets)
+        .map_err(super::kept_bullets_failed)?;
+    // Then the working model forgets every timing an utterance not in the
+    // recording carried, so no stage reads it as an anchor, a window or
+    // reusable word timing. `keep` and `exact` restore its given bullet from
+    // the binding above, after every phase that orders bullets; `derive`
+    // derives none, since it has no aligned word (see `chat_ops::fa::presence`).
+    let stripped = crate::chat_ops::fa::strip_off_record_timing(&mut file);
+    if stripped.bullets() > 0 {
+        tracing::info!(
+            removed = stripped.bullets(),
+            ?policy,
+            "given bullets on utterances not in the recording are not alignment evidence"
+        );
+    }
+    let pending_timing = match pending_timing {
+        Some(outstanding) => Some(outstanding),
+        None => off_record_timing_only(&file, media, &main_bullets, stripped),
+    };
+    // An outstanding obligation means the working document has no timing
+    // anywhere, main-tier bullets included (that is when E544 fires), and no
+    // note keeps one. `exact` keeps every utterance without a bullet untimed
+    // and admits no UTR, so the output could never meet the obligation:
+    // refuse now, not after FA.
     if pending_timing.is_some() {
         match policy {
             crate::chat_ops::fa::MainBulletPolicy::KeepExact => {
@@ -427,30 +497,11 @@ pub(crate) fn read_fa_source_named(
             | crate::chat_ops::fa::MainBulletPolicy::KeepGiven => {}
         }
     }
-    // Both bindings read the input AS PARSED: the bullets the policy keeps,
-    // including any on an utterance not in the recording, and the
-    // obligations, which permit exactly those.
-    let main_bullets = crate::chat_ops::fa::MainBulletAuthority::bind(policy, &file)
-        .map_err(|error| ServerError::Validation(error.to_string()))?;
     let admission = FaAdmission {
         media,
         pending_timing,
-        required_timing: super::completion::RequiredFaTiming::bind(&file, &main_bullets)
-            .map_err(super::kept_bullets_failed)?,
+        required_timing,
     };
-    // Then the working model forgets every timing an utterance not in the
-    // recording carried, so no stage reads it as an anchor, a window or
-    // reusable word timing. `keep` and `exact` restore its given bullet from
-    // the binding above, after every phase that orders bullets; `derive`
-    // derives none, since it has no aligned word (see `chat_ops::fa::presence`).
-    let removed = crate::chat_ops::fa::strip_off_record_timing(&mut file);
-    if removed > 0 {
-        tracing::info!(
-            removed,
-            ?policy,
-            "given bullets on utterances not in the recording are not alignment evidence"
-        );
-    }
     Ok(FaWorkingDocument {
         disposition: FaWorkingDisposition::Active(ActiveFaDocument {
             file,
@@ -459,6 +510,36 @@ pub(crate) fn read_fa_source_named(
         }),
         main_bullets,
     })
+}
+
+/// The obligation of a linked source whose only timing was on utterances not
+/// in the recording, decided on the working document after their timing was
+/// removed (see the module documentation's fifth row).
+///
+/// Owed exactly when the declaration is linked, the strip removed timing
+/// from a note, the working document has no timing left, and no note keeps a
+/// bullet the output will carry: under `--main-bullets keep` or `exact` a
+/// note's given bullet is restored after alignment, which is timing, so
+/// nothing beyond it is owed. Decided by the same timing observation E544
+/// uses (`timing_evidence`). What was removed names the remedy.
+fn off_record_timing_only(
+    file: &ChatFile,
+    media: AlignableMedia,
+    main_bullets: &crate::chat_ops::fa::MainBulletAuthority,
+    stripped: crate::chat_ops::fa::StrippedOffRecordTiming,
+) -> Option<OutstandingTiming> {
+    let notes = stripped.removed()?;
+    match (media.linkage, file.timing_evidence()) {
+        (DeclaredLinkage::Linked, TranscriptTimingEvidence::Absent)
+            if !main_bullets.restores_off_record_bullet() =>
+        {
+            Some(OutstandingTiming {
+                header_span: media.header_span,
+                origin: TimingObligationOrigin::OffRecordTimingOnly(notes),
+            })
+        }
+        (DeclaredLinkage::Linked, _) | (DeclaredLinkage::Unlinked, _) => None,
+    }
 }
 
 /// The working document of a pending-timing admission, and a copy of its
@@ -651,7 +732,7 @@ mod tests {
             .expect("restored linkage is written, its words untimed");
         assert!(
             matches!(
-                admitted.into_document().1.as_slice(),
+                admitted.into_document().shortfalls.as_slice(),
                 [crate::api::OutputShortfallRecord::TimingIncomplete {
                     required_words: 3,
                     untimed_words: 3,
@@ -982,6 +1063,94 @@ mod tests {
                 .contains("<transcript file name without extension>, audio, unlinked"),
             "{anonymous}"
         );
+    }
+
+    /// A linked source whose only timing was the bullet on a `[+ diary]`
+    /// note: the fifth row of the admission table. Chatter admits it (the
+    /// note's bullet is timing), but align never uses that bullet, so under
+    /// `derive`, which does not write it back, admission records the
+    /// obligation itself, and an output that gains no timing is refused with
+    /// a message naming the note and the remedies instead of failing the
+    /// output gate's generic E544. Under `keep` and `exact` the note's
+    /// bullet is written as given, which is timing: nothing more is owed.
+    #[test]
+    fn a_linked_source_timed_only_on_a_note_owes_timing_unless_the_note_keeps_it() {
+        use crate::chat_ops::fa::MainBulletPolicy;
+        use crate::error::OffRecordTiming;
+        let source = never_aligned("@Media:\tsample, audio\n").replace(
+            "*CHI:\tmore words .\n",
+            "*CHI:\tmore words .\n*CHI:\tthe note . [+ diary] \u{15}1000_2000\u{15}\n",
+        );
+        let named = || TranscriptName::for_path(std::path::Path::new("sample.cha"));
+        let derived = read_fa_source_named(&source, named(), MainBulletPolicy::DeriveFromWords)
+            .expect("the note's bullet makes the source timed, so it is admitted");
+        assert_eq!(
+            origin(&derived),
+            Some(TimingObligationOrigin::OffRecordTimingOnly(
+                OffRecordTiming::BulletNotKept
+            ))
+        );
+        for policy in [MainBulletPolicy::KeepGiven, MainBulletPolicy::KeepExact] {
+            let kept = read_fa_source_named(&source, named(), policy)
+                .expect("a kept note bullet is admitted");
+            assert_eq!(origin(&kept), None, "{policy:?}: the kept bullet is timing");
+        }
+        // A note with only word timing: no bullet for any policy to keep, so
+        // the obligation stands under `keep` too, without the keep remedy;
+        // `exact` cannot meet it and is refused before any work.
+        let word_timed = never_aligned("@Media:\tsample, audio\n").replace(
+            "*CHI:\tmore words .\n",
+            "*CHI:\tmore words .\n*CHI:\tthe note . [+ diary]\n\
+             %wor:\tthe \u{15}1000_1200\u{15} note \u{15}1200_1500\u{15} .\n",
+        );
+        for policy in [
+            MainBulletPolicy::DeriveFromWords,
+            MainBulletPolicy::KeepGiven,
+        ] {
+            let working = read_fa_source_named(&word_timed, named(), policy)
+                .expect("the note's word timing makes the source timed");
+            assert_eq!(
+                origin(&working),
+                Some(TimingObligationOrigin::OffRecordTimingOnly(
+                    OffRecordTiming::WordTimingOnly
+                )),
+                "{policy:?}"
+            );
+        }
+        assert!(matches!(
+            read_fa_source_named(&word_timed, named(), MainBulletPolicy::KeepExact),
+            Err(ServerError::AlignmentMedia(
+                AlignmentMediaRefusal::LinkedUntimedUnderExactBullets
+            ))
+        ));
+
+        // Speech with timing of its own owes nothing more, note or not.
+        let speech_timed = source.replace("hello world .\n", "hello world . \u{15}0_500\u{15}\n");
+        assert_eq!(origin(&read_named(&speech_timed).expect("admitted")), None);
+
+        // The output owes timing: one that gains none is refused as
+        // unavailable evidence, with the note named and the remedies.
+        let FaInputDocument::Active(active) = derived.attempt() else {
+            panic!("an ordinary source is aligned")
+        };
+        let output = crate::types::results::FaResult::without_groups(
+            active.chat_file,
+            crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
+            "test",
+            &crate::engine_reports::FaCacheNamespace::for_test("test"),
+        );
+        let Err(refused) = active.admission.finish(output) else {
+            panic!("a linked output with no timing cannot be written");
+        };
+        assert_eq!(
+            crate::runner::util::classify_server_error(&refused),
+            crate::scheduling::FailureCategory::EvidenceUnavailable
+        );
+        let message = refused.to_string();
+        for phrase in ["[+ diary]", "--main-bullets keep", ", unlinked", "E544"] {
+            assert!(message.contains(phrase), "{phrase}: {message}");
+        }
+        assert!(message.contains("no output was written"), "{message}");
     }
 
     /// Admitting linked-without-timing defers E544 and nothing else: every

@@ -19,7 +19,8 @@
 
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::pipeline::post_validate::{
-    AbbreviationMergeRefused, OutputReport, PostValidationFailure, ProducedOutput, Shortfall,
+    AbbreviationMergeRefused, Exclusion, OutputReport, PostValidationFailure, ProducedOutput,
+    Shortfall,
 };
 use crate::recipe_runner::materialize::PlannedMaterializedFile;
 use crate::recipe_runner::runtime::{
@@ -62,6 +63,9 @@ pub(crate) struct ChatOutput {
     /// Requested work the document does not carry, reported with the
     /// file's outcome whatever the document's standing.
     pub(crate) shortfalls: Vec<Shortfall>,
+    /// Parts of the input the producer left out on purpose, reported with
+    /// the file's outcome as information; they never diagnose it.
+    pub(crate) exclusions: Vec<Exclusion>,
     /// Whether to merge abbreviations before writing.
     pub(crate) merge_abbreviations: MergeAbbreviations,
 }
@@ -166,17 +170,27 @@ impl OutputWriteFailure {
 /// What a writer persisted, and whether the bytes were admitted.
 ///
 /// A sum, so the runner records a diagnosed file as diagnosed without being
-/// able to forget to ask: there is no artifact without its standing.
+/// able to forget to ask: there is no artifact without its standing. Both
+/// arms carry the producer's exclusions, which are information whatever the
+/// standing.
 #[derive(Debug)]
 pub(crate) enum WrittenOutput {
-    /// Admitted CHAT, or a document kind with no admission (evidence JSON).
-    Clean(PlannedMaterializedFile),
+    /// Admitted CHAT with nothing requested missing, or a document kind with
+    /// no admission (evidence JSON).
+    Clean {
+        /// The written artifact.
+        artifact: PlannedMaterializedFile,
+        /// What the producer left out on purpose.
+        exclusions: Vec<Exclusion>,
+    },
     /// A generating producer's CHAT, written with what its admission found.
     Diagnosed {
         /// The written artifact.
         artifact: PlannedMaterializedFile,
         /// Every finding, and every stage skipped because of them.
         diagnostics: crate::api::FileOutputDiagnostics,
+        /// What the producer left out on purpose.
+        exclusions: Vec<Exclusion>,
     },
 }
 
@@ -185,17 +199,26 @@ impl WrittenOutput {
     /// clean output, `Diagnosed` (never an error, never retried) otherwise.
     pub(crate) async fn record(self, lifecycle: &crate::runner::util::FileRunTracker<'_>) {
         match self {
-            Self::Clean(artifact) => {
+            Self::Clean {
+                artifact,
+                exclusions,
+            } => {
                 lifecycle
-                    .complete_with_result(artifact.display_path, artifact.content_type)
+                    .complete_clean(artifact.display_path, artifact.content_type, exclusions)
                     .await;
             }
             Self::Diagnosed {
                 artifact,
                 diagnostics,
+                exclusions,
             } => {
                 lifecycle
-                    .complete_diagnosed(artifact.display_path, artifact.content_type, diagnostics)
+                    .complete_diagnosed(
+                        artifact.display_path,
+                        artifact.content_type,
+                        diagnostics,
+                        exclusions,
+                    )
                     .await;
             }
         }
@@ -219,6 +242,7 @@ pub(crate) async fn write_primary_chat_output_artifact(
     let ChatOutput {
         document,
         shortfalls,
+        exclusions,
         merge_abbreviations,
     } = output;
     // The merge is the last transition on the proof, and it re-runs the
@@ -242,8 +266,12 @@ pub(crate) async fn write_primary_chat_output_artifact(
     write_chat_output_artifact_with_provenance_gate(&target, &proof).await?;
     // Read from the proof that was WRITTEN (after the merge), so the reported
     // findings describe the bytes on disk, with every shortfall of the run.
+    // Exclusions are not asked: they never decide the standing.
     Ok(match OutputReport::of(&proof, &shortfalls) {
-        OutputReport::Clean => WrittenOutput::Clean(primary_output),
+        OutputReport::Clean => WrittenOutput::Clean {
+            artifact: primary_output,
+            exclusions,
+        },
         OutputReport::Diagnosed(draft) => {
             // A finding list too long for the record is written once, in
             // full, beside the job's staged outputs, never into the user's
@@ -256,6 +284,7 @@ pub(crate) async fn write_primary_chat_output_artifact(
             WrittenOutput::Diagnosed {
                 diagnostics: draft.record(&sidecar).await,
                 artifact: primary_output,
+                exclusions,
             }
         }
     })
@@ -303,7 +332,10 @@ pub(crate) async fn write_primary_output_artifact(
             // record of one run, so a fresh one differing from the last is
             // the information, not noise.
             write_text_output_artifact(&target, &body).await?;
-            Ok(WrittenOutput::Clean(primary_output))
+            Ok(WrittenOutput::Clean {
+                artifact: primary_output,
+                exclusions: Vec::new(),
+            })
         }
     }
 }
@@ -443,13 +475,14 @@ mod tests {
             ChatOutput {
                 document: PostValidated::pass_through(unchanged, ReleasedCommand::Align).into(),
                 shortfalls: Vec::new(),
+                exclusions: Vec::new(),
                 // Even with the merge requested, a pass-through is left alone.
                 merge_abbreviations: MergeAbbreviations::Merge,
             },
         )
         .await
         .expect("a declared pass-through must be written, not refused");
-        let WrittenOutput::Clean(artifact) = artifact else {
+        let WrittenOutput::Clean { artifact, .. } = artifact else {
             panic!("an unchanged admitted source is written clean");
         };
 
@@ -510,20 +543,40 @@ mod tests {
                 .expect("valid CHAT")
                 .into(),
                 shortfalls: Vec::new(),
+                exclusions: vec![excluded_note()],
                 merge_abbreviations: MergeAbbreviations::Leave,
             },
         )
         .await
         .expect("write artifact");
-        let WrittenOutput::Clean(artifact) = artifact else {
-            panic!("an admitted document is written clean");
+        // Clean despite the exclusion, which the writer carries through.
+        let WrittenOutput::Clean {
+            artifact,
+            exclusions,
+        } = artifact
+        else {
+            panic!("an admitted document with only an exclusion is written clean");
         };
+        assert_eq!(exclusions, [excluded_note()]);
 
         assert_eq!(artifact.content_type, ContentType::Chat);
         assert_eq!(artifact.display_path, DisplayPath::from("nested/test.cha"));
         let written = std::fs::read_to_string(tmp.path().join("requested/test.cha"))
             .expect("read written output");
         assert!(written.contains("*PAR:\thello ."));
+    }
+
+    /// One utterance left out of alignment, as align reports it.
+    fn excluded_note() -> crate::api::OutputExclusionRecord {
+        crate::api::OutputExclusionRecord::NotInRecording {
+            excluded_utterances: 1,
+            excluded_words: 3,
+            first_excluded: vec![crate::api::ExcludedUtteranceRecord {
+                utterance: 2,
+                words: 3,
+                postcode: crate::api::OffRecordPostcode::Diary,
+            }],
+        }
     }
 
     /// RED FIRST (2026-10-06): a generating producer's diagnosed output
@@ -564,6 +617,7 @@ mod tests {
             ChatOutput {
                 document: PostValidated::produced(generated, ReleasedCommand::Transcribe),
                 shortfalls: Vec::new(),
+                exclusions: Vec::new(),
                 merge_abbreviations: MergeAbbreviations::Merge,
             },
         )
@@ -573,6 +627,7 @@ mod tests {
         let WrittenOutput::Diagnosed {
             artifact,
             diagnostics,
+            ..
         } = written
         else {
             panic!("the writer must report the diagnosis");

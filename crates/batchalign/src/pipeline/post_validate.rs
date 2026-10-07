@@ -269,7 +269,65 @@ pub(crate) struct LocalizedDiagnosis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeldOutUtterances(Vec<usize>);
 
+/// Where applying a stage's results left the file's utterances, so a
+/// judgement of the result can find the utterances the stage was not given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AppliedLayout {
+    /// Every utterance is where it was: the stage edits utterances in place.
+    InPlace,
+    /// The stage split utterances; where each input utterance went, as the
+    /// split that performed it recorded.
+    Segmented(batchalign_transform::utseg::SegmentationLayout),
+}
+
+/// The held-out utterances at their positions in a stage's OUTPUT, which
+/// [`PostValidated::produced_outside`] judges.
+///
+/// A different type from [`HeldOutUtterances`], which holds positions in the
+/// stage's INPUT: segmentation renumbers utterances, so the two are different
+/// index spaces, and only [`HeldOutUtterances::in_place`] and
+/// [`HeldOutUtterances::after`] cross from one to the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldOutInOutput(Vec<usize>);
+
+impl HeldOutInOutput {
+    /// Whether the output utterance at this ordinal is held out.
+    fn contains(&self, ordinal: usize) -> bool {
+        self.0.binary_search(&ordinal).is_ok()
+    }
+}
+
 impl HeldOutUtterances {
+    /// The same utterances in the output of a stage that edits utterances in
+    /// place (morphosyntax): the positions do not change.
+    pub(crate) fn in_place(&self) -> HeldOutInOutput {
+        HeldOutInOutput(self.0.clone())
+    }
+
+    /// The same utterances, at their positions in a stage's output.
+    ///
+    /// A held-out utterance is never collected for the stage, so it is never
+    /// given an assignment: it stays one utterance and only moves down past
+    /// the extra children of splits before it. `None` when the layout records
+    /// a split of one (or has no such utterance), which only a stage that
+    /// applied a result to an utterance it was not given can cause; its output
+    /// cannot then be judged against them. The layout records splits only;
+    /// that a held-out utterance is otherwise untouched rests on its never
+    /// being collected.
+    pub(crate) fn after(&self, layout: &AppliedLayout) -> Option<HeldOutInOutput> {
+        match layout {
+            AppliedLayout::InPlace => Some(self.in_place()),
+            // Ascending stays ascending: a whole utterance's output position
+            // grows with its input position.
+            AppliedLayout::Segmented(layout) => self
+                .0
+                .iter()
+                .map(|&ordinal| layout.whole_output_ordinal(ordinal))
+                .collect::<Option<Vec<usize>>>()
+                .map(HeldOutInOutput),
+        }
+    }
+
     /// Whether the utterance at this ordinal is held out.
     pub(crate) fn contains(&self, ordinal: usize) -> bool {
         self.0.binary_search(&ordinal).is_ok()
@@ -482,6 +540,13 @@ pub(crate) use crate::api::OptionalStage;
 /// reported whatever the document's standing: a file with any shortfall is
 /// reported diagnosed, never clean. The wire record is the one owner.
 pub(crate) type Shortfall = crate::api::OutputShortfallRecord;
+
+/// Part of the input a producer left out of its work on purpose, by a
+/// recorded ruling. Reported beside the written output on a separate channel
+/// from [`Shortfall`]: it is information, and never makes a file diagnosed,
+/// so [`OutputReport::of`] does not take it. The wire record is the one
+/// owner.
+pub(crate) type Exclusion = crate::api::OutputExclusionRecord;
 
 /// How a written output is reported: clean, or with diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1176,7 +1241,7 @@ impl PostValidated {
     /// caller keeps the document from before the stage.
     pub(crate) fn produced_outside(
         file: ChatFile,
-        held_out: &HeldOutUtterances,
+        held_out: &HeldOutInOutput,
         command: ReleasedCommand,
     ) -> Result<ProducedOutput, PostValidationFailure> {
         let judgement = Judgement::Admitted;

@@ -7,7 +7,7 @@
 //! the job's file status map.
 
 use crate::api::{ContentType, DisplayPath, FileProgressStage, MachineTime};
-use crate::store::{FileFailure, FilePhase, FileProgress, FileResultEntry};
+use crate::store::{CompletedFileOutput, FileFailure, FilePhase, FileProgress, FileResultEntry};
 
 use super::Job;
 use super::types::{FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord};
@@ -41,44 +41,66 @@ impl Job {
             return false;
         };
         let started_at = file_status.phase.started_at();
+        // A written result splits in two: its exclusions go onto the phase,
+        // which is what is persisted and reported; the rest is the file's
+        // downloadable result and stamp.
+        let written = |finished: CompletedFileOutput| {
+            let CompletedFileOutput {
+                filename,
+                content_type,
+                stamp,
+                exclusions,
+            } = finished;
+            let entry = FileResultEntry {
+                filename,
+                content_type,
+                error: None,
+            };
+            (exclusions, Some((entry, stamp)))
+        };
         let (phase, result) = match completion {
             FileCompletion::WithoutResult => (
                 FilePhase::Done {
                     started_at,
                     finished_at: Some(finished_at),
+                    exclusions: Vec::new(),
                 },
                 None,
             ),
-            FileCompletion::Clean(result) => (
-                FilePhase::Done {
-                    started_at,
-                    finished_at: Some(finished_at),
-                },
-                Some(result),
-            ),
+            FileCompletion::Clean(result) => {
+                let (exclusions, result) = written(result);
+                (
+                    FilePhase::Done {
+                        started_at,
+                        finished_at: Some(finished_at),
+                        exclusions,
+                    },
+                    result,
+                )
+            }
             FileCompletion::Diagnosed {
                 result,
                 diagnostics,
-            } => (
-                FilePhase::Diagnosed {
-                    started_at,
-                    finished_at: Some(finished_at),
-                    diagnostics: Some(diagnostics),
-                },
-                Some(result),
-            ),
+            } => {
+                let (exclusions, result) = written(result);
+                (
+                    FilePhase::Diagnosed {
+                        started_at,
+                        finished_at: Some(finished_at),
+                        diagnostics: Some(diagnostics),
+                        exclusions,
+                    },
+                    result,
+                )
+            }
         };
         file_status.phase = phase;
         file_status.progress = FileProgress::default();
-        if let Some(result) = result {
+        if let Some((entry, stamp)) = result {
             // The stamp decision belongs to the FILE, not to one of its
             // artifacts: it says what the command recorded about this run.
-            file_status.stamp = result.stamp;
-            self.execution.results.push(FileResultEntry {
-                filename: result.filename,
-                content_type: result.content_type,
-                error: None,
-            });
+            file_status.stamp = stamp;
+            self.execution.results.push(entry);
         }
         self.execution.completed_files += 1;
         true

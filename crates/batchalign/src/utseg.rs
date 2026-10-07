@@ -385,7 +385,9 @@ fn utseg_hooks() -> TextPipelineHooks<UtsegBatchItem, Vec<usize>, AdmittedUtsegP
         collect: collect_utseg_batch_items,
         integrate: integrate_admitted_assignments,
         apply: |file, assignments| {
-            apply_utseg_document(file, assignments).map_err(ServerError::from)
+            apply_utseg_document(file, assignments)
+                .map(crate::pipeline::post_validate::AppliedLayout::Segmented)
+                .map_err(ServerError::from)
         },
         provenance: crate::provenance::utseg_provenance,
     }
@@ -472,7 +474,8 @@ fn apply_utseg_predictions(
     let mut assignment_map: HashMap<usize, Vec<usize>> = HashMap::new();
     integrate_admitted_assignments(&mut assignment_map, items, predictions);
     if !assignment_map.is_empty() {
-        apply_utseg_document(chat_file, &assignment_map)?;
+        // The batch path judges each whole file, so the layout is not needed.
+        let _layout = apply_utseg_document(chat_file, &assignment_map)?;
     }
     Ok(())
 }
@@ -480,8 +483,14 @@ fn apply_utseg_predictions(
 pub(crate) fn apply_utseg_document(
     chat_file: &mut ChatFile,
     assignment_map: &HashMap<usize, Vec<usize>>,
-) -> Result<(), batchalign_transform::utseg::UtsegApplyRefusal> {
-    let losses = apply_utseg_results(chat_file, assignment_map)?;
+) -> Result<
+    batchalign_transform::utseg::SegmentationLayout,
+    batchalign_transform::utseg::UtsegApplyRefusal,
+> {
+    let batchalign_transform::utseg::UtsegApplied {
+        invalidated: losses,
+        layout,
+    } = apply_utseg_results(chat_file, assignment_map)?;
     if !losses.is_empty() {
         let descriptions: Vec<_> = losses
             .iter()
@@ -506,7 +515,7 @@ pub(crate) fn apply_utseg_document(
             }),
         );
     }
-    Ok(())
+    Ok(layout)
 }
 
 // ---------------------------------------------------------------------------

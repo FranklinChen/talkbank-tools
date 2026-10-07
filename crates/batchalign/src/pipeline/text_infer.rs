@@ -66,8 +66,12 @@ pub(crate) struct TextPipelineHooks<Item, State, Response> {
     pub collect: fn(&ChatFile) -> Vec<(usize, Item)>,
     /// Merge inferred responses into the final application map.
     pub integrate: IntegrateFn<Item, State, Response>,
-    /// Apply all results to the parsed chat file.
-    pub apply: fn(&mut ChatFile, &HashMap<usize, State>) -> Result<(), ServerError>,
+    /// Apply all results to the parsed chat file, saying where its
+    /// utterances went (a split moves the ones after it).
+    pub apply: fn(
+        &mut ChatFile,
+        &HashMap<usize, State>,
+    ) -> Result<crate::pipeline::post_validate::AppliedLayout, ServerError>,
     /// Source of the provenance comment stamped on the output.
     pub provenance: TextProvenance<Response>,
 }
@@ -148,8 +152,10 @@ where
     }
 
     // Editing consumes the validity proof; the output must earn a new one.
+    // The whole document is judged, so where its utterances went is not
+    // needed.
     let mut chat_file = admitted.into_judged_document();
-    analyze_and_apply(
+    let _layout = analyze_and_apply(
         &mut chat_file,
         &batch_items,
         lang,
@@ -195,7 +201,9 @@ where
         .into_iter()
         .filter(|(utterance, _)| !held_out.contains(*utterance))
         .collect();
-    if !batch_items.is_empty() {
+    let layout = if batch_items.is_empty() {
+        crate::pipeline::post_validate::AppliedLayout::InPlace
+    } else {
         analyze_and_apply(
             &mut chat_file,
             &batch_items,
@@ -205,11 +213,26 @@ where
             infer,
             observe,
         )
-        .await?;
-    }
+        .await?
+    };
+    // The held-out utterances, where the stage's output has them: a split
+    // before one moves it down.
+    let held_out = held_out
+        .after(&layout)
+        .ok_or_else(|| ServerError::OutputAdmission {
+            command: hooks.command,
+            details: crate::error::OutputAdmissionRefusal::unestablished(
+                "the stage changed an utterance it was not given, so its output cannot be \
+             judged against the utterances that carry the findings",
+            ),
+        })?;
     // Judged under the stage's command, as the admitted pipeline's gate is,
-    // so both routes apply the same command checks.
-    Ok(PostValidated::produced(chat_file, hooks.command))
+    // so both routes apply the same command checks. A result that adds a
+    // finding outside the held-out utterances is refused, as the strict gate
+    // refuses an admitted document's stage output; the caller keeps the
+    // document from before the stage.
+    PostValidated::produced_outside(chat_file, &held_out, hooks.command)
+        .map_err(|failure| failure.into_server_error())
 }
 
 /// Infer the collected items, apply the responses and stamp provenance: the
@@ -222,7 +245,7 @@ async fn analyze_and_apply<Item, State, Response, Failure, Infer, Observe>(
     hooks: &TextPipelineHooks<Item, State, Response>,
     infer: Infer,
     observe: Observe,
-) -> Result<(), ServerError>
+) -> Result<crate::pipeline::post_validate::AppliedLayout, ServerError>
 where
     Failure: std::fmt::Display,
     Infer: AsyncFnOnce(
@@ -245,7 +268,7 @@ where
     let mut state_map: HashMap<usize, State> = HashMap::new();
     (hooks.integrate)(&mut state_map, batch_items, &responses);
 
-    (hooks.apply)(chat_file, &state_map)?;
+    let layout = (hooks.apply)(chat_file, &state_map)?;
 
     // Inject the processing provenance comment, named by the applied
     // responses. A run that applied nothing says so rather than stamping a
@@ -262,7 +285,7 @@ where
             );
         }
     }
-    Ok(())
+    Ok(layout)
 }
 
 /// Hooks for the cross-file text-batch pipeline (pool all files'
@@ -695,7 +718,9 @@ mod tests {
                     command: ReleasedCommand::Utseg,
                     collect: collect_nothing,
                     integrate: |_state: &mut HashMap<usize, ()>, _items, _responses| {},
-                    apply: |_file, _state| Ok(()),
+                    apply: |_file, _state| {
+                        Ok(crate::pipeline::post_validate::AppliedLayout::InPlace)
+                    },
                     provenance: test_stamp,
                 },
                 must_not_infer,
@@ -935,15 +960,11 @@ mod tests {
         );
     }
 
-    /// Task 6 (a), at the stage boundary, with two speakers (so a rule about
-    /// the participants cannot make every utterance fail on its own): a
-    /// generated transcript diagnosed for
-    /// one invalid word is segmented everywhere but in that word's utterance.
-    /// Before, the whole file went unsegmented. The faulty utterance is never
-    /// sent to the model, keeps its generated form, and the result is judged
-    /// afresh: still diagnosed, for that word alone.
-    #[tokio::test]
-    async fn a_diagnosed_transcript_is_segmented_outside_its_faulty_utterance() {
+    /// The diagnosed transcript of the localized-segmentation tests: three
+    /// utterances, two speakers (so a rule about the participants cannot make
+    /// every utterance fail on its own), the second holding a word CHAT
+    /// cannot hold, localized to that utterance.
+    fn localized_b2() -> crate::pipeline::post_validate::LocalizedDiagnosis {
         use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};
         const GENERATED: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tPAR0 Participant, PAR1 Participant\n\
@@ -979,11 +1000,122 @@ mod tests {
             .localize()
             .expect("the finding is the second utterance's");
         assert_eq!(localized.held_out().ordinals().collect::<Vec<_>>(), [1]);
+        localized
+    }
+
+    /// A worker stand-in that splits every utterance it is given after its
+    /// third word, recording which utterances it was given.
+    fn split_after_third_word(
+        items: &[(usize, batchalign_transform::utseg::UtsegBatchItem)],
+    ) -> Vec<Result<Vec<usize>, crate::text_batch::EngineItemFailure>> {
+        items
+            .iter()
+            .map(|(_, item)| {
+                Ok((0..item.words.len())
+                    .map(|word| usize::from(word >= 3))
+                    .collect())
+            })
+            .collect()
+    }
+
+    /// Mirroring morphosyntax: segmentation of a
+    /// diagnosed transcript that adds a finding of its own outside the
+    /// held-out utterance is refused, as an admitted document's stage output
+    /// is, instead of being written as though the finding were the
+    /// transcript's. Here the application breaks the first utterance it split.
+    /// The held-out utterance has moved down past that split, so the
+    /// judgement finds it where the layout put it: the refusal carries the
+    /// new finding alone, never the held-out one.
+    #[tokio::test]
+    async fn segmentation_that_adds_a_finding_outside_the_held_out_utterance_is_refused() {
+        let pool = WorkerPool::new(PoolConfig::default());
+        let cache = crate::cache::UtteranceCache::noop();
+        let infer = async |_pool: &WorkerPool,
+                           items: &[(usize, batchalign_transform::utseg::UtsegBatchItem)],
+                           _lang: &LanguageCode3|
+               -> Result<
+            Vec<Result<Vec<usize>, crate::text_batch::EngineItemFailure>>,
+            ServerError,
+        > { Ok(split_after_third_word(items)) };
+        let error = run_localized_text_pipeline(
+            localized_b2(),
+            &LanguageCode3::eng(),
+            PipelineServices::new(&pool, &cache),
+            TextPipelineHooks {
+                command: ReleasedCommand::Utseg,
+                collect: crate::utseg::collect_utseg_batch_items,
+                integrate: |state: &mut HashMap<usize, Vec<usize>>,
+                            items,
+                            responses: &[Vec<usize>]| {
+                    for ((utterance, _), assignment) in items.iter().zip(responses) {
+                        state.insert(*utterance, assignment.clone());
+                    }
+                },
+                apply: |file, state| {
+                    use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};
+                    let layout = crate::utseg::apply_utseg_document(file, state)?;
+                    // A defective application: the first child of the first
+                    // split carries a word CHAT cannot hold.
+                    for line in &mut file.lines {
+                        if let Line::Utterance(utterance) = line {
+                            utterance.main.content.content = TierContentItems::new(
+                                ["the", "c3", "ball"]
+                                    .into_iter()
+                                    .map(|word| {
+                                        UtteranceContent::Word(Box::new(Word::simple(word)))
+                                    })
+                                    .collect(),
+                            );
+                            break;
+                        }
+                    }
+                    Ok(crate::pipeline::post_validate::AppliedLayout::Segmented(
+                        layout,
+                    ))
+                },
+                provenance: |_lang, _responses| {
+                    Ok(TextStamp::NotStamped(
+                        crate::provenance::NoStampReason::NothingApplied,
+                    ))
+                },
+            },
+            infer,
+            |_items, _responses| Ok(()),
+        )
+        .await
+        .expect_err("a stage that breaks an utterance it was given is refused");
+        let ServerError::OutputAdmission {
+            details: crate::error::OutputAdmissionRefusal::Judged { first, rest, .. },
+            ..
+        } = &error
+        else {
+            panic!("refused as the stage's judged output, got {error}");
+        };
+        let findings: Vec<&str> = std::iter::once(first)
+            .chain(rest)
+            .map(|finding| finding.message.as_str())
+            .collect();
+        // Never empty: the first finding is a field of its own.
+        assert!(
+            findings.iter().all(|message| message.contains("c3")),
+            "only the stage's own finding: {findings:?}"
+        );
+    }
+
+    /// Task 6 (a), at the stage boundary, with two speakers (so a rule about
+    /// the participants cannot make every utterance fail on its own): a
+    /// generated transcript diagnosed for
+    /// one invalid word is segmented everywhere but in that word's utterance.
+    /// Before, the whole file went unsegmented. The faulty utterance is never
+    /// sent to the model, keeps its generated form, and the result is judged
+    /// afresh: still diagnosed, for that word alone.
+    #[tokio::test]
+    async fn a_diagnosed_transcript_is_segmented_outside_its_faulty_utterance() {
+        let localized = localized_b2();
 
         let pool = WorkerPool::new(PoolConfig::default());
         let cache = crate::cache::UtteranceCache::noop();
         let inferred = std::sync::Mutex::new(Vec::new());
-        // Split every utterance it is given after its third word.
         let infer = async |_pool: &WorkerPool,
                            items: &[(usize, batchalign_transform::utseg::UtsegBatchItem)],
                            _lang: &LanguageCode3|
@@ -995,14 +1127,7 @@ mod tests {
                 .lock()
                 .expect("test lock")
                 .extend(items.iter().map(|(utterance, _)| *utterance));
-            Ok(items
-                .iter()
-                .map(|(_, item)| {
-                    Ok((0..item.words.len())
-                        .map(|word| usize::from(word >= 3))
-                        .collect())
-                })
-                .collect())
+            Ok(split_after_third_word(items))
         };
         let produced = run_localized_text_pipeline(
             localized,
@@ -1019,7 +1144,9 @@ mod tests {
                     }
                 },
                 apply: |file, state| {
-                    crate::utseg::apply_utseg_document(file, state).map_err(ServerError::from)
+                    crate::utseg::apply_utseg_document(file, state)
+                        .map(crate::pipeline::post_validate::AppliedLayout::Segmented)
+                        .map_err(ServerError::from)
                 },
                 provenance: |_lang, _responses| {
                     Ok(TextStamp::NotStamped(

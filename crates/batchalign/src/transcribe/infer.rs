@@ -272,8 +272,8 @@ async fn infer_speaker(
 /// carries a [`ProtocolErrorCodeV2`] the worker itself classified; a Hugging
 /// Face Hub access denial becomes `ServerError::ModelAccessDenied`, a
 /// configuration/credential condition on the SERVER's machine, never
-/// `Validation`, which the dashboard renders as "pipeline bug, filed
-/// automatically" and which describes a malformed CLIENT request. Every
+/// `Validation`, which describes a refused CLIENT input (the dashboard
+/// labels it "Input Refused"). Every
 /// other protocol code, and a shape mismatch
 /// (`SpeakerResultParseError::UnexpectedPayload`), stays `Validation`: those
 /// really are "the response this server got does not make sense".
@@ -412,9 +412,9 @@ mod tests {
     /// pyannote's speaker-diarization load hits a gated Hugging Face Hub
     /// repository) must become `ServerError::ModelAccessDenied`, and NEVER
     /// `Validation`. Before this, every speaker V2 parse failure collapsed
-    /// into `Validation`, which the dashboard renders as "pipeline bug, not
-    /// your input" even when the true cause was the operator's own missing
-    /// Hub credentials.
+    /// into `Validation`, which the dashboard then labelled a pipeline bug,
+    /// even when the true cause was the operator's own missing Hub
+    /// credentials.
     #[test]
     fn model_access_denied_protocol_failure_never_becomes_validation() {
         let error = SpeakerResultParseError::Protocol {

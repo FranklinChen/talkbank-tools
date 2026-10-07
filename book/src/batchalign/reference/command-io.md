@@ -98,8 +98,10 @@ CHAT transcripts by running forced alignment against the corresponding audio.
 timestamps. Utterance-level bullet times (`\x15start_end\x15`) updated.
 `, unlinked` is removed from `@Media:` once the file carries timing; align
 never writes a `@Media:` header that was not there. Existing `%mor`, `%gra` tiers preserved. An
-utterance marked `[+ diary]` is not speech in the recording: it gets no bullet
-and no word timing, and is reported untimed with the cause `not_in_recording`
+utterance marked `[+ diary]` is not speech in the recording: it gets no word
+timing, and no bullet unless `--main-bullets keep` or `exact` keeps its given
+one, and it is listed as an exclusion (`not_in_recording`), which is
+information and never makes the file diagnosed
 (see [Utterances not in the recording](forced-alignment.md#utterances-not-in-the-recording)). Media
 file is read but never modified.
 

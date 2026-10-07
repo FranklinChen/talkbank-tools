@@ -329,6 +329,7 @@ mod tests {
             .get_mut("eng.cha")
             .expect("english status");
         eng.phase = crate::store::FilePhase::Done {
+            exclusions: Vec::new(),
             started_at: None,
             finished_at: Some(crate::unix_time(10.0)),
         };

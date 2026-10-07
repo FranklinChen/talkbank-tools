@@ -82,9 +82,15 @@ source: `RequiredFaTiming::admit` returns `FaCompletion::Complete` when every
 required word retains a positive interval, or `FaCompletion::Partial` with an
 `UntimedAccount` naming each utterance with untimed words, the words, and the
 cause (`WindowRefused`, carrying the refused window grouping recorded;
-`NotPlaced`, a run grouping could place in no request; `NotInRecording`, an
-utterance the transcript marks as not speech in the recording, such as
-`[+ diary]`; or `NoUsableTiming`). It observes written `%wor` when present and the typed
+`NotPlaced`, a run grouping could place in no request; or `NoUsableTiming`).
+Both carry a second, separate account: the `ExclusionAccount` of every
+utterance the transcript marks as not speech in the recording (`[+ diary]`),
+made after admission checked that the output gave none of them timing (a
+preserved source, which is not aligned, has none). A word of such an utterance is not a
+required word, so it can never appear in the untimed account: the ruling of
+2026-10-07 is that an intentional exclusion must not count against a file,
+and the two accounts being different types is what keeps a note from ever
+diagnosing one. It observes written `%wor` when present and the typed
 main-word timing surface for a no-`%wor` projection; retained `%wor` does not
 depend on a caller refreshing a second representation. `AdmittedFaResult`
 keeps the completion payload alongside Chatter's immutable output admission.
@@ -94,11 +100,16 @@ Declined alignment instead retains the separately admitted unchanged source,
 as described below.
 
 A partial result is written, never discarded: measured timing is kept, untimed
-words stay in the transcript without bullets, and `AdmittedFaResult::shortfalls`
+words stay in the transcript without bullets, and `AdmittedFaEvidence::shortfalls`
 derives one `timing_incomplete` shortfall from the account (totals plus the
 first 20 utterances), so the file is reported `diagnosed` (CLI exit code 7),
 never clean. The complete account is logged once. A document in which no word
-could be timed is written and diagnosed the same way.
+could be timed is written and diagnosed the same way. The exclusion account
+leaves on its own channel: `AdmittedFaResult::into_document` returns an
+`AlignedOutput { document, shortfalls, exclusions }`, `ChatOutput` carries the
+exclusions beside the shortfalls, and the writer reports them on both
+`WrittenOutput` arms without asking `OutputReport::of`, which decides clean
+versus diagnosed from findings and shortfalls alone.
 `AlignmentCompletionFailure::SourceChanged` (the aligned document's words no
 longer match the source) remains an internal producer fault (HTTP 500) that
 refuses the file, and so does `OffRecordUtteranceTimed`: an utterance not in
@@ -157,7 +168,19 @@ It cannot authorize unchanged output, and headers are not edited to excuse it.
 A source with linked `@Media` and no timing at all, the state before a first
 alignment, is admitted the same way: Chatter's timing-regeneration validation
 runs every rule and returns E544 as the pending obligation, under the origin
-`NeverTimed`, so its messages speak of alignment rather than regeneration. A
+`NeverTimed`, so its messages speak of alignment rather than regeneration.
+A third origin is established by align itself, not by Chatter:
+`OffRecordTimingOnly`, a linked source whose only timing was on utterances
+not in the recording. Chatter admits it as timed, but input admission removes
+the notes' timing from the working document (`strip_off_record_timing`), and
+when nothing is left and no note keeps a bullet the output will carry
+(`MainBulletAuthority::restores_off_record_bullet`; `derive` keeps none),
+`off_record_timing_only` records the same obligation against the admitted
+`@Media` declaration's span (`AlignableMedia` carries it). Its messages name
+the note and the remedy (`OffRecordTiming::BulletNotKept` adds
+`--main-bullets keep`; `WordTimingOnly` does not). `OutstandingTiming` holds
+the declaration's span and the origin, so both kinds share
+`require_output_timing` and `admit_grouping`. A
 `NoAlign` or dummy file keeps its E544 refusal, since align would write it back
 unchanged. Admission also decides the `@Media` declaration of every actively
 aligned source (`AlignableMedia`): absent, `missing` or `notrans` is refused as

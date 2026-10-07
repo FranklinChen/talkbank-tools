@@ -572,6 +572,20 @@ impl MainBulletAuthority {
         })
     }
 
+    /// Whether any utterance not in the recording will carry a bullet in the
+    /// output: one the input gave it, under a policy that keeps given
+    /// bullets. Such a bullet is timing the output carries whatever
+    /// alignment finds.
+    pub(crate) fn restores_off_record_bullet(&self) -> bool {
+        match self {
+            Self::DeriveFromWords => false,
+            Self::Keep(given) => given
+                .by_utterance
+                .iter()
+                .any(|slot| matches!(slot, Given::OffRecord(Some(_)))),
+        }
+    }
+
     /// Check, after every phase has run, that each kept bullet is exactly the
     /// given one and that the output has exactly the input's utterances.
     pub(super) fn verify_held(

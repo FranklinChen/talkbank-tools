@@ -203,6 +203,25 @@ impl<'a> FileRunTracker<'a> {
             filename: result_filename,
             content_type,
             stamp,
+            exclusions: Vec::new(),
+        }))
+        .await;
+    }
+
+    /// Mark the file as done: its output passed admission with nothing
+    /// requested missing, and is listed with what its producer left out on
+    /// purpose (information, never a reason to diagnose it).
+    pub(crate) async fn complete_clean(
+        &self,
+        result_filename: DisplayPath,
+        content_type: ContentType,
+        exclusions: Vec<crate::api::OutputExclusionRecord>,
+    ) {
+        self.complete(FileCompletion::Clean(CompletedFileOutput {
+            filename: result_filename,
+            content_type,
+            stamp: crate::api::FileStampOutcome::Unrecorded,
+            exclusions,
         }))
         .await;
     }
@@ -216,12 +235,14 @@ impl<'a> FileRunTracker<'a> {
         result_filename: DisplayPath,
         content_type: ContentType,
         diagnostics: crate::api::FileOutputDiagnostics,
+        exclusions: Vec<crate::api::OutputExclusionRecord>,
     ) {
         self.complete(FileCompletion::Diagnosed {
             result: CompletedFileOutput {
                 filename: result_filename,
                 content_type,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
+                exclusions,
             },
             diagnostics,
         })

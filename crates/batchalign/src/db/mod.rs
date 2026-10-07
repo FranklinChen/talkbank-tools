@@ -273,6 +273,7 @@ mod tests {
             "job1",
             "a.cha",
             &crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: Some(crate::unix_time(1700000001.0)),
                 finished_at: Some(crate::unix_time(1700000005.0)),
             },
@@ -284,6 +285,63 @@ mod tests {
         let jobs = db.load_all_jobs().await.unwrap();
         assert_eq!(jobs[0].file_statuses[0].status, "done");
         assert_eq!(jobs[0].file_statuses[0].content_type, "chat");
+    }
+
+    /// A written file's exclusions survive the database: written as their
+    /// own column by the one phase writer and read back, through the
+    /// recovery boundary, into exactly the phase that was written. A phase
+    /// without any writes NULL, so a later failure leaves none behind.
+    #[tokio::test]
+    async fn a_done_files_exclusions_round_trip_through_their_column() {
+        use crate::api::{ExcludedUtteranceRecord, OffRecordPostcode, OutputExclusionRecord};
+        use crate::store::{FileFailure, FilePhase};
+
+        let (db, _dir) = test_db().await;
+        let mut record = make_job_record(
+            "job1",
+            "align",
+            align_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        );
+        record.status = crate::api::JobStatus::Running;
+        db.insert_job(&record).await.unwrap();
+
+        let done = FilePhase::Done {
+            started_at: Some(crate::unix_time(1.0)),
+            finished_at: Some(crate::unix_time(2.0)),
+            exclusions: vec![OutputExclusionRecord::NotInRecording {
+                excluded_utterances: 1,
+                excluded_words: 4,
+                first_excluded: vec![ExcludedUtteranceRecord {
+                    utterance: 2,
+                    words: 4,
+                    postcode: OffRecordPostcode::Diary,
+                }],
+            }],
+        };
+        db.update_file_status("job1", "a.cha", &done, Some("chat"))
+            .await
+            .unwrap();
+        let rows = db.load_file_status_rows("job1").await.unwrap();
+        assert!(rows[0].exclusions.is_some(), "the column holds them");
+        let crate::store::queries::RecoveredFilePhase::Exact(read) =
+            crate::store::queries::recover_file_phase("job1", &rows[0])
+        else {
+            panic!("a row this build wrote reads back exactly");
+        };
+        assert_eq!(read, done);
+
+        let failed = FilePhase::Error {
+            started_at: Some(crate::unix_time(3.0)),
+            finished_at: Some(crate::unix_time(4.0)),
+            failure: FileFailure::recorded("refused".into(), FailureCategory::Validation),
+        };
+        db.update_file_status("job1", "a.cha", &failed, None)
+            .await
+            .unwrap();
+        let rows = db.load_file_status_rows("job1").await.unwrap();
+        assert_eq!(rows[0].exclusions, None, "an error owns no exclusions");
     }
 
     /// A file that failed and then succeeded is stored `done` with no error.
@@ -316,6 +374,7 @@ mod tests {
             .await
             .unwrap();
         let done = FilePhase::Done {
+            exclusions: Vec::new(),
             started_at: Some(crate::unix_time(4.0)),
             finished_at: Some(crate::unix_time(5.0)),
         };
@@ -330,6 +389,7 @@ mod tests {
         assert_eq!(row.error_category, None);
         assert_eq!(row.next_eligible_at, None);
         let (phase, dropped) = FilePhase::from_row(crate::store::FilePhaseColumns {
+            exclusions: None,
             status: crate::api::FileStatusKind::Done,
             error: row.error.as_deref(),
             error_category: None,

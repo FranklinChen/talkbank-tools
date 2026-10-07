@@ -5,14 +5,20 @@
 //! has a positive interval. Partial: some do not, and the result carries a
 //! typed account of each utterance with untimed words, which words, and why
 //! (its audio window was refused, so no request was made; or a request was
-//! made and produced no usable interval; or the transcript marks it as not in
-//! the recording, as `[+ diary]` does). A partial result is still written:
+//! made and produced no usable interval). A partial result is still written:
 //! the timing that was measured is kept, the untimed words stay in the
 //! transcript without bullets, and the file is reported diagnosed with the
 //! account as a shortfall. Nothing here can certify a partial result as
-//! complete, and a changed lexical structure is still an internal failure,
-//! as is any timing on an utterance not in the recording that the input did
-//! not give it under a policy keeping given bullets.
+//! complete, and a changed lexical structure is still an internal failure.
+//!
+//! An utterance the transcript marks as not in the recording (`[+ diary]`)
+//! owes no timing at all, so its words are not required words and it is
+//! never in the untimed account. Whatever the result's state, it carries the
+//! separate [`ExclusionAccount`] of every such utterance, which
+//! is reported as information and does not diagnose the file (ruling of
+//! 2026-10-07: an intentional exclusion must not count against a file). Any
+//! timing on one that the input did not give it, under a policy keeping
+//! given bullets, is an internal failure.
 
 use crate::api::OffRecordPostcode;
 use crate::chat_ops::fa::RecordingPresence;
@@ -70,7 +76,11 @@ impl BulletExtent {
 
 /// Owns the exact result whose source correspondence and timing are complete.
 /// No mutable result or independent completion flag can leave this owner.
-pub(super) struct CompleteFaResult(FaResult);
+pub(super) struct CompleteFaResult {
+    result: FaResult,
+    /// The utterances left out on purpose; `None` when there is none.
+    exclusions: Option<ExclusionAccount>,
+}
 
 /// The result whose source correspondence holds but whose timing does not
 /// cover every required word, with the account of what is missing. Built
@@ -79,6 +89,8 @@ pub(super) struct CompleteFaResult(FaResult);
 pub(super) struct PartialFaResult {
     result: FaResult,
     account: UntimedAccount,
+    /// The utterances left out on purpose; `None` when there is none.
+    exclusions: Option<ExclusionAccount>,
 }
 
 /// What final output admission established about the source's timing
@@ -94,7 +106,8 @@ pub(super) enum FaCompletion {
 /// empty: the first is a field of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UntimedAccount {
-    /// Required lexical words in the whole file.
+    /// Required lexical words in the whole file: every word of an utterance
+    /// in the recording. A word of an excluded utterance is not required.
     required_words: usize,
     first: UntimedUtterance,
     rest: Vec<UntimedUtterance>,
@@ -124,9 +137,68 @@ pub(crate) enum UntimedCause {
     /// for these words: the aligner returned none, or the words could not be
     /// sent to it.
     NoUsableTiming,
-    /// The transcript marks it as not speech in the recording; alignment
-    /// never looked for it.
-    NotInRecording(OffRecordPostcode),
+}
+
+/// Every utterance alignment left out because the transcript marks it as not
+/// in the recording, in transcript order, never empty: the first is a field
+/// of its own. Built only by [`RequiredFaTiming::admit`], after it checked
+/// that the output gave none of them timing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExclusionAccount {
+    first: ExcludedUtterance,
+    rest: Vec<ExcludedUtterance>,
+}
+
+/// One utterance left out of alignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExcludedUtterance {
+    utterance: UtteranceIdx,
+    /// Its lexical words, none owed timing.
+    words: usize,
+    postcode: OffRecordPostcode,
+}
+
+impl ExclusionAccount {
+    fn utterances(&self) -> impl Iterator<Item = &ExcludedUtterance> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    /// The bounded record of this account: the totals and the first
+    /// utterances. The complete account is logged once by the caller.
+    pub(crate) fn record(&self) -> crate::api::OutputExclusionRecord {
+        crate::api::OutputExclusionRecord::NotInRecording {
+            excluded_utterances: (1 + self.rest.len()) as u64,
+            excluded_words: self
+                .utterances()
+                .map(|utterance| utterance.words as u64)
+                .sum(),
+            first_excluded: self
+                .utterances()
+                .take(crate::api::FileOutputDiagnostics::FIRST_FINDINGS)
+                .map(|excluded| crate::api::ExcludedUtteranceRecord {
+                    utterance: excluded.utterance.raw() as u64 + 1,
+                    words: excluded.words as u64,
+                    postcode: excluded.postcode,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for ExclusionAccount {
+    /// Every utterance, for the one full log line.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not in the recording:")?;
+        for excluded in self.utterances() {
+            write!(
+                f,
+                " utterance {} {}",
+                excluded.utterance.raw() + 1,
+                excluded.postcode
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl UntimedAccount {
@@ -172,11 +244,6 @@ impl UntimedUtterance {
                 }
                 UntimedCause::NotPlaced => crate::api::UntimedCauseRecord::NotPlaced,
                 UntimedCause::NoUsableTiming => crate::api::UntimedCauseRecord::NoUsableTiming,
-                UntimedCause::NotInRecording(postcode) => {
-                    crate::api::UntimedCauseRecord::NotInRecording {
-                        postcode: *postcode,
-                    }
-                }
             },
         }
     }
@@ -200,9 +267,6 @@ impl std::fmt::Display for UntimedAccount {
                 UntimedCause::WindowRefused(_) => f.write_str(" (window refused)")?,
                 UntimedCause::NotPlaced => f.write_str(" (not placed)")?,
                 UntimedCause::NoUsableTiming => f.write_str(" (no usable timing)")?,
-                UntimedCause::NotInRecording(postcode) => {
-                    write!(f, " (not in the recording: {postcode})")?;
-                }
             }
         }
         Ok(())
@@ -213,6 +277,12 @@ impl PartialFaResult {
     /// What is untimed, and why.
     pub(super) fn account(&self) -> &UntimedAccount {
         &self.account
+    }
+
+    /// The utterances left out on purpose, checked untimed by the same
+    /// admission that measured the result.
+    pub(super) fn exclusions(&self) -> Option<&ExclusionAccount> {
+        self.exclusions.as_ref()
     }
 
     pub(super) fn into_timeline_trace(self) -> crate::types::traces::FaTimelineTrace {
@@ -251,8 +321,14 @@ fn word_coverage(utterance: &Utterance) -> Vec<WordTimingCoverage> {
 }
 
 impl CompleteFaResult {
+    /// The utterances left out on purpose, checked untimed by the same
+    /// admission that measured the result.
+    pub(super) fn exclusions(&self) -> Option<&ExclusionAccount> {
+        self.exclusions.as_ref()
+    }
+
     pub(super) fn into_timeline_trace(self) -> crate::types::traces::FaTimelineTrace {
-        self.0.into_timeline_trace()
+        self.result.into_timeline_trace()
     }
 }
 
@@ -318,8 +394,10 @@ impl RequiredFaTiming {
     /// Measure `result` against the source's obligations.
     ///
     /// A changed lexical structure is an internal failure (the aligner may
-    /// change timing, never words). Otherwise the result is complete, or
-    /// partial with the account of every untimed word; both are written.
+    /// change timing, never words), and so is timing on an utterance not in
+    /// the recording. Otherwise the result is complete, or partial with the
+    /// account of every untimed word owed timing; both are written, with
+    /// the account of the utterances left out on purpose beside them.
     pub(super) fn admit(&self, result: FaResult) -> Result<FaCompletion, ServerError> {
         // Why an utterance is untimed is decided by grouping, which records a
         // refused window, or a run it could not place, as a decision on the
@@ -351,6 +429,7 @@ impl RequiredFaTiming {
             });
         let mut required_words = 0;
         let mut untimed = Vec::new();
+        let mut excluded = Vec::new();
         for (ordinal, expected) in self.0.iter().enumerate() {
             let index = UtteranceIdx::new(ordinal);
             let Some((line, utterance)) = utterances.next() else {
@@ -363,18 +442,27 @@ impl RequiredFaTiming {
             if timings.len() != expected.words.len() {
                 return Err(AlignmentCompletionFailure::SourceChanged { utterance: index }.into());
             }
-            required_words += expected.words.len();
             let missing: Vec<WordIdx> = timings
                 .iter()
                 .enumerate()
                 .filter(|(_, timing)| matches!(timing, WordTimingCoverage::Missing))
                 .map(|(word, _)| WordIdx::new(word))
                 .collect();
-            let cause = match &expected.presence {
-                ObligedPresence::InRecording => causes
-                    .get(&line)
-                    .cloned()
-                    .unwrap_or(UntimedCause::NoUsableTiming),
+            match &expected.presence {
+                ObligedPresence::InRecording => {
+                    required_words += expected.words.len();
+                    if !missing.is_empty() {
+                        untimed.push(UntimedUtterance {
+                            utterance: index,
+                            words: expected.words.len(),
+                            untimed: missing,
+                            cause: causes
+                                .get(&line)
+                                .cloned()
+                                .unwrap_or(UntimedCause::NoUsableTiming),
+                        });
+                    }
+                }
                 ObligedPresence::NotInRecording {
                     postcode,
                     permitted_bullet,
@@ -389,16 +477,12 @@ impl RequiredFaTiming {
                         }
                         .into());
                     }
-                    UntimedCause::NotInRecording(*postcode)
+                    excluded.push(ExcludedUtterance {
+                        utterance: index,
+                        words: expected.words.len(),
+                        postcode: *postcode,
+                    });
                 }
-            };
-            if !missing.is_empty() {
-                untimed.push(UntimedUtterance {
-                    utterance: index,
-                    words: expected.words.len(),
-                    untimed: missing,
-                    cause,
-                });
             }
         }
         if utterances.next().is_some() {
@@ -407,9 +491,14 @@ impl RequiredFaTiming {
             }
             .into());
         }
+        let mut excluded = excluded.into_iter();
+        let exclusions = excluded.next().map(|first| ExclusionAccount {
+            first,
+            rest: excluded.collect(),
+        });
         let mut untimed = untimed.into_iter();
         Ok(match untimed.next() {
-            None => FaCompletion::Complete(CompleteFaResult(result)),
+            None => FaCompletion::Complete(CompleteFaResult { result, exclusions }),
             Some(first) => FaCompletion::Partial(PartialFaResult {
                 result,
                 account: UntimedAccount {
@@ -417,6 +506,7 @@ impl RequiredFaTiming {
                     first,
                     rest: untimed.collect(),
                 },
+                exclusions,
             }),
         })
     }
@@ -502,7 +592,7 @@ mod tests {
         let admitted = admission
             .finish(result(file))
             .expect("partial timing is written, not refused");
-        let (_document, shortfalls) = admitted.into_document();
+        let shortfalls = admitted.into_document().shortfalls;
         insta::assert_json_snapshot!(shortfalls, @r#"
         [
           {
@@ -534,7 +624,7 @@ mod tests {
         let admitted = admission
             .finish(result(file))
             .expect("untimed output is written, not refused");
-        let (_document, shortfalls) = admitted.into_document();
+        let shortfalls = admitted.into_document().shortfalls;
         let [
             crate::api::OutputShortfallRecord::TimingIncomplete {
                 required_words: 2,
@@ -556,8 +646,9 @@ mod tests {
         let admitted = admission
             .finish(result(file))
             .expect("complete timing admission");
-        let (_document, shortfalls, _timeline) = admitted.into_document_and_timeline();
-        assert!(shortfalls.is_empty(), "complete timing is clean");
+        let (output, _timeline) = admitted.into_document_and_timeline();
+        assert!(output.shortfalls.is_empty(), "complete timing is clean");
+        assert!(output.exclusions.is_empty(), "and nothing was left out");
     }
 
     #[test]
@@ -593,7 +684,7 @@ mod tests {
                 .finish(result(file))
                 .expect("complete")
                 .into_document()
-                .1
+                .shortfalls
                 .is_empty()
         );
     }
@@ -632,40 +723,82 @@ mod tests {
             .expect("the diary note is the second utterance")
     }
 
-    /// A `[+ diary]` note is written untimed and reported with its cause,
-    /// never dropped from the account. Its words count among the file's, and
-    /// the spoken utterance's timing is unaffected.
+    /// A `[+ diary]` note is written untimed and listed as an exclusion,
+    /// never as a shortfall (ruling of 2026-10-07: an intentional exclusion
+    /// must not count against a file). With all speech timed, the file is
+    /// clean: no shortfall, and the note in the separate exclusion channel.
     #[test]
-    fn a_diary_note_is_reported_untimed_because_it_is_not_in_the_recording() {
+    fn a_diary_note_is_an_exclusion_and_does_not_diagnose_the_file() {
         let (mut file, admission) =
             attempt_with_diary("", crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY);
         assert_eq!(time_words(&mut file, false), 3);
-        let (_document, shortfalls) = admission
+        let crate::fa::AlignedOutput {
+            document,
+            shortfalls,
+            exclusions,
+        } = admission
             .finish(result(file))
             .expect("the note is written untimed")
             .into_document();
-        insta::assert_json_snapshot!(shortfalls, @r#"
+        assert!(shortfalls.is_empty(), "{shortfalls:?}");
+        assert_eq!(
+            crate::pipeline::post_validate::OutputReport::of(&document.into(), &shortfalls),
+            crate::pipeline::post_validate::OutputReport::Clean,
+            "a file whose only untimed utterance is a note is clean"
+        );
+        insta::assert_json_snapshot!(exclusions, @r#"
         [
           {
-            "kind": "timing_incomplete",
-            "required_words": 7,
-            "untimed_words": 4,
-            "untimed_utterances": 1,
-            "first_untimed": [
+            "kind": "not_in_recording",
+            "excluded_utterances": 1,
+            "excluded_words": 4,
+            "first_excluded": [
               {
                 "utterance": 2,
                 "words": 4,
-                "untimed_words": 4,
-                "cause": {
-                  "kind": "not_in_recording",
-                  "postcode": "diary"
-                }
+                "postcode": "diary"
               }
             ]
           }
         ]
         "#);
-        insta::assert_snapshot!(shortfalls[0].to_string(), @"timing incomplete: 4 of 7 words in 1 utterance(s) have no timing and were written without it (first: utterance 2, 4 of 4 words, not in the recording: [+ diary])");
+        insta::assert_snapshot!(exclusions[0].to_string(), @"left out of alignment by design: 1 utterance(s) (4 words) marked as not in the recording were not looked for in it (first: utterance 2, [+ diary])");
+    }
+
+    /// Untimed speech beside a note: the speech is the shortfall, counted
+    /// over the words owed timing only, and the note is still an exclusion,
+    /// not a cause in the untimed account.
+    #[test]
+    fn untimed_speech_beside_a_note_is_a_shortfall_that_does_not_count_the_note() {
+        let (file, admission) =
+            attempt_with_diary("", crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY);
+        let crate::fa::AlignedOutput {
+            shortfalls,
+            exclusions,
+            ..
+        } = admission
+            .finish(result(file))
+            .expect("untimed speech is written with its account")
+            .into_document();
+        let [
+            crate::api::OutputShortfallRecord::TimingIncomplete {
+                required_words: 3,
+                untimed_words: 3,
+                untimed_utterances: 1,
+                first_untimed,
+            },
+        ] = shortfalls.as_slice()
+        else {
+            panic!("expected the speech's shortfall alone, got {shortfalls:?}");
+        };
+        assert_eq!(first_untimed[0].utterance, 1);
+        assert!(matches!(
+            exclusions.as_slice(),
+            [crate::api::OutputExclusionRecord::NotInRecording {
+                excluded_utterances: 1,
+                ..
+            }]
+        ));
     }
 
     /// The input's bullet on a diary note: admission removes it from the
@@ -802,7 +935,7 @@ mod tests {
                 .finish(result(file))
                 .expect("nothing to time")
                 .into_document()
-                .1
+                .shortfalls
                 .is_empty()
         );
     }

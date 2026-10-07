@@ -387,6 +387,7 @@ impl MediaAnalysisAttempt<'_, '_> {
                         return Ok(FileOutput::Chat(ChatOutput {
                             document: document.into(),
                             shortfalls: Vec::new(),
+                            exclusions: Vec::new(),
                             merge_abbreviations: MergeAbbreviations::Leave,
                         }));
                     }
@@ -427,6 +428,7 @@ impl MediaAnalysisAttempt<'_, '_> {
                     return Ok(FileOutput::Chat(ChatOutput {
                         document: document.into(),
                         shortfalls: Vec::new(),
+                        exclusions: Vec::new(),
                         merge_abbreviations: MergeAbbreviations::Leave,
                     }));
                 }

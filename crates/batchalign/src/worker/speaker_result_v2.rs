@@ -22,9 +22,9 @@ use batchalign_types::interval::AdmittedInterval;
 /// validation error. Without this, `infer_speaker` in `transcribe/infer.rs`
 /// had no way to tell "the worker's response was shaped wrong" apart from
 /// "the worker told us it could not download a gated Hugging Face model",
-/// and reported both as `ServerError::Validation`, which the dashboard
-/// renders as "pipeline bug, filed automatically" even when the true cause
-/// is a configuration condition on the operator's own machine.
+/// and reported both as `ServerError::Validation`, which the dashboard then
+/// labelled a pipeline bug, even when the true cause is a configuration
+/// condition on the operator's own machine.
 #[derive(Debug, Clone)]
 pub enum SpeakerResultParseError {
     /// The worker's response itself reported failure; carries the protocol

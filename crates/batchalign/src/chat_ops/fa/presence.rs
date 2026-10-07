@@ -19,7 +19,7 @@
 //! | interpolation (`estimate_untimed_boundaries`) | takes no share of a gap |
 //! | grouping (`group_utterances`) | gets no window and no alignment request |
 //! | incremental reuse | is not given the prior file's `%wor` |
-//! | completion (`fa::completion`) | is reported untimed, cause `NotInRecording`; any timing on it is a producer fault |
+//! | completion (`fa::completion`) | owes no timing and is listed as an exclusion, never a shortfall, so it does not diagnose the file; any timing on it is a producer fault |
 //!
 //! What happens to a bullet the INPUT gave such an utterance is the main-bullet
 //! policy's, read through this rule: `derive` (the default) recomputes every
@@ -65,10 +65,12 @@ impl RecordingPresence {
 /// Called once, at alignment's input admission, on the working model, AFTER
 /// the main-bullet policy and the timing obligations were bound to the input
 /// as parsed. From here on no stage can read such an utterance's timing as an
-/// anchor, a window or reusable word timing. Returns how many given bullets
-/// were removed, for the log.
-pub(crate) fn strip_off_record_timing(chat_file: &mut ChatFile) -> usize {
-    let mut removed_bullets = 0;
+/// anchor, a window or reusable word timing. Returns what it removed.
+pub(crate) fn strip_off_record_timing(chat_file: &mut ChatFile) -> StrippedOffRecordTiming {
+    let mut stripped = StrippedOffRecordTiming {
+        bullets: 0,
+        timed_utterances: 0,
+    };
     for line in &mut chat_file.lines {
         let Line::Utterance(utterance) = line else {
             continue;
@@ -77,13 +79,56 @@ pub(crate) fn strip_off_record_timing(chat_file: &mut ChatFile) -> usize {
             RecordingPresence::InRecording => {}
             RecordingPresence::NotInRecording(_) => {
                 if utterance.main.content.bullet.is_some() {
-                    removed_bullets += 1;
+                    stripped.bullets += 1;
+                }
+                if carries_timing(utterance) {
+                    stripped.timed_utterances += 1;
                 }
                 super::orchestrate::strip_utterance_timing(utterance);
             }
         }
     }
-    removed_bullets
+    stripped
+}
+
+/// What [`strip_off_record_timing`] removed from the utterances not in the
+/// recording. Built only there, from what it saw before removing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StrippedOffRecordTiming {
+    /// Main-tier bullets removed.
+    bullets: usize,
+    /// Utterances that carried any timing (a bullet, or timed words on the
+    /// main tier or in `%wor`).
+    timed_utterances: usize,
+}
+
+impl StrippedOffRecordTiming {
+    /// Main-tier bullets removed, for the log.
+    pub(crate) fn bullets(self) -> usize {
+        self.bullets
+    }
+
+    /// What kind of timing was removed, or `None` when there was none: the
+    /// one place the two counts are read together.
+    pub(crate) fn removed(self) -> Option<crate::error::OffRecordTiming> {
+        match (self.timed_utterances, self.bullets) {
+            (0, _) => None,
+            (_, 0) => Some(crate::error::OffRecordTiming::WordTimingOnly),
+            (_, _) => Some(crate::error::OffRecordTiming::BulletNotKept),
+        }
+    }
+}
+
+/// Whether an utterance carries any timing: a main-tier bullet, or a timed
+/// word on its main tier or in its `%wor`.
+fn carries_timing(utterance: &Utterance) -> bool {
+    utterance.main.content.bullet.is_some()
+        || utterance
+            .wor_tier()
+            .is_some_and(|tier| tier.words().any(|word| word.inline_bullet.is_some()))
+        || super::collect_existing_fa_word_timings(utterance)
+            .iter()
+            .any(Option::is_some)
 }
 
 #[cfg(test)]
@@ -141,7 +186,12 @@ mod tests {
             "*MOT:\tgo there . \u{15}100_900\u{15}\n%wor:\tgo \u{15}100_400\u{15} there \u{15}400_900\u{15} .\n\
              *MOT:\tbig day today . [+ diary] \u{15}1000_2000\u{15}\n%wor:\tbig \u{15}1000_1300\u{15} day \u{15}1300_1600\u{15} today \u{15}1600_2000\u{15} .\n",
         );
-        assert_eq!(strip_off_record_timing(&mut file), 1);
+        let stripped = strip_off_record_timing(&mut file);
+        assert_eq!(stripped.bullets(), 1);
+        assert_eq!(
+            stripped.removed(),
+            Some(crate::error::OffRecordTiming::BulletNotKept)
+        );
         let utterances: Vec<&Utterance> = file
             .lines
             .iter()

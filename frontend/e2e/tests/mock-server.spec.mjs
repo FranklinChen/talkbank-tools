@@ -71,19 +71,19 @@ function buildFailedJobFileStatuses() {
   files.push(
     makeFileStatus("gamma/sample-54.cha", "error", {
       error: "CHAT declaration is missing an @ID tier for speaker PAR.",
-      error_category: "input",
+      error_category: "parse_error",
     }),
     makeFileStatus("gamma/sample-55.cha", "error", {
       error: "CHAT declaration is missing an @ID tier for speaker PAR.",
-      error_category: "input",
+      error_category: "parse_error",
     }),
     makeFileStatus("gamma/sample-56.cha", "error", {
       error: "Referenced media file missing from media root.",
-      error_category: "media",
+      error_category: "input_missing",
     }),
     makeFileStatus("gamma/sample-57.cha", "error", {
       error: "Referenced media file missing from media root.",
-      error_category: "media",
+      error_category: "input_missing",
     }),
     makeFileStatus("gamma/sample-58.cha", "error", {
       error: "SQLite store returned a synthetic write failure while flushing the result bundle.",
@@ -91,7 +91,7 @@ function buildFailedJobFileStatuses() {
     }),
     makeFileStatus("gamma/sample-59.cha", "error", {
       error: "Morphosyntax worker exited unexpectedly after returning a malformed payload.",
-      error_category: "processing",
+      error_category: "worker_crash",
     })
   );
 
@@ -116,7 +116,7 @@ function makeJob(jobId, status, { completed, total, submittedAt, fileStatuses, e
             status === "failed"
               ? "synthetic failure while analyzing this file: tokenization and morphosyntax pipeline both reported inconsistent state for dashboard testing."
               : null,
-          error_category: status === "failed" ? "processing" : null,
+          error_category: status === "failed" ? "worker_crash" : null,
           progress_current: completed,
           progress_total: total,
         }
@@ -225,6 +225,18 @@ async function startHarness() {
         submittedAt: "2026-02-25T00:07:00Z",
         fileStatuses: [
           makeFileStatus("clean.cha", "done"),
+          // Clean, with a note align left out on purpose: the wire shape of
+          // `OutputExclusionRecord`, information beside a done file.
+          makeFileStatus("noted.cha", "done", {
+            exclusions: [
+              {
+                kind: "not_in_recording",
+                excluded_utterances: 2,
+                excluded_words: 9,
+                first_excluded: [{ utterance: 3, words: 5, postcode: "diary" }],
+              },
+            ],
+          }),
           makeFileStatus("noisy.cha", "diagnosed", {
             started_at: "2026-02-25T00:00:01.000Z",
             finished_at: "2026-02-25T00:00:02.000Z",
@@ -608,6 +620,10 @@ test("a file written with diagnostics renders as written output, not as an error
     ).toBeVisible();
     await expect(page.getByRole("tab", { name: /Diagnosed/ })).toBeVisible();
     await expect(page.getByRole("tab", { name: /Errors/ })).toBeDisabled();
+    // A done file's exclusions are listed as information, not as a fault.
+    await expect(
+      page.getByText("2 utterances not in the recording, left out of alignment by design").first(),
+    ).toBeVisible();
   } finally {
     await harness.close();
   }
@@ -813,11 +829,15 @@ test("dashboard groups errors, paginates files, and filters failed job details",
     await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
     await expect(page.getByText("18 files failed validation and processing checks.")).toBeVisible();
     await expect(page.getByText("18 errors")).toBeVisible();
+    // Labelled by each error's own category: a refused input is the
+    // input's to fix, never reported as a pipeline bug.
     await expect(
       page.getByText(
-        "This is a pipeline bug, not your input. The file's error below is the report; please pass it on."
+        "The input was refused before any output was written. Each file's error below names what to change in it."
       )
     ).toBeVisible();
+    await expect(page.getByText(/Input Refused \(12\)/)).toBeVisible();
+    await expect(page.getByText("This is a pipeline bug, not your input.")).toHaveCount(0);
 
     const validationGroup = page
       .locator("button")

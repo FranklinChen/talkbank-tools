@@ -299,6 +299,7 @@ mod tests {
             status: FileStatusKind::Processing,
             error: None,
             error_category: None,
+            exclusions: Vec::new(),
             diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: Some(crate::unix_time(1700000000.0)),
@@ -317,11 +318,48 @@ mod tests {
             !json.contains("diagnostics"),
             "a file without diagnostics does not mention them on the wire: {json}"
         );
+        assert!(
+            !json.contains("exclusions"),
+            "a file without exclusions does not mention them: the field is additive: {json}"
+        );
+
+        // A clean file with an exclusion: `done`, no diagnostics, and the
+        // exclusion in its own field. A client that predates the field reads
+        // the rest of the entry unchanged.
+        let clean = FileStatusEntry {
+            filename: "noted.cha".into(),
+            status: FileStatusKind::Done,
+            exclusions: vec![OutputExclusionRecord::NotInRecording {
+                excluded_utterances: 1,
+                excluded_words: 4,
+                first_excluded: vec![ExcludedUtteranceRecord {
+                    utterance: 2,
+                    words: 4,
+                    postcode: OffRecordPostcode::Diary,
+                }],
+            }],
+            ..entry.clone()
+        };
+        let json = serde_json::to_value(&clean).unwrap();
+        assert_eq!(json["status"], "done");
+        assert!(json.get("diagnostics").is_none(), "{json}");
+        assert_eq!(
+            json["exclusions"],
+            serde_json::json!([{
+                "kind": "not_in_recording",
+                "excluded_utterances": 1,
+                "excluded_words": 4,
+                "first_excluded": [{"utterance": 2, "words": 4, "postcode": "diary"}],
+            }])
+        );
+        let back: FileStatusEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(clean, back);
 
         // A diagnosed file: the status and its findings travel together, and
         // the wire shape is the one downstream clients read.
         let diagnosed = FileStatusEntry {
             status: FileStatusKind::Diagnosed,
+            exclusions: Vec::new(),
             diagnostics: Some(FileOutputDiagnostics::of_findings(
                 vec![FileOutputDiagnostics::coded_finding(
                     "E220",
@@ -464,6 +502,7 @@ mod tests {
                 status: FileStatusKind::Processing,
                 error: None,
                 error_category: None,
+                exclusions: Vec::new(),
                 diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: Some(crate::unix_time(1700000000.0)),

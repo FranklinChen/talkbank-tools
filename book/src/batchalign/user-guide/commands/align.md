@@ -19,10 +19,7 @@ CHAT. See the [command contract](../../architecture/command-contracts.md).
 
 Alignment aims to time every alignable lexical word. When some words cannot
 be timed (their audio window was refused, the audio left for them could not
-contain them, or the aligner gave no usable interval), or are not in the
-recording at all (an utterance marked `[+ diary]`, a written diary note, is
-never looked for in the audio and gets no bullet; see
-[Utterances not in the recording](../../reference/forced-alignment.md#utterances-not-in-the-recording)),
+contain them, or the aligner gave no usable interval),
 the file is still
 written: every measured timing is kept, the
 untimed words stay in the transcript without bullets, and the file is reported
@@ -32,6 +29,16 @@ cause. The CLI exits with code 7 when any file is diagnosed. This holds even
 when no word could be timed. Existing valid word timing counts as timing.
 Complete timing coverage is not a guarantee of acoustic accuracy; assumptions
 and review evidence remain visible.
+
+An utterance that is not in the recording at all is different: an utterance
+marked `[+ diary]`, a written diary note, is never looked for in the audio and
+gets no word timing, and no bullet unless `--main-bullets keep` or `exact`
+keeps the one it was given (see
+[Utterances not in the recording](../../reference/forced-alignment.md#utterances-not-in-the-recording)).
+That is align doing what the transcript asks, so it never counts against the
+file: the note is listed under the file as information ("left out of
+alignment by design: ..."), and a file whose only untimed utterances are notes
+is done, with exit code 0.
 
 When corrupt `%wor` was the only timing, regeneration must establish real
 timing before output can be written. A fallback window longer than the selected

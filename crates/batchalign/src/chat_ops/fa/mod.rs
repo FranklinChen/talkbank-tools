@@ -76,7 +76,7 @@ pub use self::postprocess::{
     postprocess_utterance_timings, postprocess_utterance_timings_with_boundary_policy,
 };
 pub use self::presence::RecordingPresence;
-pub(crate) use self::presence::strip_off_record_timing;
+pub(crate) use self::presence::{StrippedOffRecordTiming, strip_off_record_timing};
 #[cfg(test)]
 pub use self::repair::repair_bullets;
 pub use self::repair::{BulletRepairPolicy, RepairDecision, RepairResult, RepairStats};

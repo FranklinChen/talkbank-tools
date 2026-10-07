@@ -109,7 +109,7 @@ impl JobDB {
         job_id: &str,
     ) -> Result<Vec<FileStatusRow>, ServerError> {
         let fs_rows = sqlx::query(
-            "SELECT filename, status, error, error_category, diagnostics,
+            "SELECT filename, status, error, error_category, diagnostics, exclusions,
                     content_type, started_at, finished_at, next_eligible_at
              FROM file_statuses
              WHERE job_id = ?",
@@ -126,6 +126,7 @@ impl JobDB {
                 error: fs_row.try_get("error")?,
                 error_category: fs_row.try_get("error_category")?,
                 diagnostics: fs_row.try_get("diagnostics")?,
+                exclusions: fs_row.try_get("exclusions")?,
                 content_type: fs_row.try_get("content_type")?,
                 started_at: fs_row.try_get("started_at")?,
                 finished_at: fs_row.try_get("finished_at")?,

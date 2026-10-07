@@ -61,11 +61,15 @@ impl DirectProgressTracker {
 
             match entry.status {
                 FileStatusKind::Done => {
-                    progress.log_done(entry.filename.as_ref());
+                    progress.log_done(entry.filename.as_ref(), &entry.exclusions);
                     self.seen_terminal_files.insert(filename);
                 }
                 FileStatusKind::Diagnosed => {
-                    progress.log_diagnosed(entry.filename.as_ref(), entry.diagnostics.as_ref());
+                    progress.log_diagnosed(
+                        entry.filename.as_ref(),
+                        entry.diagnostics.as_ref(),
+                        &entry.exclusions,
+                    );
                     self.seen_terminal_files.insert(filename);
                 }
                 FileStatusKind::Error => {
@@ -176,9 +180,13 @@ pub(super) async fn poll_and_write_incrementally(
                                 Ok(true) => {
                                     written_count += 1;
                                     if entry.status == FileStatusKind::Diagnosed {
-                                        progress.log_diagnosed(fn_, entry.diagnostics.as_ref());
+                                        progress.log_diagnosed(
+                                            fn_,
+                                            entry.diagnostics.as_ref(),
+                                            &entry.exclusions,
+                                        );
                                     } else {
-                                        progress.log_done(fn_);
+                                        progress.log_done(fn_, &entry.exclusions);
                                     }
                                 }
                                 Ok(false) => {
@@ -683,6 +691,22 @@ pub(super) fn cancelled_receipt_from(
     })
 }
 
+/// List what clean (`done`) files' producers left out on purpose, as
+/// information under the summary: an exclusion never makes a file diagnosed,
+/// so it would otherwise be reported only in the per-file progress lines,
+/// which the TUI does not print.
+fn print_done_exclusions(file_statuses: &[FileStatusEntry]) {
+    for entry in file_statuses
+        .iter()
+        .filter(|entry| entry.status == FileStatusKind::Done && !entry.exclusions.is_empty())
+    {
+        eprintln!("  \u{2713} {}:", entry.filename);
+        for exclusion in &entry.exclusions {
+            eprintln!("    {exclusion}");
+        }
+    }
+}
+
 /// Print a structured failure summary.
 pub(super) fn print_failure_summary(
     file_statuses: &[FileStatusEntry],
@@ -699,6 +723,7 @@ pub(super) fn print_failure_summary(
             "\nAll done! {total_files} file(s) written to {}",
             out_dir.display()
         );
+        print_done_exclusions(file_statuses);
         return;
     }
 
@@ -721,7 +746,12 @@ pub(super) fn print_failure_summary(
                 eprintln!("    {line}");
             }
         }
+        // Information, beside the diagnostics: what was left out on purpose.
+        for exclusion in &entry.exclusions {
+            eprintln!("    {exclusion}");
+        }
     }
+    print_done_exclusions(file_statuses);
 
     for error in errors {
         let filename = error.filename.as_ref();
@@ -825,6 +855,7 @@ mod tests {
                 status: FileStatusKind::Error,
                 error: Some("worker failed".into()),
                 error_category: None,
+                exclusions: Vec::new(),
                 diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
@@ -867,7 +898,7 @@ mod tests {
             self.updates.lock().expect("updates lock").push(done);
         }
 
-        fn log_done(&self, filename: &str) {
+        fn log_done(&self, filename: &str, _exclusions: &[crate::api::OutputExclusionRecord]) {
             self.done
                 .lock()
                 .expect("done lock")
@@ -885,6 +916,7 @@ mod tests {
             &self,
             filename: &str,
             _diagnostics: Option<&crate::api::FileOutputDiagnostics>,
+            _exclusions: &[crate::api::OutputExclusionRecord],
         ) {
             self.diagnosed
                 .lock()
@@ -906,6 +938,7 @@ mod tests {
             status,
             error: None,
             error_category: None,
+            exclusions: Vec::new(),
             diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
@@ -1295,6 +1328,7 @@ mod tests {
             status: FileStatusKind::Processing,
             error: None,
             error_category: None,
+            exclusions: Vec::new(),
             diagnostics: None,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: None,
@@ -1316,6 +1350,7 @@ mod tests {
                 status: FileStatusKind::Done,
                 error: None,
                 error_category: None,
+                exclusions: Vec::new(),
                 diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,
@@ -1332,6 +1367,7 @@ mod tests {
                 status: FileStatusKind::Error,
                 error: Some("decoder failed".into()),
                 error_category: None,
+                exclusions: Vec::new(),
                 diagnostics: None,
                 stamp: crate::api::FileStampOutcome::Unrecorded,
                 started_at: None,

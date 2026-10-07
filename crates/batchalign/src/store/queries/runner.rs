@@ -40,6 +40,7 @@ mod tests {
         );
         if let Some(status) = job.execution.file_statuses.get_mut("a.cha") {
             status.phase = crate::store::FilePhase::Done {
+                exclusions: Vec::new(),
                 started_at: None,
                 finished_at: Some(crate::unix_time(5.0)),
             };

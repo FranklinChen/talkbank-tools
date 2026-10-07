@@ -6,8 +6,9 @@ the artifact's repository requires accepting license terms, the operator has
 no Hub token, the token lacks access, or the Hub is unreachable and no cached
 copy exists. Left unclassified, that failure surfaces at the worker boundary
 as an undifferentiated runtime crash, which the server reports as a
-generic/validation-class failure and the dashboard renders as "pipeline bug"
-even though nothing about batchalign itself is broken.
+generic/validation-class failure, which the dashboard used to label a
+pipeline bug (it now labels validation "Input Refused"), even though neither
+batchalign nor the input is at fault.
 
 :func:`classify_huggingface_access_error` maps the specific
 ``huggingface_hub`` exception CLASSES raised for those cases (never their

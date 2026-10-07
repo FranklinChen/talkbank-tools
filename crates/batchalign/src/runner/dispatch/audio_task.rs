@@ -424,6 +424,7 @@ mod tests {
             Ok(FileOutput::Chat(ChatOutput {
                 document: output.into(),
                 shortfalls: Vec::new(),
+                exclusions: Vec::new(),
                 merge_abbreviations: MergeAbbreviations::Leave,
             }))
         }
@@ -574,6 +575,7 @@ mod tests {
             Ok(FileOutput::Chat(ChatOutput {
                 document: output,
                 shortfalls: Vec::new(),
+                exclusions: Vec::new(),
                 merge_abbreviations: MergeAbbreviations::Leave,
             }))
         }

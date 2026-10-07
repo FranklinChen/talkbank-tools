@@ -281,10 +281,11 @@ impl AudioFileTask for AlignAudioTask<'_> {
         // fresh serialization of the model beside it: that second
         // serialization is what made the L2-gated bytes and the written bytes
         // two different things.
-        // The shortfalls (untimed words make the file diagnosed) leave with
-        // the bytes, whichever way they leave.
-        let (document, shortfalls) = if retention.requires_timeline() {
-            let (document, shortfalls, timeline) = fa_result.into_document_and_timeline();
+        // The shortfalls (untimed words make the file diagnosed) and the
+        // exclusions (notes left out on purpose, which do not) leave with the
+        // bytes, whichever way they leave.
+        let aligned = if retention.requires_timeline() {
+            let (aligned, timeline) = fa_result.into_document_and_timeline();
             self.dumper
                 .dump_fa_evidence(&self.filename, &timeline)
                 .map_err(|error| {
@@ -306,10 +307,15 @@ impl AudioFileTask for AlignAudioTask<'_> {
                     .upsert_file(&self.job_id, self.file_index, file_traces)
                     .await;
             }
-            (document, shortfalls)
+            aligned
         } else {
             fa_result.into_document()
         };
+        let crate::fa::AlignedOutput {
+            document,
+            shortfalls,
+            exclusions,
+        } = aligned;
 
         // Asked BEFORE the bytes are, because asking is what materializes
         // them: `PostValidated::as_str` serializes the judged model the first
@@ -340,6 +346,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
         Ok(FileOutput::Chat(ChatOutput {
             document: document.into(),
             shortfalls,
+            exclusions,
             merge_abbreviations: self.output.merge_abbreviations,
         }))
     }

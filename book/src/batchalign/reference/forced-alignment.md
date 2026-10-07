@@ -80,12 +80,13 @@ and needs no `@Media`. Every other transcript is admitted or refused by its
 | `@Media: name, audio` (or `video`) | some | aligned |
 | `@Media: name, audio, unlinked` | none | aligned; `unlinked` is removed once the output carries timing, and kept if alignment produced none (the file is then written untimed and reported diagnosed) |
 | `@Media: name, audio` | none | aligned; the output must carry timing, because a linked header without timing is invalid CHAT (E544), so if alignment produces none the file is refused with a message saying so and nothing is written |
+| `@Media: name, audio` | only on `[+ diary]` notes | as the row above under `--main-bullets derive`: align never uses a note's timing and `derive` does not write its bullet, so the speech must gain timing, and if none is aligned the file is refused (`evidence_unavailable`) naming the note and the remedies (`--main-bullets keep`, a compatible UTR backend, or `, unlinked`); under `keep` and `exact` the note's given bullet is written as given, so nothing more is owed |
 | none | none | refused before any work: add `@Media: name, audio, unlinked` (or `video`) after the `@ID` headers |
 | `missing` type or status, or `notrans` | any | refused before any work, with the header change named |
 | `name, audio, unlinked` | some | refused by Chatter (E552): `unlinked` beside timing contradicts itself |
 
-A linked header with no timing under `--main-bullets exact` is refused before
-any work too: `exact` keeps untimed utterances untimed and runs no UTR, so the
+A linked header with no usable timing (none, or none but word timing on notes)
+under `--main-bullets exact` is refused before any work too: `exact` keeps untimed utterances untimed and runs no UTR, so the
 timing the header requires could never be written. Two `@Media` headers, or a
 media type or status CHAT does not define, are refused by Chatter's validation
 (E501, E535, E536) with its own message.
@@ -1581,11 +1582,16 @@ from the line's text, and is the one owner of the rule. For such an utterance:
 - Interpolation gives it no share of a gap, and grouping makes no alignment
   request for it, so its neighbours are placed exactly as if it were absent.
 - The incremental path (`--before`) does not copy a prior `%wor` onto it.
-- Completion reports it untimed with the cause `not_in_recording`
-  (`{"kind": "not_in_recording", "postcode": "diary"}`, shown as "not in the
-  recording: [+ diary]") in the `timing_incomplete` shortfall, never dropped
-  from the account. Like every untimed cause, it makes the file `diagnosed`
-  (exit 7), even when every spoken word is timed.
+- Completion lists it as an exclusion, never as a shortfall: an intentional
+  exclusion does not count against the file (ruling of 2026-10-07). Its words
+  are not required words, so it is not in the `timing_incomplete` account,
+  and a file whose only untimed utterances are notes is clean (`done`, exit
+  0). The file's `exclusions` list carries
+  `{"kind": "not_in_recording", "excluded_utterances", "excluded_words",
+  "first_excluded"}`, each first entry `{utterance, words, postcode}` (at most
+  20), shown as "left out of alignment by design: ...". A file with untimed
+  speech beside a note is still `diagnosed` for the speech alone, and lists
+  the note as an exclusion beside its shortfall.
 
 A bullet the input gave such an utterance follows the main-bullet policy:
 `derive` (the default) recomputes each bullet from the utterance's aligned
@@ -1600,6 +1606,16 @@ one under `keep`/`exact` (any bullet under `derive`), is an internal fault
 conflicts with timing aligned around it refuses the file as
 `KeptOffRecordBulletConflict` (see the kept main bullets section); rerun with
 `--main-bullets derive`, or correct the bullet.
+
+A linked transcript whose only timing was on notes (the speech untimed, a note
+with a bullet) is CHAT-valid as input, since Chatter sees the note's timing,
+but align has no timing it can use. Admission records the obligation itself
+(`TimingObligationOrigin::OffRecordTimingOnly`) when no note keeps a bullet
+the output will carry: the speech must gain timing, and if none is aligned the
+file is refused as unavailable evidence, before inference when every window is
+refused, with a message that names the note and the remedies. It used to fail
+at the output gate with a generic E544 reported as an internal fault. See
+[What align accepts](#what-align-accepts).
 
 ## Engine Selection
 
