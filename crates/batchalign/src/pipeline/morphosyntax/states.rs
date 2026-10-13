@@ -455,7 +455,7 @@ impl<D: AnalysisScope> Analysis<Inferred, D> {
                 // in the items it wrote.
                 let (retokenization_traces, l2) = injection.into_parts();
                 let deferred = if options.l2.should_analyze() {
-                    l2.into_reported_positions()
+                    applied.secondary_positions(&self.chat, l2)
                 } else {
                     Vec::new()
                 };
@@ -507,7 +507,8 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
     pub(super) fn postcheck(
         mut self,
         options: &RunOptions<'_>,
-    ) -> Result<PostChecked<D::Judged>, ServerError> {
+    ) -> Result<PostChecked<crate::morphosyntax::report::MorphosyntaxOutput<D::Judged>>, ServerError>
+    {
         batchalign_transform::decisions::strip_decision_tiers(&mut self.chat);
         if let Some(count) = self.state.applied.repair_count() {
             // The file-level report no worker can make: a worker sees one
@@ -530,7 +531,12 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
         remove_empty_morphosyntax_placeholders(&mut self.chat);
 
         let output = self.scope.judge(self.chat)?;
-        Ok(PostChecked { output })
+        Ok(PostChecked {
+            output: crate::morphosyntax::report::MorphosyntaxOutput::new(
+                output,
+                self.state.applied.into_secondary(),
+            ),
+        })
     }
 }
 

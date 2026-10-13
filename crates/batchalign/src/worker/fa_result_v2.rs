@@ -169,6 +169,7 @@ mod tests {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-fa-v2-1"),
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
+                attention_capture: None,
                 tokens: vec![
                     WhisperTokenTimingV2 {
                         text: "hello".into(),

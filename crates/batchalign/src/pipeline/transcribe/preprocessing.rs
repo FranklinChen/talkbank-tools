@@ -48,12 +48,16 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
         ctx.asr_pipeline_snapshot.as_ref(),
     ) {
         let trace = crate::types::results::snapshot_into_pipeline_trace(snapshot.clone());
-        if let Ok(json) = serde_json::to_string_pretty(&trace) {
-            let _ = std::fs::write(&path, json);
-            tracing::warn!(
+        match write_pipeline_trace(Path::new(&path), &trace) {
+            Ok(()) => tracing::info!(
                 path = %path,
                 "BA3_DUMP_ASR_PIPELINE wrote per-stage AsrPipelineTrace JSON",
-            );
+            ),
+            Err(error) => tracing::warn!(
+                path = %path,
+                %error,
+                "BA3_DUMP_ASR_PIPELINE failed; continuing with transcription",
+            ),
         }
     }
 
@@ -62,6 +66,25 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
         utterances,
         speaker_assignments,
     }))
+}
+
+/// Diagnostic persistence is separate from admission of recognized speech.
+/// Only a successful filesystem write produces the success result.
+fn write_pipeline_trace(
+    path: &Path,
+    trace: &crate::traces::AsrPipelineTrace,
+) -> Result<(), PipelineTraceWriteError> {
+    let json = serde_json::to_vec_pretty(trace)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PipelineTraceWriteError {
+    #[error("could not encode ASR pipeline trace: {0}")]
+    Encode(#[from] serde_json::Error),
+    #[error("could not write ASR pipeline trace: {0}")]
+    Write(#[from] std::io::Error),
 }
 
 pub(crate) fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatchItem> {
@@ -380,4 +403,26 @@ pub(super) fn prepare_asr_chunks_with_snapshot(
         }
     }
     Ok(prepared)
+}
+
+#[cfg(test)]
+mod trace_write_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_write_preserves_schema_and_reports_filesystem_failure() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let trace =
+            crate::types::results::snapshot_into_pipeline_trace(AsrPipelineSnapshot::default());
+        // A directory is an unwritable file target even when tests run as root.
+        assert!(matches!(
+            write_pipeline_trace(dir.path(), &trace),
+            Err(PipelineTraceWriteError::Write(_))
+        ));
+        let path = dir.path().join("trace.json");
+        write_pipeline_trace(&path, &trace).expect("write trace");
+        let actual: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read trace")).expect("trace JSON");
+        assert_eq!(actual, serde_json::to_value(trace).expect("expected trace"));
+    }
 }

@@ -185,7 +185,7 @@ pub struct UtteranceTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 7;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,7 +210,10 @@ pub struct FaTimelineTrace {
     /// `evidence_sources` and `cache_keys` arrays moved into those spans,
     /// since an anchored group has one of each per piece; a
     /// `window_split_at_anchors` decision carries `split_window`, and
-    /// `refused_window` gains the `anchor_gap` cause.
+    /// `refused_window` gains the `anchor_gap` cause. Version 7 partitions an
+    /// anchored group's words across requested `pieces` and `unrequested`
+    /// ranges. Missing ranges carry no cache key or worker reply; older traces
+    /// default to an empty `unrequested` list.
     #[serde(default)]
     pub evidence_schema_version: u32,
     /// Forced-alignment engine selected for this run.
@@ -989,10 +992,29 @@ pub enum FaGroupSpanTrace {
     /// One over-budget utterance aligned as several requests, cut at the
     /// ends of words utterance timing recovery heard.
     Anchored {
-        /// The pieces in word and time order; they partition the group's
-        /// window and words.
+        /// Requested pieces in word and time order. Together with
+        /// `unrequested`, they partition the group's original words/window.
         pieces: Vec<FaPieceTrace>,
+        /// Source-bound ranges with no request capability. No cache key or
+        /// inference result is invented for them. Existing traces omit this.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unrequested: Vec<FaUnrequestedPieceTrace>,
     },
+}
+
+/// A piece kept in the word partition but not sent to an aligner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FaUnrequestedPieceTrace {
+    /// Original zero-based first word index (inclusive).
+    pub first_word: usize,
+    /// Original zero-based last word index (inclusive).
+    pub last_word: usize,
+    /// The actual gap and engine budget that prevented a request.
+    pub window: RefusedWindowTrace,
+    /// No new timing, or existing `%wor` reused for the whole group. A planned
+    /// refusal never discards independently admitted retained timing.
+    pub source: FaEvidenceSourceTrace,
 }
 
 /// One piece of an anchored group: its request's window, words and evidence.

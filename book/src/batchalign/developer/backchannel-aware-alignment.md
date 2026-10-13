@@ -1,7 +1,7 @@
 # Overlap-Aware Alignment Improvements
 
 **Status:** Current
-**Last updated:** 2026-10-06 08:38 EDT
+**Last updated:** 2026-10-08 13:30 EDT
 
 This page documents overlap-aware alignment improvements: what is shipped
 and known limitations.
@@ -37,10 +37,23 @@ jointly across the complete transcript. This is not independent per-speaker
 alignment, unrestricted transcript reordering or three-way overlap handling.
 
 Reference-layer checkpoints and one recomputed block avoid a recording-wide
-score matrix. Pre-allocation admission bounds work to 64,000,000 source-state ×
-reference cells and score storage to 2,097,152 cells; possible addressed matches
+score matrix. A canonical-order feasible alignment supplies a lower bound `L`
+using the same matching relation. At reference prefix `k` and consumed-source
+depth `d`, no complete path can score above
+`min(d,k) + min(m-d,n-k)`, where `m` and `n` are the source and reference lengths.
+States below `L` are excluded from storage and traversal. This is an exact
+bound, not a heuristic window: every optimal path, candidate and missing-word
+possibility survives. A selected witness supplies no timing authority.
+
+Admission bounds preliminary witness work plus admitted source-state/reference
+cells to 64,000,000 and score storage to 2,097,152 cells; possible addressed matches
 are separately limited to 1,048,576. Graph/evidence overhead is additional to
-score storage. A producer-owned `CommonLocalMatch` cannot be constructed from
+score storage. Graph construction also has a pre-allocation node limit.
+The witness uses linear retained memory; matching prefixes/suffixes avoid its
+quadratic work on near-identical sequences. Weak witnesses can still exhaust
+the budget. Unreachable cells are distinct from reachable zero scores, and
+cancellation remains separate from budget refusal.
+A producer-owned `CommonLocalMatch` cannot be constructed from
 selection. Only common first/last correspondences authorize UTR hints. When all
 of a turn's words are mandatory on every optimum, its complete candidate hull
 may authorize FA search without choosing a repeated occurrence.

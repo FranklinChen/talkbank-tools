@@ -154,12 +154,41 @@ mod tests {
         assert!(sub.validate().is_ok());
 
         // before_paths with mismatched length should fail
-        sub.before_paths = vec!["/before_a".into(), "/before_b".into()];
+        sub.before_paths = vec![Some("/before_a".into()), Some("/before_b".into())];
         assert!(sub.validate().is_err());
 
         // before_paths matching source_paths length should pass
-        sub.before_paths = vec!["/before_a".into()];
+        sub.before_paths = vec![Some("/before_a".into())];
         assert!(sub.validate().is_ok());
+
+        // Complete lists retain their existing string-array wire format.
+        let complete = serde_json::to_value(&sub).unwrap();
+        assert_eq!(complete["before_paths"], serde_json::json!(["/before_a"]));
+        assert_eq!(
+            serde_json::from_value::<JobSubmission>(complete).unwrap(),
+            sub
+        );
+
+        sub.source_paths.push("/second".into());
+        sub.output_paths.push("/out_second".into());
+        sub.before_paths = vec![None, Some("/before_second".into())];
+        assert!(sub.validate().is_ok());
+        let partial = serde_json::to_value(&sub).unwrap();
+        insta::assert_json_snapshot!(partial["before_paths"], @r#"
+        [
+          null,
+          "/before_second"
+        ]
+        "#);
+        assert_eq!(
+            serde_json::from_value::<JobSubmission>(partial).unwrap(),
+            sub
+        );
+        sub.before_paths.pop();
+        assert!(
+            sub.validate().is_err(),
+            "null entries do not relax cardinality"
+        );
 
         // empty before_paths always valid (no incremental)
         sub.before_paths = vec![];

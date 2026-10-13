@@ -7,6 +7,10 @@
 //! keeping a recording-wide source-state × reference matrix in memory.
 
 use super::{Alignable, FuzzyComparison, MatchMode, PreparedFuzzyWord, WordEvidence};
+use crate::dp_align::control::{Uninterrupted, WorkControl, uninterrupted};
+
+mod band;
+use band::Band;
 
 const WORK_CELLS: usize = 64_000_000;
 const SCORE_CELLS: usize = 2_097_152;
@@ -50,7 +54,7 @@ impl<'source> SpeakerTurn<'source> {
 /// Bounded analysis refusal, never an assertion of absence or ambiguity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalInterleavingRefusal {
-    /// Checked source-DAG × reference work exceeds the limit.
+    /// Feasible-witness work plus admitted source-DAG/reference cells exceed the limit.
     WorkBudgetExceeded,
     /// Checkpoints and one reconstructed block exceed the score-memory limit.
     MemoryBudgetExceeded,
@@ -60,7 +64,7 @@ pub enum LocalInterleavingRefusal {
 
 impl LocalInterleavingRefusal {
     /// The production limit the refused budget enforces, in its own unit:
-    /// source-DAG nodes times reference positions, retained score cells, or
+    /// witness work plus banded source/reference cells, retained score cells, or
     /// distinct addressed candidate matches.
     pub fn limit(self) -> usize {
         match self {
@@ -90,7 +94,6 @@ pub struct LocalInterleaving<'source> {
     addresses: Vec<Address>,
     words: Vec<WordEvidence>,
     selected: Vec<Selected>,
-    optimum: usize,
     search_frontiers: Vec<SearchFrontier>,
     required: Vec<usize>,
 }
@@ -290,22 +293,48 @@ impl<'source> LocalInterleaving<'source> {
         reference: &'source [String],
         mode: MatchMode,
     ) -> Result<Self, LocalInterleavingRefusal> {
-        let budget = Budget::admit(turns, reference.len())?;
-        let (graph, addresses) = Graph::of(turns, budget.nodes);
+        uninterrupted(Self::observe_controlled(
+            turns,
+            reference,
+            mode,
+            &Uninterrupted,
+        ))
+    }
+
+    /// The outer result reports interruption; budget refusals remain separate.
+    pub fn observe_controlled<C: WorkControl + ?Sized>(
+        turns: &[SpeakerTurn<'source>],
+        reference: &'source [String],
+        mode: MatchMode,
+        control: &C,
+    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
+        control.check()?;
+        let nodes = match Budget::nodes(turns) {
+            Ok(nodes) => nodes,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        let (graph, addresses) = Graph::of(turns, nodes);
+        control.check()?;
         let source: Vec<_> = addresses
             .iter()
             .map(|a| turns[a.utterance].words[a.word].as_str())
             .collect();
         let relation = Relation::new(source, reference, mode);
-        let mut row = vec![0usize; graph.edges.len()];
+        let band = match Band::admit(&graph, &relation, addresses.len(), reference.len(), control)?
+        {
+            Ok(band) => band,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        let mut row = band.initial();
         let mut checkpoints = vec![row.clone()];
         for k in 0..reference.len() {
-            row = graph.forward(&row, k, &relation);
-            if (k + 1) % budget.block == 0 {
+            control.check()?;
+            row = band.forward(&row, k, &relation);
+            if (k + 1) % band.block == 0 {
                 checkpoints.push(row.clone());
             }
         }
-        let optimum = row[graph.end];
+        let optimum = row.get(graph.rank[graph.end]);
         let mut words = addresses
             .iter()
             .map(|_| WordEvidence {
@@ -313,24 +342,26 @@ impl<'source> LocalInterleaving<'source> {
                 can_be_missing: false,
             })
             .collect::<Vec<_>>();
-        let mut backward = vec![0usize; graph.edges.len()];
-        graph.observe_edges(&row, &backward, None, &relation, optimum, &mut words);
+        let mut backward = band.terminal();
+        band.observe_edges(&row, &backward, None, &relation, optimum, &mut words);
         let mut candidate_count = 0usize;
         let mut end = reference.len();
         // Backward scores prove all optimal correspondences. Traceback uses
         // the same source graph and retained forward checkpoints, never an
         // independent monotonic rematch.
         while end > 0 {
-            let start = (end - 1) / budget.block * budget.block;
+            let start = (end - 1) / band.block * band.block;
             let mut block = Vec::with_capacity(end - start + 1);
-            block.push(checkpoints[start / budget.block].clone());
+            block.push(checkpoints[start / band.block].clone());
             for k in start..end {
-                block.push(graph.forward(&block[k - start], k, &relation));
+                control.check()?;
+                block.push(band.forward(&block[k - start], k, &relation));
             }
             for k in (start..end).rev() {
+                control.check()?;
                 let next = backward;
-                backward = graph.backward(&next, k, &relation);
-                graph.observe_edges(
+                backward = band.backward(&next, k, &relation);
+                candidate_count += band.observe_edges(
                     &block[k - start],
                     &backward,
                     Some((&next, k)),
@@ -338,15 +369,8 @@ impl<'source> LocalInterleaving<'source> {
                     optimum,
                     &mut words,
                 );
-                // A source edge can occur in multiple episode states. Count
-                // distinct source/reference pairs, not duplicate graph edges.
-                for word in &mut words {
-                    if word.candidates.last() == Some(&k) {
-                        candidate_count += 1;
-                    }
-                }
                 if candidate_count > CANDIDATES {
-                    return Err(LocalInterleavingRefusal::CandidateBudgetExceeded);
+                    return Ok(Err(LocalInterleavingRefusal::CandidateBudgetExceeded));
                 }
             }
             end = start;
@@ -356,7 +380,13 @@ impl<'source> LocalInterleaving<'source> {
         }
         // Common proof does not depend on traceback. Select one optimum using
         // the retained forward checkpoints, recomputing only a bounded block.
-        let selected = graph.traceback(&checkpoints, budget.block, reference.len(), &relation);
+        let selected = band.traceback(
+            &checkpoints,
+            band.block,
+            reference.len(),
+            &relation,
+            control,
+        )?;
         let required = words
             .iter()
             .enumerate()
@@ -371,21 +401,20 @@ impl<'source> LocalInterleaving<'source> {
                 after: addresses.partition_point(|a| a.utterance < frontier.after),
             })
             .collect();
-        Ok(Self {
+        Ok(Ok(Self {
             turns: turns.to_vec(),
             reference,
             addresses,
             words,
             selected,
-            optimum,
             search_frontiers,
             required,
-        })
+        }))
     }
 
     /// Maximum matched population under the declared bounded order model.
     pub fn matched_words(&self) -> usize {
-        self.optimum
+        self.selected.len()
     }
     /// One globally compatible optimum for inspection, never timing authority.
     pub fn selected(&self) -> impl Iterator<Item = LocalMatch<'source>> + '_ {
@@ -421,10 +450,7 @@ impl<'source> LocalInterleaving<'source> {
     }
 }
 
-struct Budget {
-    nodes: usize,
-    block: usize,
-}
+struct Budget;
 
 /// An episode preserves the first turn and the following speaker's turn/word
 /// order as two chains. Every prefix of that following run is a legal choice;
@@ -481,10 +507,7 @@ fn search_frontiers(turns: &[SpeakerTurn<'_>]) -> Vec<SearchFrontier> {
 }
 
 impl Budget {
-    fn admit(
-        turns: &[SpeakerTurn<'_>],
-        reference: usize,
-    ) -> Result<Self, LocalInterleavingRefusal> {
+    fn nodes(turns: &[SpeakerTurn<'_>]) -> Result<usize, LocalInterleavingRefusal> {
         let refused = LocalInterleavingRefusal::WorkBudgetExceeded;
         let mut nodes = turns.len().checked_add(1).ok_or(refused)?;
         for turn in turns {
@@ -505,24 +528,12 @@ impl Budget {
                 .ok_or(refused)?;
             nodes = nodes.checked_add(states.saturating_sub(2)).ok_or(refused)?;
         }
-        if nodes
-            .checked_mul(reference.checked_add(1).ok_or(refused)?)
-            .is_none_or(|work| work > WORK_CELLS)
-        {
-            return Err(refused);
-        }
-        let mut block = 1usize;
-        while block < reference.div_ceil(block) {
-            block += 1;
-        }
-        let layers = reference / block + block + 6;
-        if nodes
-            .checked_mul(layers)
-            .is_none_or(|cells| cells > SCORE_CELLS)
-        {
+        // Bound graph construction itself, before allocating adjacency lists.
+        // The former dense budget needed at least six rows for every node.
+        if nodes > SCORE_CELLS / 6 {
             return Err(LocalInterleavingRefusal::MemoryBudgetExceeded);
         }
-        Ok(Self { nodes, block })
+        Ok(nodes)
     }
 }
 
@@ -536,6 +547,8 @@ struct Graph {
     edges: Vec<Vec<Edge>>,
     incoming: Vec<Vec<Edge>>,
     order: Vec<usize>,
+    rank: Vec<usize>,
+    depth: Vec<usize>,
     end: usize,
 }
 
@@ -636,124 +649,31 @@ impl Graph {
             }
             cursor += 1;
         }
+        // Every complete path consumes all source words once. Consequently a
+        // node has one consumed-word depth, even when reached via an episode.
+        let mut depth = vec![0; edges.len()];
+        for &from in &order {
+            for edge in &edges[from] {
+                depth[edge.to] = depth[from] + usize::from(edge.word.is_some());
+            }
+        }
+        // Stable sorting retains topological order among epsilon-linked nodes.
+        order.sort_by_key(|&node| depth[node]);
+        let mut rank = vec![0; edges.len()];
+        for (slot, &node) in order.iter().enumerate() {
+            rank[node] = slot;
+        }
         (
             Self {
                 edges,
                 incoming,
                 order,
+                rank,
+                depth,
                 end: turns.len(),
             },
             addresses,
         )
-    }
-
-    fn forward(&self, previous: &[usize], k: usize, relation: &Relation<'_>) -> Vec<usize> {
-        let mut row = previous.to_vec();
-        for &from in &self.order {
-            for edge in &self.edges[from] {
-                let matched = edge.word.is_some_and(|word| relation.matches(word, k));
-                row[edge.to] = row[edge.to].max(row[from]);
-                if matched {
-                    row[edge.to] = row[edge.to].max(previous[from] + 1);
-                }
-            }
-        }
-        row
-    }
-
-    fn backward(&self, next: &[usize], k: usize, relation: &Relation<'_>) -> Vec<usize> {
-        let mut row = next.to_vec();
-        for &from in self.order.iter().rev() {
-            for edge in &self.edges[from] {
-                row[from] = row[from].max(row[edge.to]);
-                if edge.word.is_some_and(|word| relation.matches(word, k)) {
-                    row[from] = row[from].max(next[edge.to] + 1);
-                }
-            }
-        }
-        row
-    }
-
-    fn observe_edges(
-        &self,
-        forward: &[usize],
-        backward: &[usize],
-        next: Option<(&[usize], usize)>,
-        relation: &Relation<'_>,
-        optimum: usize,
-        words: &mut [WordEvidence],
-    ) {
-        for &from in &self.order {
-            for edge in &self.edges[from] {
-                let Some(word) = edge.word else {
-                    continue;
-                };
-                if forward[from] + backward[edge.to] == optimum {
-                    words[word].can_be_missing = true;
-                }
-                if let Some((next, k)) = next
-                    && relation.matches(word, k)
-                    && forward[from] + 1 + next[edge.to] == optimum
-                    && words[word].candidates.last() != Some(&k)
-                {
-                    words[word].candidates.push(k);
-                }
-            }
-        }
-    }
-
-    fn traceback(
-        &self,
-        checkpoints: &[Vec<usize>],
-        width: usize,
-        reference_len: usize,
-        relation: &Relation<'_>,
-    ) -> Vec<Selected> {
-        let mut node = self.end;
-        let mut k = reference_len;
-        let mut selected = Vec::new();
-        while k > 0 {
-            let start = (k - 1) / width * width;
-            let mut rows = vec![checkpoints[start / width].clone()];
-            for reference in start..k {
-                rows.push(self.forward(&rows[reference - start], reference, relation));
-            }
-            while k > start {
-                let current = &rows[k - start];
-                let previous = &rows[k - start - 1];
-                if current[node] == previous[node] {
-                    k -= 1;
-                    continue;
-                }
-                let mut advanced = false;
-                for edge in &self.incoming[node] {
-                    if let Some(word) = edge.word
-                        && relation.matches(word, k - 1)
-                        && previous[edge.to] + 1 == current[node]
-                    {
-                        selected.push(Selected {
-                            source: word,
-                            reference: k - 1,
-                        });
-                        node = edge.to;
-                        k -= 1;
-                        advanced = true;
-                        break;
-                    }
-                    if current[edge.to] == current[node] {
-                        node = edge.to;
-                        advanced = true;
-                        break;
-                    }
-                }
-                // Source graph construction guarantees an optimal incoming edge
-                // whenever the reference skip is not optimal. No external graph
-                // or score table can enter this producer.
-                debug_assert!(advanced);
-            }
-        }
-        selected.reverse();
-        selected
     }
 }
 

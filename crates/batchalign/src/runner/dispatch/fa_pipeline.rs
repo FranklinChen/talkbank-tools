@@ -10,7 +10,7 @@ use crate::fa::{AdmittedFaResult, FaServices};
 use crate::options::EngineBackend as _;
 use crate::params::{AudioContext, CachePolicy, FaParams};
 use crate::pipeline::PipelineServices;
-use crate::provenance::UtrContribution;
+use crate::provenance::UtrRecovery;
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
@@ -198,12 +198,8 @@ struct AlignAudioTask<'a> {
     audio_duration: Option<crate::media::probe::AudioDuration>,
     /// The model FA runs on, with the anchors UTR observed on it.
     model: crate::fa::FaWorkingDocument,
-    had_unrecovered_untimed: bool,
-    utr_fallback_attempted: bool,
-    /// Whether a timing-recovery pass ran for this file, and with which
-    /// engine: what the `utr=` provenance field records.
-    utr_contribution: UtrContribution,
-    utr_engine: Option<crate::options::UtrEngine>,
+    /// This file's observed recovery outcomes and its single fallback permit.
+    utr_recovery: UtrRecovery,
     utr_strategy: super::options::ResolvedUtrStrategy,
     dumper: &'a DebugDumper,
     debug_traces: bool,
@@ -313,9 +309,10 @@ impl AudioFileTask for AlignAudioTask<'_> {
         };
         let crate::fa::AlignedOutput {
             document,
-            shortfalls,
+            mut shortfalls,
             exclusions,
         } = aligned;
+        shortfalls.extend(self.utr_recovery.contribution().shortfalls());
 
         // Asked BEFORE the bytes are, because asking is what materializes
         // them: `PostValidated::as_str` serializes the judged model the first
@@ -330,7 +327,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
         let provenance = crate::provenance::align_provenance(
             &self.output.provenance_lang,
             self.services.cache_namespace,
-            &self.utr_contribution,
+            self.utr_recovery.contribution(),
             false,
             self.output.incremental_enabled,
             self.admitted.params().main_bullets,
@@ -355,20 +352,17 @@ impl AudioFileTask for AlignAudioTask<'_> {
         &mut self,
         lifecycle: &FileRunTracker<'_>,
         _error: &crate::error::ServerError,
-    ) {
-        if self.had_unrecovered_untimed
-            && !self.utr_fallback_attempted
-            && let Some(utr_engine) = self.utr_engine.as_ref()
-            && let Some(active) = self.model.active_mut()
+    ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
+        if let Some(active) = self.model.active_mut()
+            && let Some(pending) = self.utr_recovery.fallback()
         {
-            self.utr_fallback_attempted = true;
             info!(
                 filename = %self.filename,
                 "FA failed with untimed utterances; attempting fallback UTR"
             );
             lifecycle.stage(FileStage::RecoveringTimingFallback).await;
 
-            match active
+            let recovered = active
                 .recover_timing(async |file| {
                     run_utr_pass(
                         file,
@@ -381,7 +375,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                             audio_duration: self.audio_duration,
                             max_group_ms: Some(self.admitted.params().max_group_ms()),
                             filename: &self.filename,
-                            engine: utr_engine,
+                            engine: pending.engine(),
                             strategy: &self.utr_strategy,
                             dumper: self.dumper,
                         },
@@ -389,37 +383,10 @@ impl AudioFileTask for AlignAudioTask<'_> {
                     )
                     .await
                 })
-                .await
-            {
-                Ok(utr_result) => {
-                    // Every completed pass is recorded once, with the engine
-                    // the plan ran it with, before anything is decided from
-                    // how much it injected.
-                    self.utr_contribution.record_pass(utr_engine, &utr_result);
-                    if utr_result.injected() > 0 {
-                        self.had_unrecovered_untimed = false;
-                        info!(
-                            filename = %self.filename,
-                            injected = utr_result.injected(),
-                            "Fallback UTR recovered timing"
-                        );
-                    } else {
-                        warn!(
-                            filename = %self.filename,
-                            injected = utr_result.injected(),
-                            "Fallback UTR ran but injected no timing; proceeding to FA retry without additional anchors"
-                        );
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        filename = %self.filename,
-                        error = %error,
-                        "Fallback UTR failed with error; proceeding to FA retry without timing recovery"
-                    );
-                }
-            }
+                .await;
+            pending.record(recovered)?;
         }
+        Ok(())
     }
 }
 
@@ -457,9 +424,6 @@ pub(crate) async fn dispatch_fa_infer(
         .max(1)
         .min(plan.kernel_plan.file_parallelism_hint.max(1));
 
-    // Read before_paths once for incremental FA
-    let before_paths = job.filesystem.before_paths.clone();
-
     // Process files concurrently, bounded by available workers.
     let file_sem = Arc::new(tokio::sync::Semaphore::new(file_parallelism));
     let mut tasks = Vec::new();
@@ -483,11 +447,7 @@ pub(crate) async fn dispatch_fa_infer(
         let cache_namespace = runtime.cache_namespace.clone();
         let file = file.clone();
         let file_index = file.file_index;
-        let before_path = if !before_paths.is_empty() && file_index < before_paths.len() {
-            Some(before_paths[file_index].assume_shared_filesystem())
-        } else {
-            None
-        };
+        let before_path = job.filesystem.before_path(file_index);
         let utr_engine = utr_engine.clone();
         let utr_strategy = utr_strategy.clone();
         let job_lang_fallback = job_lang_fallback.clone();
@@ -501,6 +461,7 @@ pub(crate) async fn dispatch_fa_infer(
                 let services = FaServices {
                     pipeline: PipelineServices::new(&pool, &cache),
                     cache_namespace: &cache_namespace,
+                    attention_capture_dir: job.dispatch.options.common().debug_dir.as_deref(),
                 };
                 let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
                 let context = FaFileContext {
@@ -770,14 +731,13 @@ async fn process_one_fa_file(
     // UTR pre-pass: if untimed utterances exist and a UTR engine is configured,
     // run ASR to recover utterance-level timing before FA grouping. The model
     // and the anchors the pass observes on it travel together from here.
-    let mut utr_contribution = UtrContribution::NotRun;
-    let had_unrecovered_untimed = if let Some(active) = model.active_mut() {
+    let utr_recovery = if let Some(active) = model.active_mut() {
         let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(active.document());
 
         match plan_align_utr_stage(untimed, &file_lang, utr_engine) {
             Ok(AlignUtrDecision::SkipAllTimed) => {
                 info!(filename, timed, "All utterances timed, skipping UTR");
-                false
+                UtrRecovery::not_run()
             }
             Ok(AlignUtrDecision::Run(utr_engine)) => {
                 lifecycle.stage(FileStage::RecoveringUtteranceTiming).await;
@@ -819,12 +779,14 @@ async fn process_one_fa_file(
                 // stage.
                 drop(utr_progress);
                 utr_forwarder.finished().await;
-                match recovered {
-                    Ok(utr_result) => {
-                        utr_contribution.record_pass(utr_engine, &utr_result);
-                        utr_result.unmatched() > 0
+                match UtrRecovery::from_initial(utr_engine, recovered) {
+                    Ok(recovery) => recovery,
+                    Err(crate::chat_ops::fa::utr::UtrCancelled) => {
+                        lifecycle
+                            .fail("Timing recovery cancelled", FailureCategory::Cancelled)
+                            .await;
+                        return FileTaskOutcome::TerminalStateRecorded;
                     }
-                    Err(_) => true,
                 }
             }
             Ok(AlignUtrDecision::ProceedWithoutUtr) => {
@@ -833,7 +795,7 @@ async fn process_one_fa_file(
                     untimed,
                     "Untimed utterances detected but no UTR engine configured, using interpolation"
                 );
-                true
+                UtrRecovery::not_run()
             }
             Err(error) => {
                 lifecycle
@@ -843,7 +805,7 @@ async fn process_one_fa_file(
             }
         }
     } else {
-        false
+        UtrRecovery::not_run()
     };
 
     // Provenance comments embed the language for auditability. Use the
@@ -865,16 +827,13 @@ async fn process_one_fa_file(
         audio_identity,
         audio_duration,
         model,
-        had_unrecovered_untimed,
-        utr_fallback_attempted: false,
-        utr_contribution,
-        utr_engine: utr_engine.cloned(),
+        utr_recovery,
         utr_strategy: context.utr_strategy.clone(),
         dumper,
         debug_traces: job.dispatch.debug_traces,
         output: AlignOutputPolicy {
             provenance_lang,
-            incremental_enabled: !job.filesystem.before_paths.is_empty(),
+            incremental_enabled: job.filesystem.before_path(file_index).is_some(),
             merge_abbreviations: MergeAbbreviations::from_option(should_merge_abbrev),
         },
     };

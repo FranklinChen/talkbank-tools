@@ -11,8 +11,11 @@
 //!
 //! Utterance timing recovery (UTR) has usually heard many of the utterance's
 //! words already: each `WordAnchor` says "this word ended at this instant".
-//! [`AnchoredSplit::plan`] cuts the utterance at the END of anchored words so
-//! every piece fits the budget, and each piece is aligned as its own request.
+//! [`AnchoredSplit::plan`] first cuts at the END of anchored words so
+//! each admissible piece is aligned as its own request. Over-budget pieces
+//! retain their words and refusal, without discarding their neighbours.
+//! An unavailable piece's fully anchored last word can then be separated at
+//! its observed start, only if the preceding words stay unavailable.
 //! Every cut point is therefore an acoustic observation; there is no path that
 //! cuts at a time nobody heard.
 //!
@@ -33,8 +36,8 @@
 //! farther apart than the budget, no cut at an anchor can keep both sides in
 //! budget. On real data that stretch is minutes long and means UTR placed the
 //! utterance across audio it does not belong to, so the refusal names the
-//! widest such stretch and the utterance is recorded for review, never
-//! aligned.
+//! stretch for review. Only that piece is left unaligned; the complete word
+//! partition remains owned by the group, including unavailable pieces.
 //!
 //! # Tricky parts for a newcomer
 //!
@@ -55,6 +58,9 @@ use talkbank_model::{UtteranceIdx, WordIdx};
 use super::FaWord;
 use super::coordinates::{FaWindow, FileMs, Ms};
 use super::utr::{AlignableWords, AnchorDisorder, AnchorLookup};
+
+mod partition;
+pub use partition::{AnchoredPart, UnavailablePiece};
 
 /// A window inside its recording that is longer than the engine budget.
 ///
@@ -198,7 +204,7 @@ impl AnchoredPiece {
 }
 
 /// An over-budget utterance window, partitioned at anchored words into
-/// pieces that each fit the budget.
+/// request pieces and explicitly unavailable pieces.
 ///
 /// The pieces' windows partition the utterance window (the first starts at
 /// its start, each later one at the previous one's end, the last ends at its
@@ -209,14 +215,14 @@ pub struct AnchoredSplit {
     utterance: UtteranceIdx,
     window: FaWindow,
     budget: Ms,
-    earlier: Vec<AnchoredPiece>,
-    last: AnchoredPiece,
+    earlier: Vec<AnchoredPart>,
+    last: AnchoredPart,
 }
 
 /// The pieces of a split, in order: a nameable type so a group can iterate
 /// them without boxing.
 pub type Pieces<'s> =
-    std::iter::Chain<std::slice::Iter<'s, AnchoredPiece>, std::iter::Once<&'s AnchoredPiece>>;
+    std::iter::Chain<std::slice::Iter<'s, AnchoredPart>, std::iter::Once<&'s AnchoredPart>>;
 
 /// Why an over-budget window could not be split.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,13 +245,6 @@ pub(super) enum SplitRefusal {
     /// Anchors exist, but none can be a cut: each lies on the last word or at
     /// or outside the window's edges.
     NoInteriorCut,
-    /// A stretch with no usable cut is longer than the budget.
-    Gap {
-        /// Where the stretch starts.
-        from: FileMs,
-        /// Where it ends.
-        to: FileMs,
-    },
 }
 
 /// A candidate cut: after `word`, at the instant that word was heard ending.
@@ -307,31 +306,11 @@ impl AnchoredSplit {
             return Err(SplitRefusal::NoInteriorCut);
         }
 
-        // A4 before A2: if any stretch between neighbouring cut points is
-        // longer than the budget, no split exists, and the widest such
-        // stretch is what a reviewer needs to see.
-        let boundaries = std::iter::once(window.audio_start())
-            .chain(cuts.iter().map(|cut| cut.at))
-            .chain(std::iter::once(window.end()))
-            .collect::<Vec<_>>();
-        let widest = boundaries.iter().zip(boundaries.iter().skip(1)).fold(
-            None::<(FileMs, FileMs)>,
-            |widest, (&from, &to)| match widest {
-                Some((wf, wt)) if wt.since(wf) >= to.since(from) => Some((wf, wt)),
-                Some(_) | None => Some((from, to)),
-            },
-        );
-        if let Some((from, to)) = widest
-            && to.since(from) > budget
-        {
-            return Err(SplitRefusal::Gap { from, to });
-        }
-
         // Greedy: cut at a candidate exactly when the NEXT boundary would put
         // the current piece over budget. A cut is taken only when both the
         // window and the words split there with something on each side; a cut
-        // that cannot is skipped, and the check after the loop catches any
-        // piece that skipping left over budget.
+        // that cannot is skipped. Each resulting piece is admitted separately:
+        // a wide gap cannot erase a bounded prefix, interior piece or suffix.
         let mut earlier = Vec::new();
         let mut rest_window = window;
         let mut rest_words = words;
@@ -345,30 +324,19 @@ impl AnchoredSplit {
             };
             match rest_words.split_after(cut.word) {
                 Ok((piece_words, after_words)) => {
-                    earlier.push(AnchoredPiece {
-                        words: piece_words,
-                        window: piece_window,
-                    });
+                    let (prefix, tail) = AnchoredPart::admit(piece_words, piece_window, budget)
+                        .retain_anchored_tail(anchors);
+                    earlier.extend(prefix);
+                    earlier.push(tail);
                     rest_window = after_window;
                     rest_words = after_words;
                 }
                 Err(unsplit) => rest_words = unsplit,
             }
         }
-        let last = AnchoredPiece {
-            words: rest_words,
-            window: rest_window,
-        };
-        if let Some(over) = earlier
-            .iter()
-            .chain(std::iter::once(&last))
-            .find(|piece| piece.window.len() > budget)
-        {
-            return Err(SplitRefusal::Gap {
-                from: over.window.audio_start(),
-                to: over.window.end(),
-            });
-        }
+        let (prefix, last) =
+            AnchoredPart::admit(rest_words, rest_window, budget).retain_anchored_tail(anchors);
+        earlier.extend(prefix);
 
         Ok(Self {
             utterance,
@@ -420,10 +388,13 @@ impl AnchoredSplit {
     /// gap, at most `max_extension`, at most what keeps the last piece within
     /// the budget, and never past the recording.
     pub(super) fn extend_into_trailing_gap(&mut self, next_start: FileMs, max_extension: Ms) {
-        let gap = next_start.since(self.last.window.end());
-        let headroom = self.budget.0.saturating_sub(self.last.window.len().0);
+        let AnchoredPart::Request(last) = &mut self.last else {
+            return;
+        };
+        let gap = next_start.since(last.window.end());
+        let headroom = self.budget.0.saturating_sub(last.window.len().0);
         let extension = Ms((gap.0 / 2).min(max_extension.0).min(headroom));
-        self.last.window = self.last.window.extend_by(extension);
+        last.window = last.window.extend_by(extension);
         self.window = self.window.extend_by(extension);
     }
 
@@ -447,7 +418,6 @@ impl SplitRefusal {
     /// - `NoReliableMatch`, `AnchorsRefused`, `AnchorsDescribeOtherWords`,
     ///   `NoInteriorCut` -> `anchors_unusable` with the matching cause:
     ///   recovery matched this utterance and its evidence could not be used.
-    /// - `Gap` -> `anchor_gap`, the A4 review signal.
     pub(super) fn into_refused_window(self, over: OverBudgetWindow) -> RefusedWindow {
         match self {
             Self::NotRecovered => over.over_budget(),
@@ -457,13 +427,6 @@ impl SplitRefusal {
                 over.anchors_unusable(UnusableAnchors::AnchorsDescribeOtherWords)
             }
             Self::NoInteriorCut => over.anchors_unusable(UnusableAnchors::NoInteriorCut),
-            Self::Gap { from, to } => RefusedWindow::AnchorGap {
-                start_ms: over.window.audio_start().get(),
-                end_ms: over.window.end().get(),
-                budget_ms: over.budget.0,
-                gap_start_ms: from.get(),
-                gap_end_ms: to.get(),
-            },
         }
     }
 }
@@ -565,7 +528,12 @@ mod tests {
                 (1, 35_500, 40_000),
             ]
         );
-        let pieces: Vec<&AnchoredPiece> = split.pieces().collect();
+        let pieces: Vec<&AnchoredPart> = split.pieces().collect();
+        assert!(
+            pieces
+                .iter()
+                .all(|piece| matches!(piece, AnchoredPart::Request(_)))
+        );
         assert!(pieces.iter().all(|piece| piece.window().len() <= BUDGET));
         let words_in_order: Vec<usize> = pieces
             .iter()
@@ -590,8 +558,7 @@ mod tests {
         );
     }
 
-    /// A4: a stretch with no anchor longer than the budget is refused with
-    /// the widest such stretch, which is where a reviewer must look.
+    /// Refuse only the uncuttable range, preserving both bounded neighbours.
     #[test]
     fn a_gap_over_budget_is_refused_with_its_position() {
         let anchors = anchored(
@@ -605,20 +572,23 @@ mod tests {
                 (4, 245_000, 246_000),
             ],
         );
-        let refusal = plan(over(0, 250_000), words(6), AnchorLookup::Anchored(&anchors))
-            .expect_err("a four-minute stretch cannot be cut within budget");
+        let partition = plan(over(0, 250_000), words(6), AnchorLookup::Anchored(&anchors))
+            .expect("an unavailable range does not discard its neighbours");
+        let parts: Vec<_> = partition.pieces().collect();
+        assert!(matches!(parts[0], AnchoredPart::Request(_)));
+        assert!(matches!(parts[2], AnchoredPart::Request(_)));
         assert_eq!(
-            refusal,
-            SplitRefusal::Gap {
-                from: FileMs::new(3_000),
-                to: FileMs::new(244_000),
-            }
+            shape(&partition),
+            vec![(2, 0, 3000), (1, 3000, 244000), (3, 244000, 250000)]
         );
+        let AnchoredPart::Unavailable(unavailable) = parts[1] else {
+            panic!("uncuttable range")
+        };
         assert_eq!(
-            refusal.into_refused_window(over(0, 250_000)),
+            unavailable.refusal(),
             RefusedWindow::AnchorGap {
-                start_ms: 0,
-                end_ms: 250_000,
+                start_ms: 3_000,
+                end_ms: 244_000,
                 budget_ms: 15_000,
                 gap_start_ms: 3_000,
                 gap_end_ms: 244_000,
@@ -718,5 +688,61 @@ mod tests {
             .split_after(WordIdx::new(2))
             .expect_err("nothing after the last word");
         assert_eq!(whole.as_slice().len(), 3);
+    }
+
+    #[test]
+    fn anchored_tail_rescue_keeps_unknown_prefix_unrequested() {
+        let anchors = anchored(
+            6,
+            &[
+                (3, 15_750, 16_500),
+                (4, 16_500, 17_250),
+                (5, 17_250, 18_000),
+            ],
+        );
+        let split =
+            plan(over(0, 20_250), words(6), AnchorLookup::Anchored(&anchors)).expect("partition");
+        assert_eq!(
+            shape(&split),
+            vec![(3, 0, 15_750), (1, 15_750, 16_500), (2, 16_500, 20_250)]
+        );
+        let parts: Vec<_> = split.pieces().collect();
+        assert!(matches!(parts[0], AnchoredPart::Unavailable(_)));
+        assert!(matches!(parts[1], AnchoredPart::Request(_)));
+        assert!(matches!(parts[2], AnchoredPart::Request(_)));
+        assert_eq!(parts[1].first_word().raw(), 3);
+    }
+
+    #[test]
+    fn anchored_tail_rescue_does_not_crop_unknown_words_into_requests() {
+        // The prefix would fit only after a start cut. Do not turn it into
+        // a request by treating an unproved preceding word end as observed.
+        let anchors = anchored(3, &[(1, 14_750, 15_500)]);
+        let split =
+            plan(over(0, 20_000), words(3), AnchorLookup::Anchored(&anchors)).expect("partition");
+        assert_eq!(shape(&split), vec![(2, 0, 15_500), (1, 15_500, 20_000)]);
+        assert!(matches!(
+            split.pieces().next(),
+            Some(AnchoredPart::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn anchored_tail_rescue_requires_a_positive_bounded_observation_and_prefix_words() {
+        for (anchor_word, start, end) in [
+            (1, 20_000, 20_000),
+            (1, 20_000, 40_000),
+            (0, 20_000, 21_000),
+        ] {
+            let anchors = anchored(3, &[(anchor_word, start, end)]);
+            let split = plan(over(0, 60_000), words(3), AnchorLookup::Anchored(&anchors))
+                .expect("partition");
+            assert!(
+                split
+                    .pieces()
+                    .all(|part| matches!(part, AnchoredPart::Unavailable(_)))
+            );
+            assert_eq!(split.pieces().flat_map(|part| part.words()).count(), 3);
+        }
     }
 }

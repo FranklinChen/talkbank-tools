@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhisperObservationsV2",
+  "description": "Unwindowed producers keep their original wire shape. A windowed producer\ncannot attach ownership beside a second, already-merged transcript.",
+  "anyOf": [
+    {
+      "description": "Native or legacy observations with no claimed window ownership.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WhisperChunkSpanV2"
+      }
+    },
+    {
+      "description": "Independently decoded, sample-owned windows.",
+      "$ref": "#/$defs/WhisperWindowsV2"
+    }
+  ],
+  "$defs": {
+    "AudioPositionSeconds": {
+      "description": "A point in the audio, in finite non-negative seconds from its start.",
+      "type": "number",
+      "format": "double",
+      "minimum": 0.0
+    },
+    "FrameCountV2": {
+      "description": "Number of audio frames in a prepared artifact.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "SampleRateHzV2": {
+      "description": "Audio sample rate in Hz carried by prepared artifacts.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "WhisperChunkSpanV2": {
+      "description": "One raw Whisper chunk as a producer emitted it: its words, and whichever\nbounds the model reported.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat a bound, when present, is a finite non-negative position in the\naudio, which its type proves.\n\nA bound is absent when the model predicted no timestamp for it: the\nHuggingFace pipeline reports `(start, None)` for a chunk cut off\nmid-word, and `(None, None)` for a whole transcript when timestamps were\nsuppressed. A missing bound is an absence of TIMING, never of words, and\nthe words travel untimed exactly as a Tencent or Aliyun word with a\nmissing offset does. Between 536f29c8 and this change such a chunk was\ndropped, which emptied every Cantonese Whisper transcript.",
+      "type": "object",
+      "properties": {
+        "end_s": {
+          "description": "End timestamp in seconds, when the model reported one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioPositionSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "start_s": {
+          "description": "Start timestamp in seconds, when the model reported one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioPositionSeconds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "text": {
+          "description": "Surface text for the chunk.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "WhisperWindowV2": {
+      "description": "One independent decode. Timestamps are local to this window, not the file.",
+      "type": "object",
+      "properties": {
+        "left_context": {
+          "description": "Left context shared with the preceding decode.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "right_context": {
+          "description": "Right context shared with the following decode.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "sample_count": {
+          "description": "Number of source samples, excluding model padding.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "spans": {
+          "description": "Raw word or segment observations, never cross-window merged.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WhisperChunkSpanV2"
+          }
+        },
+        "start_sample": {
+          "description": "First source sample observed by this decode.",
+          "$ref": "#/$defs/FrameCountV2"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "start_sample",
+        "sample_count",
+        "left_context",
+        "right_context",
+        "spans"
+      ]
+    },
+    "WhisperWindowsV2": {
+      "description": "A contiguous sequence with nonempty owned interiors. Deserialization is\nadmission: consumers cannot obtain a sequence with fabricated gaps or seams.",
+      "type": "object",
+      "properties": {
+        "sample_rate_hz": {
+          "$ref": "#/$defs/SampleRateHzV2"
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WhisperWindowV2"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sample_rate_hz",
+        "windows"
+      ]
+    }
+  }
+}

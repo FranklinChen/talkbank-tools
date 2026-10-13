@@ -79,16 +79,21 @@ use crate::api::{
     InvalidStampSafeText, LanguageCode3, ReleasedCommand, ReportedEngineName, StampJoiner,
     StampSafeText,
 };
+#[cfg(test)]
 use crate::chat_ops::fa::utr::UtrResult;
 use crate::chat_ops::{ChatFile, Header, Line};
 use crate::engine_reports::FaCacheNamespace;
 use crate::morphosyntax::identity::AppliedAnalyses;
 use crate::transcribe::types::AsrIdentity;
+#[cfg(test)]
 use crate::types::engines::UtrEngine;
 use crate::utseg::AdmittedUtsegPrediction;
 use crate::utseg_evidence::UtsegEngineIdentities;
 use batchalign_transform::parse::parse_strict;
 use batchalign_transform::serialize::to_chat_string;
+
+mod utr;
+pub(crate) use utr::{UtrContribution, UtrRecovery};
 
 // ---------------------------------------------------------------------------
 // Shared literals
@@ -183,9 +188,11 @@ enum StampField {
     Incremental,
     Lang,
     MainBullets,
+    ProvenanceIncomplete,
     Retokenize,
     UdRepairs,
     Utr,
+    UtrUnavailable,
     Wor,
 }
 
@@ -201,9 +208,11 @@ impl StampField {
             Self::Incremental => "incremental",
             Self::Lang => "lang",
             Self::MainBullets => "main_bullets",
+            Self::ProvenanceIncomplete => "provenance_incomplete",
             Self::Retokenize => "retokenize",
             Self::UdRepairs => "ud_repairs",
             Self::Utr => "utr",
+            Self::UtrUnavailable => "utr_unavailable",
             Self::Wor => "wor",
         }
     }
@@ -827,6 +836,35 @@ pub fn inject_provenance(file: &mut ChatFile, comment: &ProvenanceComment) {
     );
 }
 
+/// Carry the source's morphology records with morphology copied from it.
+///
+/// This is retention, not a new inference stamp: keep the original build,
+/// timestamp and even damaged optional metadata verbatim as evidence. A prior
+/// with no stamp cannot justify retaining a different stamp from the current
+/// document. Unrelated current comments and other commands' stamps stay put.
+pub(crate) fn inherit_morphotag_provenance(
+    prior: &batchalign_transform::AdmittedSourceChat<'_>,
+    destination: &mut ChatFile,
+) {
+    let records_morphology = |line: &Line| {
+        matches!(line,
+            Line::Header { header, .. }
+            if matches!(header.as_ref(), Header::Comment { content }
+                if is_stamp_for(&content.to_chat_string(), ReleasedCommand::Morphotag)))
+    };
+    let inherited = prior
+        .document()
+        .lines
+        .iter()
+        .filter(|line| records_morphology(line))
+        .cloned();
+    destination.lines.retain(|line| !records_morphology(line));
+    let insert_pos = insert_pos_after_constant_headers(destination);
+    for (offset, line) in inherited.enumerate() {
+        destination.lines.insert(insert_pos + offset, line);
+    }
+}
+
 /// Inject a provenance comment into serialized CHAT text.
 ///
 /// Parses the text, injects the comment into the AST, and re-serializes.
@@ -889,6 +927,12 @@ fn morphotag_comment(
 /// kept.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IncrementalMorphotagStampError {
+    /// Reused tiers have no recorded model attribution.
+    #[error("the reused morphology has no recorded model attribution")]
+    MissingPriorAttribution,
+    /// A prior run explicitly recorded that attribution was incomplete.
+    #[error("the prior morphology provenance is explicitly incomplete")]
+    PriorIncomplete,
     /// The `--before` document's morphotag stamp does not parse.
     #[error(transparent)]
     UnparseablePriorStamp(#[from] UnparseableStamp),
@@ -913,9 +957,77 @@ pub enum IncrementalMorphotagStampError {
     UnreadablePriorRepairCount(String),
 }
 
-impl From<IncrementalMorphotagStampError> for crate::error::ServerError {
-    fn from(error: IncrementalMorphotagStampError) -> Self {
-        Self::Validation(error.to_string())
+/// Metadata recovery is independent of CHAT validity and analysis availability.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum MorphologyProvenanceReport {
+    #[default]
+    Complete,
+    Incomplete(IncrementalMorphotagStampError),
+}
+
+impl MorphologyProvenanceReport {
+    pub(crate) fn into_record(self) -> Option<crate::api::OutputShortfallRecord> {
+        match self {
+            Self::Complete => None,
+            Self::Incomplete(cause) => Some(
+                crate::api::OutputShortfallRecord::MorphologyProvenanceIncomplete {
+                    detail: cause.to_string().chars().take(500).collect(),
+                },
+            ),
+        }
+    }
+}
+
+/// Finalize attribution without discarding already installed morphology.
+/// `prior` is present only when its tiers actually contributed to this output.
+/// The report must travel with the document to writeback; logging is insufficient.
+pub(crate) fn finish_incremental_morphotag_provenance(
+    destination: &mut ChatFile,
+    prior: Option<&ChatFile>,
+    lang: &LanguageCode3,
+    applied: &AppliedAnalyses,
+    retokenize: bool,
+) -> MorphologyProvenanceReport {
+    let candidate = match prior {
+        Some(prior) => incremental_morphotag_provenance(prior, lang, applied, retokenize),
+        None => Ok(Some(morphotag_provenance(lang, applied, retokenize))),
+    };
+    match candidate {
+        Ok(Some(stamp)) => {
+            inject_provenance(destination, &stamp);
+            MorphologyProvenanceReport::Complete
+        }
+        Ok(None) => MorphologyProvenanceReport::Complete,
+        Err(cause) => {
+            // Keep prior records verbatim. This extra record names only known
+            // new models, never an invented union or total historical count.
+            let names = applied
+                .engine_names()
+                .into_iter()
+                .filter(|name| !name.as_str().contains(EngineNames::JOINER.as_str()))
+                .collect();
+            let stamp = morphotag_comment(lang, &names, retokenize, applied.repair_count())
+                .field_if(StampField::Incremental, true)
+                .field_if(StampField::ProvenanceIncomplete, true);
+            let already_marked = destination.lines.iter().any(|line| {
+                let Line::Header { header, .. } = line else { return false; };
+                let Header::Comment { content } = header.as_ref() else { return false; };
+                let text = content.to_chat_string();
+                matches!(RecognizedComment::classify(&text), RecognizedComment::Stamp(record)
+                    if record.records(ReleasedCommand::Morphotag)
+                    && record.parse().is_ok_and(|parsed| parsed.fields.contains_key(StampField::ProvenanceIncomplete.as_str())))
+            });
+            if !applied.ran_no_model() || !already_marked {
+                let position = insert_pos_after_constant_headers(destination);
+                destination.lines.insert(
+                    position,
+                    Line::header(Header::Comment {
+                        content: crate::chat_ops::BulletContent::from_text(stamp.format()),
+                    }),
+                );
+            }
+            MorphologyProvenanceReport::Incomplete(cause)
+        }
     }
 }
 
@@ -933,17 +1045,20 @@ impl From<IncrementalMorphotagStampError> for crate::error::ServerError {
 /// joins with. That is exact only when no name contains the separator, so a
 /// model that ran now with such a name is refused rather than written into a
 /// list the next incremental run would misread.
-pub(crate) fn incremental_morphotag_provenance(
+fn incremental_morphotag_provenance(
     prior: &ChatFile,
     lang: &LanguageCode3,
     applied: &AppliedAnalyses,
     retokenize: bool,
 ) -> Result<Option<ProvenanceComment>, IncrementalMorphotagStampError> {
+    let prior_record = stamped_morphotag_record(prior, ReleasedCommand::Morphotag)?;
+    if prior_record.engines.is_empty() {
+        return Err(IncrementalMorphotagStampError::MissingPriorAttribution);
+    }
     if applied.ran_no_model() {
         return Ok(None);
     }
     let separator = EngineNames::JOINER.as_str();
-    let prior_record = stamped_morphotag_record(prior, ReleasedCommand::Morphotag)?;
     let mut names = prior_record.engines;
     for name in applied.engine_names() {
         if name.as_str().contains(separator) {
@@ -1012,6 +1127,12 @@ fn stamped_morphotag_record(
             | RecognizedComment::Foreign => continue,
         };
         let parsed = stamp.parse()?;
+        if parsed
+            .fields
+            .contains_key(StampField::ProvenanceIncomplete.as_str())
+        {
+            return Err(IncrementalMorphotagStampError::PriorIncomplete);
+        }
         if let Some(list) = parsed.fields.get(StampField::Engine.as_str()) {
             for name in list.split(separator) {
                 record.engines.extend([StampSafeText::try_from(name)?]);
@@ -1025,26 +1146,6 @@ fn stamped_morphotag_record(
         }
     }
     Ok(record)
-}
-
-/// Whether utterance timing recovery contributed to an aligned file, and with
-/// which engine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UtrContribution {
-    /// No recovery pass ran for this file.
-    NotRun,
-    /// A recovery pass ran with this engine.
-    Ran(UtrEngine),
-}
-
-impl UtrContribution {
-    /// Fold one completed recovery pass in. A pass that ran records its
-    /// engine; one that found nothing untimed leaves the earlier record.
-    pub(crate) fn record_pass(&mut self, engine: &UtrEngine, result: &UtrResult) {
-        if result.ran() {
-            *self = Self::Ran(engine.clone());
-        }
-    }
 }
 
 /// Build a provenance comment for align: `fa=` is the FA engine the selected
@@ -1069,13 +1170,15 @@ pub(crate) fn align_provenance(
             StampField::MainBullets,
             StampFieldValue(StampSafeText::from_static(main_bullets.stamp_name())),
         );
-    let comment = match utr {
-        UtrContribution::NotRun => comment,
-        UtrContribution::Ran(engine) => {
-            comment.field(StampField::Utr, StampFieldValue::from(engine.stamp_name()))
-        }
+    let comment = match utr.completed_engine() {
+        None => comment,
+        Some(engine) => comment.field(StampField::Utr, StampFieldValue::from(engine.stamp_name())),
     };
     comment
+        .field_if_some(
+            StampField::UtrUnavailable,
+            utr.unavailable_stamp().map(StampFieldValue::from),
+        )
         .field_if(StampField::Wor, wor)
         .field_if(StampField::Incremental, incremental)
 }
@@ -2573,6 +2676,81 @@ mod tests {
         ));
     }
 
+    /// Encoding refusal is a metadata shortfall, never permission to lose the
+    /// installed document. Its incomplete marker is read back on later runs.
+    #[test]
+    fn incremental_provenance_recovers_and_stays_incomplete_on_readback() {
+        for fields in [
+            "engine=stanza-1.10.0 ; ud_repairs=many",
+            "engine=stanza-1.10.0 ; lang",
+            "lang=eng",
+            "engine=stanza-1.10.0 ; provenance_incomplete=true",
+        ] {
+            let prior = prior_document(fields);
+            let mut output = prior.clone();
+            let report = finish_incremental_morphotag_provenance(
+                &mut output,
+                Some(&prior),
+                &LanguageCode3::eng(),
+                &applied_that_repaired(2),
+                false,
+            );
+            assert!(matches!(report, MorphologyProvenanceReport::Incomplete(_)));
+            let text = batchalign_transform::serialize::to_chat_string(&output);
+            assert!(text.contains(fields), "original evidence: {text}");
+            assert!(text.contains("engine=stanza-1.11.1:eng:standard"), "{text}");
+            assert!(text.contains("provenance_incomplete=true"), "{text}");
+            assert!(text.contains("ud_repairs=2"), "new run count: {text}");
+            assert!(text.contains("*PAR:\thello ."), "{text}");
+            // Reuse alone adds no new inference claim or duplicate marker.
+            let retained = output.clone();
+            let report = finish_incremental_morphotag_provenance(
+                &mut output,
+                Some(&retained),
+                &LanguageCode3::eng(),
+                &AppliedAnalyses::none(),
+                false,
+            );
+            assert!(matches!(report, MorphologyProvenanceReport::Incomplete(_)));
+            assert_eq!(
+                batchalign_transform::serialize::to_chat_string(&output),
+                text
+            );
+            // A fresh run, with no reused tiers, must not inherit that defect.
+            let report = finish_incremental_morphotag_provenance(
+                &mut output,
+                None,
+                &LanguageCode3::eng(),
+                &applied_that_ran("1.12.0"),
+                false,
+            );
+            assert!(matches!(report, MorphologyProvenanceReport::Complete));
+            let fresh = batchalign_transform::serialize::to_chat_string(&output);
+            assert!(!fresh.contains("provenance_incomplete"));
+            assert!(!fresh.contains("stanza-1.10.0"));
+        }
+        let prior = prior_document("engine=stanza-1.10.0");
+        let mut output = prior.clone();
+        let report = finish_incremental_morphotag_provenance(
+            &mut output,
+            Some(&prior),
+            &LanguageCode3::eng(),
+            &applied_that_ran("1.11.1+cpu"),
+            false,
+        );
+        assert!(matches!(
+            report,
+            MorphologyProvenanceReport::Incomplete(
+                IncrementalMorphotagStampError::SeparatorInModelName(_)
+            )
+        ));
+        let text = batchalign_transform::serialize::to_chat_string(&output);
+        assert!(
+            !text.contains("engine=stanza-1.11.1+cpu"),
+            "must not write an ambiguous engine list"
+        );
+    }
+
     /// Align records the reported FA engine byte for byte, and `utr=` only
     /// when a recovery pass actually ran.
     #[test]
@@ -2596,13 +2774,15 @@ mod tests {
             "{ran}"
         );
 
-        let mut contribution = UtrContribution::NotRun;
-        contribution.record_pass(&UtrEngine::RevAi, &UtrResult::not_run_no_untimed(3));
-        assert_eq!(contribution, UtrContribution::NotRun);
+        let recovery =
+            UtrRecovery::from_initial(&UtrEngine::RevAi, Ok(UtrResult::not_run_no_untimed(3)))
+                .unwrap();
+        let contribution = recovery.contribution();
+        assert_eq!(*contribution, UtrContribution::NotRun);
         let not_run = align_provenance(
             &LanguageCode3::eng(),
             &fa,
-            &contribution,
+            contribution,
             false,
             false,
             derive,

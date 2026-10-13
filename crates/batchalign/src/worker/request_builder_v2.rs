@@ -177,6 +177,7 @@ pub async fn build_forced_alignment_request_v2(
         request_id: input.ids.request_id.clone(),
         task: InferenceTaskV2::ForcedAlignment,
         payload: TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+            attention_capture: None,
             backend,
             payload_ref_id: payload_attachment.id.clone(),
             audio_ref_id: audio_attachment.id.clone(),

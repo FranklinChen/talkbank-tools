@@ -287,7 +287,6 @@ impl JobStore {
                         continue;
                     }
 
-                    let (status, job_status_note) = recover_job_status(&row.job_id, &row.status);
                     let command = match ReleasedCommand::try_from(row.command.as_str()) {
                         Ok(command) => command,
                         Err(_) => {
@@ -297,13 +296,19 @@ impl JobStore {
                         }
                     };
 
-                    // Validate the row's command/options pairing before
-                    // collecting any persistence repairs, including for jobs
-                    // whose files have not yet reached a terminal state.
-                    if let Err(error) = crate::command_model::command_spec(command).selected_output_policy(&row.options) {
-                        warn!(job_id = %row.job_id, %error, "Inconsistent command options in DB, skipping job recovery");
-                        continue;
-                    }
+                    // A failed admission is visible but read-only. It grants
+                    // neither artifact naming nor persistence-repair authority.
+                    let admission = crate::command_model::command_spec(command)
+                        .selected_output_policy(&row.options);
+                    let (status, job_status_note) = match &admission {
+                        Ok(_) => recover_job_status(&row.job_id, &row.status),
+                        Err(error) => {
+                            warn!(job_id = %row.job_id, %error, "Inconsistent command options in DB; recovering as non-runnable failure");
+                            (JobStatus::Failed, Some(format!(
+                                "Stored command/options are inconsistent: {error}. Original records are unchanged; restart is refused until the mismatch is resolved."
+                            )))
+                        }
+                    };
 
                     let mut file_statuses = HashMap::new();
                     let mut results: Vec<FileResultEntry> = Vec::new();
@@ -316,14 +321,15 @@ impl JobStore {
                                 warn!(
                                     job_id = %row.job_id,
                                     filename = %fs_row.filename,
-                                    "Recovered file status: {dropped}; rewriting the row \
-                                     from its phase"
+                                    "Recovered file status: {dropped}"
                                 );
-                                repairs.files.push((
-                                    JobId::from(row.job_id.clone()),
-                                    fs_row.filename.clone(),
-                                    phase.clone(),
-                                ));
+                                if admission.is_ok() {
+                                    repairs.files.push((
+                                        JobId::from(row.job_id.clone()),
+                                        fs_row.filename.clone(),
+                                        phase.clone(),
+                                    ));
+                                }
                                 phase
                             }
                             RecoveredFilePhase::Foreign(phase) => {
@@ -357,7 +363,7 @@ impl JobStore {
                             },
                         );
 
-                        if fs_status.is_terminal() {
+                        if fs_status.is_terminal() && admission.is_ok() {
                             // Persisted file-status names identify inputs, not artifacts.
                             let artifact = match crate::recipe_runner::runtime::primary_output_artifact(
                                 command,
@@ -435,10 +441,11 @@ impl JobStore {
                                         job_id = %row.job_id,
                                         submitter_name = %name,
                                         "Recovered job row names a submitter with no \
-                                         address; recorded as no submitter, and the row \
-                                         is rewritten so"
+                                         address; displayed as no submitter"
                                     );
-                                    repairs.submitters.push(JobId::from(row.job_id.clone()));
+                                    if admission.is_ok() {
+                                        repairs.submitters.push(JobId::from(row.job_id.clone()));
+                                    }
                                     None
                                 }
                             },
@@ -753,18 +760,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_refuses_inconsistent_options_before_repairing_pending_rows() {
-        let (store, db, _dir) = test_store_with_db().await;
-        let mut record =
-            make_job_record("mismatched", JobStatus::Queued, vec!["source.wav".into()]);
-        record.command = "convert".into(); // options still name the original command
-        db.insert_job(&record).await.unwrap();
-        assert_eq!(store.load_from_db().await.unwrap(), 0);
-        assert!(store.get(&JobId::from("mismatched")).await.is_none());
-        let retained = db.load_all_jobs().await.unwrap();
-        assert_eq!(retained.len(), 1);
-        assert_eq!(retained[0].options, record.options);
-        assert_eq!(retained[0].command, "convert");
+    async fn recovery_exposes_inconsistent_options_without_dispatch_restart_or_row_repairs() {
+        for status in [JobStatus::Queued, JobStatus::Running, JobStatus::Completed] {
+            let (store, db, _dir) = test_store_with_db().await;
+            let mut record = make_job_record(
+                "mismatched",
+                status,
+                vec!["source.wav".into(), "pending.wav".into()],
+            );
+            record.command = "convert".into(); // options still name morphotag
+            db.insert_job(&record).await.unwrap();
+            // These two inconsistencies normally trigger persistence repairs.
+            db.seed_file_status_row(
+                "mismatched",
+                "source.wav",
+                "done",
+                Some("stale error"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            db.seed_job_submitter_columns("mismatched", "", "someone")
+                .await
+                .unwrap();
+            let original = db.load_all_jobs().await.unwrap().remove(0);
+            let id = JobId::from("mismatched");
+
+            // Repeated recovery is idempotent and never changes the raw rows.
+            for _ in 0..2 {
+                assert_eq!(store.load_from_db().await.unwrap(), 1);
+                let info = store.get(&id).await.expect("visible failed job");
+                assert_eq!(info.status, JobStatus::Failed);
+                assert!(
+                    info.error
+                        .as_deref()
+                        .unwrap()
+                        .contains("Stored command/options are inconsistent")
+                );
+                let detail = store.get_job_detail(&id).await.expect("visible details");
+                assert_eq!(detail.options, record.options);
+                assert!(
+                    detail.results.is_empty(),
+                    "cannot guess artifacts from inconsistent options"
+                );
+                assert!(
+                    store
+                        .claim_ready_queued_jobs()
+                        .await
+                        .ready_job_ids
+                        .is_empty()
+                );
+                assert!(matches!(
+                    store.restart(&id).await,
+                    Err(ServerError::Planning(
+                        crate::error::PlanningError::OutputOptionsMismatch { .. }
+                    ))
+                ));
+                assert_eq!(store.get(&id).await.unwrap().status, JobStatus::Failed);
+                assert!(!store.registry.runner_claim_active(&id).await.unwrap());
+
+                let retained = db.load_all_jobs().await.unwrap().remove(0);
+                assert_eq!(retained.status, original.status);
+                assert_eq!(retained.options, original.options);
+                assert_eq!(retained.command, original.command);
+                assert_eq!(retained.error, original.error);
+                assert_eq!(retained.submitted_by_name, original.submitted_by_name);
+                assert_eq!(
+                    format!("{:?}", retained.file_statuses),
+                    format!("{:?}", original.file_statuses)
+                );
+            }
+        }
     }
 
     /// Startup recovery re-queues resumable work and persists the queued state.

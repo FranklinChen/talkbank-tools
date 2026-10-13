@@ -100,19 +100,21 @@ pub(super) fn prepare_paths_submission(
                 };
                 let candidate = before_path.join(filename);
                 if candidate.exists() {
-                    matches.push(
+                    matches.push(Some(
                         std::fs::canonicalize(&candidate)
                             .map_err(CliError::Io)?
                             .to_string_lossy()
                             .to_string(),
-                    );
+                    ));
+                } else {
+                    matches.push(None);
                 }
             }
             matches
         } else if before_path.is_file() && files.len() == 1 {
             std::fs::canonicalize(before_path)
                 .map_err(CliError::Io)
-                .map(|p| vec![p.to_string_lossy().to_string()])?
+                .map(|p| vec![Some(p.to_string_lossy().to_string())])?
         } else {
             eprintln!("warning: --before path is not a valid file or directory, ignoring");
             Vec::new()
@@ -138,7 +140,10 @@ pub(super) fn prepare_paths_submission(
             output_paths: output_paths.into_iter().map(Into::into).collect(),
             display_names: server_names,
             debug_traces,
-            before_paths: before_paths.into_iter().map(Into::into).collect(),
+            before_paths: before_paths
+                .into_iter()
+                .map(|path| path.map(Into::into))
+                .collect(),
         },
         destinations: plan.into_destinations(),
         total_files: files.len(),
@@ -177,7 +182,7 @@ fn detect_media_mapping(
 #[cfg(test)]
 mod tests {
     use super::{detect_media_mapping, prepare_paths_submission};
-    use crate::api::{ContentType, FileProvenance, FileResult};
+    use crate::api::{ContentType, FileProvenance, FileResult, ReleasedCommand};
     use crate::cli::args::InputKind;
     use crate::cli::output::write_result;
     use crate::options::{AlignOptions, CommandOptions, MorphotagOptions};
@@ -191,6 +196,66 @@ mod tests {
     }
 
     const CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n";
+
+    #[test]
+    fn partial_before_directory_preserves_every_source_slot() {
+        for options in [morphotag(), align()] {
+            let root = tempfile::tempdir().unwrap();
+            let inputs = root.path().join("current");
+            let priors = root.path().join("before");
+            let output = root.path().join("output");
+            std::fs::create_dir_all(&inputs).unwrap();
+            std::fs::create_dir_all(&priors).unwrap();
+            for name in ["a.cha", "b.cha", "c.cha"] {
+                std::fs::write(inputs.join(name), CHAT).unwrap();
+            }
+            // Exercise no, partial and complete companion populations through
+            // real discovery and request validation, not a copied index loop.
+            for added in [None, Some("b.cha"), Some("a.cha"), Some("c.cha")] {
+                if let Some(name) = added {
+                    std::fs::write(priors.join(name), CHAT).unwrap();
+                }
+                let prepared = prepare_paths_submission(
+                    &options,
+                    if options.command() == ReleasedCommand::Morphotag {
+                        "per-file"
+                    } else {
+                        "eng"
+                    },
+                    1,
+                    InputKind::Chat,
+                    std::slice::from_ref(&inputs),
+                    Some(&output),
+                    None,
+                    Some(&priors),
+                    &[],
+                )
+                .unwrap()
+                .unwrap();
+                let request = prepared.submission;
+                request.validate().unwrap();
+                assert_eq!(request.before_paths.len(), request.source_paths.len());
+                for (source, prior) in request.source_paths.iter().zip(&request.before_paths) {
+                    let candidate = priors.join(
+                        source
+                            .assume_shared_filesystem()
+                            .as_path()
+                            .file_name()
+                            .unwrap(),
+                    );
+                    let expected = candidate
+                        .exists()
+                        .then(|| std::fs::canonicalize(candidate).unwrap());
+                    assert_eq!(
+                        prior
+                            .as_ref()
+                            .map(|path| path.assume_shared_filesystem().as_path().to_owned()),
+                        expected
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn shared_submission_and_copy_back_share_exact_mixed_root_destinations() {

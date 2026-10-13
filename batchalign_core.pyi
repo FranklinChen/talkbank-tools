@@ -9,6 +9,11 @@ See ``book/src/batchalign/architecture/python-rust-errors.md``.
 
 from __future__ import annotations
 
+import numpy as np
+from numpy.typing import NDArray
+
+def whisper_lexical_frame_indices(costs: NDArray[np.float32]) -> list[int]: ...
+
 class BatchalignError(Exception):
     """Common ancestor for every typed exception raised across the
     Rust/Python PyO3 boundary."""

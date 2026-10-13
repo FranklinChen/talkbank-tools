@@ -33,20 +33,110 @@ enum AnchorError {
     },
 }
 
-/// Outcome of splicing L2 results into a `ChatFile`.
+/// Why a merged span retained its primary placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpliceRetentionReason {
+    /// The planned utterance no longer exists at its AST position.
+    MissingUtterance,
+    /// The host has no morphology tier.
+    MissingMorphology,
+    /// The planned range does not fit the host morphology tier.
+    OutsideMorphology,
+    /// The primary attachment cannot be read.
+    UnreadableHostAnchor,
+    /// Coordinated insertion refused the proposed structure.
+    InsertionRefused,
+    /// The resulting grammar failed validation and was rolled back.
+    GrammarRolledBack,
+}
+
+/// The producer's disposition of one merged span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanSpliceDisposition {
+    /// The span's morphology was installed.
+    Applied {
+        /// Whether its planned external relation correction was installed.
+        external_relation_corrected: bool,
+    },
+    /// Primary placeholders remain; the secondary analysis was not installed.
+    Retained(SpliceRetentionReason),
+}
+
+/// A splice result bound to the span that produced it. Only the splice
+/// producer constructs this receipt; counts are derived from these receipts.
+#[derive(Debug)]
+pub struct SpanSpliceOutcome {
+    line_idx: usize,
+    first_word: MorItemIndex,
+    words: usize,
+    target_lang: talkbank_model::model::LanguageCode,
+    disposition: SpanSpliceDisposition,
+}
+
+impl SpanSpliceOutcome {
+    /// Zero-based position in the source AST's line sequence, not a text line.
+    pub fn line_idx(&self) -> usize {
+        self.line_idx
+    }
+    /// First morphology item targeted by this span.
+    pub fn first_word(&self) -> MorItemIndex {
+        self.first_word
+    }
+    /// Number of morphology positions targeted by this span.
+    pub fn words(&self) -> usize {
+        self.words
+    }
+    /// The secondary language requested for this span.
+    pub fn target_lang(&self) -> &talkbank_model::model::LanguageCode {
+        &self.target_lang
+    }
+    /// What the splice actually installed or retained.
+    pub fn disposition(&self) -> SpanSpliceDisposition {
+        self.disposition
+    }
+}
+
+/// Transcript-ordered outcomes of splicing L2 results into a `ChatFile`.
 #[derive(Debug, Default)]
 pub struct SpliceOutcome {
-    /// Number of @s positions successfully spliced with real morphology.
-    pub spliced: usize,
-    /// Number of words of the spliced spans that fell back to `L2|xxx`
-    /// (rolled back, or no `%mor` to place them in). Words whose span was
-    /// never merged are not counted here; the caller reports them.
-    pub fallback: usize,
-    /// Number of corrected external relations written into `%gra`. A
-    /// correction is written only on a span root that ends attached to a
-    /// host governor. Utterance-root replacements and generic primary-root
-    /// fallback attachments are not external corrections and are not counted.
-    pub gra_upgraded: usize,
+    spans: Vec<SpanSpliceOutcome>,
+}
+
+impl SpliceOutcome {
+    /// Every attempted span, including retained placeholders.
+    pub fn spans(&self) -> &[SpanSpliceOutcome] {
+        &self.spans
+    }
+    /// Number of positions actually installed.
+    pub fn spliced(&self) -> usize {
+        self.spans
+            .iter()
+            .filter(|s| matches!(s.disposition, SpanSpliceDisposition::Applied { .. }))
+            .map(|s| s.words)
+            .sum()
+    }
+    /// Number of attempted positions retained. Unmerged spans are not counted.
+    pub fn fallback(&self) -> usize {
+        self.spans
+            .iter()
+            .filter(|s| matches!(s.disposition, SpanSpliceDisposition::Retained(_)))
+            .map(|s| s.words)
+            .sum()
+    }
+    /// Number of planned external relation corrections actually installed.
+    pub fn gra_upgraded(&self) -> usize {
+        self.spans
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.disposition,
+                    SpanSpliceDisposition::Applied {
+                        external_relation_corrected: true
+                    }
+                )
+            })
+            .count()
+    }
 }
 
 /// Reason an L2 splice rolled back to `L2|xxx` for one or more
@@ -152,8 +242,7 @@ struct SpliceFallbackContext<'a> {
 ///
 /// The `secondary_gras_summary` closure is only invoked on the
 /// rollback path so the success path pays no diagnostic-building
-/// cost. Callers update their `outcome.spliced` / `outcome.fallback`
-/// counters off the returned [`SpliceValidationResult`].
+/// cost. The caller derives a span disposition from this validation result.
 ///
 /// This is the single chokepoint for the "no invalid CHAT shipped
 /// downstream" guarantee: any future change to the rollback shape
@@ -365,7 +454,18 @@ pub fn splice_l2_into_chat(
     merged.sort_by_key(|span| (span.line_idx, span.first_word));
     let mut outcome = SpliceOutcome::default();
     for span in merged {
-        splice_span(chat_file, span, &mut outcome);
+        let line_idx = span.line_idx;
+        let first_word = span.first_word;
+        let words = span.mors.len();
+        let target_lang = span.target_lang.clone();
+        let disposition = splice_span(chat_file, span);
+        outcome.spans.push(SpanSpliceOutcome {
+            line_idx,
+            first_word,
+            words,
+            target_lang,
+            disposition,
+        });
     }
     outcome
 }
@@ -374,15 +474,14 @@ pub fn splice_l2_into_chat(
 fn splice_span(
     chat_file: &mut talkbank_model::model::ChatFile,
     span: MergedL2Span,
-    outcome: &mut SpliceOutcome,
-) {
+) -> SpanSpliceDisposition {
+    use SpanSpliceDisposition::{Applied, Retained};
     use talkbank_model::model::DependentTier;
     use talkbank_model::model::Line;
 
     let words = span.mors.len();
     let Some(Line::Utterance(utt)) = chat_file.lines.as_mut_slice().get_mut(span.line_idx) else {
-        outcome.fallback += words;
-        return;
+        return Retained(SpliceRetentionReason::MissingUtterance);
     };
     let mut mor_tier = None;
     let mut gra_tier = None;
@@ -394,14 +493,12 @@ fn splice_span(
         }
     }
     let Some(mor) = mor_tier else {
-        outcome.fallback += words;
-        return;
+        return Retained(SpliceRetentionReason::MissingMorphology);
     };
     let start = span.first_word.as_usize();
     let item_range = start..start + words;
     if item_range.end > mor.items().len() {
-        outcome.fallback += words;
-        return;
+        return Retained(SpliceRetentionReason::OutsideMorphology);
     }
 
     let Some(gra) = gra_tier else {
@@ -409,8 +506,9 @@ fn splice_span(
         for (slot, item) in mor.items_mut()[item_range].iter_mut().zip(span.mors) {
             *slot = item;
         }
-        outcome.spliced += words;
-        return;
+        return Applied {
+            external_relation_corrected: false,
+        };
     };
 
     let mut new_gras = span.gras;
@@ -428,8 +526,7 @@ fn splice_span(
                 "L2 splice fell back to L2|xxx: the host anchor of the span \
                  root cannot be read"
             );
-            outcome.fallback += words;
-            return;
+            return Retained(SpliceRetentionReason::UnreadableHostAnchor);
         }
     };
 
@@ -463,8 +560,7 @@ fn splice_span(
                 %error,
                 "L2 splice refused; the primary placeholders are retained"
             );
-            outcome.fallback += words;
-            return;
+            return Retained(SpliceRetentionReason::InsertionRefused);
         }
     };
 
@@ -483,17 +579,13 @@ fn splice_span(
         },
     ) {
         SpliceValidationResult::Valid => {
-            outcome.spliced += words;
             // A correction counts where it was written.
-            if applied_attachment == AppliedAttachment::PlannedHost
-                && span.attachment.corrected_deprel().is_some()
-            {
-                outcome.gra_upgraded += 1;
+            Applied {
+                external_relation_corrected: applied_attachment == AppliedAttachment::PlannedHost
+                    && span.attachment.corrected_deprel().is_some(),
             }
         }
-        SpliceValidationResult::RolledBack => {
-            outcome.fallback += words;
-        }
+        SpliceValidationResult::RolledBack => Retained(SpliceRetentionReason::GrammarRolledBack),
     }
 }
 
@@ -510,6 +602,59 @@ mod cardinality_tests {
     use talkbank_model::model::dependent_tier::GrammaticalRelation;
     use talkbank_model::model::dependent_tier::mor::{Mor, MorStem, MorWord, PosCategory};
     use talkbank_parser::TreeSitterParser;
+
+    #[test]
+    fn refused_spans_keep_their_address_and_cause_without_changing_chat() {
+        let parser = TreeSitterParser::new().unwrap();
+        let (mut chat, _) = parse_lenient(
+            &parser,
+            "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n",
+        );
+        let line = chat
+            .lines
+            .iter()
+            .position(|line| matches!(line, talkbank_model::model::Line::Utterance(_)))
+            .unwrap();
+        let before = crate::serialize::to_chat_string(&chat);
+        let span = |line_idx| {
+            MergedL2Span::for_splice_test(
+                line_idx,
+                MorItemIndex::new(0),
+                vec![Mor::new(MorWord::new(
+                    PosCategory::new("noun"),
+                    MorStem::new("hello"),
+                ))],
+                Vec::new(),
+                L2Attachment::InternalRoot,
+            )
+        };
+        let outcome = splice_l2_into_chat(&mut chat, vec![span(999), span(line)]);
+        assert_eq!(crate::serialize::to_chat_string(&chat), before);
+        assert_eq!(outcome.spliced(), 0);
+        assert_eq!(outcome.fallback(), 2);
+        assert_eq!(outcome.spans()[0].line_idx(), line);
+        assert_eq!(outcome.spans()[1].line_idx(), 999);
+        let receipts: Vec<_> = outcome.spans().iter().map(|span| serde_json::json!({
+            "first_word": span.first_word().as_usize(), "words": span.words(),
+            "language": span.target_lang().as_str(), "disposition": format!("{:?}", span.disposition())
+        })).collect();
+        insta::assert_json_snapshot!(receipts, @r#"
+        [
+          {
+            "disposition": "Retained(MissingMorphology)",
+            "first_word": 0,
+            "language": "spa",
+            "words": 1
+          },
+          {
+            "disposition": "Retained(MissingUtterance)",
+            "first_word": 0,
+            "language": "spa",
+            "words": 1
+          }
+        ]
+        "#);
+    }
 
     /// Splice replaces a 1-chunk `L2|xxx` slot with an N-chunk merged Mor.
     /// The output `%mor` chunk count grows but `%gra` count stays the same;
@@ -2389,7 +2534,7 @@ mod cardinality_tests {
                 merged.reverse();
             }
             let outcome = splice_l2_into_chat(&mut chat_file, merged);
-            assert_eq!(outcome.spliced, 2, "{outcome:?}");
+            assert_eq!(outcome.spliced(), 2, "{outcome:?}");
             let talkbank_model::model::Line::Utterance(utt) = &chat_file.lines[line_idx] else {
                 unreachable!()
             };
@@ -2417,11 +2562,18 @@ mod cardinality_tests {
 
     /// Group per-word results into merged spans (a `None` breaks a span and
     /// counts as a fallback) and splice them.
+    #[derive(Debug)]
+    struct TestSpliceCounts {
+        spliced: usize,
+        fallback: usize,
+        gra_upgraded: usize,
+    }
+
     fn splice_positions(
         chat_file: &mut talkbank_model::model::ChatFile,
         deferred: &[L2DeferredPosition],
         merged: Vec<Option<PositionResult>>,
-    ) -> SpliceOutcome {
+    ) -> TestSpliceCounts {
         let attachment = |test: &TestAttachment| match *test {
             TestAttachment::Internal => L2Attachment::InternalRoot,
             // The test's relation is the primary's when it matches it, and
@@ -2492,9 +2644,12 @@ mod cardinality_tests {
                 )
             })
             .collect();
-        let mut outcome = splice_l2_into_chat(chat_file, spans);
-        outcome.fallback += unmerged;
-        outcome
+        let outcome = splice_l2_into_chat(chat_file, spans);
+        TestSpliceCounts {
+            spliced: outcome.spliced(),
+            fallback: outcome.fallback() + unmerged,
+            gra_upgraded: outcome.gra_upgraded(),
+        }
     }
 
     /// Test helper: a span root attached under the host governor of the

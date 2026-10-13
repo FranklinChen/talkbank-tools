@@ -241,7 +241,7 @@ impl UtrAsrCacheNamespace {
         models: &crate::types::worker_v2::AsrRequestedModelsV2,
     ) -> UtrAsrCacheEligibility {
         let revision = match engine {
-            UtrEngine::Whisper => "utr-asr-word-v3",
+            UtrEngine::Whisper => "utr-asr-open-begin-v5",
             UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1",
         };
         match models.pinned_namespace_text() {
@@ -481,7 +481,7 @@ mod typed_cache_tests {
         for engine in [UtrEngine::RevAi, UtrEngine::Whisper, UtrEngine::HkTencent] {
             let bytes = namespace_for(&engine).namespace().to_owned();
             let revision = match engine {
-                UtrEngine::Whisper => "utr-asr-word-v3",
+                UtrEngine::Whisper => "utr-asr-open-begin-v5",
                 UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1",
             };
             let prefix = format!("{revision}:{}:", engine.wire_name());
@@ -512,11 +512,16 @@ mod typed_cache_tests {
             .expect("cache");
         let data = serde_json::json!({"segments": []});
         let whisper = namespace_for(&UtrEngine::Whisper);
-        for old_revision in ["utr-asr-v1:", "utr-asr-word-v2:"] {
+        for old_revision in [
+            "utr-asr-v1:",
+            "utr-asr-word-v2:",
+            "utr-asr-word-v3:",
+            "utr-asr-owned-windows-v4:",
+        ] {
             let old = UtrAsrCacheNamespace(super::BuildOwnedNamespace::derived(
                 whisper
                     .namespace()
-                    .replace("utr-asr-word-v3:", old_revision),
+                    .replace("utr-asr-open-begin-v5:", old_revision),
             ));
             cache
                 .put("old-producer", super::tasks::UTR_ASR, &old, &data)

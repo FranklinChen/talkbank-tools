@@ -8,10 +8,10 @@ use crate::api::{
 
 use super::asr_model::AsrModelIdentityV2;
 use super::requests::{
-    FrameCountV2, ProtocolErrorCodeV2, SpeakerEmbeddingSpanIdV2, WhisperChunkSpanV2,
-    WorkerRequestIdV2,
+    FrameCountV2, ProtocolErrorCodeV2, SpeakerEmbeddingSpanIdV2, WorkerRequestIdV2,
 };
 use super::utseg_evidence::UtsegBoundaryModelEvidenceV2;
+use super::whisper_windows::WhisperObservationsV2;
 use crate::interval::{AdmittedInterval, IntervalRefusal, UntimedCause};
 
 /// One ASR result built from raw Whisper chunks.
@@ -19,10 +19,11 @@ use crate::interval::{AdmittedInterval, IntervalRefusal, UntimedCause};
 pub struct WhisperChunkResultV2 {
     /// Transcript language.
     pub lang: LanguageCode3,
-    /// Concatenated transcript text.
+    /// Legacy transcript summary. Independently decoded windows have no merged
+    /// summary yet and leave this empty; consumers derive text from observations.
     pub text: String,
     /// Raw chunk spans.
-    pub chunks: Vec<WhisperChunkSpanV2>,
+    pub chunks: WhisperObservationsV2,
     /// The models that produced this result, as the runtime observed them.
     ///
     /// Required, and deliberately not defaulted: a transcript whose models are
@@ -247,6 +248,9 @@ pub struct WhisperTokenTimingV2 {
 /// reconciliation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct WhisperTokenTimingResultV2 {
+    /// Optional durable diagnostic receipt, not used for timing projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_capture: Option<super::WhisperAttentionCaptureReceiptV2>,
     /// Raw token timings in model order.
     pub tokens: Vec<WhisperTokenTimingV2>,
 }
@@ -397,15 +401,18 @@ pub enum UdRelationRepairKindV2 {
     /// A label that is no UD relation and has no known equivalent. Replaced by
     /// `dep`, which is a real UD relation.
     UnknownRelation,
+    /// The appended cue was root and its sole lexical child became root.
+    CueRootPromotion,
 }
 
 impl UdRelationRepairKindV2 {
     /// Every variant, in declaration order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::PadRelation,
         Self::RelationCase,
         Self::RelationAlias,
         Self::UnknownRelation,
+        Self::CueRootPromotion,
     ];
 
     /// The variant's one name: its wire form and its schema constant.
@@ -415,6 +422,7 @@ impl UdRelationRepairKindV2 {
             Self::RelationCase => "relation_case",
             Self::RelationAlias => "relation_alias",
             Self::UnknownRelation => "unknown_relation",
+            Self::CueRootPromotion => "cue_root_promotion",
         }
     }
 }

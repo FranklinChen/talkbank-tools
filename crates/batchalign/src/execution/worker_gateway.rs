@@ -74,7 +74,7 @@ pub(crate) trait WorkerGateway: Send + Sync {
         options: MorphotagRuntimeOptions,
         progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
         cancellation: Cancellation<'_>,
-    ) -> Result<PostValidated, ServerError>;
+    ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, ServerError>;
 
     /// Run utterance segmentation over one cross-file batch of CHAT inputs.
     ///
@@ -175,7 +175,8 @@ impl WorkerGateway for PooledWorkerGateway {
             PipelineServices::new(&self.pool, &self.cache),
             &params,
         )
-        .await
+        .await?
+        .without_reports()
     }
 
     async fn morphotag_single(
@@ -185,7 +186,7 @@ impl WorkerGateway for PooledWorkerGateway {
         options: MorphotagRuntimeOptions,
         progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
         cancellation: Cancellation<'_>,
-    ) -> Result<PostValidated, ServerError> {
+    ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, ServerError> {
         let params = MorphosyntaxParams {
             tokenization_mode: options.tokenization_mode,
             multilingual_policy: options.multilingual_policy,

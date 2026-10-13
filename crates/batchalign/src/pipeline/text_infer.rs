@@ -814,7 +814,11 @@ mod tests {
         )
         .await;
         assert_eq!(results.len(), 1, "one input file, one result");
-        results.remove(0).result
+        results.remove(0).result.map(|output| {
+            output
+                .without_reports()
+                .expect("text fixture has no secondary morphology")
+        })
     }
 
     /// Positive control: untouched output passes the gate and reaches the

@@ -71,6 +71,7 @@ dirs = "7.0"
 include_dir = "0.7"
 indexmap = { version = "2.14", features = ["serde"] }
 indicatif = "0.18"
+nutype = { version = "=0.8.0", features = ["serde"] }
 
 # Testing
 insta = { version = "1.49", features = ["json", "yaml"] }
@@ -107,18 +108,18 @@ batchalign-transform = { path = "crates/batchalign-transform" }
 # Keep every CHAT crate on the same revision; never commit path overrides.
 # talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", rev = "5e8957916bd06f8b3a38ce8e685d20f03c27294e" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb" }
 
 tempfile = "3.27"
 thiserror = "^2.0.21"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
-toml = "^1.1.6"
+toml = "^1.1.8"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.34"
 tower-http = { version = "0.7", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }
@@ -129,7 +130,7 @@ utoipa = { version = "6", features = ["axum_extras", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 whatlang = "0.18"
 sysinfo = "0.39"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Logging and tracing
 tracing = "0.1"

@@ -1109,6 +1109,12 @@
       "type": "string",
       "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
     },
+    "SampleRateHzV2": {
+      "description": "Audio sample rate in Hz carried by prepared artifacts.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
     "SpeakerAttributionV2": {
       "description": "Who a provider attributed one monologue to.\n\nTwo states, because there are two facts, and the wire used to have a\nspelling for only one of them. `speaker` was a bare string, so an engine\nthat separates no speakers at all (Aliyun, FunASR, Whisper, Qwen) had to\nwrite SOMETHING, and what it wrote was `\"0\"`: a label indistinguishable\nfrom a provider's real first speaker. Downstream that became\n`SpeakerIndex(0)` and a `PAR0` tier, so \"nobody was diarized\" and \"the\nprovider said speaker zero\" produced identical CHAT.\n\n`Undiarized` is now a state of its own, and an ABSENT label where\nseparation WAS requested is a refusal rather than a track number.",
       "oneOf": [
@@ -1682,6 +1688,10 @@
         {
           "type": "string",
           "const": "unknown_relation"
+        },
+        {
+          "type": "string",
+          "const": "cue_root_promotion"
         }
       ]
     },
@@ -2014,16 +2024,52 @@
         }
       ]
     },
+    "WhisperAttentionCaptureReceiptV2": {
+      "description": "Small receipt for numeric evidence retained outside the JSON transport.",
+      "type": "object",
+      "properties": {
+        "blake3": {
+          "description": "BLAKE3 of the closed SQLite file, verified by the server before use.",
+          "type": "string"
+        },
+        "capture": {
+          "description": "Request capability, retained whole rather than independently relabelled.",
+          "$ref": "#/$defs/WhisperAttentionCaptureRequestV2"
+        },
+        "request_id": {
+          "description": "Worker request that produced this artifact.",
+          "$ref": "#/$defs/WorkerRequestIdV2"
+        }
+      },
+      "required": [
+        "capture",
+        "request_id",
+        "blake3"
+      ]
+    },
+    "WhisperAttentionCaptureRequestV2": {
+      "description": "A request-bound destination for a new diagnostic SQLite artifact.",
+      "type": "object",
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "semantic_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination",
+        "semantic_key"
+      ]
+    },
     "WhisperChunkResultV2": {
       "description": "One ASR result built from raw Whisper chunks.",
       "type": "object",
       "properties": {
         "chunks": {
           "description": "Raw chunk spans.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WhisperChunkSpanV2"
-          }
+          "$ref": "#/$defs/WhisperObservationsV2"
         },
         "lang": {
           "description": "Transcript language.",
@@ -2034,7 +2080,7 @@
           "$ref": "#/$defs/AsrModelIdentityV2"
         },
         "text": {
-          "description": "Concatenated transcript text.",
+          "description": "Legacy transcript summary. Independently decoded windows have no merged\nsummary yet and leave this empty; consumers derive text from observations.",
           "type": "string"
         }
       },
@@ -2082,10 +2128,37 @@
         "text"
       ]
     },
+    "WhisperObservationsV2": {
+      "description": "Unwindowed producers keep their original wire shape. A windowed producer\ncannot attach ownership beside a second, already-merged transcript.",
+      "anyOf": [
+        {
+          "description": "Native or legacy observations with no claimed window ownership.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WhisperChunkSpanV2"
+          }
+        },
+        {
+          "description": "Independently decoded, sample-owned windows.",
+          "$ref": "#/$defs/WhisperWindowsV2"
+        }
+      ]
+    },
     "WhisperTokenTimingResultV2": {
       "description": "Forced-alignment token response returned before Rust token-to-word\nreconciliation.",
       "type": "object",
       "properties": {
+        "attention_capture": {
+          "description": "Optional durable diagnostic receipt, not used for timing projection.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WhisperAttentionCaptureReceiptV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "tokens": {
           "description": "Raw token timings in model order.",
           "type": "array",
@@ -2115,6 +2188,67 @@
         "text",
         "time_s"
       ]
+    },
+    "WhisperWindowV2": {
+      "description": "One independent decode. Timestamps are local to this window, not the file.",
+      "type": "object",
+      "properties": {
+        "left_context": {
+          "description": "Left context shared with the preceding decode.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "right_context": {
+          "description": "Right context shared with the following decode.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "sample_count": {
+          "description": "Number of source samples, excluding model padding.",
+          "$ref": "#/$defs/FrameCountV2"
+        },
+        "spans": {
+          "description": "Raw word or segment observations, never cross-window merged.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WhisperChunkSpanV2"
+          }
+        },
+        "start_sample": {
+          "description": "First source sample observed by this decode.",
+          "$ref": "#/$defs/FrameCountV2"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "start_sample",
+        "sample_count",
+        "left_context",
+        "right_context",
+        "spans"
+      ]
+    },
+    "WhisperWindowsV2": {
+      "description": "A contiguous sequence with nonempty owned interiors. Deserialization is\nadmission: consumers cannot obtain a sequence with fabricated gaps or seams.",
+      "type": "object",
+      "properties": {
+        "sample_rate_hz": {
+          "$ref": "#/$defs/SampleRateHzV2"
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WhisperWindowV2"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sample_rate_hz",
+        "windows"
+      ]
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
     },
     "WorkerRequestIdV2": {
       "description": "Stable identifier for one V2 protocol request/response pair.",

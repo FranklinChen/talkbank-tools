@@ -49,6 +49,7 @@ def test_whisper_loader_reports_observed_window_algorithm_identity(monkeypatch) 
     assert _state.whisper_fa_model is handle
     assert _reported_engine(InferTask.FA) == WHISPER_FA_ENGINE_ID
     assert WHISPER_FA_ENGINE_ID != "whisper-fa-large-v2"
+    assert WHISPER_FA_ENGINE_ID != "whisper-fa-large-v2-lexical-window-v2"
 
 
 def test_stanza_version_reads_the_installed_package() -> None:

@@ -66,7 +66,12 @@ fn an_over_budget_utterance_with_dense_anchors_becomes_an_anchored_group() {
     let GroupSpan::Anchored(split) = group.span() else {
         panic!("a 33.8 s utterance with anchors every 3 s is split");
     };
-    let pieces: Vec<&AnchoredPiece> = split.pieces().collect();
+    let pieces: Vec<_> = split.pieces().collect();
+    assert!(
+        pieces
+            .iter()
+            .all(|piece| matches!(piece, AnchoredPart::Request(_)))
+    );
     assert!(
         pieces
             .iter()
@@ -104,8 +109,8 @@ fn an_over_budget_utterance_with_dense_anchors_becomes_an_anchored_group() {
 }
 
 /// Six words in the first six seconds and six more five minutes later: the
-/// anchors leave a stretch no piece can cross, so the utterance is refused
-/// as an `anchor_gap` naming that stretch, for review, and never aligned.
+/// anchors leave a stretch no request can cross. Keep that word unrequested,
+/// but retain the bounded prefix and suffix for alignment.
 #[test]
 fn a_minutes_long_anchor_gap_is_refused_for_review() {
     let starts: Vec<u64> = (0..6)
@@ -114,11 +119,25 @@ fn a_minutes_long_anchor_gap_is_refused_for_review() {
         .collect();
     let grouped = group_after_utr(&starts, 400_000);
 
-    assert!(grouped.groups.is_empty(), "nothing is sent to the aligner");
+    assert_eq!(grouped.groups.len(), 1);
+    let GroupSpan::Anchored(partition) = grouped.groups[0].span() else {
+        panic!("partition")
+    };
+    let shape: Vec<_> = partition
+        .pieces()
+        .map(|part| {
+            (
+                matches!(part, AnchoredPart::Request(_)),
+                part.first_word().raw(),
+                part.last_word().raw(),
+            )
+        })
+        .collect();
+    assert_eq!(shape, vec![(true, 0, 5), (false, 6, 6), (true, 7, 11)]);
     assert_eq!(grouped.decisions.len(), 1);
     let expected = RefusedWindow::AnchorGap {
-        start_ms: 0,
-        end_ms: 305_800,
+        start_ms: 5_800,
+        end_ms: 300_800,
         budget_ms: BUDGET_MS,
         // The end of "six", then the end of "seven".
         gap_start_ms: 5_800,

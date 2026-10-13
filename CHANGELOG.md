@@ -5,6 +5,109 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Owned secondary morphology boundaries
+
+- Secondary-language batches own their CHAT spans through inference and return
+  analyses paired with those spans. They cannot request free retokenization:
+  word boundaries stay fixed while model multi-word-token analyses remain
+  available inside each word. Missing or surplus responses refuse the batch
+  without mutating its placeholders or claiming analysis provenance.
+
+### Owned morphosyntax cue projection
+
+- Admit the model's dependency graph before deleting the appended parsing cue.
+  Contract an attached cue into its parent, or promote its sole lexical child
+  when it is root. Ambiguous roots receive one model parse without the cue,
+  retaining lexical boundaries and validating the new graph. Failed retries
+  and malformed graph/boundary evidence fail only the affected item.
+- Graph-owned emission replaces raw positional slicing and a separate drop
+  boolean. POS overrides cannot alter admitted heads or word identities.
+- Repair metadata remains bound to source rows; deleted cue repairs are not
+  attributed to retained words. Root relation changes are reported as
+  `cue_root_promotion`. This adds a closed worker repair kind: worker and server
+  must be upgraded together. The analyzed-result fields and CHAT syntax are unchanged.
+
+### Validated provider identifier values
+
+- The Rust `RevAiJobId` value now rejects empty strings at construction as
+  well as deserialization. Its inner field is private and unchecked string
+  conversions are removed; valid wire values are unchanged.
+- JSON Schema and OpenAPI describe the same nonempty-string constraint.
+
+### Partial anchored alignment recovery
+
+- A fully observed final word can be separated from an unavailable range
+  when its complete anchor fits and the preceding range stays unrequested.
+  This does not crop unknown words into new requests or reuse ASR as final timing.
+- An oversized gap no longer discards bounded alignment pieces before or after
+  it. One owned partition retains every original word and its request status.
+- Unavailable ranges have no worker request, cache key or invented timing;
+  assembly preserves their untimed slots and output remains visibly diagnosed.
+- Alignment evidence records unrequested word ranges and their window causes;
+  retained word timing can still be reused without new inference.
+
+### Visible unavailable timing recovery
+
+- Failed UTR attempts retain CHAT and available timing while reporting their
+  typed causes in file status, CLI, dashboard and saved alignment provenance.
+- A consumed fallback permission replaces independent retry flags. Later
+  success does not erase an earlier failed attempt; cancellation still stops.
+
+### Visible provenance recovery
+
+- Missing or damaged incremental morphology attribution no longer turns
+  successfully installed morphology into a file-level validation failure.
+- Original records survive, incomplete attribution is marked in CHAT and
+  reported through file status, CLI and dashboard, and later reuse cannot
+  silently certify it as complete. Clean combined stamps are unchanged.
+
+### Reused morphology retains its provenance
+
+- Incremental morphology copies the prior's morphology stamps with admitted
+  reused tiers, retaining their original build and date without claiming new
+  inference. Unrelated current comments and other commands' stamps survive.
+- Missing prior stamps do not inherit unrelated current-model attribution;
+  damaged optional stamp metadata is retained without blocking reuse.
+
+### Per-file optional incremental priors
+
+- A partially populated `--before` directory no longer produces a malformed
+  batch request. Files without companions use fresh processing while other
+  files keep their own prior; current CHAT admission remains required.
+- Paths requests accept null prior entries without relaxing list cardinality;
+  complete string lists remain compatible. Rust prior lists now contain
+  `Option<ClientPath>`. Alignment provenance follows each file's prior.
+
+### Exact bounded search for longer UTR dialogues
+
+- Joint speaker-order search now stores only states that can attain a proven
+  feasible score. It preserves all optimal correspondences and ambiguity,
+  rather than imposing a heuristic window or increasing the existing limits.
+- Preliminary witness work, checkpoint storage and candidate populations
+  remain budgeted; weak-evidence regions can still be refused independently.
+
+### UTR search yields the async executor and cooperates with cancellation
+
+- Both recovery paths run owned candidate computation on the blocking pool,
+  preserving tracing context. Only completed work can replace the source;
+  cancelled or panicked work leaves it unchanged.
+- Search checkpoints preserve global/two-pass matching policy and existing
+  budgets. Cancellation remains distinct from missing or ambiguous evidence.
+- Rust strategy implementations now supply `UtrStrategy::inject_controlled`;
+  synchronous `inject` and transform alignment entry points remain available.
+
+### Secondary morphology preserves output and reports incomplete spans
+
+- Full and incremental morphotag carry secondary extraction, dispatch, merge and splice
+  shortfalls through checked output to file status, CLI and dashboard. Valid
+  primary/successful secondary analysis is written; affected spans retain
+  `L2|xxx`. Explicit unsupported-language results are exclusions, not failures;
+  missing runtime capability information is an analysis shortfall.
+- Per-span producer receipts replace independent splice counters. Provenance
+  names only installed secondary analyses. Report counts include every affected
+  span, with bounded, transcript-ordered inline examples and typed causes.
+- Transcription and comparison keep their existing placeholder-only policy.
+
 ### A file timed only on a diary note is refused with its remedy
 
 - A linked transcript (`@Media: name, audio`) whose only timing was the bullet

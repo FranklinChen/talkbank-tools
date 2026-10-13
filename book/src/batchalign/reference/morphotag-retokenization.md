@@ -1,7 +1,7 @@
 # Morphotag Retokenization
 
 **Status:** Current
-**Last updated:** 2026-10-04 17:48 EDT
+**Last updated:** 2026-10-12 22:31 EDT
 
 ## Purpose and audience
 
@@ -19,8 +19,8 @@ For deeper detail:
 - [`reference/stanza-limitations.md`](./stanza-limitations.md), Defect 2
   (MWT hint preservation) is the root cause of the Preserve-mode MWT
   regression discussed below.
-- [`reference/l2-morphotag-status.md`](./l2-morphotag-status.md), L2 uses
-  `retokenize=true` for secondary Stanza dispatch.
+- [`reference/l2-morphotag-status.md`](./l2-morphotag-status.md), L2 preserves
+  CHAT word boundaries while retaining MWT expansion within each word.
 - [`developer/commands/morphotag.md`](../developer/commands/morphotag.md),
   CLI wiring and dispatch sketch.
 

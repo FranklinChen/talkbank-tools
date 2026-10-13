@@ -162,7 +162,8 @@ fn run_l2_in(
         })
         .collect();
     let outcome = splice_l2_into_chat(&mut chat, merged);
-    assert_eq!(outcome.fallback, 0, "every span splices: {outcome:?}");
+    assert_eq!(outcome.fallback(), 0, "every span splices: {outcome:?}");
+    assert_eq!(outcome.spans().len(), secondaries.len());
 
     let utterance = chat
         .lines

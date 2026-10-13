@@ -93,7 +93,9 @@ pub enum MatchMode {
 }
 
 mod comparison;
+pub mod control;
 mod correspondence;
+use control::{Uninterrupted, WorkControl, uninterrupted};
 pub mod interleaving;
 use comparison::{Alignable, FuzzyComparison, LiteralMatchMode, PreparedFuzzyWord};
 pub use correspondence::{
@@ -113,11 +115,25 @@ pub use correspondence::{
 ///
 /// Returns a list of `AlignResult` items in sequence order.
 pub fn align(payload: &[String], reference: &[String], mode: MatchMode) -> Vec<AlignResult> {
+    uninterrupted(align_controlled(payload, reference, mode, &Uninterrupted))
+}
+
+/// Align with cooperative interruption, preserving the synchronous policy.
+pub fn align_controlled<C: WorkControl + ?Sized>(
+    payload: &[String],
+    reference: &[String],
+    mode: MatchMode,
+    control: &C,
+) -> Result<Vec<AlignResult>, C::Error> {
+    control.check()?;
     match mode {
-        MatchMode::Exact => align_generic(payload, reference, LiteralMatchMode::Exact),
-        MatchMode::CaseInsensitive => {
-            align_generic(payload, reference, LiteralMatchMode::AsciiInsensitive)
-        }
+        MatchMode::Exact => align_generic(payload, reference, LiteralMatchMode::Exact, control),
+        MatchMode::CaseInsensitive => align_generic(
+            payload,
+            reference,
+            LiteralMatchMode::AsciiInsensitive,
+            control,
+        ),
         MatchMode::Fuzzy { threshold } => {
             let payload: Vec<_> = payload
                 .iter()
@@ -127,7 +143,12 @@ pub fn align(payload: &[String], reference: &[String], mode: MatchMode) -> Vec<A
                 .iter()
                 .map(|word| PreparedFuzzyWord::new(word))
                 .collect();
-            align_generic(&payload, &reference, FuzzyComparison::new(threshold))
+            align_generic(
+                &payload,
+                &reference,
+                FuzzyComparison::new(threshold),
+                control,
+            )
         }
     }
 }
@@ -145,7 +166,7 @@ pub fn align_chars(payload: &[char], reference: &[char], mode: MatchMode) -> Vec
         MatchMode::Exact => LiteralMatchMode::Exact,
         MatchMode::CaseInsensitive | MatchMode::Fuzzy { .. } => LiteralMatchMode::AsciiInsensitive,
     };
-    align_generic(payload, reference, mode)
+    uninterrupted(align_generic(payload, reference, mode, &Uninterrupted))
 }
 
 // ---------------------------------------------------------------------------
@@ -153,11 +174,13 @@ pub fn align_chars(payload: &[char], reference: &[char], mode: MatchMode) -> Vec
 // ---------------------------------------------------------------------------
 
 /// Prefix/suffix stripping + Hirschberg dispatch for any [`Alignable`] type.
-fn align_generic<T: Alignable>(
+fn align_generic<T: Alignable, C: WorkControl + ?Sized>(
     payload: &[T],
     reference: &[T],
     mode: T::Policy,
-) -> Vec<AlignResult> {
+    control: &C,
+) -> Result<Vec<AlignResult>, C::Error> {
+    control.check()?;
     // Strip common prefix
     let prefix_len = payload
         .iter()
@@ -186,7 +209,9 @@ fn align_generic<T: Alignable>(
     // DP on the middle part only
     let mid_pay = &payload[prefix_len..payload.len() - suffix_len];
     let mid_ref = &reference[prefix_len..reference.len() - suffix_len];
-    result.extend(hirschberg(mid_pay, mid_ref, prefix_len, prefix_len, mode));
+    result.extend(hirschberg(
+        mid_pay, mid_ref, prefix_len, prefix_len, mode, control,
+    )?);
 
     // Build suffix matches
     let pay_suffix_start = payload.len() - suffix_len;
@@ -199,49 +224,51 @@ fn align_generic<T: Alignable>(
         });
     }
 
-    result
+    Ok(result)
 }
 
 /// Hirschberg's divide-and-conquer alignment (linear space).
-fn hirschberg<T: Alignable>(
+fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
     payload: &[T],
     reference: &[T],
     pay_offset: usize,
     ref_offset: usize,
     mode: T::Policy,
-) -> Vec<AlignResult> {
+    control: &C,
+) -> Result<Vec<AlignResult>, C::Error> {
+    control.check()?;
     if reference.is_empty() {
-        return payload
+        return Ok(payload
             .iter()
             .enumerate()
             .map(|(i, k)| AlignResult::ExtraPayload {
                 key: k.to_key(),
                 payload_idx: pay_offset + i,
             })
-            .collect();
+            .collect());
     }
     if payload.is_empty() {
-        return reference
+        return Ok(reference
             .iter()
             .enumerate()
             .map(|(i, k)| AlignResult::ExtraReference {
                 key: k.to_key(),
                 reference_idx: ref_offset + i,
             })
-            .collect();
+            .collect());
     }
 
     if reference.len() <= 1 || payload.len() <= 1 || reference.len() * payload.len() <= SMALL_CUTOFF
     {
-        return align_small(payload, reference, pay_offset, ref_offset, mode);
+        return align_small(payload, reference, pay_offset, ref_offset, mode, control);
     }
 
     let mid = reference.len() / 2;
     let left_ref = &reference[..mid];
     let right_ref = &reference[mid..];
 
-    let score_left = row_costs(left_ref, payload, mode);
-    let score_right = row_costs_rev(right_ref, payload, mode);
+    let score_left = row_costs(left_ref, payload, mode, control)?;
+    let score_right = row_costs_rev(right_ref, payload, mode, control)?;
 
     let pay_len = payload.len();
     let mut split = 0;
@@ -254,16 +281,24 @@ fn hirschberg<T: Alignable>(
         }
     }
 
-    let mut left_result = hirschberg(&payload[..split], left_ref, pay_offset, ref_offset, mode);
+    let mut left_result = hirschberg(
+        &payload[..split],
+        left_ref,
+        pay_offset,
+        ref_offset,
+        mode,
+        control,
+    )?;
     let right_result = hirschberg(
         &payload[split..],
         right_ref,
         pay_offset + split,
         ref_offset + mid,
         mode,
-    );
+        control,
+    )?;
     left_result.extend(right_result);
-    left_result
+    Ok(left_result)
 }
 
 /// Compute the last row of the DP cost matrix for reference vs payload.
@@ -271,15 +306,24 @@ fn hirschberg<T: Alignable>(
 /// Reuses a scratch buffer (`cur`) across rows instead of allocating a fresh
 /// `Vec` per reference item. See `book/src/batchalign/developer/arena-allocators.md`
 /// Pattern 2 (scratch buffers).
-fn row_costs<T: Alignable>(reference: &[T], payload: &[T], mode: T::Policy) -> Vec<usize> {
+fn row_costs<T: Alignable, C: WorkControl + ?Sized>(
+    reference: &[T],
+    payload: &[T],
+    mode: T::Policy,
+    control: &C,
+) -> Result<Vec<usize>, C::Error> {
     let pay_len = payload.len();
     let mut prev: Vec<usize> = (0..=pay_len).collect();
     let mut cur = Vec::with_capacity(pay_len + 1);
 
     for ref_item in reference.iter() {
+        control.check()?;
         cur.clear();
         cur.push(prev[0] + COST_GAP);
         for (pay_idx, pay_item) in payload.iter().enumerate() {
+            if pay_idx.is_multiple_of(1024) {
+                control.check()?;
+            }
             let is_match = ref_item.matches(pay_item, mode);
             let sub_cost = prev[pay_idx] + if is_match { 0 } else { COST_SUB };
             let del_cost = prev[pay_idx + 1] + COST_GAP;
@@ -288,19 +332,28 @@ fn row_costs<T: Alignable>(reference: &[T], payload: &[T], mode: T::Policy) -> V
         }
         std::mem::swap(&mut prev, &mut cur);
     }
-    prev
+    Ok(prev)
 }
 
 /// Compute `row_costs` on reversed reference and payload without cloning.
-fn row_costs_rev<T: Alignable>(reference: &[T], payload: &[T], mode: T::Policy) -> Vec<usize> {
+fn row_costs_rev<T: Alignable, C: WorkControl + ?Sized>(
+    reference: &[T],
+    payload: &[T],
+    mode: T::Policy,
+    control: &C,
+) -> Result<Vec<usize>, C::Error> {
     let pay_len = payload.len();
     let mut prev: Vec<usize> = (0..=pay_len).collect();
     let mut cur = Vec::with_capacity(pay_len + 1);
 
     for ref_item in reference.iter().rev() {
+        control.check()?;
         cur.clear();
         cur.push(prev[0] + COST_GAP);
         for (pay_idx, pay_item) in payload.iter().rev().enumerate() {
+            if pay_idx.is_multiple_of(1024) {
+                control.check()?;
+            }
             let is_match = ref_item.matches(pay_item, mode);
             let sub_cost = prev[pay_idx] + if is_match { 0 } else { COST_SUB };
             let del_cost = prev[pay_idx + 1] + COST_GAP;
@@ -309,7 +362,7 @@ fn row_costs_rev<T: Alignable>(reference: &[T], payload: &[T], mode: T::Policy) 
         }
         std::mem::swap(&mut prev, &mut cur);
     }
-    prev
+    Ok(prev)
 }
 
 /// Traceback action for the full-table aligner.
@@ -327,13 +380,14 @@ enum Action {
 /// Uses a flat `Vec` instead of `Vec<Vec<...>>` to reduce allocation count
 /// from `rows + 1` to `1`. See `book/src/batchalign/developer/arena-allocators.md`
 /// Pattern 3 (flat table).
-fn align_small<T: Alignable>(
+fn align_small<T: Alignable, C: WorkControl + ?Sized>(
     payload: &[T],
     reference: &[T],
     pay_offset: usize,
     ref_offset: usize,
     mode: T::Policy,
-) -> Vec<AlignResult> {
+    control: &C,
+) -> Result<Vec<AlignResult>, C::Error> {
     let rows = reference.len() + 1;
     let cols = payload.len() + 1;
 
@@ -350,6 +404,9 @@ fn align_small<T: Alignable>(
 
     for i in 1..rows {
         for j in 1..cols {
+            if j % 1024 == 1 {
+                control.check()?;
+            }
             let is_match = reference[i - 1].matches(&payload[j - 1], mode);
             let sub_cost = dp[idx(i - 1, j - 1)].0 + if is_match { 0 } else { COST_SUB };
             let del_cost = dp[idx(i - 1, j)].0 + COST_GAP;
@@ -413,7 +470,7 @@ fn align_small<T: Alignable>(
     }
 
     output.reverse();
-    output
+    Ok(output)
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@
 
 #[macro_use]
 mod macros;
+mod rev_ai_job_id;
 
 pub mod api {
     //! Backward-compatible re-export of domain types historically reached via

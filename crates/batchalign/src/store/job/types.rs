@@ -207,7 +207,7 @@ pub struct JobFilesystemConfig {
     /// Absolute output paths parallel to [`Self::filenames`] in paths mode.
     pub output_paths: Vec<ClientPath>,
     /// Optional "before" paths parallel to [`Self::source_paths`].
-    pub before_paths: Vec<ClientPath>,
+    pub before_paths: Vec<Option<ClientPath>>,
     /// Key into the server's configured media-mapping roots.
     pub media_mapping: MediaMappingKey,
     /// Optional subdirectory within the selected media mapping.
@@ -462,7 +462,7 @@ pub struct RunnerFilesystemConfig {
     /// Output paths parallel to [`PendingJobFile::file_index`].
     pub output_paths: Vec<ClientPath>,
     /// Optional "before" paths parallel to [`PendingJobFile::file_index`].
-    pub before_paths: Vec<ClientPath>,
+    pub before_paths: Vec<Option<ClientPath>>,
     /// Staging directory for uploaded content mode.
     pub staging_dir: ServerPath,
     /// Media-mapping key for server-side audio lookup.
@@ -474,6 +474,20 @@ pub struct RunnerFilesystemConfig {
     /// The FA pipeline passes this to `infer_media_mapping()` to auto-detect
     /// which media volume and repo-relative subdir to search for audio files.
     pub source_dir: ClientPath,
+}
+
+impl RunnerFilesystemConfig {
+    /// Resolve only this file's optional prior in shared-filesystem mode.
+    /// Missing entries never borrow a neighbouring file's reuse evidence.
+    pub(crate) fn before_path(&self, file_index: usize) -> Option<ServerPath> {
+        if !self.paths_mode {
+            return None;
+        }
+        self.before_paths
+            .get(file_index)
+            .and_then(Option::as_ref)
+            .map(ClientPath::assume_shared_filesystem)
+    }
 }
 
 /// Immutable runner-facing snapshot of job state.

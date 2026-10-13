@@ -1,7 +1,7 @@
 # Tracing and Debugging
 
 **Status:** Current
-**Last updated:** 2026-10-01 14:49 EDT
+**Last updated:** 2026-10-08 07:51 EDT
 
 This document describes the tracing and debugging strategy across the
 batchalign3 stack: Rust (batchalign-core PyO3 bridge), Rust (CLI and server
@@ -412,7 +412,7 @@ the client shell.
 
 | Variable | Writes | On failure |
 | --- | --- | --- |
-| `BA3_DUMP_ASR_PIPELINE=/path/file.json` | `AsrPipelineTrace`: the worker's tokens, the words after each post-processing stage, and the final utterances. A raw token's `ts` and `end_ts` are written as `null` when the provider supplied no such endpoint, so a consumer has to handle a missing bound rather than reading a zero that was never reported | Serialization and write failures are ignored |
+| `BA3_DUMP_ASR_PIPELINE=/path/file.json` | `AsrPipelineTrace`: the worker's tokens, the words after each post-processing stage, and the final utterances. A raw token's `ts` and `end_ts` are written as `null` when the provider supplied no such endpoint, so a consumer has to handle a missing bound rather than reading a zero that was never reported | Serialization and write failures log a warning; transcription continues. Success is logged only after the write succeeds |
 | `BA3_DUMP_UTTERANCES=/path/file.json` | The post-processed utterances handed to CHAT construction | The file fails with a typed diagnostic error |
 
 Each names a single path, so a multi-file job overwrites it once per file

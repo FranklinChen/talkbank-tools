@@ -249,6 +249,23 @@ impl<'a> FileRunTracker<'a> {
         .await;
     }
 
+    /// Record written text output with its stamp, exclusions and optional
+    /// diagnostics. An analysis shortfall does not fail or retry the file.
+    pub(crate) async fn complete_reported(
+        &self,
+        result: CompletedFileOutput,
+        diagnostics: Option<crate::api::FileOutputDiagnostics>,
+    ) {
+        self.complete(match diagnostics {
+            Some(diagnostics) => FileCompletion::Diagnosed {
+                result,
+                diagnostics,
+            },
+            None => FileCompletion::Clean(result),
+        })
+        .await;
+    }
+
     /// Mark the file as done without a downloadable artifact and close the
     /// active attempt as successful.
     pub(crate) async fn complete_without_result(&self) {

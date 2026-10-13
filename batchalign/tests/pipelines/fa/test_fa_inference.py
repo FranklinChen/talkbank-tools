@@ -132,9 +132,10 @@ def _install_whisper_alignment_helpers(monkeypatch) -> None:
     """Install fake DTW/median-filter helpers for Whisper FA tests."""
 
     module = ModuleType("transformers.models.whisper.generation_whisper")
-    module._dynamic_time_warping = lambda _matrix: (
-        np.asarray([0, 1, 2], dtype=np.int64),
-        np.asarray([0, 2, 3], dtype=np.int64),
+    module.lexical_frames = lambda _matrix: [0, 2, 3]
+    monkeypatch.setattr(
+        "batchalign_core.whisper_lexical_frame_indices",
+        lambda matrix: module.lexical_frames(matrix),
     )
     module._median_filter = lambda weights, _width: weights
     monkeypatch.setitem(
@@ -272,7 +273,10 @@ def test_load_whisper_fa_selects_device_and_dtype(
 
     class _ModelLoader:
         @staticmethod
-        def from_pretrained(model: str, *, attn_implementation: str, torch_dtype):
+        def from_pretrained(
+            model: str, *, revision: str, attn_implementation: str, torch_dtype
+        ):
+            captured["model_revision"] = revision
             captured["model_name"] = model
             captured["attn_implementation"] = attn_implementation
             captured["torch_dtype"] = torch_dtype
@@ -282,7 +286,8 @@ def test_load_whisper_fa_selects_device_and_dtype(
 
     class _ProcessorLoader:
         @staticmethod
-        def from_pretrained(model: str):
+        def from_pretrained(model: str, *, revision: str):
+            captured["processor_revision"] = revision
             captured["processor_name"] = model
             return SimpleNamespace(name=model)
 
@@ -298,14 +303,21 @@ def test_load_whisper_fa_selects_device_and_dtype(
     )
     monkeypatch.setattr(
         "batchalign.inference.types.WhisperFAHandle",
-        lambda model, processor, sample_rate: SimpleNamespace(
+        lambda model, processor, sample_rate, model_identity: SimpleNamespace(
             model=model,
             processor=processor,
             sample_rate=sample_rate,
+            model_identity=model_identity,
         ),
     )
 
     from batchalign.inference.fa import load_whisper_fa
+    from batchalign.inference.types import WhisperModelIdentity
+
+    identity = WhisperModelIdentity("openai/fake-whisper", "a" * 40)
+    monkeypatch.setattr(
+        "batchalign.inference.fa._resolve_whisper_identity", lambda model: identity
+    )
 
     handle = load_whisper_fa(
         model="openai/fake-whisper",
@@ -314,6 +326,12 @@ def test_load_whisper_fa_selects_device_and_dtype(
     )
 
     assert handle.sample_rate == 22050
+    assert handle.model_identity == identity
+    assert (
+        captured["model_revision"]
+        == captured["processor_revision"]
+        == identity.revision
+    )
     assert handle.processor.name == "openai/fake-whisper"
     assert captured["model_name"] == "openai/fake-whisper"
     assert captured["processor_name"] == "openai/fake-whisper"
@@ -497,6 +515,40 @@ def test_infer_whisper_fa_decodes_tokens_from_alignment_heads(monkeypatch) -> No
     ]
 
 
+def test_whisper_fa_uses_real_native_open_begin_alignment(monkeypatch) -> None:
+    import batchalign_core
+
+    native = batchalign_core.whisper_lexical_frame_indices
+    _install_whisper_alignment_helpers(monkeypatch)
+    monkeypatch.setattr(batchalign_core, "whisper_lexical_frame_indices", native)
+
+    class PrefixAttention(_FakeWhisperModel):
+        def __call__(self, **_kwargs):
+            return SimpleNamespace(
+                cross_attentions=[
+                    torch.tensor(
+                        [
+                            [
+                                [
+                                    [99.0, 0.0, 0.0, 0.0],
+                                    [98.0, 0.0, 0.0, 0.0],
+                                    [0.0, 0.0, 9.0, 0.0],
+                                    [9.0, 9.0, 0.0, 9.0],
+                                    [8.0, 8.0, 0.0, 8.0],
+                                ]
+                            ]
+                        ]
+                    )
+                ]
+            )
+
+    handle = SimpleNamespace(
+        model=PrefixAttention(), processor=_FakeWhisperProcessor(), sample_rate=16000
+    )
+    result = infer_whisper_fa(handle, torch.zeros(1280), "ab")
+    assert [time for _, time in result] == [0.0, 0.0, 0.04, 0.06, 0.06]
+
+
 def test_whisper_fa_excludes_padding_before_normalization_and_dtw(monkeypatch) -> None:
     _install_whisper_alignment_helpers(monkeypatch)
     module = __import__("sys").modules["transformers.models.whisper.generation_whisper"]
@@ -504,9 +556,9 @@ def test_whisper_fa_excludes_padding_before_normalization_and_dtw(monkeypatch) -
 
     def dtw(matrix):
         captured.append(matrix.shape)
-        return np.asarray([0, 1, 2]), np.asarray([0, 1, 1])
+        return [0, 1, 1]
 
-    module._dynamic_time_warping = dtw
+    module.lexical_frames = dtw
     handle = SimpleNamespace(
         model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
     )
@@ -532,10 +584,10 @@ def test_live_whisper_host_binds_dtw_rows_to_lexical_labels(monkeypatch) -> None
     captured = []
 
     def dtw(matrix):
-        captured.append(matrix.clone())
-        return np.asarray([0, 1, 2]), np.asarray([0, 1, 3])
+        captured.append(matrix.copy())
+        return [0, 1, 3]
 
-    module._dynamic_time_warping = dtw
+    module.lexical_frames = dtw
     handle = SimpleNamespace(
         model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
     )
@@ -550,7 +602,7 @@ def test_live_whisper_host_binds_dtw_rows_to_lexical_labels(monkeypatch) -> None
     # after normalization.
     lexical = handle.model().cross_attentions[0][0, 0, 2:]
     std, mean = torch.std_mean(lexical, dim=-2, keepdim=True, unbiased=False)
-    assert torch.equal(captured[0], -(lexical - mean) / std)
+    np.testing.assert_array_equal(captured[0], (-(lexical - mean) / std).numpy())
 
 
 @pytest.mark.parametrize("labels", [[9, 2, 10, 20, 3], [1, 2, 10, 20, 9], [1, 2, 3]])
@@ -574,10 +626,7 @@ def test_whisper_fa_refuses_unbound_decoder_labels(monkeypatch, labels) -> None:
 def test_whisper_fa_refuses_incomplete_dtw_label_coverage(monkeypatch) -> None:
     _install_whisper_alignment_helpers(monkeypatch)
     module = __import__("sys").modules["transformers.models.whisper.generation_whisper"]
-    module._dynamic_time_warping = lambda matrix: (
-        np.asarray([0, 1]),
-        np.asarray([0, 1]),
-    )
+    module.lexical_frames = lambda matrix: [0, 1]
     handle = SimpleNamespace(
         model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
     )

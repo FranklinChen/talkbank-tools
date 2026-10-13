@@ -382,10 +382,9 @@ def _extract_token_timestamps(
     - ``self`` is ``nn.Module`` whose ``__getattr__`` returns ``Tensor | Module``,
       hiding the real ``WhisperConfig`` attributes.
     """
-    from transformers.models.whisper.generation_whisper import (
-        _dynamic_time_warping,
-        _median_filter,
-    )
+    from transformers.models.whisper.generation_whisper import _median_filter
+
+    from batchalign_core import whisper_lexical_frame_indices
 
     config = self.config
 
@@ -487,11 +486,8 @@ def _extract_token_timestamps(
         else:
             matrix = weights[batch_idx]
 
-        text_indices, time_indices = _dynamic_time_warping(
-            -matrix.cpu().double().numpy()
-        )
-        jumps = np.pad(np.diff(text_indices), (1, 0), constant_values=1).astype(bool)
-        jump_times = time_indices[jumps] * time_precision
+        indices = whisper_lexical_frame_indices(-matrix.cpu().float().numpy())
+        jump_times = np.asarray(indices) * time_precision
         if num_input_ids is None:
             timestamps[batch_idx, 1:] = torch.tensor(jump_times)
         else:

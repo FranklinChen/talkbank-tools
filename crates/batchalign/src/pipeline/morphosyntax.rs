@@ -6,6 +6,7 @@ mod states;
 mod tests;
 
 use super::plan::{StageId, observe_stage};
+use crate::morphosyntax::report::MorphosyntaxOutput;
 use crate::pipeline::post_validate::PostValidated;
 use crate::{error::ServerError, pipeline::PipelineServices};
 pub(crate) use language::resolve_per_file_lang;
@@ -17,7 +18,7 @@ pub(crate) async fn run_morphosyntax_pipeline(
     chat_text: &str,
     services: PipelineServices<'_>,
     params: &crate::params::MorphosyntaxParams<'_>,
-) -> Result<PostValidated, ServerError> {
+) -> Result<MorphosyntaxOutput, ServerError> {
     let parsed = observe_stage(
         "morphotag",
         StageId::Parse,
@@ -33,7 +34,7 @@ pub(crate) async fn run_admitted_morphosyntax(
     parsed: ParsedFile,
     services: PipelineServices<'_>,
     params: &crate::params::MorphosyntaxParams<'_>,
-) -> Result<PostValidated, ServerError> {
+) -> Result<MorphosyntaxOutput, ServerError> {
     let options = RunOptions::new(services, params);
     let parsed = match parsed {
         ParsedFile::PassThrough(chat) => {
@@ -50,6 +51,7 @@ pub(crate) async fn run_admitted_morphosyntax(
                         chat,
                         crate::api::ReleasedCommand::Morphotag,
                     )
+                    .map(MorphosyntaxOutput::from)
                     .map_err(|failure| failure.into_server_error())
                 }),
             )
@@ -69,7 +71,7 @@ pub(crate) enum LocalizedMorphosyntax {
     /// Analyzed everywhere but at the held-out utterances, and judged afresh
     /// (still diagnosed for them, or admitted if the analysis happened to
     /// remove the findings' cause).
-    Analyzed(crate::pipeline::post_validate::ProducedOutput),
+    Analyzed(MorphosyntaxOutput<crate::pipeline::post_validate::ProducedOutput>),
 }
 
 /// Morphosyntax on a generated transcript whose findings are confined to some
@@ -95,7 +97,7 @@ pub(crate) async fn run_localized_morphosyntax(
 async fn analyze_in_scope<D: AnalysisScope>(
     parsed: Analysis<Admitted, D>,
     options: &RunOptions<'_>,
-) -> Result<D::Judged, ServerError> {
+) -> Result<MorphosyntaxOutput<D::Judged>, ServerError> {
     let collected = observe_stage(
         "morphotag",
         StageId::CollectPayloads,

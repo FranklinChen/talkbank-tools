@@ -25,4 +25,7 @@ pub use plan::{
     AsPlanned, ExternalRelation, L2Attachment, L2DispatchPlan, L2SpanPlan, RelationStage,
     plan_dispatch_spans,
 };
-pub use splice::{SpliceOutcome, splice_l2_into_chat};
+pub use splice::{
+    SpanSpliceDisposition, SpanSpliceOutcome, SpliceOutcome, SpliceRetentionReason,
+    splice_l2_into_chat,
+};

@@ -64,7 +64,12 @@ fn prepared_comparison_preserves_legacy_plans() {
         for mode in modes {
             assert_eq!(
                 align(payload, reference, mode),
-                align_generic(&legacy_payload, &legacy_reference, mode),
+                uninterrupted(align_generic(
+                    &legacy_payload,
+                    &legacy_reference,
+                    mode,
+                    &Uninterrupted
+                )),
                 "case {case}, mode {mode:?}",
             );
         }
@@ -123,7 +128,12 @@ fn fuzzy_comparison_performance_probe() {
             let result = std::hint::black_box(if prepared_first {
                 align(&payload, &reference, mode)
             } else {
-                align_generic(&legacy_payload, &legacy_reference, mode)
+                uninterrupted(align_generic(
+                    &legacy_payload,
+                    &legacy_reference,
+                    mode,
+                    &Uninterrupted,
+                ))
             });
             let elapsed = start.elapsed();
             if prepared_first {

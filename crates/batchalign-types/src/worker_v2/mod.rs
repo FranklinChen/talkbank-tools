@@ -80,9 +80,13 @@ pub mod error_envelope;
 pub mod requests;
 pub mod responses;
 pub mod utseg_evidence;
+pub mod whisper_attention;
+pub mod whisper_windows;
 
 pub use asr_model::*;
 pub use error_envelope::*;
 pub use requests::*;
 pub use responses::*;
 pub use utseg_evidence::*;
+pub use whisper_attention::*;
+pub use whisper_windows::*;

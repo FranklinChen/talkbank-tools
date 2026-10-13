@@ -176,10 +176,13 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // every declaration its transition refuses (`AlignmentMedia`, above),
         // so only an alignment that changed the header can reach it.
         ServerError::AdmissionDisagreement
+        | ServerError::UnexpectedMorphologyReport
+        | ServerError::UtrTask(_)
         | ServerError::ReplacementPlanContradicted { .. }
         | ServerError::Database(_)
         | ServerError::Migration(_)
         | ServerError::Persistence(_)
+        | ServerError::Planning(_)
         | ServerError::StoredLease(_)
         | ServerError::MediaTiming(_)
         | ServerError::MorphosyntaxInjection(_)

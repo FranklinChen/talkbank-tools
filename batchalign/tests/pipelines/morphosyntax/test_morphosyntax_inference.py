@@ -645,6 +645,8 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
         ctx,
         [
             [
+                # A real Stanza MWT has a range row as well as components.
+                {"id": (1, 2), "text": "attenzione"},
                 {
                     "id": 1,
                     "text": "attenzi",
@@ -697,7 +699,7 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
         f"non-UD deprel reached the response: {deprels!r}, "
         "the production path is not validating Stanza output"
     )
-    assert deprels[1] == "iobj", f"expected iob normalized to iobj, got {deprels!r}"
+    assert deprels[2] == "iobj", f"expected iob normalized to iobj, got {deprels!r}"
     # And the rewrite is REPORTED, not merely made. Until this field existed
     # the only evidence a transcript had been repaired was a log line, so
     # nothing downstream could count the repairs, attribute them, or say in

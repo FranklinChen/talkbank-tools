@@ -828,8 +828,8 @@ mod tests {
     /// admission removes them all and issues a pending regeneration. Chatter
     /// removes only the tiers it cannot read (a readable `%wor` beside them
     /// is retained), so each utterance's tier carries a bullet only the
-    /// grammar can recover. (A zero-duration word bullet is not a fault;
-    /// a reversed one is E362, see the regeneration test below.)
+    /// grammar can recover. Zero-duration and reversed word bullets are
+    /// E362, covered separately by the regeneration test below.
     fn pending_word_only(word_only: &str) -> String {
         word_only
             .replace("\u{15}0_200\u{15}", "\u{15}invalid\u{15}")
@@ -882,28 +882,18 @@ mod tests {
         active=true
         word_tiers=0
         ");
-        // A zero-duration word bullet is valid CHAT (CLAN CHECK accepts it on
-        // %wor), so it is neither removed nor refused; alignment regenerates
-        // the tier from its own evidence.
-        let zero_length = SOURCE.replace("0_200", "100_100");
-        let working = read_fa_source(&zero_length).expect("a zero-length word bullet is admitted");
-        assert_eq!(word_count(working.document()), 1);
-        let no_align = zero_length.replace("@ID:", "@Options:\tNoAlign\n@ID:");
-        assert!(
-            read_fa_source(&no_align).is_ok(),
-            "preservation keeps a zero-length word bullet"
-        );
-        // A reversed one is E362: its tier is removed and regenerated like
-        // any other unusable word tier, and preservation, which writes the
-        // input back, refuses it.
-        let reversed = SOURCE.replace("0_200", "200_0");
-        let working = read_fa_source(&reversed).expect("an unusable word tier is regenerated");
-        assert_eq!(word_count(working.document()), 0);
-        let no_align = reversed.replace("@ID:", "@Options:\tNoAlign\n@ID:");
-        assert!(
-            read_fa_source(&no_align).is_err(),
-            "preservation does not keep a reversed word bullet"
-        );
+        // Nonpositive word intervals are E362: alignment removes their tier
+        // for regeneration, while preservation cannot write them back.
+        for interval in ["100_100", "200_0"] {
+            let invalid = SOURCE.replace("0_200", interval);
+            let working = read_fa_source(&invalid).expect("an unusable word tier is regenerated");
+            assert_eq!(word_count(working.document()), 0, "{interval}");
+            let no_align = invalid.replace("@ID:", "@Options:\tNoAlign\n@ID:");
+            assert!(
+                read_fa_source(&no_align).is_err(),
+                "preservation does not keep a nonpositive word bullet: {interval}"
+            );
+        }
         for bad_retained in [
             corrupt_words.replace("@End", "%mor:\tnoun|hello\n@End"),
             corrupt_words.replace("hello world .", "<hello [/] world ."),

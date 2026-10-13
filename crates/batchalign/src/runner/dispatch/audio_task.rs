@@ -52,11 +52,14 @@ pub(crate) trait AudioFileTask {
     ) -> Result<FileOutput, ServerError>;
 
     /// Optional command-owned recovery step before the shell records a retry.
+    /// Unavailable analysis is an output shortfall; only cancellation may stop
+    /// recovery here, so a provider error cannot accidentally fail the file.
     async fn on_retryable_worker_failure(
         &mut self,
         _lifecycle: &FileRunTracker<'_>,
         _error: &ServerError,
-    ) {
+    ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
+        Ok(())
     }
 }
 
@@ -205,7 +208,14 @@ where
                     && is_retryable_worker_failure(category)
                     && has_retry_budget
                 {
-                    task.on_retryable_worker_failure(lifecycle, &error).await;
+                    if let Err(crate::chat_ops::fa::utr::UtrCancelled) =
+                        task.on_retryable_worker_failure(lifecycle, &error).await
+                    {
+                        lifecycle
+                            .fail("Timing recovery cancelled", FailureCategory::Cancelled)
+                            .await;
+                        return FileTaskOutcome::TerminalStateRecorded;
+                    }
                     let backoff_ms = retry_policy.backoff_for_retry(attempt_number);
                     lifecycle
                         .retry_after(
@@ -229,6 +239,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod utr_tests;
     use std::collections::BTreeMap;
     use std::sync::{
         Arc, Mutex,
@@ -433,8 +444,9 @@ mod tests {
             &mut self,
             _lifecycle: &FileRunTracker<'_>,
             _error: &ServerError,
-        ) {
+        ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
             self.recoveries.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 

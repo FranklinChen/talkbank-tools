@@ -29,7 +29,7 @@ ALLOWED_DP_ALIGN_CALLS = {
     "crates/batchalign-transform/src/compare/engine.rs": 1,
 }
 
-# Allowlisted `CorrespondenceAnalysis::observe` call sites. `observe` runs one
+# Allowlisted `CorrespondenceAnalysis::observe[_controlled]` call sites. Each runs one
 # `dp_align::align` (the selected path) and a budgeted common-correspondence
 # admission over the same pair, so each call is the same O(n*m) decision:
 #
@@ -85,7 +85,9 @@ def test_chat_ops_dp_calls_are_allowlisted() -> None:
     dp_call_src = sorted(path for root in dp_call_roots for path in root.rglob("*.rs"))
     align_hits = _scan_paths(dp_call_src, r"\bdp_align::align\s*\(")
     align_chars_hits = _scan_paths(dp_call_src, r"\bdp_align::align_chars\s*\(")
-    observe_hits = _scan_paths(dp_call_src, r"\bCorrespondenceAnalysis::observe\s*\(")
+    observe_hits = _scan_paths(
+        dp_call_src, r"\bCorrespondenceAnalysis::observe(?:_controlled)?\s*\("
+    )
 
     actual = Counter(rel for rel, _, _ in align_hits)
     assert dict(sorted(actual.items())) == ALLOWED_DP_ALIGN_CALLS, (

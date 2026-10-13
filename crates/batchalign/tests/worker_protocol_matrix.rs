@@ -32,7 +32,7 @@ use batchalign::types::worker_v2::{
     ExecuteResponseV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2, InferenceTaskV2,
     ProtocolErrorCodeV2, ProviderDiarizationV2, ProviderMediaInputV2, SpeakerBackendV2,
     SpeakerEmbeddingOutcomeV2, SpeakerInferenceEvidenceV2, TaskRequestV2, TaskResultV2,
-    WorkerArtifactIdV2,
+    WhisperObservationsV2, WorkerArtifactIdV2,
 };
 use batchalign::worker::WorkerProfile;
 use batchalign::worker::handle::WorkerConfig;
@@ -660,14 +660,23 @@ fn validate_execute_response_invariants(
 fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
     match result {
         TaskResultV2::WhisperChunkResult(value) => {
-            if value.text.trim().is_empty() {
-                return Err("whisper chunk result text must not be empty".into());
-            }
             // Chunk ORDER is not a wire invariant: seams overlap and chunks
             // arrive inverted from every producer, and the consumer settles
             // them (`batchalign::worker::chunk_spans`). A fixture recorded
             // from a real seam must be admitted here.
-            if value.chunks.is_empty() {
+            let empty = match &value.chunks {
+                WhisperObservationsV2::Monolithic(spans) => {
+                    if value.text.trim().is_empty() {
+                        return Err("whisper chunk result text must not be empty".into());
+                    }
+                    spans.is_empty()
+                }
+                WhisperObservationsV2::Windows(windows) => windows
+                    .windows()
+                    .iter()
+                    .all(|window| window.spans.is_empty()),
+            };
+            if empty {
                 return Err("whisper chunk result must contain at least one chunk".into());
             }
             Ok(())

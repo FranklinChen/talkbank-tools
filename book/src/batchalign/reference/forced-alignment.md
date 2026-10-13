@@ -1,9 +1,30 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-10-07 09:56 EDT
+**Last updated:** 2026-10-09 17:39 EDT
 
 ## Overview
+
+For Whisper FA, `--debug-dir PATH` also opts active FA requests into numeric
+attention capture. Each newly inferred request exclusively creates a
+`whisper-attention-*.sqlite` data-plane artifact containing the selected heads'
+pre-normalization attention, final DTW costs, token IDs/text/roles, row-entry
+frames, model identity, frame geometry and the prepared PCM SHA-256. The worker
+request ID and semantic FA key bind the observation to its request. Only a
+small BLAKE3 receipt travels in the response/cache; tensors are not JSON ledger
+data. A requested artifact must be complete and its digest/identity verified,
+or the diagnostic run fails. Writes report `progress_v2` and never overwrite
+an existing capture. Token-only cache rows do not satisfy a capture request;
+an intact, request-matching earlier numeric capture can be reused. Ordinary
+runs without `--debug-dir`, non-Whisper engines and the alignment algorithm are
+unchanged. Captures are diagnostic observations, never additional authority to
+write word timings. Complete existing `%wor` populations are still preserved.
+Hub model identity is resolved from its config snapshot before loading; the
+model and processor both load that exact revision. Custom local model folders
+remain usable for ordinary inference but cannot claim a hub capture identity.
+
+For a consolidated statement of current defaults, validity, and policy
+precedence, see [Bullet and Word-Timing Policies](bullet-policies.md).
 
 The `align` command adds word-level timestamps to CHAT files. Given a transcript
 and an audio file, it determines exactly where each word appears in the recording.
@@ -358,6 +379,16 @@ kept, and recovery simply observed no word anchors for it. Timing is never
 refused, and no other region is affected. A transcript with no bullets at all
 is one region, so it behaves as before.
 
+This remains a practical limitation for long, fully untimed conversations.
+There is no fixed word-count cutoff: turn lengths and speaker changes determine
+the joint graph's size. A regression control with 280 alternating ten-word turns
+(2,800 words) exceeds the budget despite complete, uniquely matching ASR words
+and recovers no utterance hints. With the same words and ASR timings but retained
+bullets on alternating turns, all 140 untimed turns recover and all 140 original
+bullets are preserved. Regional recovery therefore fixes the whole-file limit
+only where anchors actually divide the problem; it does not solve unanchored
+recovery. This control measures UTR hints, not end-to-end acoustic alignment.
+
 Bullets are trusted as region bounds. A provider token far outside the bullets
 around it (seconds, not the usual few hundred milliseconds of boundary
 imprecision) is outside every window that could claim it for the wrong
@@ -686,7 +717,7 @@ one started when either is exceeded:
 
 | Constraint | Limit | Rationale |
 |------------|-------|-----------|
-| **Time window** (`max_group_ms`) | Per engine: the `max_group` field of the selected engine's row in `FA_ENGINES` | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory, and the engines do not agree on the trade-off: the wav2vec family's CTC target length grows with the window, so it takes a narrower one than Whisper. `group_utterances()` is never told which engine will align its groups; the caller reads the window off the run's engine (`FaParams::max_group_ms()`, which is `FaEngineName::max_group_ms()`, which is that row). The numbers are deliberately not restated here: read the rows in `crates/batchalign/src/types/engines.rs`. It is also the engine BUDGET for a single utterance: an utterance whose own window exceeds it is never sent whole. It is split at the words utterance timing recovery heard, into pieces that each fit (an anchored group, `window_split_at_anchors`), or refused (`window_refused` with cause `anchor_gap` when the anchors leave a stretch longer than the budget, `anchors_unusable` when recovery matched the utterance but gave no usable cut, `over_budget` when recovery has nothing to say about it). See "Over-budget utterances" below. |
+| **Time window** (`max_group_ms`) | Per engine: the `max_group` field of the selected engine's row in `FA_ENGINES` | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory, and the engines do not agree on the trade-off: the wav2vec family's CTC target length grows with the window, so it takes a narrower one than Whisper. `group_utterances()` is never told which engine will align its groups; the caller reads the window off the run's engine (`FaParams::max_group_ms()`, which is `FaEngineName::max_group_ms()`, which is that row). The numbers are deliberately not restated here: read the rows in `crates/batchalign/src/types/engines.rs`. It is also the engine BUDGET for a single utterance: an utterance whose own window exceeds it is never sent whole. It is partitioned at recovered word ends into requestable and unavailable pieces. Bounded pieces survive an oversized `anchor_gap`; only that word range stays unrequested. Complete partitions record `window_split_at_anchors`. Whole-window refusal remains for `anchors_unusable` or `over_budget` when no usable cut exists. See "Over-budget utterances" below. |
 | **Label-byte cap** (`MAX_GROUP_LABEL_BYTES = 448`) | 448 UTF-8 bytes | Whisper's CTC forced-alignment backend (`ctc_loss` / `ctc_best_path`) has a maximum label sequence length of exactly 448 TOKENS; exceeding it produces a hard `ValueError: Labels' sequence length N cannot exceed the maximum allowed length of 448 tokens`. The cap is applied to EVERY engine's groups, not only Whisper's, because grouping is never told which engine will align them; the tightest engine's limit is therefore used for all. The unit is a UTF-8 BYTE, and that is a deliberately conservative proxy for the token limit: every token occupies at least one byte, so a byte count bounds the token count from above. A character count does not, and outside ASCII it is smaller, so counting characters would loosen the cap against the very limit it stands in for. |
 
 The label-byte limit exists because the time window alone is insufficient. Dense
@@ -779,32 +810,48 @@ utterance at those words.
   window exceeds the budget, so every split has at least two pieces.
   Candidate cuts are the END times of anchored words strictly inside the
   utterance window, excluding the last word. If any stretch between
-  neighbouring cut points (or a window edge) is longer than the budget, the
-  utterance is refused as `anchor_gap`, naming the widest such stretch: on
-  real data that stretch is minutes long and means UTR placed the utterance
-  across audio it does not belong to, so it is recorded for review and never
-  aligned. Otherwise a greedy walk extends each piece to the furthest cut
-  that keeps it within budget. Each piece OWNS its words (`NonEmptyWords`,
+  neighbouring cut points (or a window edge) is longer than the budget, only
+  that part is unavailable (`anchor_gap`). Bounded parts before and after it
+  remain requestable; no guessed cut or wider request is introduced. A greedy
+  walk extends each request to the furthest cut that keeps it within budget.
+  `AnchoredPart::Request` owns the within-budget capability, while
+  `AnchoredPart::Unavailable` owns the unrequested range and its cause.
+  Each part OWNS its words (`NonEmptyWords`,
   split off the utterance's list) and its window (`FaWindow::split_at`), and
   neither split can leave an empty side, so the pieces partition both by
   construction.
+  A narrow refinement can rescue the final word of an unavailable part: its
+  admitted positive anchor must end exactly at the part's end, its complete
+  interval must fit the budget, and a nonempty preceding word range must
+  remain over budget. Only this anchored word gains a request, starting at
+  its observed start; the prefix remains explicitly unavailable. Existing
+  requests are unchanged. This is not a general start-cut policy, a crop for
+  unknown words, or permission to use ASR timing as the final FA result.
 - **Execution** (`fa/units.rs`). The utterance stays ONE group, because
   injection walks a group's words with one cursor and a group holding part of
   an utterance would desynchronize it. The pieces are how the group is
   EXECUTED: `DispatchPlan::build` lays out each group's requests in the
-  group's own shape (one `DispatchUnit`, or one per piece), each with its own
+  group's own shape (one `DispatchUnit`, or one per admitted piece), each with its own
   words, window and cache key. Cache lookup, worker dispatch, raw evidence and
   engine fallback are per unit; the authorization to infer holds the missed
   units themselves. `UnitLedger` holds each group's resolution in the same
   shape (a `%wor`-reused group has no request slots at all), and
   `UnitLedger::assemble` is the one place unit timings become group timings,
-  concatenated in word order. `%wor` reuse, injection and post-processing stay
+  concatenated in word order. An unavailable part has no reply slot or cache
+  key; assembly contributes exactly its original number of untimed slots.
+  `%wor` reuse, injection and post-processing stay
   per group and are unchanged. A single group is keyed by its own words and
   window, so its cache entries stay reachable.
 - **Evidence.** The split is a `window_split_at_anchors` decision
   (`needs_review: false`, with `split_window` carrying the piece count), and
-  the group's evidence `span` is `anchored`, listing each piece's window,
-  first and last word, evidence source and cache key (FA evidence schema 6).
+  the group's evidence `span` is `anchored`, listing each requested piece's
+  window, first/last word, evidence source and cache key. Partial partitions
+  instead record their `anchor_gap` review decisions and list exact
+  `unrequested` word ranges and causes beside the requested pieces (evidence
+  schema 7; older spans deserialize with no unrequested ranges). Both lists
+  together cover the original population; neither partial coverage nor a valid
+  CHAT file is reported as complete alignment. Prior `%wor` reuse remains
+  distinguishable from newly missing timing on an unrequested range.
   Refusals are durable data: `over_budget` when recovery has nothing to say
   about the utterance, `anchors_unusable` with a closed cause
   (`no_reliable_anchors`, `anchors_refused`, `anchors_describe_other_words`,
@@ -816,9 +863,10 @@ flowchart TD
     long["utterance window > max_group_ms\n(OverBudgetWindow)"]
     lookup{"what did UTR\nobserve here?"}
     cuts{"any interior cut?\n(anchored word end,\nnot the last word)"}
-    gap{"widest stretch between\ncut points > budget?"}
-    split["AnchoredSplit: greedy pieces,\neach within budget\n(window_split_at_anchors)"]
-    refuse_gap["refuse: anchor_gap\n(needs review)"]
+    split["AnchoredSplit: source-owned partition\n(all original words)"]
+    gap{"this piece fits budget?"}
+    request["request this piece"]
+    refuse_gap["keep this piece untimed\nanchor_gap (needs review)"]
     refuse_unusable["refuse: anchors_unusable\n(cause)"]
     refuse_over["refuse: over_budget"]
     long --> lookup
@@ -826,16 +874,17 @@ flowchart TD
     lookup -->|"only fuzzy / multi-word,\nrefused set, other words"| refuse_unusable
     lookup -->|"admitted anchors"| cuts
     cuts -->|"no"| refuse_unusable
-    cuts -->|"yes"| gap
-    gap -->|"yes"| refuse_gap
-    gap -->|"no"| split
+    cuts -->|"yes"| split
+    split --> gap
+    gap -->|"yes"| request
+    gap -->|"no"| refuse_gap
 ```
 
 An anchored group is never merged with a neighbour: grouping closes the
 pending group before it and holds the anchored group until the next
 utterance's start is known. Its last piece is then padded into the following
 silence as a single group's window is (half the gap, at most 1.5 s), but only
-as far as keeps that piece within the budget.
+as far as keeps that piece within the budget. An unavailable last piece is not padded.
 
 ### Failure points, recovery, and what the user sees
 
@@ -1240,8 +1289,12 @@ See the [Monotonicity Invariant](#monotonicity-invariant) section for full detai
 
 ### Post-processing
 
-After FA injects raw word timings into the AST, three post-processing steps run
-**in this order** for each utterance:
+After FA injects raw word timings into the AST, word postprocessing precedes
+main-bullet projection. The diagram shows the compatibility boundary update;
+before `%wor` is written, finalization also imposes kept authority, runs optional
+repair, and resolves monotonicity/overlap. The selected policies can therefore
+override or narrow this intermediate coverage; see the
+[policy reference](bullet-policies.md).
 
 ```mermaid
 flowchart TD
@@ -1278,18 +1331,18 @@ different origins with opposite desired behaviors after FA:
   derived from ASR token streams. They are provisional, their purpose is to
   give FA a window to work in, not to define the final timing. Once FA produces
   precise per-word timings, the hint should be discarded and the bullet set
-  directly from the FA word span. This is the **self-healing property**: valid
-  FA word timings always produce a valid utterance bullet, independent of how
-  accurate the UTR estimate was.
+  directly from the FA word span. Positive word timings define a local hull,
+  but do not guarantee that it is acoustically right or compatible with other
+  utterances. Complete output still has to pass finalization and validation.
 
 `BulletSource` is a non-serialized field (`#[serde(skip)]`), it never appears
 in CHAT output and has no effect on the file format. The distinction lives only
 in memory during the align pipeline.
 
-**Order matters:** `postprocess_utterance_timings` runs first so it can use the
-UTR bullet for bounding word end times. If `update_utterance_bullet` ran first,
-it would recompute from raw onset-only timings (Whisper FA gives only start
-times), producing a bullet too tight for proper end-time chaining.
+**Order matters:** `postprocess_utterance_timings` runs before the bullet update
+so the policy acts on word evidence before projecting utterance coverage.
+An onset-only final word may use a retained transcript boundary, not a
+provisional UTR hint, to extend its end.
 
 #### Kept main bullets (`--main-bullets keep`)
 
@@ -1417,10 +1470,9 @@ bullet, with opposite implications for whether clamping is safe.
 **The two bullet sources:**
 
 - **`BulletSource::Authoritative`**: the bullet was parsed from CHAT text.
-  After a previous FA run (or after a researcher links audio manually in CLAN),
-  the bullet covers the full speech span for that utterance. Clamping FA word
-  timings to it is safe and desirable: it prevents a freshly-aligned word from
-  wandering outside the known boundary.
+  It may originate from a previous FA run or manual linking, but parsing alone
+  cannot distinguish those origins or prove that it covers the full speech.
+  Compatibility clamping treats it as a retained boundary, not acoustic gold.
 
 - **`BulletSource::Utr`**: the bullet was injected by UTR at runtime
   (never serialized to disk). UTR's estimates are rough grouping hints, not
@@ -1444,31 +1496,25 @@ drop timings for every word after the first, producing output that appeared
 aligned but missed most of the utterance.
 
 **The `%wor` discriminator.** The presence of a `%wor` tier distinguishes
-first-time alignment (post-transcribe, no `%wor`) from re-alignment (previous
-FA run, `%wor` present). `%wor` is generated only by FA, so its presence
-guarantees:
+first-time alignment (post-transcribe, no `%wor`) from a presumed re-alignment.
+This is a compatibility heuristic, not a provenance certificate: a `%wor`
+tier can be stale or edited, and its presence proves neither a correct prior
+alignment nor a main bullet wide enough for the speech.
 
-1. A previous FA run already aligned this utterance correctly, and
-2. The utterance bullet was set from FA word timings and is wide enough to cover
-   the full speech span.
-
-Clamping is therefore **only applied when BOTH conditions hold**:
+Under `--existing-wor-boundaries preserve`, this ordinary rerun clamp is
+eligible when BOTH conditions hold (with the detailed edge-healing rules still
+applied):
 
 1. `bullet.source == BulletSource::Authoritative`: not a runtime UTR hint, AND
 2. `utterance.wor_tier().is_some()`: this is a re-alignment, not a first-time alignment.
 
-When either condition fails, FA word timings are injected as-is. The
-`update_utterance_bullet()` call that follows then overwrites the narrow bullet
-with the actual FA word span, the self-healing property described above. This
-means valid FA timings always produce a valid utterance bullet, regardless of how
-accurate or narrow the prior estimate was.
-
-**Practical consequence.** On the `transcribe` → `align` workflow (the most
-common first-time alignment case), clamping is never applied. All FA word
-timings are accepted. The utterance bullet is widened to cover them. On
-subsequent `align` re-runs (e.g., after transcript editing), clamping is
-applied using the now-authoritative FA-derived bullet, preventing edited words
-from being placed outside the established audio window.
+`rebuild-from-evidence` bypasses that prior-boundary clamp. When the clamp is
+ineligible, other word postprocessing and final overlap resolution still apply;
+this is not unconditional acceptance of every model interval. Moreover,
+`--main-bullets keep` or `exact` imposes its captured input boundary independently
+of this `%wor` heuristic. The subsequent main-bullet update may preserve wider
+retained coverage or replace a provisional hint with a word hull. Neither
+choice proves acoustic accuracy or complete-file validity.
 
 **Source:** `crates/batchalign/src/chat_ops/fa/postprocess.rs:37`,
 `postprocess_utterance_timings()`.
@@ -2210,9 +2256,11 @@ absolute timestamps.
 
 ## Monotonicity Invariant
 
-CHAT requires that utterance-level timing bullets increase monotonically through
-the file (E362).  CLAN players seek into the audio by bullet position; a
-regression means the player would seek backwards, which is undefined behavior.
+Chatter's complete validation requires nondecreasing starts of utterance-final
+main-tier bullets in document order (E362), independently of its per-speaker
+E701 check. Equal starts are allowed. This is a start-order rule, not a ban on
+cross-speaker end overlap and not a within-`%wor` ordering rule. No claim about
+player behavior is needed to state the validator's contract.
 
 ### The fundamental limitation
 

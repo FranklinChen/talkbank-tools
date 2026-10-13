@@ -36,7 +36,46 @@ from batchalign.worker._types_v2 import (
     WhisperChunkResultPayloadV2,
     WhisperChunkResultV2,
     WhisperChunkSpanV2,
+    WhisperWindowsV2,
 )
+
+
+def test_window_ownership_crosses_the_real_rust_worker_bridge(tmp_path: Path) -> None:
+    observations = WhisperWindowsV2.model_validate(
+        {
+            "sample_rate_hz": 16000,
+            "windows": [
+                {
+                    "start_sample": 0,
+                    "sample_count": 3,
+                    "left_context": 0,
+                    "right_context": 1,
+                    "spans": [{"text": "one", "start_s": 0.0, "end_s": 0.0001}],
+                },
+                {
+                    "start_sample": 1,
+                    "sample_count": 3,
+                    "left_context": 1,
+                    "right_context": 0,
+                    "spans": [{"text": "two", "start_s": None, "end_s": None}],
+                },
+            ],
+        }
+    )
+    response = execute_asr_request_v2(
+        _make_request(tmp_path),
+        AsrExecutionHostV2(
+            local_whisper_runner=lambda _audio, lang: WhisperChunkResultPayloadV2(
+                lang=lang,
+                text="",
+                chunks=observations,
+                model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
+            )
+        ),
+    )
+    assert isinstance(response.outcome, ExecuteSuccessV2)
+    assert isinstance(response.result, WhisperChunkResultV2)
+    assert response.result.chunks == observations
 
 
 def _write_pcm_f32le(path: Path, samples: np.ndarray) -> None:

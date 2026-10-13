@@ -41,8 +41,7 @@ impl<'a> BenchmarkOutputPlan<'a> {
             ReleasedCommand::Benchmark,
             options,
             &unit.audio().display_path,
-        )
-        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
+        )?
         .into_iter();
         let (Some(primary), Some(sidecar), None) =
             (artifacts.next(), artifacts.next(), artifacts.next())
@@ -202,6 +201,33 @@ mod tests {
             filename: "nested/clip.wav".into(),
             has_chat: false,
         }
+    }
+
+    #[test]
+    fn benchmark_option_mismatch_is_planning_failure_before_any_write() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let filesystem = filesystem(temp.path());
+        let unit = unit(&temp.path().join("input/clip.wav"));
+        let file = file();
+        let sink = RecordingSink::default();
+        let job_id = JobId::from("benchmark-plan-test");
+        let options = crate::recipe_runner::runtime::test_options(ReleasedCommand::Align);
+        let Err(error) =
+            BenchmarkOutputPlan::admit(&filesystem, &file, &unit, &options, &sink, &job_id)
+        else {
+            panic!("another command's options cannot admit benchmark output");
+        };
+        assert!(matches!(
+            error,
+            ServerError::Planning(crate::error::PlanningError::OutputOptionsMismatch {
+                expected: ReleasedCommand::Benchmark,
+                observed: ReleasedCommand::Align,
+            })
+        ));
+        assert!(sink.completed_files().is_empty());
+        assert!(sink.attempts().is_empty());
+        assert!(!temp.path().join("requested").exists());
+        assert!(!temp.path().join("staging").exists());
     }
 
     #[tokio::test]

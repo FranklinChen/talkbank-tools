@@ -1,7 +1,7 @@
 # Command Contracts: Input Admission and Output Guarantees
 
 **Status:** Current policy; command-admission migration in progress
-**Last updated:** 2026-10-06 23:58 EDT
+**Last updated:** 2026-10-08 06:38 EDT
 
 ## One validity owner
 
@@ -40,6 +40,13 @@ not an admitted inference input. Admit through the actual parser and validator;
 do not strip source lines, reparse a cleaned substitute or add a parallel parser.
 
 ## Current enforcement
+
+Work and output planning failures retain their typed `PlanningError` through
+benchmark admission and result retrieval. A stored command/options mismatch or
+missing catalog artifact is an internal planning failure (HTTP 500,
+nonretryable `system` category), not a filesystem error or invalid CHAT. The
+server preserves the planning cause and refuses the affected operation before
+publication; it does not retry inference to repair a plan.
 
 The shared text pipeline in `crates/batchalign/src/pipeline/text_infer.rs`
 uses Chatter's source-bound admission with model rules and dependent-tier

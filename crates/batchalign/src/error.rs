@@ -12,6 +12,7 @@ use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::WindowFault;
 use crate::media::probe::ProbeError;
 use crate::media::window::EmptySegment;
+pub use crate::recipe_runner::planner::PlanningError;
 pub use crate::revai::RetainedRevLanguageRejection;
 
 /// Why a recording's duration could not be established.
@@ -631,6 +632,12 @@ impl std::fmt::Display for AsrProviderDisposition {
 /// a structured `conflicts` array.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// The server could not derive a consistent work or output plan.
+    ///
+    /// **HTTP 500.** Preserve the typed planning cause; this is not a
+    /// filesystem failure or a reason to retry model inference.
+    #[error("planning error: {0}")]
+    Planning(#[from] PlanningError),
     /// The provider response was retained but its language was not admitted.
     /// The payload can only be issued after successful evidence persistence.
     /// HTTP 502: provider evidence was unusable, not malformed client input.
@@ -684,6 +691,18 @@ pub enum ServerError {
          this transcript; no output was written"
     )]
     AdmissionDisagreement,
+
+    /// A consumer configured to receive no morphology reports received
+    /// analysis or provenance outcomes. This is an internal policy mismatch,
+    /// never invalid CHAT or an inference retry condition.
+    #[error(
+        "internal policy mismatch: a report-free morphology consumer received analysis or provenance outcomes"
+    )]
+    UnexpectedMorphologyReport,
+
+    /// UTR's owned blocking task failed; never invalid CHAT or worker failure.
+    #[error("utterance timing recovery task failed: {0}")]
+    UtrTask(#[source] tokio::task::JoinError),
 
     /// Under `--main-bullets keep` or `exact`, the bullets the input gave
     /// these utterances (not in the recording, e.g. `[+ diary]`) conflict
@@ -1176,13 +1195,16 @@ impl ServerError {
                 }
             }
             Self::Database(_) | Self::Migration(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Persistence(_) | Self::StoredLease(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Persistence(_) | Self::StoredLease(_) | Self::Planning(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             Self::AlignmentMedia(_) | Self::KeptOffRecordBulletConflict { .. } => {
                 StatusCode::BAD_REQUEST
             }
-            Self::AdmissionDisagreement | Self::ReplacementPlanContradicted { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::AdmissionDisagreement
+            | Self::UnexpectedMorphologyReport
+            | Self::UtrTask(_)
+            | Self::ReplacementPlanContradicted { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MediaTiming(_)
             | Self::OutputParse(_)
             | Self::MorphosyntaxInjection(_)
@@ -1423,6 +1445,44 @@ mod tests {
                 .unwrap()
                 .contains("analysis unavailable")
         );
+    }
+
+    #[tokio::test]
+    async fn planning_failures_retain_their_cause_and_are_nonretryable_system_errors() {
+        use super::{PlanningError, ServerError};
+        use crate::api::{DisplayPath, ReleasedCommand};
+
+        for cause in [
+            PlanningError::OutputOptionsMismatch {
+                expected: ReleasedCommand::Benchmark,
+                observed: ReleasedCommand::Align,
+            },
+            PlanningError::MissingPrimary(ReleasedCommand::Benchmark),
+            PlanningError::MissingFileStem(DisplayPath::from("/")),
+            PlanningError::MissingFileName(DisplayPath::from("/")),
+        ] {
+            let error = ServerError::from(cause.clone());
+            assert!(matches!(&error, ServerError::Planning(retained) if retained == &cause));
+            assert!(
+                std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<PlanningError>())
+                    .is_some_and(|retained| retained == &cause)
+            );
+            let category = crate::runner::util::classify_server_error(&error);
+            assert_eq!(category, crate::scheduling::FailureCategory::System);
+            assert!(!crate::runner::util::is_retryable_worker_failure(category));
+            let detail = error.to_string();
+            let response = axum::response::IntoResponse::into_response(error);
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            let body = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .expect("error response");
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+            assert_eq!(body["detail"].as_str(), Some(detail.as_str()));
+        }
     }
 
     #[test]

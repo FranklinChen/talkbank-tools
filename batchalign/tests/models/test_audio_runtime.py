@@ -53,15 +53,12 @@ def _install_whisper_generation_helpers(
 ) -> None:
     module = ModuleType("transformers.models.whisper.generation_whisper")
 
-    def _dynamic_time_warping(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def lexical_frames(matrix: np.ndarray) -> list[int]:
         recorded_matrices.append(matrix)
         text_len = matrix.shape[0]
-        return (
-            np.arange(text_len, dtype=np.int64),
-            np.arange(1, text_len + 1, dtype=np.int64),
-        )
+        return list(range(1, text_len + 1))
 
-    module._dynamic_time_warping = _dynamic_time_warping
+    monkeypatch.setattr("batchalign_core.whisper_lexical_frame_indices", lexical_frames)
     module._median_filter = lambda weights, _width: weights
     monkeypatch.setitem(
         sys.modules,
@@ -402,6 +399,33 @@ def test_generated_conditioning_rows_do_not_shift_lexical_timestamps(
     torch.testing.assert_close(
         timestamps,
         torch.tensor([[0.0, 0.0, 0.0, 0.02, 0.04, 0.04]]),
+    )
+
+
+def test_generation_uses_real_native_open_begin_alignment(monkeypatch) -> None:
+    import batchalign_core
+
+    native = batchalign_core.whisper_lexical_frame_indices
+    _install_whisper_generation_helpers(monkeypatch, recorded_matrices=[])
+    monkeypatch.setattr(batchalign_core, "whisper_lexical_frame_indices", native)
+    output = _FakeGenerateOutput(
+        cross_attentions=[
+            _attention_step([99.0, 0.0, 0.0, 0.0]),
+            _attention_step([0.0, 0.0, 9.0, 0.0]),
+            _attention_step([9.0, 9.0, 0.0, 9.0]),
+            _attention_step([8.0, 8.0, 0.0, 8.0]),
+        ],
+        sequences=torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.int64),
+    )
+    timestamps = _extract_token_timestamps(
+        _FakeWhisperModel(),
+        output,
+        [(0, 0)],
+        num_frames=8,
+        num_input_ids=1,
+    )
+    torch.testing.assert_close(
+        timestamps, torch.tensor([[0.0, 0.04, 0.06, 0.06, 0.06]])
     )
 
 

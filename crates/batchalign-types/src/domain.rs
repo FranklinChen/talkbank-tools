@@ -1827,13 +1827,7 @@ numeric_id!(
     pub NumWorkers(usize) [Eq]
 );
 
-validated_string_id!(
-    /// A Rev.AI server-side job identifier returned after audio submission (non-empty).
-    ///
-    /// Obtained during preflight batch upload and passed to polling calls so
-    /// individual file tasks can retrieve results without re-uploading audio.
-    pub RevAiJobId
-);
+pub use crate::rev_ai_job_id::{RevAiJobId, RevAiJobIdError};
 
 /// Engine category that supports backend overrides.
 ///

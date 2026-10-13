@@ -34,6 +34,7 @@
 mod cantonese_asr_bridge;
 pub(crate) mod error;
 pub(crate) mod py_json_bridge;
+mod whisper_alignment;
 mod worker_artifacts;
 mod worker_asr_exec;
 mod worker_execute;
@@ -65,6 +66,10 @@ fn init_rust_tracing() {
 #[pymodule]
 fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_rust_tracing();
+    m.add_function(wrap_pyfunction!(
+        whisper_alignment::whisper_lexical_frame_indices,
+        m
+    )?)?;
 
     // Typed boundary exceptions. Python `batchalign/errors.py`
     // re-exports these so application catch sites match by class

@@ -28,14 +28,19 @@ requires acoustic adjudication, especially when adjacent utterances overlap
 and the later monotonicity pass intervenes.
 
 `--end-overlap-policy` is an independent local projection dimension. Its
-compatibility default clamps all adjacent end overlap. The experimental
-`preserve-cross-speaker` arm keeps overlap only when adjacent speaker codes
-differ; same-speaker clamps and start-regression stripping remain unchanged.
+current default is `preserve-cross-speaker`; `clamp-all-adjacent` is the legacy
+compatibility arm. Both resolve same-speaker overlap by speaker stream, even
+across intervening other-speaker lines; only the compatibility arm additionally
+resolves physically adjacent cross-speaker overlap. Start-order enforcement
+remains separate. See [Bullet and Word-Timing Policies](../reference/bullet-policies.md).
 Both policies travel inside one `FaProjectionPolicy`, so full, incremental,
 all-reusable, and empty-group paths cannot silently apply different
-combinations. `--main-bullets {derive,keep}` is a third dimension in the same
-value: `keep` leaves every utterance bullet the input carried unchanged and fits
-word timings inside it, again without touching the cache key. A second phase type, `FaFinalized`, requires optional bullet
+combinations. `--main-bullets {derive,keep,exact}` is a third dimension:
+`keep` leaves every utterance bullet the input carried unchanged and fits
+word timings inside it; `exact` also keeps supplied absences and requires
+`--no-utr`. Neither changes the raw-evidence cache key. `MainBulletAuthority`
+carries the captured authority alongside `FaProjectionPolicy` in `FaProjection`.
+A second phase type, `FaFinalized`, requires optional bullet
 repair to run before that policy's monotonicity projection on every path.
 
 A cache-only ten-file development experiment held every other typed option

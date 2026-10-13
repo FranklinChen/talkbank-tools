@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhisperAttentionCaptureReceiptV2",
+  "description": "Small receipt for numeric evidence retained outside the JSON transport.",
+  "type": "object",
+  "properties": {
+    "blake3": {
+      "description": "BLAKE3 of the closed SQLite file, verified by the server before use.",
+      "type": "string"
+    },
+    "capture": {
+      "description": "Request capability, retained whole rather than independently relabelled.",
+      "$ref": "#/$defs/WhisperAttentionCaptureRequestV2"
+    },
+    "request_id": {
+      "description": "Worker request that produced this artifact.",
+      "$ref": "#/$defs/WorkerRequestIdV2"
+    }
+  },
+  "required": [
+    "capture",
+    "request_id",
+    "blake3"
+  ],
+  "$defs": {
+    "WhisperAttentionCaptureRequestV2": {
+      "description": "A request-bound destination for a new diagnostic SQLite artifact.",
+      "type": "object",
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "semantic_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination",
+        "semantic_key"
+      ]
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
+    }
+  }
+}

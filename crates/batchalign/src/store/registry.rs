@@ -379,24 +379,16 @@ impl JobRegistry {
         &self,
         job_id: &JobId,
     ) -> Option<Result<JobRestartProjection, ServerError>> {
-        let job_id_for_message = job_id.clone();
-        self.update_job(job_id.clone(), move |job| -> Result<JobRestartProjection, ServerError> {
-            if !job.execution.status.can_restart() {
-                return Err(ServerError::JobConflict {
-                    message: format!(
-                        "Job {job_id_for_message} is {}, only cancelled or failed jobs can be restarted.",
-                        job.execution.status
-                    ),
-                    conflicts: Vec::new(),
-                });
-            }
-
-            job.prepare_for_restart();
-            Ok(JobRestartProjection {
-                info: job.to_info(),
-                job_update: job.to_list_item(),
-            })
-        })
+        self.update_job(
+            job_id.clone(),
+            move |job| -> Result<JobRestartProjection, ServerError> {
+                job.prepare_for_restart()?;
+                Ok(JobRestartProjection {
+                    info: job.to_info(),
+                    job_update: job.to_list_item(),
+                })
+            },
+        )
         .await
     }
 

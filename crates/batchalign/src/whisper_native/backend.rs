@@ -163,7 +163,7 @@ pub(super) fn transcribe_impl(
     Ok(WhisperChunkResultV2 {
         lang,
         text,
-        chunks,
+        chunks: chunks.into(),
         // Built from the file this run actually loaded, not from a constant:
         // the path may be the auto-fetched default or one the host named, and
         // the result must say which weights produced it either way.

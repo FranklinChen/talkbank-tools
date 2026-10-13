@@ -1,7 +1,7 @@
 # Morphotag Reconciliation Invariants
 
 **Status:** Current
-**Last updated:** 2026-10-03 22:04 EDT
+**Last updated:** 2026-10-12 22:13 EDT
 
 This page documents the **1-to-1 invariant** that the morphotag pipeline
 relies on, the three stages that together make it hold deterministically,
@@ -137,6 +137,48 @@ Each stage's correctness is independently testable:
 When a count mismatch nevertheless surfaces at the injection boundary,
 it is **always a bug in one of those three stages**: never an
 expected divergence class to be resolved by after-the-fact alignment.
+
+## Dependency admission and cue projection
+
+The appended terminator is evidence for Stanza, not a lexical `%mor` item.
+Deleting its row alone can leave dependency heads pointing to a missing word,
+even when input CHAT and token counts are valid. The Python producer therefore
+admits complete MWT components, word IDs, targets and acyclic head chains in
+`DependencyGraph` before projection. Logical realigned boundaries, not row
+counts or POS tags, identify the cue.
+
+An attached cue is contracted into its lexical parent. A root cue is removed
+only when its sole lexical child can become root without a competing root;
+multiple children require one new parse from the same model with lexical
+boundaries only. `CueFreeRealigned` owns that retry: its output must preserve
+the lexical token count and pass graph admission, and it has no cue to delete.
+It cannot request another retry. A retry failure remains local to the item.
+Only the resulting `AnalyzableSentence` reaches wire emission.
+Its rows are private, and mutable JSON copies cannot change the admitted graph.
+Cantonese POS tagging sees these lexical rows and may replace only their POS
+values, never their IDs or dependency heads. Admission failures belong to the
+affected item rather than poisoning every item of its language group.
+
+```mermaid
+flowchart LR
+    R[RepairedSentence] --> G[DependencyGraph]
+    G --> P[Realigned cue projection]
+    P -->|Ambiguous root| L[One lexical-only model parse]
+    L --> B[Graph and lexical boundary admission]
+    G --> F[Preserved free tokenization]
+    P --> A[AnalyzableSentence]
+    F --> A
+    B --> A
+    A --> C[Optional POS transition]
+    C --> W[Worker JSON]
+    W --> U[Rust UdTokens and MOR GRA mapping]
+```
+
+This removes the raw `sentence[:-1]` operation and separate drop boolean.
+Free tokenization owns no positional cue and preserves its rows. Rust still
+admits external JSON and validates its walked graph: a Python proof object
+does not cross IPC. Native boundary tests are not evidence that every real
+model output or private transcript has been repaired.
 
 ## The two legitimate non-realignment modes
 

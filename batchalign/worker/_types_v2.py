@@ -316,6 +316,21 @@ class AsrRequestV2(BaseModel):
     decode_budget_seconds: float | None = None
 
 
+class WhisperAttentionCaptureRequestV2(BaseModel):
+    """Exclusive-create diagnostic destination and the semantic request key."""
+
+    destination: WorkerArtifactPathV2
+    semantic_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WhisperAttentionCaptureReceiptV2(BaseModel):
+    """Small receipt; attention arrays stay in a SQLite data-plane artifact."""
+
+    capture: WhisperAttentionCaptureRequestV2
+    request_id: WorkerRequestIdV2
+    blake3: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ForcedAlignmentRequestV2(BaseModel):
     """V2 forced-alignment request payload (internally tagged as ``"forced_alignment"``)."""
 
@@ -324,6 +339,7 @@ class ForcedAlignmentRequestV2(BaseModel):
     payload_ref_id: WorkerArtifactIdV2
     audio_ref_id: WorkerArtifactIdV2
     text_mode: FaTextModeV2
+    attention_capture: WhisperAttentionCaptureRequestV2 | None = None
 
 
 class MorphosyntaxRequestV2(BaseModel):
@@ -755,13 +771,51 @@ class WhisperChunkSpanV2(BaseModel):
     end_s: FiniteNonNegativeFloat | None = None
 
 
+class WhisperWindowV2(BaseModel):
+    """One independently decoded window with local timestamps and source samples."""
+
+    model_config = {"extra": "forbid"}
+
+    start_sample: Annotated[int, Field(ge=0, le=2**64 - 1)]
+    sample_count: Annotated[int, Field(gt=0, le=2**64 - 1)]
+    left_context: Annotated[int, Field(ge=0, le=2**64 - 1)]
+    right_context: Annotated[int, Field(ge=0, le=2**64 - 1)]
+    spans: list[WhisperChunkSpanV2]
+
+
+class WhisperWindowsV2(BaseModel):
+    """Contiguous sample ownership; never a parallel already-merged word list."""
+
+    model_config = {"extra": "forbid"}
+
+    sample_rate_hz: Annotated[int, Field(gt=0, le=2**32 - 1)]
+    windows: list[WhisperWindowV2]
+
+    @model_validator(mode="after")
+    def admit_ownership(self) -> WhisperWindowsV2:
+        if not self.windows:
+            raise ValueError("at least one Whisper window is required")
+        owned_end = 0
+        for window in self.windows:
+            if window.left_context + window.right_context >= window.sample_count:
+                raise ValueError("Whisper window has no owned interior")
+            if window.start_sample + window.left_context != owned_end:
+                raise ValueError("Whisper owned interiors must be contiguous from zero")
+            owned_end = window.start_sample + window.sample_count - window.right_context
+            if owned_end > 2**64 - 1:
+                raise ValueError("Whisper window end overflow")
+        if self.windows[0].left_context or self.windows[-1].right_context:
+            raise ValueError("outer Whisper windows cannot claim exterior context")
+        return self
+
+
 class WhisperChunkResultPayloadV2(BaseModel):
     """Raw Whisper chunk output returned by Python (internally tagged)."""
 
     kind: Literal["whisper_chunk_result"] = "whisper_chunk_result"
     lang: LanguageCode
     text: str
-    chunks: list[WhisperChunkSpanV2]
+    chunks: list[WhisperChunkSpanV2] | WhisperWindowsV2
     # Which models produced this text, as the runtime observed them. Required,
     # matching Rust: a result that cannot name its models cannot be stamped or
     # cached honestly, and an optional field would let a producer forget.
@@ -892,6 +946,7 @@ class WhisperTokenTimingResultPayloadV2(BaseModel):
 
     kind: Literal["whisper_token_timing_result"] = "whisper_token_timing_result"
     tokens: list[WhisperTokenTimingV2]
+    attention_capture: WhisperAttentionCaptureReceiptV2 | None = None
 
 
 class IndexedWordTimingV2(BaseModel):
@@ -954,6 +1009,8 @@ class UdRelationRepairKindV2(str, Enum):
     """A known non-UD spelling of a UD relation (``iob`` for ``iobj``)."""
     UNKNOWN_RELATION = "unknown_relation"
     """No UD relation and no known equivalent, degraded to ``dep``."""
+    CUE_ROOT_PROMOTION = "cue_root_promotion"
+    """The appended root cue's sole lexical child is promoted to root."""
 
 
 class UdRelationRepairV2(BaseModel):

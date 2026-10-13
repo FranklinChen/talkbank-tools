@@ -212,6 +212,7 @@ def load_whisper_asr(
     from batchalign.device import resolve_inference_device
     from batchalign.inference.audio import bind_whisper_token_timestamp_extractor
     from batchalign.inference.types import WhisperASRHandle
+    from batchalign.inference.whisper_windows import WindowOwnedWhisperPipeline
 
     device = resolve_inference_device(device_policy)
 
@@ -245,6 +246,7 @@ def load_whisper_asr(
 
     pipe = pipeline(
         "automatic-speech-recognition",
+        pipeline_class=WindowOwnedWhisperPipeline,
         model=model,
         tokenizer=WhisperTokenizer.from_pretrained(base),
         chunk_length_s=25,
@@ -281,7 +283,12 @@ def _infer_whisper(
     """
     gen_kwargs = model.gen_kwargs(model.lang)
 
-    raw = model(item.audio_path, batch_size=1, generate_kwargs=gen_kwargs)
+    raw = model(
+        item.audio_path,
+        batch_size=1,
+        generate_kwargs=gen_kwargs,
+        observation_mode="legacy",
+    )
 
     # Parse pipeline output at the boundary into typed model
     output = WhisperChunksAsrResponse.model_validate(
@@ -321,6 +328,29 @@ def infer_whisper_prepared_audio(
         batch_size=1,
         generate_kwargs=gen_kwargs,
     )
+
+    if isinstance(raw, dict) and "window_observations" in raw:
+        from batchalign.worker._types_v2 import WhisperWindowsV2
+
+        observations = WhisperWindowsV2.model_validate(raw["window_observations"])
+        last = observations.windows[-1]
+        if (
+            observations.sample_rate_hz != model.sample_rate
+            or last.start_sample + last.sample_count != len(audio)
+        ):
+            raise ValueError(
+                "Whisper window ownership does not cover the prepared audio"
+            )
+        if model.model_identity is None:
+            raise RuntimeError(
+                "Whisper window observations have no loaded model identity"
+            )
+        return WhisperChunkResultPayloadV2(
+            lang=lang,
+            text="",
+            chunks=observations,
+            model=model.model_identity,
+        )
 
     chunks = raw.get("chunks", []) if isinstance(raw, dict) else []
     # Overlap at a seam and an inverted chunk travel as emitted: the Rust

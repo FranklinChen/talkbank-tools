@@ -37,6 +37,7 @@
 use talkbank_model::model::{ChatFile, Line};
 
 use batchalign_transform::dp_align::{self, MatchMode};
+use dp_align::control::{Uninterrupted, WorkControl, uninterrupted};
 
 use tracing::debug;
 
@@ -54,7 +55,7 @@ pub mod interleaving;
 mod lexical;
 pub mod overlap_markers;
 #[cfg(test)]
-mod region_tests;
+pub(crate) mod region_tests;
 mod regions;
 mod search;
 mod two_pass;
@@ -108,7 +109,20 @@ pub struct AsrTimingToken {
 pub trait UtrStrategy: Send + Sync {
     /// Inject utterance-level timing from ASR tokens into untimed CHAT utterances.
     fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult;
+    /// Interruptible work on a privately owned candidate document. A cancelled
+    /// candidate must not be installed into the caller's source document.
+    fn inject_controlled(
+        &self,
+        chat_file: &mut ChatFile,
+        asr_tokens: &[AsrTimingToken],
+        control: &dyn WorkControl<Error = UtrCancelled>,
+    ) -> Result<UtrResult, UtrCancelled>;
 }
+
+/// Cancellation is neither failed lexical evidence nor a budget refusal.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("utterance timing recovery cancelled")]
+pub struct UtrCancelled;
 
 /// Global single-pass UTR strategy.
 ///
@@ -216,6 +230,20 @@ impl UtrStrategy for GlobalUtr {
             MatchMode::CaseInsensitive,
         )
     }
+    fn inject_controlled(
+        &self,
+        chat_file: &mut ChatFile,
+        asr_tokens: &[AsrTimingToken],
+        control: &dyn WorkControl<Error = UtrCancelled>,
+    ) -> Result<UtrResult, UtrCancelled> {
+        run_global_utr_controlled(
+            chat_file,
+            asr_tokens,
+            GlobalUtrParticipation::AllUtterances,
+            MatchMode::CaseInsensitive,
+            control,
+        )
+    }
 }
 
 /// Which utterances participate in the global UTR alignment payload.
@@ -260,6 +288,23 @@ pub(super) fn run_global_utr(
     participation: GlobalUtrParticipation,
     dp_match_mode: MatchMode,
 ) -> UtrResult {
+    uninterrupted(run_global_utr_controlled(
+        chat_file,
+        asr_tokens,
+        participation,
+        dp_match_mode,
+        &Uninterrupted,
+    ))
+}
+
+pub(super) fn run_global_utr_controlled<C: WorkControl + ?Sized>(
+    chat_file: &mut ChatFile,
+    asr_tokens: &[AsrTimingToken],
+    participation: GlobalUtrParticipation,
+    dp_match_mode: MatchMode,
+    control: &C,
+) -> Result<UtrResult, C::Error> {
+    control.check()?;
     if asr_tokens.is_empty() {
         let utt_infos = collect_utr_utterance_info(chat_file);
         // Nothing can match. The plan still records every utterance as
@@ -289,7 +334,7 @@ pub(super) fn run_global_utr(
             .iter()
             .filter(|info| info.retained_timing.is_some())
             .count();
-        return UtrResult {
+        return Ok(UtrResult {
             injected: 0,
             skipped,
             unmatched: utt_infos.len() - skipped,
@@ -298,9 +343,17 @@ pub(super) fn run_global_utr(
             // No tokens, so nothing was heard: an index that observed nothing,
             // which never supersedes an earlier pass's anchors.
             anchors: AnchorIndex::not_observed(),
-        };
+        });
     }
-    PreparedGlobalUtr::plan(chat_file, asr_tokens, participation, dp_match_mode).project()
+    let prepared = PreparedGlobalUtr::plan_controlled(
+        chat_file,
+        asr_tokens,
+        participation,
+        dp_match_mode,
+        control,
+    )?;
+    control.check()?;
+    Ok(prepared.project())
 }
 
 /// A selected pass owns the source borrow and every observation derived from
@@ -384,14 +437,32 @@ impl UtrTimingCorridor {
 }
 
 impl<'a> PreparedGlobalUtr<'a> {
+    #[cfg(test)]
     fn plan(
         source: &'a mut ChatFile,
         tokens: &[AsrTimingToken],
         participation: GlobalUtrParticipation,
         match_mode: MatchMode,
     ) -> Self {
+        uninterrupted(Self::plan_controlled(
+            source,
+            tokens,
+            participation,
+            match_mode,
+            &Uninterrupted,
+        ))
+    }
+
+    fn plan_controlled<C: WorkControl + ?Sized>(
+        source: &'a mut ChatFile,
+        tokens: &[AsrTimingToken],
+        participation: GlobalUtrParticipation,
+        match_mode: MatchMode,
+        control: &C,
+    ) -> Result<Self, C::Error> {
         let census = collect_utr_utterance_info(source);
-        let plan = plan_global_utr_alignment_for(&census, tokens, match_mode, participation);
+        let plan =
+            plan_global_utr_alignment_for(&census, tokens, match_mode, participation, control)?;
         let anchors = AnchorIndex::from_plan(&plan);
         let line_indices: Vec<_> = source
             .lines
@@ -428,14 +499,14 @@ impl<'a> PreparedGlobalUtr<'a> {
                     .or_insert(bullet.timing.start_ms);
             }
         }
-        Self {
+        Ok(Self {
             source,
             census,
             plan,
             anchors,
             line_indices,
             following_starts,
-        }
+        })
     }
 
     /// Consume exactly the source-bound pass; raw tokens are no longer present.
@@ -816,7 +887,13 @@ pub(super) fn plan_global_utr_alignment(
     participation: GlobalUtrParticipation,
 ) -> UtrAlignmentPlan {
     let utt_infos = collect_utr_utterance_info(chat_file);
-    plan_global_utr_alignment_for(&utt_infos, asr_tokens, dp_match_mode, participation)
+    uninterrupted(plan_global_utr_alignment_for(
+        &utt_infos,
+        asr_tokens,
+        dp_match_mode,
+        participation,
+        &Uninterrupted,
+    ))
 }
 
 /// Plan against utterance information already collected, so a caller that
@@ -825,12 +902,14 @@ pub(super) fn plan_global_utr_alignment(
 ///
 /// The census is partitioned into anchored regions and each region is
 /// planned on its own, within its own budget (see `regions`).
-fn plan_global_utr_alignment_for(
+fn plan_global_utr_alignment_for<C: WorkControl + ?Sized>(
     utt_infos: &[UtrUtteranceInfo],
     asr_tokens: &[AsrTimingToken],
     dp_match_mode: MatchMode,
     participation: GlobalUtrParticipation,
-) -> UtrAlignmentPlan {
+    control: &C,
+) -> Result<UtrAlignmentPlan, C::Error> {
+    control.check()?;
     let order = UtrOrderModel::of(utt_infos, participation);
     let regions = regions::partition(utt_infos);
     let plan = |region: &regions::UtrRegion, contested: &ContestedTokens| {
@@ -842,13 +921,14 @@ fn plan_global_utr_alignment_for(
             dp_match_mode,
             participation,
             contested,
+            control,
         )
     };
     let uncontested = ContestedTokens::none();
     let first: Vec<_> = regions
         .iter()
         .map(|region| plan(region, &uncontested))
-        .collect();
+        .collect::<Result<_, _>>()?;
     // Neighbouring regions share the anchor between them: tokens inside its
     // span are in both windows. A token claimed by owned words of both is
     // one the regional search cannot assign, so the regions that claimed it
@@ -856,18 +936,20 @@ fn plan_global_utr_alignment_for(
     // regions pay for it.
     let contested = ContestedTokens::between(&first);
     if contested.is_empty() {
-        return UtrAlignmentPlan::assemble(order, first);
+        return Ok(UtrAlignmentPlan::assemble(order, first));
     }
-    UtrAlignmentPlan::assemble(
-        order,
-        regions.iter().zip(first).map(|(region, local)| {
+    let plans = regions
+        .iter()
+        .zip(first)
+        .map(|(region, local)| {
             if contested.touches(&local) {
                 plan(region, &contested)
             } else {
-                local
+                Ok(local)
             }
-        }),
-    )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(UtrAlignmentPlan::assemble(order, plans))
 }
 
 /// Provider tokens whose correspondence the regional decomposition cannot
@@ -928,17 +1010,25 @@ impl ContestedTokens {
 /// joint composition (on a single-speaker region it admits exactly the
 /// monotonic orders), so regions bound the work without changing the model.
 /// A region with no tokens matches nothing under either model.
-fn plan_region<'c>(
+fn plan_region<'c, C: WorkControl + ?Sized>(
     order: UtrOrderModel,
     searched: regions::SearchedCensus<'c>,
     lexical: &lexical::UtrLexicalStream<'_>,
     dp_match_mode: MatchMode,
     participation: GlobalUtrParticipation,
     contested: &ContestedTokens,
-) -> evidence::LocalRegionPlan<'c> {
+    control: &C,
+) -> Result<evidence::LocalRegionPlan<'c>, C::Error> {
+    control.check()?;
     match order {
         UtrOrderModel::Interleaved if !lexical.is_empty() => {
-            return lexical.plan_interleaving(searched, dp_match_mode, participation, contested);
+            return lexical.plan_interleaving(
+                searched,
+                dp_match_mode,
+                participation,
+                contested,
+                control,
+            );
         }
         UtrOrderModel::Interleaved | UtrOrderModel::Monotonic => {}
     }
@@ -957,13 +1047,14 @@ fn plan_region<'c>(
             });
         }
     }
-    plan_utr_alignment(
+    plan_utr_alignment_controlled(
         &payload,
         lexical,
         searched,
         dp_match_mode,
         participation,
         contested,
+        control,
     )
 }
 
@@ -973,6 +1064,7 @@ struct UtrPayloadWord {
     address: UtrWordAddress,
 }
 
+#[cfg(test)]
 fn plan_utr_alignment<'c>(
     payload: &[UtrPayloadWord],
     lexical: &lexical::UtrLexicalStream<'_>,
@@ -981,6 +1073,27 @@ fn plan_utr_alignment<'c>(
     participation: GlobalUtrParticipation,
     contested: &ContestedTokens,
 ) -> evidence::LocalRegionPlan<'c> {
+    uninterrupted(plan_utr_alignment_controlled(
+        payload,
+        lexical,
+        searched,
+        dp_match_mode,
+        participation,
+        contested,
+        &Uninterrupted,
+    ))
+}
+
+fn plan_utr_alignment_controlled<'c, C: WorkControl + ?Sized>(
+    payload: &[UtrPayloadWord],
+    lexical: &lexical::UtrLexicalStream<'_>,
+    searched: regions::SearchedCensus<'c>,
+    dp_match_mode: MatchMode,
+    participation: GlobalUtrParticipation,
+    contested: &ContestedTokens,
+    control: &C,
+) -> Result<evidence::LocalRegionPlan<'c>, C::Error> {
+    control.check()?;
     let region = searched.span();
     let all_words = payload
         .iter()
@@ -1012,7 +1125,7 @@ fn plan_utr_alignment<'c>(
             indices: complete.earliest,
         };
         let admitted = lexical.unique_embedding_matches(payload, &reference_indices);
-        return build_alignment_plan(
+        return Ok(build_alignment_plan(
             UtrAlignmentStrategy::UniqueExactSubsequence,
             payload,
             lexical,
@@ -1023,11 +1136,15 @@ fn plan_utr_alignment<'c>(
             },
             participation,
             contested,
-        );
+        ));
     }
 
-    let alignment =
-        dp_align::CorrespondenceAnalysis::observe(&all_words, &asr_texts, dp_match_mode);
+    let alignment = dp_align::CorrespondenceAnalysis::observe_controlled(
+        &all_words,
+        &asr_texts,
+        dp_match_mode,
+        control,
+    )?;
     let admission = match alignment.admission() {
         dp_align::CorrespondenceAdmission::Complete(common) => {
             CorrespondenceProof::Complete(lexical.common_matches(common, payload))
@@ -1071,7 +1188,8 @@ fn plan_utr_alignment<'c>(
         contested,
     );
     interior::bound_interior_only_searches(&mut plan, lexical);
-    plan
+    control.check()?;
+    Ok(plan)
 }
 
 /// Attempt the exact-subsequence fast path for UTR.

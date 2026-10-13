@@ -849,6 +849,9 @@ where
 /// V2 forced-alignment request payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ForcedAlignmentRequestV2 {
+    /// Opt-in file-backed diagnostic capture, supported only by Whisper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_capture: Option<super::WhisperAttentionCaptureRequestV2>,
     /// Backend selected by Rust.
     pub backend: FaBackendV2,
     /// Reference to the prepared text/JSON payload for the word arrays.

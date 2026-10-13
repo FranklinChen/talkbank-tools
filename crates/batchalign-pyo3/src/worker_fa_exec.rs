@@ -8,7 +8,7 @@ use batchalign_types::api::{AudioPositionSeconds, DurationMs};
 use batchalign_types::worker_v2::{
     ExecuteRequestV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2,
     IndexedWordTimingResultV2, IndexedWordTimingV2, TaskRequestV2, TaskResultV2,
-    WhisperTokenTimingResultV2, WhisperTokenTimingV2,
+    WhisperAttentionCaptureReceiptV2, WhisperTokenTimingResultV2, WhisperTokenTimingV2,
 };
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
@@ -74,7 +74,10 @@ fn parse_whisper_tokens(
         })?;
         normalized.push(WhisperTokenTimingV2 { text, time_s });
     }
-    Ok(WhisperTokenTimingResultV2 { tokens: normalized })
+    Ok(WhisperTokenTimingResultV2 {
+        tokens: normalized,
+        attention_capture: None,
+    })
 }
 
 /// One row of an indexed-timing host's answer, as it arrives from Python.
@@ -168,13 +171,41 @@ fn run_whisper(
     )?;
     let audio_array = audio.samples()?.into_pyarray(py);
     let text = join_fa_words(&payload.words, fa_request.text_mode);
-    let response = runner
-        .bind(py)
-        .call1((audio_array, text.as_str()))
+    let response = if let Some(capture) = &fa_request.attention_capture {
+        #[derive(serde::Serialize)]
+        struct CaptureContext<'a> {
+            request_id: &'a batchalign_types::worker_v2::WorkerRequestIdV2,
+            capture: &'a batchalign_types::worker_v2::WhisperAttentionCaptureRequestV2,
+        }
+        let context = serde_json::to_string(&CaptureContext {
+            request_id: &request.request_id,
+            capture,
+        })
         .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-    Ok(TaskResultV2::WhisperTokenTimingResult(
-        parse_whisper_tokens(&response)?,
-    ))
+        runner.bind(py).call1((audio_array, text.as_str(), context))
+    } else {
+        runner.bind(py).call1((audio_array, text.as_str()))
+    }
+    .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+    let mut result = parse_whisper_tokens(&response)?;
+    if let Some(capture) = &fa_request.attention_capture {
+        // The callback returns only timings. The bridge creates the receipt
+        // from the closed artifact and the actual request, not host-supplied IDs.
+        let destination = capture.destination().as_ref().to_owned();
+        let digest = py
+            .detach(move || {
+                std::fs::read(destination).map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+            })
+            .map_err(|error| {
+                ExecuteFailure::Runtime(format!("attention capture missing: {error}"))
+            })?;
+        result.attention_capture = Some(WhisperAttentionCaptureReceiptV2 {
+            capture: capture.clone(),
+            request_id: request.request_id.clone(),
+            blake3: digest,
+        });
+    }
+    Ok(TaskResultV2::WhisperTokenTimingResult(result))
 }
 
 /// Which indexed-timing FA host a request targets.
@@ -265,6 +296,11 @@ fn run_fa(
         },
         "forced-alignment",
     )?;
+    if fa_request.attention_capture.is_some() && fa_request.backend != FaBackendV2::Whisper {
+        return Err(ExecuteFailure::InvalidPayload(
+            "attention capture requires Whisper FA".into(),
+        ));
+    }
     match fa_request.backend {
         FaBackendV2::Whisper => run_whisper(py, &request, fa_request, whisper_runner),
         FaBackendV2::Wave2vec => run_indexed_fa(

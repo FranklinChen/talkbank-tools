@@ -148,7 +148,9 @@ class TestWhisperPathBoundary:
                 *,
                 batch_size: int = 1,
                 generate_kwargs: object = None,
+                observation_mode: str = "windows",
             ) -> dict[str, object]:
+                assert observation_mode == "legacy"
                 self.calls.append((audio, batch_size, generate_kwargs))
                 return {
                     "text": "hello world",
@@ -193,7 +195,9 @@ class TestWhisperPathBoundary:
                 *,
                 batch_size: int = 1,
                 generate_kwargs: object = None,
+                observation_mode: str = "windows",
             ) -> dict[str, object]:
+                assert observation_mode == "windows"
                 self.calls.append((audio, batch_size, generate_kwargs))
                 return {
                     "text": "hello",
@@ -242,7 +246,9 @@ class TestWhisperPathBoundary:
                 *,
                 batch_size: int = 1,
                 generate_kwargs: object = None,
+                observation_mode: str = "windows",
             ) -> dict[str, object]:
+                assert observation_mode == "legacy"
                 self.calls.append((audio, batch_size, generate_kwargs))
                 return {
                     "text": "hola hello",
@@ -361,6 +367,8 @@ class _FakePipe:
 
 
 def _install_fake_transformers(monkeypatch, pipeline_impl):
+    from transformers import AutomaticSpeechRecognitionPipeline
+
     _FakeTokenizer.calls = []
     _FakeProcessor.calls = []
     module = ModuleType("transformers")
@@ -368,6 +376,7 @@ def _install_fake_transformers(monkeypatch, pipeline_impl):
     module.WhisperProcessor = _FakeProcessor
     module.WhisperTokenizer = _FakeTokenizer
     module.pipeline = pipeline_impl
+    module.AutomaticSpeechRecognitionPipeline = AutomaticSpeechRecognitionPipeline
     monkeypatch.setitem(sys.modules, "transformers", module)
 
 
@@ -402,11 +411,14 @@ class TestWhisperLoader:
         assert handle.config.base == "cuda-base"
         assert handle.config.no_repeat_ngram_size == 4
         assert handle.config.use_cache is True
+        from batchalign.inference.whisper_windows import WindowOwnedWhisperPipeline
+
         assert pipeline_calls == [
             (
                 "automatic-speech-recognition",
                 {
                     "model": "cuda-model",
+                    "pipeline_class": WindowOwnedWhisperPipeline,
                     "tokenizer": "tokenizer:cuda-base",
                     "chunk_length_s": 25,
                     "stride_length_s": 3,

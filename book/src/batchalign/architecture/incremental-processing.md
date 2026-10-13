@@ -1,7 +1,7 @@
 # Incremental Processing
 
 **Status:** Current
-**Last updated:** 2026-10-03 21:37 EDT
+**Last updated:** 2026-10-08 18:56 EDT
 
 Incremental processing allows batchalign to reprocess only the utterances that
 changed after a user edits a CHAT file, preserving cached dependent tiers
@@ -26,6 +26,49 @@ existing dependent tiers) against the "after" version (post-edit) and computing
 a precise per-utterance change classification.
 
 ## Architecture
+
+### Optional prior for each file
+
+For a directory submission, `--before DIRECTORY` matches each current file to
+its same-named prior. Missing companions select fresh processing only for those
+files; other files retain their own reuse opportunities. Absence never shifts
+the next prior onto a different current file, and does not exempt the current
+document from command-specific CHAT admission.
+
+The paths-mode request represents this as `before_paths: [null, "/prior/b.cha"]`.
+An empty list means no priors; a nonempty list must still have exactly one slot
+per `source_paths` entry. Existing lists containing only strings retain their
+wire representation. Rust request and runner fields now use
+`Vec<Option<ClientPath>>`, and the runner owns the shared per-file lookup.
+Clients using null entries require a server supporting this request extension.
+Alignment provenance marks incremental processing per file, not per batch.
+
+When morphology is reused, its prior morphology stamps travel with the copied
+tiers. A reuse-only result keeps the original model, build and date, rather
+than claiming fresh inference or assuming the edited input already has the
+right stamp. Other commands' stamps and contributor comments in the current
+document remain untouched. Missing prior stamps mean unknown attribution;
+damaged optional stamp contents remain as evidence and do not block reuse.
+This retention policy does not certify the contents of a damaged stamp.
+
+Provenance finalization is separate from CHAT validation. If prior attribution
+is missing, malformed or already marked incomplete, valid morphology is still
+written. A `morphology_provenance_incomplete` shortfall reaches stored file
+status, CLI and dashboard; the CHAT carries `provenance_incomplete=true`.
+Original prior records remain as evidence. Any appended record names only
+faithfully representable new models, and its repair count describes that new
+run, not an invented historical total. Reuse without inference does not invent
+an engine or repeatedly append an existing incomplete marker.
+
+Incomplete attribution stays incomplete on later incremental readback. Only
+a fresh analysis that replaces the old morphology can discard its provenance
+shortfall. Prior stamps do not contribute when none of their tiers were reused.
+Clean mixed runs retain the existing combined-stamp representation.
+
+Missing companions and invalid prior contents are distinct: morphotag can
+discard an invalid prior and freshly analyze its independently admitted current
+document. Internal admission failures remain errors, not evidence of an
+unusable prior. Alignment retains its own prior-admission policy.
 
 ```text
 Before CHAT (with %mor/%gra/%wor/bullets)
@@ -222,6 +265,11 @@ automatically.
 The incremental path falls back to full processing when:
 
 - No "before" text is provided (first run)
+- For morphotag, the prior CHAT fails data admission: no prior content or
+  analysis is reused, and the independently admitted current document follows
+  normal fresh analysis. Internal parser failures still fail the operation;
+  this fallback does not weaken current-input admission or change align's
+  stricter declared-prior policy.
 - All utterances changed (`summary.unchanged == 0 && summary.speaker_changed == 0`)
 - The diff engine cannot establish any correspondence
 

@@ -39,6 +39,9 @@ mod input;
 mod raw_evidence;
 mod transport;
 mod units;
+
+#[cfg(test)]
+mod partial_partition_tests;
 use input::FaAdmission;
 #[cfg(test)]
 pub(crate) use input::read_fa_source;
@@ -83,7 +86,11 @@ pub(crate) struct FaServices<'a> {
     pub(crate) pipeline: PipelineServices<'a>,
     /// The FA engine the selected worker reported.
     pub(crate) cache_namespace: &'a FaCacheNamespace,
+    /// Opt-in diagnostic directory; only Whisper requests use it.
+    pub(crate) attention_capture_dir: Option<&'a std::path::Path>,
 }
+
+mod attention_capture;
 
 /// Source admission carried only by the owning active working document.
 /// Every processed output nevertheless requires complete construction
@@ -1176,6 +1183,7 @@ mod tests {
         let services = FaServices {
             pipeline: PipelineServices::new(&pool, &cache),
             cache_namespace: &namespace,
+            attention_capture_dir: None,
         };
         let params = FaParams {
             gap_healing: WordGapHealing::Heal,

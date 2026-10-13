@@ -219,6 +219,12 @@ pub(crate) fn diagnosed_summary(diagnostics: Option<&crate::api::FileOutputDiagn
     let mut stages = 0;
     for shortfall in &diagnostics.shortfalls {
         match shortfall {
+            crate::api::OutputShortfallRecord::SecondaryMorphologyIncomplete { .. }
+            | crate::api::OutputShortfallRecord::UtrUnavailable { .. }
+            | crate::api::OutputShortfallRecord::MorphologyProvenanceIncomplete { .. }
+            | crate::api::OutputShortfallRecord::SecondaryMorphologyUnplaced { .. } => {
+                line.push_str(&format!("; {shortfall}"));
+            }
             crate::api::OutputShortfallRecord::StageSkipped { .. }
             | crate::api::OutputShortfallRecord::StageNotApplied { .. } => stages += 1,
             crate::api::OutputShortfallRecord::StageHeldOut {

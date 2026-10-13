@@ -401,7 +401,7 @@ async fn dispatch_unit_request(
 ) -> Result<crate::types::worker_v2::ExecuteResponseV2, ServerError> {
     let infer_item = build_fa_infer_item(batch, unit);
     let request_ids = build_fa_request_ids(request_namespace, unit.ordinal());
-    let request = build_forced_alignment_request_v2(
+    let mut request = build_forced_alignment_request_v2(
         artifacts.store(),
         ForcedAlignmentBuildInputV2 {
             ids: &request_ids,
@@ -426,12 +426,30 @@ async fn dispatch_unit_request(
         )),
     })?;
 
-    services
+    let capture = services
+        .attention_capture_dir
+        .filter(|_| engine == crate::types::engines::FaEngineName::Whisper)
+        .map(|dir| super::attention_capture::request(dir, unit.cache_key().as_str()))
+        .transpose()?;
+    if let crate::types::worker_v2::TaskRequestV2::ForcedAlignment(payload) = &mut request.payload {
+        payload.attention_capture = capture.clone();
+    }
+    let response = services
         .pipeline
         .pool
         .dispatch_execute_v2(&batch.worker_lang, &request)
         .await
-        .map_err(ServerError::Worker)
+        .map_err(|error| {
+            if capture.is_some() {
+                ServerError::Validation(format!("attention capture worker failed: {error}"))
+            } else {
+                ServerError::Worker(error)
+            }
+        })?;
+    if let Some(capture) = capture {
+        super::attention_capture::admit_response(&capture, &request.request_id, &response).await?;
+    }
+    Ok(response)
 }
 
 /// Lower one worker response into the FA timing domain.

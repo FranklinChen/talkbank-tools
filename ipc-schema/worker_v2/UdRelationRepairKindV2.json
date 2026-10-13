@@ -18,6 +18,10 @@
     {
       "type": "string",
       "const": "unknown_relation"
+    },
+    {
+      "type": "string",
+      "const": "cue_root_promotion"
     }
   ]
 }

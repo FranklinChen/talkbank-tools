@@ -14,9 +14,11 @@ Usage::
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
+    Literal,
     NamedTuple,
     Protocol,
     TypeAlias,
@@ -236,11 +238,13 @@ class WhisperASRHandle:
         *,
         batch_size: int = 1,
         generate_kwargs: GenerateKwargs | None = None,
-    ) -> dict[str, list[dict[str, str | tuple[float, float]]]]:
+        observation_mode: Literal["windows", "legacy"] = "windows",
+    ) -> dict[str, Any]:
         return self._pipe(  # type: ignore[no-any-return]
             audio,
             batch_size=batch_size,
             generate_kwargs=generate_kwargs or {},
+            observation_mode=observation_mode,
         )
 
     def gen_kwargs(self, lang: LanguageCode) -> GenerateKwargs:
@@ -288,6 +292,22 @@ class WhisperASRHandle:
         return kw
 
 
+@dataclass(frozen=True)
+class WhisperModelIdentity:
+    """Resolved hub commit passed to both model and processor loaders."""
+
+    model_id: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.model_id
+            or len(self.revision) != 40
+            or any(c not in "0123456789abcdef" for c in self.revision)
+        ):
+            raise ValueError("Whisper identity requires a resolved hub commit")
+
+
 class WhisperFAHandle:
     """Typed wrapper for Whisper forced alignment model bundle.
 
@@ -299,10 +319,13 @@ class WhisperFAHandle:
         model: WhisperForConditionalGeneration,
         processor: WhisperProcessor,
         sample_rate: SampleRate,
+        *,
+        model_identity: WhisperModelIdentity | None = None,
     ) -> None:
         self.model = model
         self.processor = processor
         self.sample_rate = sample_rate
+        self.model_identity = model_identity
 
 
 class Wave2VecFAHandle:

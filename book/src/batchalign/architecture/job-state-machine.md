@@ -1,7 +1,7 @@
 # Job State Machine
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-08 10:32 EDT
 
 ## Overview
 
@@ -29,6 +29,21 @@ A writer whose transition is refused must persist nothing. Both the registry
 wrappers and the store-level helpers propagate the refusal for exactly this
 reason; a refused finalize that still wrote its status to SQLite left rows
 that startup recovery never revisits.
+
+## Incompatible recovered command/options
+
+A persisted job whose command and typed options disagree is shown as `Failed`
+with a recovery explanation. The original job and file rows are left unchanged,
+including metadata that ordinary recovery would repair. File statuses remain
+available for inspection; result artifacts are not guessed from incompatible
+options. This job is not queued automatically.
+
+`Job::prepare_for_restart` is a fallible transition: it admits command/options
+compatibility and restart eligibility before mutating files, cancellation,
+leases or run generation. An incompatible job cannot be restarted, so the
+restart endpoint cannot launch its runner or persist a replacement status.
+Resolve the stored mismatch through a reviewed repair or submit a correctly
+specified new job; this behavior does not provide an automatic repair command.
 
 ## State Diagram
 
@@ -355,6 +370,28 @@ stop. Contract test: `tests/gpu_concurrent_dispatch/cancellation.rs`, which
 cancels a real transcribe job over HTTP while an echo worker holds its file.
 
 ### Cancelled vs Interrupted at shutdown
+
+UTR's full-file and partial-window paths share an owned CPU-work boundary.
+`PendingUtr` borrows the source exclusively and sends a private candidate to
+the tracing-aware blocking pool. Only a completed candidate and its matching
+`UtrResult` can be installed, with no intervening await. Dropping the pending
+future aborts queued work and signals started work to stop at cooperative search
+checkpoints. Neither cancellation nor a task panic installs candidate mutations.
+This boundary retains one additional document clone while work is pending so
+the source remains available unchanged if its candidate is abandoned. Provider
+tokens move into the task rather than being cloned.
+Cancellation is not recorded as unmatched lexical content or a search-budget
+refusal; task panics are internal system failures, not invalid CHAT.
+
+The pure alignment algorithms accept an explicit `WorkControl`, independent of
+Tokio. Interleaved forward/backward/traceback passes check between reference rows;
+Hirschberg checks rows and 1,024-cell blocks, and correspondence admission checks
+candidate construction and ranking. Synchronous APIs use an uninhabited
+interruption error, retaining their previous signatures and matching policy.
+This is cooperative cancellation, not preemption: bounded row work, allocation,
+document cloning and non-search traversals may finish before a stop is observed.
+No search budget is raised and no timing-recovery claim follows from scheduling
+alone. Tests use explicit channels/checkpoint counts, not elapsed-time thresholds.
 
 `JobStatus::Cancelled` is reserved for user gestures (TUI cancel, HTTP
 DELETE/cancel). It is permanent: a Cancelled job is never auto-resumed.

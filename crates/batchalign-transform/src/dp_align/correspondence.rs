@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use super::comparison::{Alignable, FuzzyComparison, PreparedFuzzyWord};
+use super::control::{Uninterrupted, WorkControl, uninterrupted};
 use super::{AlignResult, MatchMode};
 
 const _: () = assert!(super::COST_SUB == 2 * super::COST_GAP);
@@ -68,10 +69,32 @@ impl CommonCorrespondences {
 impl CorrespondenceAnalysis {
     /// Keep the existing path for inspection; prove common matches separately.
     pub fn observe(payload: &[String], reference: &[String], mode: MatchMode) -> Self {
-        Self {
-            selected: super::align(payload, reference, mode),
-            admission: admit(payload, reference, mode, MAX_EDGES, MAX_FUZZY_COMPARISONS),
-        }
+        uninterrupted(Self::observe_controlled(
+            payload,
+            reference,
+            mode,
+            &Uninterrupted,
+        ))
+    }
+
+    /// Interruption never constructs selected or admitted correspondence evidence.
+    pub fn observe_controlled<C: WorkControl + ?Sized>(
+        payload: &[String],
+        reference: &[String],
+        mode: MatchMode,
+        control: &C,
+    ) -> Result<Self, C::Error> {
+        Ok(Self {
+            selected: super::align_controlled(payload, reference, mode, control)?,
+            admission: admit_controlled(
+                payload,
+                reference,
+                mode,
+                MAX_EDGES,
+                MAX_FUZZY_COMPARISONS,
+                control,
+            )?,
+        })
     }
 
     /// Inspection is not authority to use the selected path as timing evidence.
@@ -92,6 +115,7 @@ struct Edge {
     backward: usize,
 }
 
+#[cfg(test)]
 fn admit(
     payload: &[String],
     reference: &[String],
@@ -99,13 +123,33 @@ fn admit(
     edge_limit: usize,
     fuzzy_limit: usize,
 ) -> CorrespondenceAdmission {
-    let mut edges = match candidate_edges(payload, reference, mode, edge_limit, fuzzy_limit) {
-        Ok(edges) => edges,
-        Err(budget) => return CorrespondenceAdmission::BudgetExhausted(budget),
-    };
+    uninterrupted(admit_controlled(
+        payload,
+        reference,
+        mode,
+        edge_limit,
+        fuzzy_limit,
+        &Uninterrupted,
+    ))
+}
+
+fn admit_controlled<C: WorkControl + ?Sized>(
+    payload: &[String],
+    reference: &[String],
+    mode: MatchMode,
+    edge_limit: usize,
+    fuzzy_limit: usize,
+    control: &C,
+) -> Result<CorrespondenceAdmission, C::Error> {
+    let mut edges =
+        match candidate_edges(payload, reference, mode, edge_limit, fuzzy_limit, control)? {
+            Ok(edges) => edges,
+            Err(budget) => return Ok(CorrespondenceAdmission::BudgetExhausted(budget)),
+        };
     let mut ranks = PrefixMaximum::new(reference.len());
     let mut row_start = 0;
     while row_start < edges.len() {
+        control.check()?;
         let row_end = row_start
             + edges[row_start..]
                 .iter()
@@ -124,6 +168,7 @@ fn admit(
     let mut ranks = PrefixMaximum::new(reference.len());
     let mut row_end = edges.len();
     while row_end > 0 {
+        control.check()?;
         let row_start = row_end
             - edges[..row_end]
                 .iter()
@@ -151,16 +196,20 @@ fn admit(
         })
         .map(|edge| (edge.payload, edge.reference))
         .collect();
-    CorrespondenceAdmission::Complete(CommonCorrespondences { pairs })
+    Ok(CorrespondenceAdmission::Complete(CommonCorrespondences {
+        pairs,
+    }))
 }
 
-fn candidate_edges(
+fn candidate_edges<C: WorkControl + ?Sized>(
     payload: &[String],
     reference: &[String],
     mode: MatchMode,
     edge_limit: usize,
     fuzzy_limit: usize,
-) -> Result<Vec<Edge>, CorrespondenceBudget> {
+    control: &C,
+) -> Result<Result<Vec<Edge>, CorrespondenceBudget>, C::Error> {
+    control.check()?;
     let mut edges = Vec::new();
     let mut push = |payload, reference| {
         if edges.len() == edge_limit {
@@ -182,12 +231,17 @@ fn candidate_edges(
             };
             let mut postings: BTreeMap<String, Vec<usize>> = BTreeMap::new();
             for (index, word) in reference.iter().enumerate() {
+                control.check()?;
                 postings.entry(key(word)).or_default().push(index);
             }
             for (index, word) in payload.iter().enumerate() {
+                control.check()?;
                 if let Some(references) = postings.get(&key(word)) {
                     for reference in references {
-                        push(index, *reference)?;
+                        control.check()?;
+                        if let Err(budget) = push(index, *reference) {
+                            return Ok(Err(budget));
+                        }
                     }
                 }
             }
@@ -198,7 +252,7 @@ fn candidate_edges(
                 .checked_mul(reference.len())
                 .is_none_or(|comparisons| comparisons > fuzzy_limit)
             {
-                return Err(CorrespondenceBudget::FuzzyComparisons);
+                return Ok(Err(CorrespondenceBudget::FuzzyComparisons));
             }
             let payload: Vec<_> = payload
                 .iter()
@@ -211,14 +265,19 @@ fn candidate_edges(
             let policy = FuzzyComparison::new(threshold);
             for (p, word) in payload.iter().enumerate() {
                 for (r, other) in reference.iter().enumerate() {
-                    if word.matches(other, policy) {
-                        push(p, r)?;
+                    if r.is_multiple_of(1024) {
+                        control.check()?;
+                    }
+                    if word.matches(other, policy)
+                        && let Err(budget) = push(p, r)
+                    {
+                        return Ok(Err(budget));
                     }
                 }
             }
         }
     }
-    Ok(edges)
+    Ok(Ok(edges))
 }
 
 /// Maximum chain length over reference positions strictly before a position.

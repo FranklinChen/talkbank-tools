@@ -804,50 +804,6 @@ mod tests {
         }
     }
 
-    // =======================================================================
-    // Job-level options: before_paths indexing pattern
-    // =======================================================================
-    //
-    // These tests verify the indexing pattern used by dispatch code to extract
-    // per-file before_paths from Job.before_paths, as used by dispatch_fa_infer
-    // and the other audio orchestrators.
-
-    /// Helper: extracts the before_path for a given file_index, matching the
-    /// pattern used in `dispatch_fa_infer`.
-    fn resolve_before_path(before_paths: &[String], file_index: usize) -> Option<String> {
-        if !before_paths.is_empty() && file_index < before_paths.len() {
-            Some(before_paths[file_index].clone())
-        } else {
-            None
-        }
-    }
-
-    #[test]
-    fn job_level_options_before_paths_resolved_by_index() {
-        let before_paths = vec![
-            "/tmp/before/a.cha".to_string(),
-            "/tmp/before/b.cha".to_string(),
-            "/tmp/before/c.cha".to_string(),
-        ];
-
-        assert_eq!(
-            resolve_before_path(&before_paths, 0),
-            Some("/tmp/before/a.cha".into())
-        );
-        assert_eq!(
-            resolve_before_path(&before_paths, 2),
-            Some("/tmp/before/c.cha".into())
-        );
-        // Out of bounds returns None
-        assert_eq!(resolve_before_path(&before_paths, 3), None);
-    }
-
-    #[test]
-    fn job_level_options_empty_before_paths_returns_none() {
-        let before_paths: Vec<String> = vec![];
-        assert_eq!(resolve_before_path(&before_paths, 0), None);
-    }
-
     #[test]
     fn job_level_options_before_paths_supports_incremental_commands() {
         // Document which commands support --before (incremental processing).

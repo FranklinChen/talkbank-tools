@@ -202,6 +202,7 @@ impl MorphosyntaxRepairs {
 pub(crate) struct AppliedAnalyses {
     engines: MorphosyntaxEngines,
     repairs: MorphosyntaxRepairs,
+    secondary: super::report::SecondaryReport,
 }
 
 impl AppliedAnalyses {
@@ -256,6 +257,25 @@ impl AppliedAnalyses {
     pub(crate) fn extend(&mut self, other: Self) {
         self.engines.0.extend(other.engines.0);
         self.repairs.0.extend(other.repairs.0);
+        self.secondary.extend(other.secondary);
+    }
+
+    pub(super) fn secondary_mut(&mut self) -> &mut super::report::SecondaryReport {
+        &mut self.secondary
+    }
+
+    pub(crate) fn into_secondary(self) -> super::report::SecondaryReport {
+        self.secondary
+    }
+
+    /// Preserve pre-dispatch extraction failures before consuming positions.
+    pub(crate) fn secondary_positions(
+        &mut self,
+        chat: &crate::chat_ops::ChatFile,
+        extraction: batchalign_transform::morphosyntax::l2::L2Extraction,
+    ) -> Vec<batchalign_transform::morphosyntax::l2::L2DeferredPosition> {
+        self.secondary.capture_extraction(chat, &extraction);
+        extraction.into_reported_positions()
     }
 
     /// Whether no model analyzed anything, in which case nothing was repaired

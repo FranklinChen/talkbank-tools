@@ -6,6 +6,10 @@
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
 
+The [bullet policy reference](../../reference/bullet-policies.md) collects the
+current defaults and explains word overlap versus utterance overlap, positive
+duration, kept boundaries, partial timing, and final validation.
+
 **Requires:** a `.cha` file whose `@Media` header names an audio file visible
 to the server (or to the local daemon). See
 [Media Resolution](../../reference/command-io.md#1-align).

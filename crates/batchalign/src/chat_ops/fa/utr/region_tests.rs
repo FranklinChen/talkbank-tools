@@ -1,5 +1,5 @@
 //! Anchored-region boundary tests: synthetic transcripts through the public
-//! injection entry point, with the global problem's refusal shown directly.
+//! injection entry point, including banded recovery and local budget refusal.
 
 use super::*;
 use batchalign_transform::dp_align::interleaving::{LocalInterleaving, SpeakerTurn};
@@ -114,7 +114,7 @@ fn bullets(chat: &ChatFile) -> Vec<Option<(u64, u64)>> {
         .collect()
 }
 
-/// The pre-region formulation: one joint search over the whole file.
+/// One joint search over the whole file, without help from timing anchors.
 fn whole_file_search_is_refused(turns: &[Turn], tokens: &[AsrTimingToken]) -> bool {
     let reference: Vec<String> = tokens.iter().map(|token| token.text.clone()).collect();
     let speaker_turns: Vec<_> = turns
@@ -124,16 +124,76 @@ fn whole_file_search_is_refused(turns: &[Turn], tokens: &[AsrTimingToken]) -> bo
     LocalInterleaving::observe(&speaker_turns, &reference, MatchMode::CaseInsensitive).is_err()
 }
 
+fn long_turns(timed: impl Fn(usize) -> bool) -> Vec<Turn> {
+    let mut turns = dialogue(280, timed);
+    for (index, turn) in turns.iter_mut().enumerate() {
+        turn.words = (0..10).map(|j| word(index * 10 + j)).collect();
+        turn.start_ms = index as u64 * 4_000;
+        turn.end_ms = turn.start_ms + 3_000;
+    }
+    turns
+}
+
+/// The retained 2,800-word control, also exercised through the owned task.
+pub(crate) fn long_turn_fixture(anchored: bool) -> (ChatFile, Vec<AsrTimingToken>) {
+    let turns = long_turns(|index| anchored && index % 2 == 0);
+    (chat(&turns), heard(&turns))
+}
+
 #[test]
-fn a_file_over_the_global_budget_recovers_fully_through_its_anchors() {
+fn long_turn_dialogue_recovers_with_and_without_anchors() {
+    // Retained regression: the dense formulation refused all 280 turns.
+    // An exact feasible-score band now fits without changing speaker order.
+    let mut turns = long_turns(|_| false);
+    let tokens = heard(&turns);
+    let mut document = chat(&turns);
+    let result = inject_utr_timing(&mut document, &tokens);
+    assert_eq!((result.injected(), result.unmatched()), (280, 0));
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    assert_eq!(plan.regions().len(), 1);
+    assert!(
+        !plan
+            .utterances()
+            .iter()
+            .any(|evidence| matches!(evidence, UtrUtteranceAlignmentEvidence::Refused { .. }))
+    );
+    for (turn, bullet) in turns.iter().zip(bullets(&document)) {
+        assert_eq!(bullet, Some((turn.start_ms, turn.start_ms + 2_950)));
+    }
+
+    // The identical words and ASR evidence recover when retained bullets
+    // divide the problem; original timing remains unchanged.
+    for (index, turn) in turns.iter_mut().enumerate() {
+        turn.timed = index % 2 == 0;
+    }
+    let mut anchored = chat(&turns);
+    let result = inject_utr_timing(&mut anchored, &tokens);
+    assert_eq!(
+        (result.injected(), result.skipped(), result.unmatched()),
+        (140, 140, 0)
+    );
+    for (turn, bullet) in turns.iter().zip(bullets(&anchored)) {
+        let (start, end) = bullet.expect("every turn timed");
+        if turn.timed {
+            assert_eq!((start, end), (turn.start_ms, turn.end_ms));
+        } else {
+            assert_eq!((start, end), (turn.start_ms, turn.start_ms + 2_950));
+        }
+    }
+}
+
+#[test]
+fn formerly_over_budget_file_recovers_fully_through_its_anchors() {
     // 1,200 alternating turns; every other one timed. One joint search over
-    // the whole file exceeds its fixed budget, which used to refuse every
-    // utterance. Each anchored region is a few turns.
+    // the whole file formerly exceeded its fixed budget. The band now admits
+    // it too. Each anchored region is still a few turns.
     let turns = dialogue(1_200, |index| index % 2 == 0);
     let tokens = heard(&turns);
     assert!(
-        whole_file_search_is_refused(&turns, &tokens),
-        "precondition: the whole-file problem exceeds the budget"
+        !whole_file_search_is_refused(&turns, &tokens),
+        "the exact band also admits the formerly refused whole-file problem"
     );
     let mut document = chat(&turns);
     let result = inject_utr_timing(&mut document, &tokens);
@@ -168,7 +228,12 @@ fn one_oversized_region_is_refused_alone_and_its_neighbours_recover() {
     let total = BIG.end + 3;
     let timed = |index: usize| index.is_multiple_of(2) && !BIG.contains(&index);
     let turns = dialogue(total, |index| timed(index) || index == BIG.end);
-    let tokens = heard(&turns);
+    let mut tokens = heard(&turns);
+    // No feasible lexical witness in the large region: its exact band remains
+    // wide and must still respect the budget. Neighbours retain their evidence.
+    for token in &mut tokens[BIG.start * 3..BIG.end * 3] {
+        token.text = "unheard".into();
+    }
     let mut document = chat(&turns);
     let before = bullets(&document);
     let result = inject_utr_timing(&mut document, &tokens);

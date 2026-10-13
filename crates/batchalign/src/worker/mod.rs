@@ -41,6 +41,7 @@ pub(crate) mod target;
 pub mod tcp_handle;
 pub mod text_request_v2;
 pub mod text_result_v2;
+mod whisper_windows;
 
 // Re-export wire-format types from types::worker so that
 // `crate::worker::InferTask` etc. continues to resolve.

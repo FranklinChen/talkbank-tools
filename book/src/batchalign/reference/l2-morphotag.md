@@ -1,12 +1,47 @@
 # L2 Morphotag: Per-Word Code-Switching Analysis
 
 **Status:** Current
-**Last updated:** 2026-10-02 06:50 EDT
+**Last updated:** 2026-10-12 22:31 EDT
 
 L2 dispatch is on by default; `--no-l2-morphotag` opts out and leaves every
 `@s` word as `L2|xxx`. This page is the design reference for implementers;
 users should read the [user guide](../user-guide/commands/morphotag.md).
 Changes to this design are recorded in the repository's `CHANGELOG.md`.
+
+The splice producer returns transcript-ordered `SpanSpliceOutcome` receipts,
+with the AST line position, first morphology item, span size, secondary language
+and typed applied/retained disposition. `SpliceOutcome` derives its summary
+counts from those receipts; callers cannot construct a success count separately
+from the producer's decisions. Missing hosts, missing morphology, out-of-range
+positions, unreadable anchors, insertion refusals and grammar rollbacks retain
+distinct causes. These receipts describe splice attempts, not spans whose
+dispatch or merge failed earlier, and do not by themselves certify complete
+secondary-language analysis.
+
+The orchestrator carries a `SecondaryReport` beside the judged CHAT in
+`MorphosyntaxOutput`, through full and incremental processing to text writeback.
+It records extraction, dispatch, response, merge and splice failures, while a runtime
+registry's explicit lack of language support is an exclusion, not a failure.
+An absent registry is unavailable analysis, not evidence of unsupported language.
+Counts cover all attempted spans; inline samples are transcript-ordered and
+bounded for job polling. Addresses use one-based utterance and morphology-item
+positions, not physical text lines. Extraction failures precede span admission
+and therefore report utterance locations and affected word counts, without
+inventing exact positions or language assignments. Model provenance is recorded only for
+actually installed secondary analyses.
+
+The writer preserves admitted CHAT, successful analysis and remaining `L2|xxx`
+placeholders. A shortfall produces a `diagnosed` file status and structured
+diagnostics visible in the CLI and dashboard, not an error/retry of the file.
+Unsupported-language exclusions alone leave the file `done`. A mismatched
+response batch has no proven positional correspondence and retains all its
+spans, explicitly reported. Cancellation still aborts the transition.
+
+Transcription's optional morphology and comparison currently select placeholder
+policy: this change does not enable secondary inference there. Their consumers
+explicitly require an empty secondary report, so a future policy change cannot
+silently drop new diagnostics. Reports describe work attempted in this run;
+they do not reconstruct diagnostics from reused prior tiers.
 
 ## Problem
 
@@ -118,7 +153,7 @@ step refers back to an earlier one by a bare index.
 ```mermaid
 flowchart TD
     UD["primary UdResponse\n+ batch items"] -->|"injection\n(invariants, one walk, UdAlignment)"| EX["InjectionResult::l2\nL2Extraction: positions + unaligned"]
-    EX -->|"into_reported_positions\n(unaligned are logged)"| DP["Vec&lt;L2DeferredPosition&gt;"]
+    EX -->|"secondary_positions\n(unaligned enter output report)"| DP["Vec&lt;L2DeferredPosition&gt;"]
     DP -->|"plan_dispatch_spans\n(consumes)"| SP["L2SpanPlan\nowns its positions + L2Attachment"]
     SP -->|"secondary Stanza worker"| SEC["secondary UdSentence"]
     SP -->|"merge_planned_secondary_span\n(consumes the plan)"| MS["MergedL2Span"]
@@ -462,10 +497,12 @@ model is known to be weak.
 
 ## MWT Contraction Expansion
 
-The secondary dispatch lets Stanza own tokenization, so for MWT-capable
-languages (English, French, Italian, etc.) contractions expand into
-multi-word tokens, and `map_ud_sentence` assembles each into one item
-matching the single `@s` word on the main tier:
+Secondary dispatch preserves the CHAT boundaries owned by `FixedSpanBatch`.
+The realigner retains MWT hints, so for MWT-capable languages (English,
+French, Italian, etc.) contractions still expand into multi-word tokens.
+`map_ud_sentence` assembles each into one item matching the single `@s`
+word on the main tier. Batch admission binds responses to their owning spans
+before merging; count mismatches leave those spans untouched:
 
 | @s word | `%mor` |
 |---------|--------|

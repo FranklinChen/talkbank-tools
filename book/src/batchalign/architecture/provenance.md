@@ -1,7 +1,7 @@
 # Processing Provenance System
 
 **Status:** Current
-**Last updated:** 2026-10-06 22:37 EDT
+**Last updated:** 2026-10-08 19:17 EDT
 
 ## Overview
 
@@ -408,6 +408,29 @@ The batch text path (`run_text_batch_pipeline`, which standalone `utseg`,
 applied. It wrote no stamp at all before 2026-09-15, so a corpus processed
 through a standalone `utseg`, `translate` or `coref` job recorded nothing about
 what produced it; those files are stamped on the next run over them.
+
+## Unavailable timing recovery
+
+An align stamp's `utr=` field names only a completed timing-recovery pass.
+An attempted pass that fails is different from deliberate omission or an
+already-timed input. Its `utr_unavailable=` field records
+`initial:<engine>:<failure_category>` and/or
+`fallback:<engine>:<failure_category>`, joined by `+` in attempt order.
+These are closed vocabularies, not raw provider text embedded in CHAT syntax.
+The selected engine in a failure record is not a claim that it produced timing.
+
+Each failed attempt also produces an `utr_unavailable` file shortfall with its
+pass, selected engine, typed category and bounded explanatory detail. The
+document is written with diagnostics, not rejected as invalid CHAT. Existing
+timing and any successful later recovery remain usable evidence; an earlier
+failure stays in the history even if the fallback completes. `utr=` and
+`utr_unavailable=` can therefore coexist without contradiction.
+
+Initial and fallback outcomes use the same recorder. Only an incomplete or
+unavailable initial pass issues a single-use fallback permission; recording
+the fallback consumes it. Cancellation is a stop, never an unavailable-provider
+shortfall. The result API reads these fields through the normal stamp codec.
+This is analysis provenance, not a new CHAT or CLAN CHECK validity rule.
 
 ## Replacement Semantics
 

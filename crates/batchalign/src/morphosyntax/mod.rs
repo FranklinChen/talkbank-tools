@@ -37,6 +37,7 @@
 mod batch;
 mod capability;
 pub(crate) mod identity;
+pub(crate) mod report;
 mod worker;
 
 use crate::chat_ops::LanguageCode;
@@ -54,6 +55,7 @@ use crate::pipeline::post_validate::PostValidated;
 use batchalign_transform::morphosyntax::{InjectionError, MatchedMorphosyntaxResponses};
 #[cfg(test)]
 use batchalign_transform::parse::{is_dummy, parse_lenient};
+use report::MorphosyntaxOutput;
 use tracing::{info, warn};
 
 pub(crate) use batch::dispatch_secondary_l2;
@@ -82,7 +84,7 @@ pub(crate) async fn process_morphosyntax(
     chat_text: &str,
     services: PipelineServices<'_>,
     params: &MorphosyntaxParams<'_>,
-) -> Result<PostValidated, ServerError> {
+) -> Result<MorphosyntaxOutput, ServerError> {
     run_morphosyntax_impl(chat_text, services, params).await
 }
 
@@ -90,7 +92,7 @@ pub(crate) async fn run_morphosyntax_impl(
     chat_text: &str,
     services: PipelineServices<'_>,
     params: &MorphosyntaxParams<'_>,
-) -> Result<PostValidated, ServerError> {
+) -> Result<MorphosyntaxOutput, ServerError> {
     run_morphosyntax_pipeline(chat_text, services, params).await
 }
 
@@ -121,7 +123,7 @@ pub(crate) async fn process_morphosyntax_incremental(
     after_text: &str,
     services: PipelineServices<'_>,
     params: &MorphosyntaxParams<'_>,
-) -> Result<PostValidated, ServerError> {
+) -> Result<MorphosyntaxOutput, ServerError> {
     use batchalign_transform::diff::{DiffSummary, diff_chat};
 
     let parser = crate::chat_parser();
@@ -135,11 +137,20 @@ pub(crate) async fn process_morphosyntax_incremental(
     // Every reused tier originates in this fully admitted document. The
     // after-file's MOR/GRA were physically discarded by source-bound admission;
     // all of them will be replaced by admitted prior tiers or fresh inference.
-    let before = crate::pipeline::text_infer::admit_retained_text(
+    let before = match crate::pipeline::text_infer::admit_retained_text(
         &parser,
         before_text,
         talkbank_model::model::TranscriptName::Anonymous,
-    )?;
+    ) {
+        Ok(before) => before,
+        Err(ServerError::ChatAdmission(error))
+            if !crate::error::chat_admission_is_internal(&error) =>
+        {
+            warn!(%error, "Invalid prior CHAT disables morphology reuse; analyzing current input");
+            return run_admitted_morphosyntax(ParsedFile::Analyze(after), services, params).await;
+        }
+        Err(error) => return Err(error),
+    };
     let before_file = before.document();
     let deltas = diff_chat(before_file, after.document());
     let summary = DiffSummary::from_deltas(&deltas);
@@ -184,7 +195,15 @@ pub(crate) async fn process_morphosyntax_incremental(
     .batch_items;
 
     if filtered_payloads.is_empty() {
-        return gate_incremental_output(after_file);
+        let provenance = crate::provenance::finish_incremental_morphotag_provenance(
+            &mut after_file,
+            (preserved_count > 0).then_some(before_file),
+            &primary_api_language,
+            &identity::AppliedAnalyses::none(),
+            params.tokenization_mode == TokenizationMode::StanzaRetokenize,
+        );
+        return gate_incremental_output(after_file)
+            .map(|document| MorphosyntaxOutput::from(document).with_provenance(provenance));
     }
 
     info!(
@@ -215,10 +234,8 @@ pub(crate) async fn process_morphosyntax_incremental(
 
     // Infer for the outstanding payloads.
     //
-    // The stamp is written only on this path, where a model actually ran. The
-    // earlier no-work exit reanalyzed nothing, so it leaves whatever stamp the
-    // document already carries (it names the models behind the tiers they
-    // preserved) instead of replacing it with one that names no engine.
+    // The copy transition carried the prior's stamps with its tiers. Only a
+    // new inference result can replace them with a combined-run stamp.
     let mut applied = identity::AppliedAnalyses::none();
     if !filtered_payloads.is_empty() {
         let pos_hint_evidence = params
@@ -260,7 +277,7 @@ pub(crate) async fn process_morphosyntax_incremental(
                         // positions read from the analysis injection mapped.
                         let (retokenization_traces, l2) = injection_result.into_parts();
                         let l2_deferred = if params.policy.l2.should_analyze() {
-                            l2.into_reported_positions()
+                            applied.secondary_positions(&after_file, l2)
                         } else {
                             Vec::new()
                         };
@@ -301,19 +318,16 @@ pub(crate) async fn process_morphosyntax_incremental(
         }
     }
 
-    // A run whose reanalysis ran no model (every changed utterance was
-    // wordless) leaves the stamp the document
-    // already carries. One that did names the models behind the tiers kept
-    // from `before_file` together with the ones that ran now.
-    if let Some(provenance) = crate::provenance::incremental_morphotag_provenance(
-        before_file,
+    let provenance = crate::provenance::finish_incremental_morphotag_provenance(
+        &mut after_file,
+        (preserved_count > 0).then_some(before_file),
         &primary_api_language,
         &applied,
         retokenize,
-    )? {
-        crate::provenance::inject_provenance(&mut after_file, &provenance);
-    }
-    gate_incremental_output(after_file)
+    );
+    gate_incremental_output(after_file).map(|document| {
+        MorphosyntaxOutput::new(document, applied.into_secondary()).with_provenance(provenance)
+    })
 }
 
 /// A complete analysis pair borrowed from a fully admitted prior transcript.
@@ -461,6 +475,9 @@ fn preserve_complete_prior_morphology(
             compatible.install();
             preserved += 1;
         }
+    }
+    if preserved > 0 {
+        crate::provenance::inherit_morphotag_provenance(prior, after);
     }
     preserved
 }

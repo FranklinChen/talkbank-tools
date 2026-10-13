@@ -838,6 +838,7 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
             }),
         ],
     };
+    let expected_line = span.line_idx();
     let merged = merge_planned_secondary_span(span, &secondary_sentence).expect("secondary merge");
     assert_eq!(
         merged.mors().len(),
@@ -846,9 +847,17 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
     );
 
     let outcome = splice_l2_into_chat(&mut chat_file, vec![merged]);
-    assert_eq!(outcome.spliced, 2);
-    assert_eq!(outcome.fallback, 0);
-    assert_eq!(outcome.gra_upgraded, 0);
+    assert_eq!(outcome.spliced(), 2);
+    assert_eq!(outcome.fallback(), 0);
+    assert_eq!(outcome.gra_upgraded(), 0);
+    assert_eq!(outcome.spans().len(), 1);
+    let receipt = &outcome.spans()[0];
+    assert_eq!(receipt.line_idx(), expected_line);
+    assert_eq!(receipt.words(), 2);
+    assert!(matches!(
+        receipt.disposition(),
+        batchalign_transform::morphosyntax::l2::SpanSpliceDisposition::Applied { .. }
+    ));
 
     let utterance = chat_file
         .lines

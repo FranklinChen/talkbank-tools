@@ -270,6 +270,14 @@ export function diagnosedSummary(
       line += `, ${shortfall.untimed_words} of ${shortfall.required_words} words untimed`;
     } else if (shortfall.kind === "stage_held_out") {
       line += `, ${stageName(shortfall.stage)} left out of ${shortfall.held_out_utterances} utterance${shortfall.held_out_utterances === 1 ? "" : "s"}`;
+    } else if (shortfall.kind === "secondary_morphology_incomplete") {
+      line += `, secondary morphology incomplete for ${shortfall.words} words in ${shortfall.spans} span(s)`;
+    } else if (shortfall.kind === "secondary_morphology_unplaced") {
+      line += `, secondary morphology not dispatched for ${shortfall.words} words in ${shortfall.utterances} utterance(s)`;
+    } else if (shortfall.kind === "morphology_provenance_incomplete") {
+      line += ", morphology provenance incomplete";
+    } else if (shortfall.kind === "utr_unavailable") {
+      line += `, UTR ${shortfall.pass} pass unavailable`;
     }
   }
   return line;
@@ -306,19 +314,28 @@ export function diagnosticLines(diagnostics: FileOutputDiagnostics): string[] {
  */
 export function exclusionSummary(exclusions: OutputExclusionRecord[]): string {
   let utterances = 0;
+  let secondarySpans = 0;
   for (const exclusion of exclusions) {
     switch (exclusion.kind) {
       case "not_in_recording":
         utterances += exclusion.excluded_utterances;
         break;
+      case "unsupported_secondary_morphology":
+        secondarySpans += exclusion.spans;
+        break;
     }
   }
-  return `${utterances} utterance${utterances === 1 ? "" : "s"} not in the recording, left out of alignment by design`;
+  const parts: string[] = [];
+  if (utterances > 0) parts.push(`${utterances} utterance${utterances === 1 ? "" : "s"} not in the recording, left out of alignment by design`);
+  if (secondarySpans > 0) parts.push(`${secondarySpans} span(s) excluded from secondary morphology: unsupported languages`);
+  return parts.join("; ");
 }
 
 /** One exclusion as a line: the server's `OutputExclusionRecord` Display. */
 export function exclusionText(exclusion: OutputExclusionRecord): string {
   switch (exclusion.kind) {
+    case "unsupported_secondary_morphology":
+      return `secondary morphology excluded: ${exclusion.spans} span(s), ${exclusion.words} words in unsupported languages; L2 placeholders retained`;
     case "not_in_recording": {
       const first = exclusion.first_excluded[0];
       const firstText = first
@@ -332,6 +349,20 @@ export function exclusionText(exclusion: OutputExclusionRecord): string {
 /** One shortfall as a line: the server's `OutputShortfallRecord` Display. */
 function shortfallText(shortfall: OutputShortfallRecord): string {
   switch (shortfall.kind) {
+    case "utr_unavailable":
+      return `UTR ${shortfall.pass} pass unavailable (${shortfall.engine}, ${shortfall.category}): ${shortfall.detail}; CHAT and available timing retained`;
+    case "morphology_provenance_incomplete":
+      return `morphology provenance incomplete: ${shortfall.detail}; morphology and original records retained`;
+    case "secondary_morphology_unplaced": {
+      const first = shortfall.first_utterances[0];
+      const detail = first ? ` (first: utterance ${first.utterance}: ${first.detail})` : "";
+      return `secondary morphology not dispatched: ${shortfall.words} words in ${shortfall.utterances} utterance(s) could not be placed${detail}`;
+    }
+    case "secondary_morphology_incomplete": {
+      const first = shortfall.first_spans[0];
+      const detail = first ? ` (first: utterance ${first.span.utterance}, ${first.span.language}: ${first.detail})` : "";
+      return `secondary morphology incomplete: ${shortfall.spans} span(s), ${shortfall.words} words retain L2 placeholders${detail}`;
+    }
     case "stage_skipped":
       return `skipped ${stageName(shortfall.stage)}: it requires an admitted document, and the generated output was written with its diagnostics instead`;
     case "stage_not_applied":

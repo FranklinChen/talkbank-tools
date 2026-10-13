@@ -1,0 +1,181 @@
+{
+  "results": [
+    {
+      "outcome": {
+        "kind": "produced",
+        "result": {
+          "kind": "analyzed",
+          "raw_sentences": [
+            [
+              {
+                "id": 1,
+                "text": "alpha",
+                "lemma": "alpha",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 2,
+                "deprel": "nsubj",
+                "deps": null,
+                "misc": null
+              },
+              {
+                "id": 2,
+                "text": "beta",
+                "lemma": "beta",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 0,
+                "deprel": "root",
+                "deps": null,
+                "misc": null
+              }
+            ]
+          ],
+          "model": {
+            "stanza_version": "1.15.0",
+            "lang": "fra",
+            "pipeline": "standard"
+          },
+          "repairs": []
+        }
+      },
+      "elapsed_s": 0.00016483408398926258
+    },
+    {
+      "outcome": {
+        "kind": "produced",
+        "result": {
+          "kind": "analyzed",
+          "raw_sentences": [
+            [
+              {
+                "id": 1,
+                "text": "alpha",
+                "lemma": "alpha",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 2,
+                "deprel": "obj",
+                "deps": null,
+                "misc": null
+              },
+              {
+                "id": 2,
+                "text": "beta",
+                "lemma": "beta",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 0,
+                "deprel": "root",
+                "deps": null,
+                "misc": null
+              }
+            ]
+          ],
+          "model": {
+            "stanza_version": "1.15.0",
+            "lang": "fra",
+            "pipeline": "standard"
+          },
+          "repairs": [
+            {
+              "kind": "cue_root_promotion",
+              "word": "beta",
+              "from_relation": "dep",
+              "to_relation": "root"
+            }
+          ]
+        }
+      },
+      "elapsed_s": 0.00007895799353718758
+    },
+    {
+      "outcome": {
+        "kind": "produced",
+        "result": {
+          "kind": "analyzed",
+          "raw_sentences": [
+            [
+              {
+                "id": [
+                  1,
+                  2
+                ],
+                "text": "compound",
+                "lemma": "",
+                "upos": "X",
+                "xpos": null,
+                "feats": null,
+                "head": 0,
+                "deprel": "dep",
+                "deps": null,
+                "misc": null
+              },
+              {
+                "id": 1,
+                "text": "part",
+                "lemma": "part",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 2,
+                "deprel": "dep",
+                "deps": null,
+                "misc": null
+              },
+              {
+                "id": 2,
+                "text": "other",
+                "lemma": "other",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 3,
+                "deprel": "dep",
+                "deps": null,
+                "misc": null
+              },
+              {
+                "id": 3,
+                "text": "beta",
+                "lemma": "beta",
+                "upos": "NOUN",
+                "xpos": null,
+                "feats": null,
+                "head": 0,
+                "deprel": "root",
+                "deps": null,
+                "misc": null
+              }
+            ]
+          ],
+          "model": {
+            "stanza_version": "1.15.0",
+            "lang": "fra",
+            "pipeline": "standard"
+          },
+          "repairs": [
+            {
+              "kind": "cue_root_promotion",
+              "word": "beta",
+              "from_relation": "dep",
+              "to_relation": "root"
+            }
+          ]
+        }
+      },
+      "elapsed_s": 0.00012612482532858849
+    },
+    {
+      "outcome": {
+        "kind": "failed",
+        "error": "morphosyntax dependency projection: ambiguous lexical root after cue removal: cue 3, children [1, 2], other roots []"
+      },
+      "elapsed_s": 0.00003591692075133324
+    }
+  ]
+}

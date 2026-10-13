@@ -121,7 +121,7 @@ mod tests {
             _options: MorphotagRuntimeOptions,
             _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
             _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
+        ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, crate::error::ServerError>
         {
             unreachable!()
         }

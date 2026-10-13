@@ -77,7 +77,7 @@ class PreparedFaPayloadV2(BaseModel):
 class ForcedAlignmentExecutionHostV2:
     """Injected FA execution hooks for the live V2 path."""
 
-    whisper_runner: Callable[[np.ndarray, str], list[tuple[str, float]]] | None = None
+    whisper_runner: Callable[..., list[tuple[str, float]]] | None = None
     wave2vec_runner: Callable[[np.ndarray, list[str]], Wave2VecFAResult] | None = None
     canto_runner: (
         Callable[
@@ -119,12 +119,25 @@ def build_default_fa_execution_host_v2(
     whisper_runner = None
     if whisper_model is not None:
 
-        def _run_whisper(audio: np.ndarray, text: str) -> list[tuple[str, float]]:
+        def _run_whisper(
+            audio: np.ndarray, text: str, capture_json: str | None = None
+        ) -> list[tuple[str, float]]:
             # `text` arrives shaped: Rust applied the request's `FaTextModeV2`,
             # including the character-spacing that `--pauses` selects. This
             # used to take a `pauses` flag and reshape the text a second time
             # here, which split one decision across two languages.
-            return infer_whisper_fa(whisper_model, _as_tensor(audio), text)
+            if capture_json is None:
+                return infer_whisper_fa(whisper_model, _as_tensor(audio), text)
+            from batchalign.inference.whisper_attention import WhisperAttentionCapture
+
+            capture = WhisperAttentionCapture(
+                capture_json, audio, text, whisper_model.sample_rate
+            )
+            result = infer_whisper_fa(
+                whisper_model, _as_tensor(audio), text, capture=capture
+            )
+            capture.require_recorded()
+            return result
 
         whisper_runner = _run_whisper
 

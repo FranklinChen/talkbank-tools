@@ -7,6 +7,11 @@ that calls into the Rust worker runtime.
 from collections.abc import Callable
 from typing import Literal
 
+import numpy as np
+from numpy.typing import NDArray
+
+def whisper_lexical_frame_indices(costs: NDArray[np.float32]) -> list[int]: ...
+
 # ---------------------------------------------------------------------------
 # Worker protocol dispatch
 # ---------------------------------------------------------------------------

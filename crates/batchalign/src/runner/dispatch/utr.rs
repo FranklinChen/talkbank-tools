@@ -28,6 +28,9 @@ use crate::types::worker_v2::DecodeBudgetSeconds;
 use batchalign_types::interval::AdmittedInterval;
 use tracing::{info, warn};
 
+#[path = "utr_work.rs"]
+mod work;
+
 /// Immutable runtime inputs for one UTR execution.
 #[derive(Clone, Copy)]
 pub(in crate::runner) struct UtrPassContext<'a> {
@@ -106,8 +109,10 @@ fn resolve_strategy(
 
 /// Run ASR and inject UTR timing into a parsed `ChatFile`.
 ///
-/// Returns `Ok((updated_chat_text, utr_result))` on success, or
-/// `Err(original_chat_text)` on inference failure.
+/// Returns the completed recovery result, or the typed failure. Callers must
+/// record that outcome through `UtrRecovery` before continuing FA. Failed
+/// inference leaves the document unchanged; owned recovery commits only a
+/// completed candidate.
 ///
 /// When `progress` is provided, per-window updates are sent during partial UTR
 /// so frontends can show "Recovering utterance timing 2/5" etc.
@@ -322,7 +327,9 @@ pub(in crate::runner) async fn run_utr_pass(
                 .dump_utr_tokens(context.filename, &all_tokens);
 
             let strategy = resolve_strategy(&context, recording);
-            let utr_result = strategy.inject(chat_file, &all_tokens);
+            let utr_result = work::PendingUtr::new(chat_file, strategy, all_tokens)
+                .run()
+                .await?;
 
             info!(
                 context.filename,
@@ -434,7 +441,9 @@ async fn run_utr_pass_full(
         .dump_utr_tokens(context.filename, &asr_tokens);
 
     let strategy = resolve_strategy(&context, recording);
-    let utr_result = strategy.inject(chat_file, &asr_tokens);
+    let utr_result = work::PendingUtr::new(chat_file, strategy, asr_tokens)
+        .run()
+        .await?;
 
     info!(
         context.filename,
@@ -1116,6 +1125,82 @@ mod utr_evidence_cache_tests {
 
     struct CountingRevService {
         calls: AtomicUsize,
+    }
+
+    struct UnavailableRevService;
+
+    #[async_trait::async_trait]
+    impl RevAsrEvidenceInference for UnavailableRevService {
+        async fn infer(
+            &self,
+            _: AuthorizedRevEvidenceRun,
+        ) -> Result<crate::revai::RevAsrInferenceOutcome, ServerError> {
+            Err(ServerError::Worker(
+                crate::worker::error::WorkerError::WorkerResponse(
+                    "controlled provider unavailable".into(),
+                ),
+            ))
+        }
+    }
+
+    /// Real evidence resolution and the admitted-document recovery transition,
+    /// with a controlled failing provider rather than a paid network call.
+    #[tokio::test]
+    async fn unavailable_provider_retains_admitted_document_and_records_the_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let audio = temp.path().join("audio.wav");
+        tokio::fs::write(&audio, b"provider media").await.unwrap();
+        let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
+            .await
+            .unwrap();
+        let request = RevAsrEvidenceRequest::from_audio(
+            &audio,
+            &crate::types::revai_language::RevLanguage::admit(
+                &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
+            )
+            .unwrap(),
+            NumSpeakers(1),
+            &RevAsrModelRevision::current(),
+        )
+        .await
+        .unwrap();
+        let mut model = crate::fa::read_fa_source(
+            "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\taudio, audio\n*PAR:\thello . \u{15}100_400\u{15}\n*PAR:\tgoodbye .\n@End\n"
+        ).unwrap();
+        let active = model.active_mut().unwrap();
+        let before = batchalign_transform::serialize::to_chat_string(active.document());
+        let dumper = DebugDumper::new(None);
+        let recovered = active
+            .recover_timing(async |_| {
+                resolve_rev_utr_asr_response(
+                    &request,
+                    &cache,
+                    CachePolicy::UseCache,
+                    &UnavailableRevService,
+                    &dumper,
+                    "sample.cha",
+                )
+                .await
+                .map(|_| panic!("the controlled provider cannot return timing"))
+            })
+            .await;
+        assert_eq!(
+            batchalign_transform::serialize::to_chat_string(active.document()),
+            before
+        );
+        let mut recovery =
+            crate::provenance::UtrRecovery::from_initial(&UtrEngine::RevAi, recovered).unwrap();
+        assert!(recovery.fallback().is_some());
+        let report = recovery.contribution();
+        assert!(report.completed_engine().is_none());
+        assert!(matches!(
+            &report.shortfalls()[..],
+            [crate::api::OutputShortfallRecord::UtrUnavailable {
+                pass: crate::api::UtrPass::Initial,
+                category: crate::scheduling::FailureCategory::ProviderTransient,
+                ..
+            }]
+        ));
     }
 
     #[async_trait::async_trait]

@@ -214,11 +214,22 @@ fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time()
         let grouping =
             super::super::grouping::group_utterances(&chat, 500, &recording, &result.anchors);
         assert!(
-            !grouping
-                .groups
-                .iter()
-                .flat_map(|group| group.words())
-                .any(|word| word.text == "missing"),
+            !grouping.groups.iter().any(|group| match group.units() {
+                super::super::GroupUnits::Whole(unit) =>
+                    unit.words.iter().any(|word| word.text == "missing"),
+                super::super::GroupUnits::Pieces(mut pieces) => pieces.any(|part| match part {
+                    super::super::AnchoredPart::Request(piece) =>
+                        piece.words().iter().any(|word| word.text == "missing"),
+                    super::super::AnchoredPart::Unavailable(piece) => {
+                        assert_eq!(
+                            piece.window().end().get(),
+                            end,
+                            "unavailable endpoint keeps the real recording edge"
+                        );
+                        false
+                    }
+                }),
+            }),
             "an over-budget obligation must not fall back to a narrow convenient crop"
         );
         assert!(grouping.decisions.iter().any(|decision| matches!(

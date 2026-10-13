@@ -1,7 +1,7 @@
 # L2 Morphotag: Current Status
 
 **Status:** Current
-**Last updated:** 2026-10-01 17:37 EDT
+**Last updated:** 2026-10-12 22:31 EDT
 
 L2 dispatch is on by default (`--no-l2-morphotag` opts out). It routes
 `@s` (code-switched) words to the Stanza model of their own language and
@@ -38,8 +38,9 @@ crates/batchalign-transform/src/morphosyntax/l2/
 
 **Dispatch** (`crates/batchalign/src/morphosyntax/batch.rs`,
 `dispatch_secondary_l2`): plan spans from the deferred positions, send
-each span to a secondary Stanza worker (`infer_batch`, Stanza owning
-tokenization), merge each response with its span
+each span to a secondary Stanza worker through `FixedSpanBatch` (CHAT
+boundaries preserved, MWT components retained), merge each admitted response
+with its owning span
 (`merge_planned_secondary_span`), and splice the merged spans
 (`splice_l2_into_chat`). The batch, single-file and incremental paths all
 call it.

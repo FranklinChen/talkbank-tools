@@ -26,10 +26,11 @@ use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::grouping::group_utterances;
 use crate::chat_ops::fa::utr::AnchorIndex;
 use batchalign_transform::dp_align::{self, MatchMode};
+use dp_align::control::{Uninterrupted, WorkControl, uninterrupted};
 
 use super::{
     AsrTimingToken, GlobalUtrParticipation, PositiveUtrInterval, UtrResult, UtrStrategy,
-    UtrUtteranceInfo, collect_utr_utterance_info, run_global_utr,
+    UtrUtteranceInfo, collect_utr_utterance_info,
 };
 
 /// Parameters needed to compare FA grouping outcomes between strategies.
@@ -331,25 +332,49 @@ impl TwoPassOverlapUtr {
 
 impl UtrStrategy for TwoPassOverlapUtr {
     fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult {
+        uninterrupted(self.inject_with_control(chat_file, asr_tokens, &Uninterrupted))
+    }
+
+    fn inject_controlled(
+        &self,
+        chat_file: &mut ChatFile,
+        asr_tokens: &[AsrTimingToken],
+        control: &dyn WorkControl<Error = super::UtrCancelled>,
+    ) -> Result<UtrResult, super::UtrCancelled> {
+        self.inject_with_control(chat_file, asr_tokens, control)
+    }
+}
+
+impl TwoPassOverlapUtr {
+    fn inject_with_control<C: WorkControl + ?Sized>(
+        &self,
+        chat_file: &mut ChatFile,
+        asr_tokens: &[AsrTimingToken],
+        control: &C,
+    ) -> Result<UtrResult, C::Error> {
+        control.check()?;
         // Run two-pass on a clone so we can compare against global.
         let mut two_pass_file = chat_file.clone();
-        let two_pass_result = run_two_pass_inner(&mut two_pass_file, asr_tokens, &self.config);
+        let two_pass_result =
+            run_two_pass_inner(&mut two_pass_file, asr_tokens, &self.config, control)?;
 
         // Run global on a separate clone for comparison.
+        control.check()?;
         let mut global_file = chat_file.clone();
-        let global_result = run_global_utr(
+        let global_result = super::run_global_utr_controlled(
             &mut global_file,
             asr_tokens,
             GlobalUtrParticipation::AllUtterances,
             self.config.match_mode.to_dp_match_mode(),
-        );
+            control,
+        )?;
 
         let two_pass_result = match two_pass_result {
             Ok(result) => result,
             Err(error) => {
                 tracing::error!(%error, "Two-pass UTR changed the utterance population; using global UTR");
                 *chat_file = global_file;
-                return global_result;
+                return Ok(global_result);
             }
         };
 
@@ -399,15 +424,16 @@ impl UtrStrategy for TwoPassOverlapUtr {
             two_pass_timed >= global_timed
         };
 
+        control.check()?;
         if prefer_two_pass {
             *chat_file = two_pass_file;
-            two_pass_result
+            Ok(two_pass_result)
         } else {
             tracing::info!(
                 "Two-pass UTR created fewer FA groups than global, falling back to global"
             );
             *chat_file = global_file;
-            global_result
+            Ok(global_result)
         }
     }
 }
@@ -417,11 +443,13 @@ impl UtrStrategy for TwoPassOverlapUtr {
 ///
 /// When overlap density exceeds `config.max_exclusion_density`, pass 1
 /// includes all utterances in the global DP to prevent context starvation.
-fn run_two_pass_inner(
+fn run_two_pass_inner<C: WorkControl + ?Sized>(
     chat_file: &mut ChatFile,
     asr_tokens: &[AsrTimingToken],
     config: &TwoPassConfig,
-) -> Result<UtrResult, UtrPopulationChanged> {
+    control: &C,
+) -> Result<Result<UtrResult, UtrPopulationChanged>, C::Error> {
+    control.check()?;
     // Check overlap density to decide whether to exclude from pass 1.
     let pre_infos = collect_utr_utterance_info(chat_file);
     let before_bullets = UtrBulletPopulation::from_infos(&pre_infos);
@@ -448,7 +476,7 @@ fn run_two_pass_inner(
     }
 
     // Pass 1: global alignment, optionally excluding overlap utterances.
-    let mut result = run_global_utr(
+    let mut result = super::run_global_utr_controlled(
         chat_file,
         asr_tokens,
         if skip_in_pass1 {
@@ -457,10 +485,11 @@ fn run_two_pass_inner(
             GlobalUtrParticipation::AllUtterances
         },
         config.match_mode.to_dp_match_mode(),
-    );
+        control,
+    )?;
 
     if asr_tokens.is_empty() {
-        return Ok(result.with_overlap_recoveries(Vec::new()));
+        return Ok(Ok(result.with_overlap_recoveries(Vec::new())));
     }
 
     // Pass 2: recover timing for overlap utterances from predecessor windows.
@@ -499,6 +528,7 @@ fn run_two_pass_inner(
     let mut pass2_bullets: Vec<RecoveredOverlapBullet> = Vec::new();
 
     for (utt_idx, info) in utt_infos.iter().enumerate() {
+        control.check()?;
         // Recover timing for +< utterances and ⌊-bearing (CA overlap) utterances.
         if !is_recoverable_overlap(info, config)
             || info.retained_timing.is_some()
@@ -516,14 +546,15 @@ fn run_two_pass_inner(
         };
 
         // Adaptive window: try narrow first, widen on failure.
-        if let Some(interval) = recover_with_adaptive_window(
+        if let Some(interval) = recover_with_adaptive_window_controlled(
             &info.words,
             asr_tokens,
             utt_idx,
             &utt_bullets,
             pred_onset_fraction,
             config,
-        ) {
+            control,
+        )? {
             pass2_bullets.push(RecoveredOverlapBullet {
                 utterance_index: super::UtrUtteranceOrdinal(utt_idx),
                 interval,
@@ -552,7 +583,10 @@ fn run_two_pass_inner(
     // Derive the final counts from the before/after bullet states. This avoids
     // increment/decrement bookkeeping that could underflow or drift when a
     // future recovery path changes which pass supplied a bullet.
-    let final_counts = before_bullets.transition_to(UtrBulletsAfter::from_chat(chat_file))?;
+    let final_counts = match before_bullets.transition_to(UtrBulletsAfter::from_chat(chat_file)) {
+        Ok(counts) => counts,
+        Err(error) => return Ok(Err(error)),
+    };
     result.skipped = final_counts.skipped;
     result.injected = final_counts.injected;
     result.unmatched = final_counts.unmatched;
@@ -565,7 +599,7 @@ fn run_two_pass_inner(
             end_ms: recovered.interval.end_ms(),
         })
         .collect();
-    Ok(result.with_overlap_recoveries(recoveries))
+    Ok(Ok(result.with_overlap_recoveries(recoveries)))
 }
 
 /// Whether pass 2 recovers this utterance on its own: a `+<` utterance, or a
@@ -717,6 +751,7 @@ fn count_timed_utterances(chat_file: &ChatFile) -> usize {
 /// poor on non-English data.
 ///
 /// Stops at the first match to prefer the tightest plausible window.
+#[cfg(test)]
 fn recover_with_adaptive_window(
     words: &[String],
     asr_tokens: &[AsrTimingToken],
@@ -725,8 +760,31 @@ fn recover_with_adaptive_window(
     pred_onset_fraction: Option<f64>,
     config: &TwoPassConfig,
 ) -> Option<PositiveUtrInterval> {
+    uninterrupted(recover_with_adaptive_window_controlled(
+        words,
+        asr_tokens,
+        utt_idx,
+        utt_bullets,
+        pred_onset_fraction,
+        config,
+        &Uninterrupted,
+    ))
+}
+
+fn recover_with_adaptive_window_controlled<C: WorkControl + ?Sized>(
+    words: &[String],
+    asr_tokens: &[AsrTimingToken],
+    utt_idx: usize,
+    utt_bullets: &[Option<(u64, u64)>],
+    pred_onset_fraction: Option<f64>,
+    config: &TwoPassConfig,
+    control: &C,
+) -> Result<Option<PositiveUtrInterval>, C::Error> {
+    control.check()?;
     // Find predecessor bullet
-    let (pred_start, pred_end) = find_predecessor_bullet(utt_idx, utt_bullets)?;
+    let Some((pred_start, pred_end)) = find_predecessor_bullet(utt_idx, utt_bullets) else {
+        return Ok(None);
+    };
     let pred_duration = pred_end.saturating_sub(pred_start);
 
     // If the predecessor has ⌈ markers, compute the estimated overlap onset
@@ -758,18 +816,19 @@ fn recover_with_adaptive_window(
         let window_start = anchor_start.saturating_sub(buffer_ms);
         let window_end = pred_end + buffer_ms;
 
-        if let Some(timing) = recover_overlap_timing(
+        if let Some(timing) = recover_overlap_timing_controlled(
             words,
             asr_tokens,
             window_start,
             window_end,
             config.match_mode.to_dp_match_mode(),
-        ) {
-            return Some(timing);
+            control,
+        )? {
+            return Ok(Some(timing));
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// Find the overlap onset fraction from the nearest preceding utterance
@@ -849,6 +908,7 @@ fn find_predecessor_bullet(
 /// the windowed tokens. Returns the matched time span if any words matched.
 ///
 /// This is cheap: typically 1-3 backchannel words against 5-20 windowed tokens.
+#[cfg(test)]
 pub fn recover_overlap_timing(
     words: &[String],
     asr_tokens: &[AsrTimingToken],
@@ -856,19 +916,42 @@ pub fn recover_overlap_timing(
     window_end_ms: u64,
     dp_match_mode: MatchMode,
 ) -> Option<PositiveUtrInterval> {
+    uninterrupted(recover_overlap_timing_controlled(
+        words,
+        asr_tokens,
+        window_start_ms,
+        window_end_ms,
+        dp_match_mode,
+        &Uninterrupted,
+    ))
+}
+
+fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
+    words: &[String],
+    asr_tokens: &[AsrTimingToken],
+    window_start_ms: u64,
+    window_end_ms: u64,
+    dp_match_mode: MatchMode,
+    control: &C,
+) -> Result<Option<PositiveUtrInterval>, C::Error> {
+    control.check()?;
     let windowed =
         super::lexical::UtrLexicalStream::within_window(asr_tokens, window_start_ms, window_end_ms);
 
     if windowed.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let windowed_texts = windowed.texts();
 
-    let alignment =
-        dp_align::CorrespondenceAnalysis::observe(words, &windowed_texts, dp_match_mode);
+    let alignment = dp_align::CorrespondenceAnalysis::observe_controlled(
+        words,
+        &windowed_texts,
+        dp_match_mode,
+        control,
+    )?;
     let dp_align::CorrespondenceAdmission::Complete(common) = alignment.admission() else {
-        return None;
+        return Ok(None);
     };
     let payload = words
         .iter()
@@ -881,18 +964,21 @@ pub fn recover_overlap_timing(
             },
         })
         .collect::<Vec<_>>();
-    let admitted =
-        super::NonEmptyAdmittedUtrWordMatches::from_vec(windowed.common_matches(common, &payload))?;
+    let Some(admitted) =
+        super::NonEmptyAdmittedUtrWordMatches::from_vec(windowed.common_matches(common, &payload))
+    else {
+        return Ok(None);
+    };
     // This windowed proof observes common correspondences only.
     let super::lexical::BoundaryAdmission::Bound(admitted) =
         admitted.admit_endpoints(words.len(), super::lexical::EndpointExtents::UNOBSERVED)
     else {
-        return None;
+        return Ok(None);
     };
-    match admitted.proposal() {
+    Ok(match admitted.proposal() {
         super::UtrTimingProposal::Positive { interval } => Some(interval),
         super::UtrTimingProposal::NonPositive { .. } => None,
-    }
+    })
 }
 
 #[cfg(test)]

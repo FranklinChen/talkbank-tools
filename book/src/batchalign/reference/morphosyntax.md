@@ -1,7 +1,7 @@
 # Morphosyntax Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-04 15:23 EDT
+**Last updated:** 2026-10-12 22:31 EDT
 
 ## 1. Overview
 
@@ -969,8 +969,9 @@ see [Language capability admission](#language-capability-admission).
 
 ### MWT Contraction Handling
 
-L2 dispatch sends `retokenize=true` to the secondary worker, enabling
-Stanza's MWT expander for the target language. For English @s words:
+L2 dispatch preserves CHAT word boundaries through its owned `FixedSpanBatch`.
+The realigner retains MWT hints, allowing Stanza's MWT expander to analyze
+components within a word without merging or splitting CHAT words. For English @s words:
 
 - `it's@s:eng` → `pron|it~aux|be` (clitic MOR, not `L2|xxx`)
 - `don't@s:eng` → `aux|do~part|not` (clitic MOR)

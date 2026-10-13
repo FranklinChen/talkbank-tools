@@ -173,6 +173,10 @@ content and then apply the same `%wor` word-membership rules to the leaves.
 
 ## Timing Bullet Format
 
+See [Bullet and Word-Timing Policies](bullet-policies.md) for positive duration,
+allowed word overlap, utterance-boundary controls, and the distinction between
+valid timing syntax and acoustic evidence.
+
 Each word may optionally have a timing bullet:
 
 ```text

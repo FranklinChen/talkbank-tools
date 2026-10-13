@@ -357,6 +357,7 @@ mod tests {
         let request = request_with_payload(
             InferenceTaskV2::ForcedAlignment,
             TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+                attention_capture: None,
                 backend: FaBackendV2::Wave2vec,
                 payload_ref_id: WorkerArtifactIdV2::from("payload-1"),
                 audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
@@ -409,6 +410,7 @@ mod tests {
         let fa_request = request_with_payload(
             InferenceTaskV2::ForcedAlignment,
             TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+                attention_capture: None,
                 backend: FaBackendV2::Wave2vec,
                 payload_ref_id: WorkerArtifactIdV2::from("payload-1"),
                 audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
@@ -604,6 +606,7 @@ mod tests {
             request_with_payload(
                 InferenceTaskV2::ForcedAlignment,
                 TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+                    attention_capture: None,
                     // The shared map's `fa` beats the flag.
                     backend: FaBackendV2::Whisper,
                     payload_ref_id: text_payload_id(),

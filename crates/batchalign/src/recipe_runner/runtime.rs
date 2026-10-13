@@ -57,14 +57,9 @@ pub(crate) fn discover_input_for_pending_file(
             .as_path()
             .to_owned()
     };
-    let before_path = (!filesystem.before_paths.is_empty()
-        && file.file_index < filesystem.before_paths.len())
-    .then(|| {
-        filesystem.before_paths[file.file_index]
-            .assume_shared_filesystem()
-            .as_path()
-            .to_owned()
-    });
+    let before_path = filesystem
+        .before_path(file.file_index)
+        .map(|path| path.as_path().to_owned());
     DiscoveredInput {
         display_path: file.filename.clone(),
         source_path,
@@ -414,7 +409,7 @@ mod tests {
                 ],
                 before_paths: before_paths
                     .into_iter()
-                    .map(batchalign_types::paths::ClientPath::from)
+                    .map(|path| Some(batchalign_types::paths::ClientPath::from(path)))
                     .collect(),
                 staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
                 media_mapping: Default::default(),
@@ -497,6 +492,38 @@ mod tests {
             input.before_path,
             Some(PathBuf::from("/before/nested/sample.cha"))
         );
+    }
+
+    #[test]
+    fn optional_priors_keep_recipe_and_text_consumers_on_the_same_file() {
+        let files: Vec<_> = ["a.cha", "b.cha", "c.cha"]
+            .into_iter()
+            .enumerate()
+            .map(|(file_index, filename)| PendingJobFile {
+                file_index,
+                filename: filename.into(),
+                has_chat: true,
+            })
+            .collect();
+        let mut job = runner_snapshot(
+            ReleasedCommand::Morphotag,
+            files,
+            vec!["/a.cha", "/b.cha", "/c.cha"],
+            vec![],
+        );
+        job.filesystem.before_paths = vec![None, Some("/before/b.cha".into()), None];
+        for (index, file) in job.pending_files.iter().enumerate() {
+            let expected = (index == 1).then(|| std::path::PathBuf::from("/before/b.cha"));
+            assert_eq!(
+                discover_input_for_pending_file(&job.filesystem, file).before_path,
+                expected
+            );
+        }
+        assert!(job.filesystem.before_path(3).is_none());
+        job.filesystem.paths_mode = false;
+        assert!(job.filesystem.before_path(1).is_none());
+        job.filesystem.before_paths.clear();
+        assert!(job.filesystem.before_path(0).is_none());
     }
 
     #[test]

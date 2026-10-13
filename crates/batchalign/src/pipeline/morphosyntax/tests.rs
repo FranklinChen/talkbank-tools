@@ -35,6 +35,156 @@ const ADMISSION_CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tCHI Target_Child\n@ID:\teng|test|CHI||female|||Target_Child|||\n\
 *CHI:\thello world .\n@End\n";
 
+#[tokio::test]
+async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_positions() {
+    // Keep a primary-language word: tagging every lexical word @s would be
+    // invalid CHAT (a whole-turn switch requires a precode). Both words have
+    // explicit synthesis, so malformed model alignment can preserve them.
+    let chat = ADMISSION_CHAT.replace("hello world", "hi@i camino@s:spa");
+    let temp = tempfile::tempdir().unwrap();
+    let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
+        .await
+        .unwrap();
+    let pool = WorkerPool::new(PoolConfig::default());
+    let mwt = MwtDict::default();
+    let mut params = test_params(&mwt);
+    params.tokenization_mode = TokenizationMode::Preserve;
+    let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
+    let ParsedFile::Analyze(parsed) = ParsedFile::parse(&chat, params.policy.ca_policy).unwrap()
+    else {
+        panic!("analysis");
+    };
+    let response = serde_json::from_str(
+        r#"{"sentences":[{"words":[
+        {"id":1,"text":"hi","lemma":"hi","upos":"INTJ","head":0,"deprel":"root"},
+        {"id":2,"text":"cami","lemma":"cami","upos":"VERB","head":1,"deprel":"dep"},
+        {"id":3,"text":"no","lemma":"no","upos":"ADV","head":2,"deprel":"advmod"}
+    ]}]}"#,
+    )
+    .unwrap();
+    let output = parsed
+        .collect(&options)
+        .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
+            response, "9.9.9", "eng",
+        )])
+        .unwrap()
+        .apply(&options)
+        .await
+        .unwrap()
+        .postcheck(&options)
+        .unwrap()
+        .serialize();
+    let (proof, report) = output.into_parts();
+    assert!(proof.as_str().contains("L2|xxx"));
+    let (shortfalls, exclusions) = report.into_records();
+    assert!(exclusions.is_empty());
+    assert!(
+        matches!(&shortfalls[..], [crate::api::OutputShortfallRecord::SecondaryMorphologyUnplaced {
+        utterances: 1, words: 1, first_utterances,
+    }] if first_utterances[0].utterance == 1 && first_utterances[0].cause == crate::api::SecondaryExtractionFailure::Alignment)
+    );
+    let wire = serde_json::to_value(shortfalls).unwrap();
+    assert!(wire[0]["first_utterances"][0].get("first_word").is_none());
+}
+
+/// Exercises primary injection, real secondary dispatch admission, final CHAT
+/// judgement and the wire report together, without loading a model.
+#[tokio::test]
+async fn secondary_unavailability_is_diagnosed_but_unsupported_language_is_excluded() {
+    use crate::api::{
+        OutputExclusionRecord, OutputShortfallRecord, SecondaryMorphologyFailureKind,
+    };
+    use crate::pipeline::post_validate::{OutputReport, ProducedOutput};
+    let chat = ADMISSION_CHAT.replace("hello world", "hello mundo@s:spa");
+    let temp = tempfile::tempdir().unwrap();
+    let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
+        .await
+        .unwrap();
+    for has_registry in [false, true] {
+        let pool = if has_registry {
+            WorkerPool::with_test_stanza_registry(
+                crate::stanza_registry::StanzaRegistry::from_capabilities(
+                    &std::collections::BTreeMap::new(),
+                ),
+            )
+        } else {
+            WorkerPool::new(PoolConfig::default())
+        };
+        let mwt = MwtDict::default();
+        let mut params = test_params(&mwt);
+        params.tokenization_mode = TokenizationMode::Preserve;
+        let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
+        let ParsedFile::Analyze(parsed) =
+            ParsedFile::parse(&chat, params.policy.ca_policy).unwrap()
+        else {
+            panic!("ordinary CHAT must be analyzed");
+        };
+        let response = serde_json::from_str(
+            r#"{"sentences":[{"words":[
+            {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"},
+            {"id":2,"text":"xbxxx","lemma":"xbxxx","upos":"NOUN","head":1,"deprel":"obj"},
+            {"id":3,"text":".","lemma":".","upos":"PUNCT","head":1,"deprel":"punct"}
+        ]}]}"#,
+        )
+        .unwrap();
+        let output = parsed
+            .collect(&options)
+            .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
+                response, "9.9.9", "eng",
+            )])
+            .unwrap()
+            .apply(&options)
+            .await
+            .unwrap()
+            .postcheck(&options)
+            .unwrap()
+            .serialize();
+        let (proof, report) = output.into_parts();
+        assert!(
+            proof.as_str().contains("intj|hello L2|xxx ."),
+            "{}",
+            proof.as_str()
+        );
+        let (shortfalls, exclusions) = report.into_records();
+        let produced = ProducedOutput::Admitted(proof);
+        if has_registry {
+            assert!(shortfalls.is_empty());
+            assert!(matches!(
+                OutputReport::of(&produced, &shortfalls),
+                OutputReport::Clean
+            ));
+            assert!(
+                matches!(&exclusions[..], [OutputExclusionRecord::UnsupportedSecondaryMorphology { spans: 1, words: 1, first_spans }]
+                if first_spans[0].utterance == 1 && first_spans[0].first_word == 2)
+            );
+        } else {
+            assert!(exclusions.is_empty());
+            assert!(
+                matches!(&shortfalls[..], [OutputShortfallRecord::SecondaryMorphologyIncomplete { spans: 1, words: 1, first_spans }]
+                if first_spans[0].cause == SecondaryMorphologyFailureKind::RegistryUnavailable)
+            );
+            let OutputReport::Diagnosed(draft) = OutputReport::of(&produced, &shortfalls) else {
+                panic!("a requested unavailable analysis must not report clean completion");
+            };
+            let diagnostics = draft.record(&temp.path().join("findings.json")).await;
+            assert_eq!(diagnostics.finding_count(), 0);
+            assert!(
+                crate::cli::progress::diagnosed_summary(Some(&diagnostics))
+                    .contains("secondary morphology incomplete")
+            );
+            let wire = serde_json::to_value(&diagnostics).unwrap();
+            assert_eq!(
+                wire["shortfalls"][0]["first_spans"][0]["cause"],
+                "registry_unavailable"
+            );
+            assert_eq!(
+                serde_json::from_value::<crate::api::FileOutputDiagnostics>(wire).unwrap(),
+                diagnostics
+            );
+        }
+    }
+}
+
 #[test]
 fn a_contradicted_replacement_plan_is_a_system_failure_not_invalid_chat() {
     let error = crate::error::ServerError::ReplacementPlanContradicted {
@@ -128,7 +278,7 @@ async fn admitted_ca_pass_through_preserves_ordinary_comment_tiers() {
 }
 
 #[tokio::test]
-async fn incremental_morphology_refuses_invalid_prior_tiers_before_reuse() {
+async fn incremental_morphology_discards_invalid_prior_and_analyzes_current() {
     let before = ADMISSION_CHAT.replace("@End", "%mor:\tnoun|hello\n@End");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
@@ -137,16 +287,34 @@ async fn incremental_morphology_refuses_invalid_prior_tiers_before_reuse() {
     let pool = WorkerPool::new(PoolConfig::default());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
+    // Fresh analysis of this valid nonlexical current file needs no worker.
+    // The invalid prior must contribute neither its words nor its partial MOR.
+    let current = ADMISSION_CHAT.replace("hello world", "xxx");
     let result = crate::morphosyntax::process_morphosyntax_incremental(
         &before,
-        ADMISSION_CHAT,
+        &current,
         services,
+        &test_params(&mwt),
+    )
+    .await
+    .expect("invalid reuse input must not reject valid current CHAT")
+    .into_text();
+    assert!(result.contains("*CHI:\txxx ."));
+    assert!(!result.contains("hello"));
+    assert!(!result.contains("noun|"));
+
+    // Fallback does not bypass admission of the current document.
+    let invalid_current = current.replace("@Languages:\teng\n", "");
+    let refusal = crate::morphosyntax::process_morphosyntax_incremental(
+        &before,
+        &invalid_current,
+        PipelineServices::new(&pool, &cache),
         &test_params(&mwt),
     )
     .await;
     assert!(matches!(
-        result,
-        Err(crate::error::ServerError::ChatAdmission(_))
+        refusal,
+        Err(crate::error::ServerError::ChatReplacementAdmission(_))
     ));
 }
 
@@ -170,6 +338,10 @@ async fn incremental_morphology_copies_only_admitted_prior_analysis_without_infe
         "@End",
         "%mor:\tintj|hello noun|world .\n\
 %gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n@End",
+    );
+    let before = before.replace(
+        "*CHI:",
+        "@Comment:\t[ba3 morphotag | engine=stanza-1.10.0 | 2026-03-28T10:00:00-04:00]\n*CHI:",
     );
     let after = ADMISSION_CHAT.replace("@End", "%mor:\tnoun|wrong\n@End");
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -195,11 +367,72 @@ async fn incremental_morphology_copies_only_admitted_prior_analysis_without_infe
     @Languages:\teng
     @Participants:\tCHI Target_Child
     @ID:\teng|test|CHI||female|||Target_Child|||
+    @Comment:\t[ba3 morphotag | engine=stanza-1.10.0 | 2026-03-28T10:00:00-04:00]
     *CHI:\thello world .
     %mor:\tintj|hello noun|world .
     %gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT
     @End
     ");
+}
+
+#[tokio::test]
+async fn reused_morphology_carries_its_own_stamps_without_requiring_readable_metadata() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+        .await
+        .expect("cache");
+    let pool = WorkerPool::new(PoolConfig::default());
+    let morphology = "%mor:\tintj|hello noun|world .\n%gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n";
+    let other_stamp = "[ba3 transcribe | asr=whisper | 2026-03-28T10:00:00-04:00]";
+    for prior_stamp in [
+        Some("[fc-ba3 morphotag | engine=stanza-1.10.0 ; lang=eng | 2026-03-28T10:00:00-04:00]"),
+        Some("[ba3 morphotag | engine=stanza-1.10.0 ; lang=eng | 2026-03-28T10:00:00-04:00]"),
+        Some(
+            "[fc-ba3 morphotag | engine=stanza-1.10.0 ; ud_repairs=damaged | 2026-03-28T10:00:00-04:00]",
+        ),
+        None,
+    ] {
+        let before = ADMISSION_CHAT
+            .replace(
+                "*CHI:",
+                &format!(
+                    "@Comment:\tprior contributor note\n{}*CHI:",
+                    prior_stamp.map_or(String::new(), |stamp| format!("@Comment:\t{stamp}\n"))
+                ),
+            )
+            .replace("@End", &format!("{morphology}@End"));
+        for current_stamp in [
+            "",
+            "@Comment:\t[fc-ba3 morphotag | engine=wrong-current-model | old]\n",
+        ] {
+            let after = ADMISSION_CHAT.replace("*CHI:", &format!(
+                "@Comment:\tcurrent contributor note\n@Comment:\t{other_stamp}\n{current_stamp}*CHI:"));
+            let output = crate::morphosyntax::process_morphosyntax_incremental(
+                &before,
+                &after,
+                PipelineServices::new(&pool, &cache),
+                &test_params(&MwtDict::default()),
+            )
+            .await
+            .expect("optional provenance cannot make reused morphology fail");
+            let (document, report) = output.into_parts();
+            let (shortfalls, exclusions) = report.into_records();
+            let incomplete = prior_stamp.is_none_or(|stamp| stamp.contains("damaged"));
+            assert_eq!(shortfalls.len(), usize::from(incomplete));
+            assert!(exclusions.is_empty());
+            let output = document.into_text();
+            assert_eq!(output.contains("provenance_incomplete=true"), incomplete);
+            assert!(output.contains(morphology), "{output}");
+            assert!(output.contains("current contributor note"), "{output}");
+            assert!(output.contains(other_stamp), "{output}");
+            assert!(!output.contains("prior contributor note"), "{output}");
+            assert!(!output.contains("wrong-current-model"), "{output}");
+            match prior_stamp {
+                Some(stamp) => assert!(output.contains(stamp), "{output}"),
+                None => assert!(!output.contains("engine="), "{output}"),
+            }
+        }
+    }
 }
 
 #[test]
@@ -465,8 +698,13 @@ async fn incremental_complete_unsupported_precode_needs_no_model_capability() {
         &test_params(&MwtDict::default()),
     )
     .await
-    .expect("source-admitted compatible complete analysis needs no model")
-    .into_text();
+    .expect("source-admitted compatible complete analysis needs no model");
+    let (document, report) = output.into_parts();
+    assert!(matches!(
+        &report.into_records().0[..],
+        [crate::api::OutputShortfallRecord::MorphologyProvenanceIncomplete { .. }]
+    ));
+    let output = document.into_text();
     assert!(output.contains("[- que] hello world ."));
     assert!(output.contains("%mor:\tintj|hello noun|world ."));
     assert!(output.contains("%gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT"));
@@ -1099,7 +1337,9 @@ async fn a_diagnosed_transcript_is_tagged_outside_its_faulty_utterance() {
         .expect("injection")
         .postcheck(&options)
         .expect("the analysis added no finding of its own")
-        .serialize();
+        .serialize()
+        .without_reports()
+        .expect("fixture has no secondary work");
     let crate::pipeline::post_validate::ProducedOutput::Diagnosed(still) = &produced else {
         panic!("the invalid word is still there, so the output is still diagnosed");
     };

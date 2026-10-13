@@ -1,7 +1,7 @@
 # morphotag
 
 **Status:** Current
-**Last updated:** 2026-10-04 11:29 EDT
+**Last updated:** 2026-10-08 09:51 EDT
 
 Add morphosyntactic analysis (`%mor` POS/lemma tiers and `%gra` dependency
 tiers) to existing CHAT transcripts. Text-only, no audio involved.
@@ -28,6 +28,17 @@ CHAT also refuses the file before inference. Corrupt `%mor` or `%gra` may be
 accepted only when the selected plan removes and regenerates them. Default CA
 pass-through preserves those tiers and therefore requires them to be valid.
 See [the complete admission contract](../../architecture/morphotag-invariants.md#input-admission-and-replacement-ownership).
+
+Secondary-language analysis is recoverable. If analysis requested for an `@s`
+span fails, the valid output is still written with successful primary/secondary
+analysis and `L2|xxx` placeholders for the affected span. The file is reported
+as **diagnosed**, with the number of affected spans/words, their first locations
+and producer causes in the CLI/dashboard diagnostics. This is not a retryable
+file failure. When the runtime explicitly reports a secondary language as
+unsupported, its spans are instead listed as **exclusions**; exclusions alone
+do not diagnose the file. `--no-l2-morphotag` remains an explicit opt-out, not
+an analysis failure. These reports describe the current run, not past failures
+that may have produced reused tiers.
 
 ---
 
@@ -316,8 +327,8 @@ the fix-s predicate now walks all word-bearing items.)
 
 ## Failure modes
 
-morphotag fails fast on engine failures rather than emitting partial
-output. When the Stanza worker reports a per-utterance error (model
+Primary morphotag analysis fails fast on engine failures rather than emitting
+partial primary analysis. When the primary Stanza worker reports a per-utterance error (model
 runtime error, Stanza output parse failure, protocol violation), the
 affected file is marked failed with a typed `ItemErrors` message
 naming the first few offending items and the total count. Other
@@ -325,6 +336,11 @@ files in the same batch continue normally, one bad file does not
 poison the rest (BA2-parity multi-file semantics). The output `.cha`
 for a failed file is **not** written; there is no silent path where
 the job appears successful but the `%mor` tier is missing.
+
+Secondary `@s` analysis failures instead retain the valid primary analysis
+and report a diagnosed output, as described above. A failure to locate
+secondary words during primary injection is reported at utterance level,
+without inventing an exact word position.
 
 Note: items in languages Stanza does not support (code-switches into
 `@s:<lang>` for unsupported languages) are an intentional fallback,

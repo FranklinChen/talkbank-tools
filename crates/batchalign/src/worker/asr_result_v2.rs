@@ -280,7 +280,9 @@ pub(crate) fn whisper_chunk_result_to_asr_response(
     fallback_lang: Option<&LanguageCode3>,
 ) -> Result<AsrResponse, String> {
     // Both producers' seams are settled here, once, whatever they sent.
-    let spans = MonotoneChunkSpans::project(&result.chunks).map_err(|refused| {
+    let observations =
+        super::whisper_windows::reconcile(&result.chunks).map_err(|refused| refused.to_string())?;
+    let spans = MonotoneChunkSpans::project(&observations).map_err(|refused| {
         format!("Whisper chunk boundaries could not be fitted as audio positions: {refused}")
     })?;
     if spans.adjusted_boundaries() > 0 {
@@ -352,6 +354,123 @@ mod tests {
     /// A fixture position; every literal in this module is a valid one.
     fn at(seconds: f64) -> Option<AudioPositionSeconds> {
         Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    }
+
+    /// Independent decodes of overlapping sample windows.
+    fn window_response(left: serde_json::Value, right: serde_json::Value) -> ExecuteResponseV2 {
+        let chunks = serde_json::from_value(serde_json::json!({
+            "sample_rate_hz": 16000,
+            "windows": [
+                {"start_sample": 0, "sample_count": 400000, "left_context": 0,
+                 "right_context": 48000, "spans": left},
+                {"start_sample": 304000, "sample_count": 400000, "left_context": 48000,
+                 "right_context": 0, "spans": right}
+            ]
+        }))
+        .expect("valid window ownership");
+        ExecuteResponseV2::success(
+            WorkerRequestIdV2::from("window-test"),
+            TaskResultV2::WhisperChunkResult(WhisperChunkResultV2 {
+                lang: LanguageCode3::eng(),
+                text: String::new(),
+                chunks,
+                model: test_identity(),
+            }),
+            NonNegativeSeconds::try_from(0.01).expect("elapsed"),
+        )
+    }
+
+    #[test]
+    fn window_boundary_keeps_disjoint_repetitions_and_collapses_shared_observations() {
+        let response = window_response(
+            serde_json::json!([
+                {"text":"again", "start_s":1.0, "end_s":1.5},
+                {"text":"shared", "start_s":21.0, "end_s":21.5}]),
+            serde_json::json!([
+                {"text":"again", "start_s":1.0, "end_s":1.5},
+                {"text":"shared", "start_s":2.0, "end_s":2.5}]),
+        );
+        let parsed = parse_asr_response_v2(
+            &response,
+            Some(&LanguageCode3::eng()),
+            &test_requested(),
+            AsrBackendV2::LocalWhisper,
+        )
+        .expect("owned observations");
+        assert_eq!(
+            parsed
+                .tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["again", "again", "shared"]
+        );
+        assert_eq!(parsed.tokens[1].start_s, at(20.0));
+    }
+
+    #[test]
+    fn window_boundary_does_not_remove_untimed_or_nonoverlapping_words() {
+        let response = window_response(
+            serde_json::json!([{"text":"keep", "start_s":20.0, "end_s":20.5}]),
+            serde_json::json!([
+                {"text":"keep", "start_s":null, "end_s":1.5},
+                {"text":"keep", "start_s":3.0, "end_s":3.5}]),
+        );
+        let parsed = parse_asr_response_v2(
+            &response,
+            Some(&LanguageCode3::eng()),
+            &test_requested(),
+            AsrBackendV2::LocalWhisper,
+        )
+        .expect("words retained");
+        assert_eq!(parsed.tokens.len(), 3);
+        assert!(parsed.tokens[1].start_s.is_none());
+    }
+
+    #[test]
+    fn window_boundary_refuses_ambiguous_repetition() {
+        let response = window_response(
+            serde_json::json!([
+                {"text":"go", "start_s":20.0, "end_s":22.0},
+                {"text":"go", "start_s":20.5, "end_s":22.5}]),
+            serde_json::json!([{"text":"go", "start_s":1.0, "end_s":3.0}]),
+        );
+        let error = parse_asr_response_v2(
+            &response,
+            Some(&LanguageCode3::eng()),
+            &test_requested(),
+            AsrBackendV2::LocalWhisper,
+        )
+        .expect_err("ambiguous seam");
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+    }
+
+    #[test]
+    fn window_boundary_keeps_untimed_words_between_shared_anchors() {
+        let response = window_response(
+            serde_json::json!([
+                {"text":"first", "start_s":20.0, "end_s":20.5},
+                {"text":"last", "start_s":22.0, "end_s":22.5}]),
+            serde_json::json!([
+                {"text":"first", "start_s":1.0, "end_s":1.5},
+                {"text":"middle", "start_s":null, "end_s":null},
+                {"text":"last", "start_s":3.0, "end_s":3.5}]),
+        );
+        let parsed = parse_asr_response_v2(
+            &response,
+            Some(&LanguageCode3::eng()),
+            &test_requested(),
+            AsrBackendV2::LocalWhisper,
+        )
+        .expect("words retained");
+        assert_eq!(
+            parsed
+                .tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "middle", "last"]
+        );
     }
 
     /// The commit the plan pins in these fixtures.
@@ -426,7 +545,8 @@ mod tests {
                         start_s: Some(seconds(0.5)),
                         end_s: Some(seconds(1.0)),
                     },
-                ],
+                ]
+                .into(),
                 model: test_identity(),
             }),
             NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
@@ -516,7 +636,8 @@ mod tests {
                     text: "hello".into(),
                     start_s: Some(seconds(0.0)),
                     end_s: Some(seconds(0.5)),
-                }],
+                }]
+                .into(),
                 model: AsrModelIdentityV2::Whisper {
                     asr: LoadedModelV2 {
                         id: whisper_id(),

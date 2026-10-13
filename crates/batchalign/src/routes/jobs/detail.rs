@@ -169,11 +169,9 @@ pub(crate) async fn get_single_result(
         }));
     }
 
-    let result_entry = primary_result_entry(&detail, &filename)
-        .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
-        .ok_or_else(|| {
-            ServerError::FileNotFound(format!("Result for {filename} not found in job {job_id}"))
-        })?;
+    let result_entry = primary_result_entry(&detail, &filename)?.ok_or_else(|| {
+        ServerError::FileNotFound(format!("Result for {filename} not found in job {job_id}"))
+    })?;
 
     let content_type = result_entry.content_type;
     let out_filename = result_entry.filename.clone();
@@ -195,8 +193,7 @@ pub(crate) async fn get_single_result(
 fn primary_result_entry<'a>(
     detail: &'a crate::store::JobDetail,
     input: &str,
-) -> Result<Option<&'a crate::store::FileResultEntry>, crate::recipe_runner::planner::PlanningError>
-{
+) -> Result<Option<&'a crate::store::FileResultEntry>, ServerError> {
     let expected = crate::recipe_runner::runtime::result_display_path_for_command(
         detail.command,
         &detail.options,
@@ -308,6 +305,24 @@ mod tests {
                 progress_label: None,
             }],
         }
+    }
+
+    #[test]
+    fn result_lookup_keeps_a_planning_failure_distinct_from_io() {
+        let mut detail = job_detail(false);
+        detail.options =
+            crate::recipe_runner::runtime::test_options(crate::ReleasedCommand::Benchmark);
+        let error = super::primary_result_entry(&detail, "nested/sample.cha")
+            .expect_err("a mismatched stored command has no result plan");
+        assert!(matches!(
+            error,
+            crate::error::ServerError::Planning(
+                crate::error::PlanningError::OutputOptionsMismatch {
+                    expected: crate::ReleasedCommand::Align,
+                    observed: crate::ReleasedCommand::Benchmark,
+                }
+            )
+        ));
     }
 
     /// An unparseable stamp is one file's state, not a failed request: the

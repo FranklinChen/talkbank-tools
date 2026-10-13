@@ -976,7 +976,7 @@ async fn stage_run_localized_morphosyntax<P: TranscribePlan>(
     Ok(match not_applied(OptionalStage::Morphosyntax, analyzed)? {
         StageOutcome::Applied(crate::pipeline::morphosyntax::LocalizedMorphosyntax::Analyzed(
             document,
-        )) => (document, Some(held_out)),
+        )) => (document.without_reports()?, Some(held_out)),
         StageOutcome::Applied(crate::pipeline::morphosyntax::LocalizedMorphosyntax::Declined(
             document,
         )) => (ProducedOutput::Diagnosed(document), None),
@@ -1047,7 +1047,7 @@ async fn stage_run_morphosyntax<'a, P: TranscribePlan>(
     }
     .await;
     let document = match not_applied(OptionalStage::Morphosyntax, analyzed)? {
-        StageOutcome::Applied(document) => document,
+        StageOutcome::Applied(document) => document.without_reports()?,
         StageOutcome::NotApplied(shortfall) => {
             tracing::warn!(%filename, %shortfall, "transcribe kept its pre-morphosyntax document");
             shortfalls.push(shortfall);

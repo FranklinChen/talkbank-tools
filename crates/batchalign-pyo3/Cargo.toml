@@ -30,6 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Shared batchalign crates
 batchalign-types = { workspace = true }
 batchalign-transform = { workspace = true }
+batchalign-fa-core = { path = "../batchalign-fa-core" }
+blake3 = { workspace = true }
 
 # Panic-site audit completed 2026-04-29 (see
 # `<workspace>/talkbank-tools/docs/panic-audit/pyo3.md`). The single

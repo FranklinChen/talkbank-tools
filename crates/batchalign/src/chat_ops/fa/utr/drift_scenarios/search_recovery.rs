@@ -101,10 +101,15 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
                 GroupUnits::Whole(unit) => inspect(unit),
                 GroupUnits::Pieces(pieces) => {
                     for piece in pieces {
-                        inspect(GroupUnit {
-                            words: piece.words(),
-                            window: piece.window(),
-                        });
+                        match piece {
+                            crate::chat_ops::fa::AnchoredPart::Request(piece) => {
+                                inspect(GroupUnit {
+                                    words: piece.words(),
+                                    window: piece.window(),
+                                })
+                            }
+                            crate::chat_ops::fa::AnchoredPart::Unavailable(_) => {}
+                        }
                     }
                 }
             }
@@ -130,13 +135,23 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
                 .iter()
                 .enumerate()
                 .filter(|(_, words)| words.contains(&0))
-                .take(5)
             {
                 println!(
                     "{name} unrequested U{utterance}: count={} envelope={:?} anchors={:?}",
                     words.iter().filter(|&&n| n == 0).count(),
                     plan.and_then(|p| p.search_envelopes[utterance].as_ref()),
                     anchors.lookup(talkbank_model::UtteranceIdx::new(utterance))
+                );
+                println!(
+                    "{name} residual U{utterance}: missing_indices={:?} surviving_asr_words={} expected_window={:?} correspondence={:?}",
+                    words
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, &count)| (count == 0).then_some(index))
+                        .collect::<Vec<_>>(),
+                    scenario.expected[utterance].surviving_asr_words,
+                    scenario.expected[utterance],
+                    plan.map(|p| &p.utterances[utterance]),
                 );
             }
             violations.push(format!(

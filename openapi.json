@@ -1465,9 +1465,16 @@
         "description": "`POST /jobs` request body.",
         "properties": {
           "before_paths": {
-            "description": "Absolute paths to \"before\" files for incremental processing\n(paths_mode only). When non-empty, the diff engine compares each\nbefore file against its corresponding source_path and only\nreprocesses changed utterances.\n\nMust be the same length as `source_paths` when non-empty.",
+            "description": "Absolute paths to \"before\" files for incremental processing\n(paths_mode only). When non-empty, the diff engine compares each\nbefore file against its corresponding source_path and only\nreprocesses changed utterances.\n\nMust be the same length as `source_paths` when non-empty. A null entry\nselects fresh processing for that source only; it never shifts later priors.",
             "items": {
-              "$ref": "#/components/schemas/ClientPath"
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ClientPath"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "type": "array"
           },
@@ -1678,8 +1685,45 @@
         "type": "string"
       },
       "OutputExclusionRecord": {
-        "description": "Part of the input a command left out of its work on purpose, because the\ntranscript asks for it by a convention with a recorded ruling.\n\nInformation, never a shortfall: the command did what the transcript asks,\nso an exclusion does not make the file diagnosed, and a file whose only\nuntimed utterances are exclusions is clean. Reported beside the written\noutput, on a `done` file as on a `diagnosed` one\n([`FileStatusEntry::exclusions`]), and bounded like\n[`FileOutputDiagnostics`] because every poll copies it.",
+        "description": "Part of the input a command left out under its documented scope policy:\na transcript convention, or an explicitly unsupported secondary language.\n\nInformation, never a shortfall: the command stayed within that scope,\nso an exclusion does not make the file diagnosed, and a file whose only\nuntimed utterances are exclusions is clean. Reported beside the written\noutput, on a `done` file as on a `diagnosed` one\n([`FileStatusEntry::exclusions`]), and bounded like\n[`FileOutputDiagnostics`] because every poll copies it.",
         "oneOf": [
+          {
+            "description": "The runtime registry explicitly lacks morphology for these languages.",
+            "properties": {
+              "first_spans": {
+                "description": "Transcript-ordered examples, bounded like output diagnostics.",
+                "items": {
+                  "$ref": "#/components/schemas/SecondaryMorphologySpan"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "unsupported_secondary_morphology"
+                ],
+                "type": "string"
+              },
+              "spans": {
+                "description": "Number of spans excluded.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "words": {
+                "description": "Number of morphology positions excluded.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "spans",
+              "words",
+              "first_spans",
+              "kind"
+            ],
+            "type": "object"
+          },
           {
             "description": "Forced alignment did not look for these utterances in the recording,\nbecause the transcript marks them as not speech in it (a\n`[+ diary]` note). Their words are written untimed; a bullet the\ninput gave one is kept as given under `--main-bullets keep` or\n`exact`, and written without under `derive`.",
             "properties": {
@@ -1747,6 +1791,135 @@
       "OutputShortfallRecord": {
         "description": "Requested work a written document does not carry, and why.",
         "oneOf": [
+          {
+            "description": "A particular timing-recovery attempt was unavailable. A later pass may\nhave contributed timing; this record does not invalidate that evidence.",
+            "properties": {
+              "category": {
+                "$ref": "#/components/schemas/FailureCategory",
+                "description": "Typed control-plane cause, also recorded in the CHAT stamp."
+              },
+              "detail": {
+                "description": "Bounded explanatory detail. Raw provider text is never stamp syntax.",
+                "type": "string"
+              },
+              "engine": {
+                "description": "Selected backend, not an engine claimed to have produced timing.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "utr_unavailable"
+                ],
+                "type": "string"
+              },
+              "pass": {
+                "$ref": "#/components/schemas/UtrPass",
+                "description": "Which attempt failed; initial and fallback failures remain distinct."
+              }
+            },
+            "required": [
+              "engine",
+              "pass",
+              "category",
+              "detail",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Morphology was retained/written, but its complete provenance could not\nbe reconstructed. Original records remain in CHAT as evidence.",
+            "properties": {
+              "detail": {
+                "description": "First metadata defect, bounded independently of retained evidence.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "morphology_provenance_incomplete"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "detail",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Primary injection could not locate secondary words safely for dispatch.",
+            "properties": {
+              "first_utterances": {
+                "description": "Bounded utterance locations; exact morphology positions are unknown.",
+                "items": {
+                  "$ref": "#/components/schemas/SecondaryMorphologyUnplacedUtterance"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "secondary_morphology_unplaced"
+                ],
+                "type": "string"
+              },
+              "utterances": {
+                "description": "Number of affected utterances.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "words": {
+                "description": "Secondary words not dispatched.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "utterances",
+              "words",
+              "first_utterances",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Secondary morphology retained placeholders for requested spans.",
+            "properties": {
+              "first_spans": {
+                "description": "Transcript-ordered, bounded examples with producer causes.",
+                "items": {
+                  "$ref": "#/components/schemas/SecondaryMorphologyFailure"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "secondary_morphology_incomplete"
+                ],
+                "type": "string"
+              },
+              "spans": {
+                "description": "Number of spans whose requested analysis was not installed.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "words": {
+                "description": "Number of morphology positions in those spans.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "spans",
+              "words",
+              "first_spans",
+              "kind"
+            ],
+            "type": "object"
+          },
           {
             "description": "The stage requires an admitted document, and the generated output was\ndiagnosed, so the stage did not run.",
             "properties": {
@@ -2235,6 +2408,118 @@
           }
         ]
       },
+      "SecondaryExtractionFailure": {
+        "description": "Why secondary positions could not be established from primary injection.",
+        "enum": [
+          "alignment",
+          "tokenization_disagrees",
+          "split_word",
+          "unmapped_word"
+        ],
+        "type": "string"
+      },
+      "SecondaryMorphologyFailure": {
+        "description": "One secondary span's failure, distinct from an unsupported-language exclusion.",
+        "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/SecondaryMorphologyFailureKind",
+            "description": "Typed producer boundary."
+          },
+          "detail": {
+            "description": "Bounded explanation from that boundary.",
+            "type": "string"
+          },
+          "span": {
+            "$ref": "#/components/schemas/SecondaryMorphologySpan",
+            "description": "Where the retained placeholders belong."
+          }
+        },
+        "required": [
+          "span",
+          "cause",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "SecondaryMorphologyFailureKind": {
+        "description": "Which producer boundary could not supply secondary morphology.",
+        "enum": [
+          "invalid_language",
+          "registry_unavailable",
+          "worker",
+          "response_count",
+          "empty_analysis",
+          "merge",
+          "splice"
+        ],
+        "type": "string"
+      },
+      "SecondaryMorphologySpan": {
+        "description": "Address of a secondary-language span in the post-injection document.",
+        "properties": {
+          "first_word": {
+            "description": "One-based morphology-item position within that utterance.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "language": {
+            "description": "Requested CHAT language code.",
+            "type": "string"
+          },
+          "utterance": {
+            "description": "One-based utterance ordinal, not a physical text line.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "words": {
+            "description": "Morphology items in the span, not expanded clitic chunks.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "utterance",
+          "first_word",
+          "words",
+          "language"
+        ],
+        "type": "object"
+      },
+      "SecondaryMorphologyUnplacedUtterance": {
+        "description": "A primary-injection failure before a secondary span could be planned.",
+        "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/SecondaryExtractionFailure",
+            "description": "Typed extraction boundary."
+          },
+          "detail": {
+            "description": "Bounded producer explanation.",
+            "type": "string"
+          },
+          "utterance": {
+            "description": "One-based utterance ordinal.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "words": {
+            "description": "Secondary words left as placeholders.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "utterance",
+          "words",
+          "cause",
+          "detail"
+        ],
+        "type": "object"
+      },
       "Sha256Digest": {
         "description": "A validated lowercase SHA-256 digest.",
         "type": "string"
@@ -2440,6 +2725,14 @@
           "anchors_refused",
           "anchors_describe_other_words",
           "no_interior_cut"
+        ],
+        "type": "string"
+      },
+      "UtrPass": {
+        "description": "Which timing-recovery attempt a failure belongs to.",
+        "enum": [
+          "initial",
+          "fallback"
         ],
         "type": "string"
       },

@@ -15,11 +15,13 @@ use super::work_unit::{
 
 /// Planning-time error while deriving typed work units.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub(crate) enum PlanningError {
+pub enum PlanningError {
     /// Output selection cannot combine one command with another's options.
     #[error("output plan for {expected} received options for {observed}")]
     OutputOptionsMismatch {
+        /// The command whose output is being planned.
         expected: crate::ReleasedCommand,
+        /// The command selected by the supplied options.
         observed: crate::ReleasedCommand,
     },
     /// A catalog policy failed to declare its primary artifact.

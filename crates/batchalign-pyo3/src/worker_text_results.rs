@@ -95,6 +95,60 @@ pub(crate) fn normalize_morphosyntax_result(
     })
 }
 
+#[cfg(test)]
+mod cue_projection_tests {
+    use super::*;
+    use batchalign_transform::morphosyntax::{MappingContext, UdSentence, map_ud_sentence};
+    use batchalign_types::worker_v2::UdRelationRepairKindV2;
+
+    /// Actual Python producer output from the native cue-projection case deck.
+    /// The wire and MOR/GRA boundary survive graph ownership and need a test.
+    #[test]
+    fn projected_python_response_normalizes_and_maps_without_dangling_heads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let response: BatchInferResponse = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/worker_protocol_v2/host_response_morphosyntax_cue_projection.json"
+        ))?;
+        let normalized = normalize_morphosyntax_result(&response, 4)
+            .map_err(|error| std::io::Error::other(error.0))?;
+        for (index, item) in normalized.items.iter().take(3).enumerate() {
+            let MorphosyntaxItemResultV2::Analyzed {
+                raw_sentences,
+                model,
+                repairs,
+            } = item
+            else {
+                return Err("projected model result was not analyzed".into());
+            };
+            assert_eq!(model.lang.as_ref(), "fra");
+            let sentence = UdSentence {
+                words: serde_json::from_value(raw_sentences[0].clone())?,
+            };
+            let (mor, gra) = map_ud_sentence(
+                &sentence,
+                &MappingContext {
+                    lang: serde_json::from_value(serde_json::to_value(&model.lang)?)?,
+                },
+            )?;
+            assert_eq!(mor.len(), 2, "two lexical tokens even with MWT components");
+            assert!(gra.len() >= 3, "relations include the synthetic terminator");
+            if index == 0 {
+                assert!(repairs.is_empty());
+            } else {
+                assert_eq!(repairs.len(), 1);
+                assert_eq!(repairs[0].kind, UdRelationRepairKindV2::CueRootPromotion);
+                assert_eq!(repairs[0].word, "beta");
+                assert_eq!(repairs[0].to_relation, "root");
+            }
+        }
+        assert!(
+            matches!(&normalized.items[3], MorphosyntaxItemResultV2::Failed { error }
+            if error.contains("ambiguous"))
+        );
+        Ok(())
+    }
+}
+
 pub(crate) fn normalize_utseg_result(
     response: &BatchInferResponse,
     expected_count: usize,

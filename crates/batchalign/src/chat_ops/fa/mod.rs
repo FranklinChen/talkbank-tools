@@ -61,7 +61,7 @@ pub use self::orchestrate::{
     refresh_reusable_alignment, refresh_reusable_utterances, retain_decision_evidence,
     strip_timing_from_content, strip_wor_from_monotonicity_stripped_utterances,
 };
-pub use self::split::{AnchoredPiece, AnchoredSplit, Pieces};
+pub use self::split::{AnchoredPart, AnchoredPiece, AnchoredSplit, Pieces, UnavailablePiece};
 // `#[cfg(test)]` (2026-09-01 review, item 12): test-fixture conveniences with
 // no production caller; see their own doc comments in `orchestrate.rs`. The
 // derive-only entry points (`apply_fa_results`, `enforce_monotonicity*`)

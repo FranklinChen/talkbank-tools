@@ -1118,9 +1118,10 @@ export interface components {
              *     before file against its corresponding source_path and only
              *     reprocesses changed utterances.
              *
-             *     Must be the same length as `source_paths` when non-empty.
+             *     Must be the same length as `source_paths` when non-empty. A null entry
+             *     selects fresh processing for that source only; it never shifts later priors.
              */
-            before_paths?: components["schemas"]["ClientPath"][];
+            before_paths?: (components["schemas"]["ClientPath"] | null)[];
             /** @description Batchalign command (align, morphotag, etc.). */
             command: components["schemas"]["ReleasedCommand"];
             /**
@@ -1260,10 +1261,10 @@ export interface components {
          */
         OptionalStage: "utterance_segmentation" | "morphosyntax";
         /**
-         * @description Part of the input a command left out of its work on purpose, because the
-         *     transcript asks for it by a convention with a recorded ruling.
+         * @description Part of the input a command left out under its documented scope policy:
+         *     a transcript convention, or an explicitly unsupported secondary language.
          *
-         *     Information, never a shortfall: the command did what the transcript asks,
+         *     Information, never a shortfall: the command stayed within that scope,
          *     so an exclusion does not make the file diagnosed, and a file whose only
          *     untimed utterances are exclusions is clean. Reported beside the written
          *     output, on a `done` file as on a `diagnosed` one
@@ -1271,6 +1272,21 @@ export interface components {
          *     [`FileOutputDiagnostics`] because every poll copies it.
          */
         OutputExclusionRecord: {
+            /** @description Transcript-ordered examples, bounded like output diagnostics. */
+            first_spans: components["schemas"]["SecondaryMorphologySpan"][];
+            /** @enum {string} */
+            kind: "unsupported_secondary_morphology";
+            /**
+             * Format: int64
+             * @description Number of spans excluded.
+             */
+            spans: number;
+            /**
+             * Format: int64
+             * @description Number of morphology positions excluded.
+             */
+            words: number;
+        } | {
             /**
              * Format: int64
              * @description How many utterances were left out, at least one.
@@ -1303,6 +1319,52 @@ export interface components {
         };
         /** @description Requested work a written document does not carry, and why. */
         OutputShortfallRecord: {
+            /** @description Typed control-plane cause, also recorded in the CHAT stamp. */
+            category: components["schemas"]["FailureCategory"];
+            /** @description Bounded explanatory detail. Raw provider text is never stamp syntax. */
+            detail: string;
+            /** @description Selected backend, not an engine claimed to have produced timing. */
+            engine: string;
+            /** @enum {string} */
+            kind: "utr_unavailable";
+            /** @description Which attempt failed; initial and fallback failures remain distinct. */
+            pass: components["schemas"]["UtrPass"];
+        } | {
+            /** @description First metadata defect, bounded independently of retained evidence. */
+            detail: string;
+            /** @enum {string} */
+            kind: "morphology_provenance_incomplete";
+        } | {
+            /** @description Bounded utterance locations; exact morphology positions are unknown. */
+            first_utterances: components["schemas"]["SecondaryMorphologyUnplacedUtterance"][];
+            /** @enum {string} */
+            kind: "secondary_morphology_unplaced";
+            /**
+             * Format: int64
+             * @description Number of affected utterances.
+             */
+            utterances: number;
+            /**
+             * Format: int64
+             * @description Secondary words not dispatched.
+             */
+            words: number;
+        } | {
+            /** @description Transcript-ordered, bounded examples with producer causes. */
+            first_spans: components["schemas"]["SecondaryMorphologyFailure"][];
+            /** @enum {string} */
+            kind: "secondary_morphology_incomplete";
+            /**
+             * Format: int64
+             * @description Number of spans whose requested analysis was not installed.
+             */
+            spans: number;
+            /**
+             * Format: int64
+             * @description Number of morphology positions in those spans.
+             */
+            words: number;
+        } | {
             /** @enum {string} */
             kind: "stage_skipped";
             /** @description The stage. */
@@ -1531,6 +1593,62 @@ export interface components {
          *     Untagged serialization retains the existing JSON string for text results.
          */
         ResultContent: string | components["schemas"]["BinaryResultDescriptor"];
+        /**
+         * @description Why secondary positions could not be established from primary injection.
+         * @enum {string}
+         */
+        SecondaryExtractionFailure: "alignment" | "tokenization_disagrees" | "split_word" | "unmapped_word";
+        /** @description One secondary span's failure, distinct from an unsupported-language exclusion. */
+        SecondaryMorphologyFailure: {
+            /** @description Typed producer boundary. */
+            cause: components["schemas"]["SecondaryMorphologyFailureKind"];
+            /** @description Bounded explanation from that boundary. */
+            detail: string;
+            /** @description Where the retained placeholders belong. */
+            span: components["schemas"]["SecondaryMorphologySpan"];
+        };
+        /**
+         * @description Which producer boundary could not supply secondary morphology.
+         * @enum {string}
+         */
+        SecondaryMorphologyFailureKind: "invalid_language" | "registry_unavailable" | "worker" | "response_count" | "empty_analysis" | "merge" | "splice";
+        /** @description Address of a secondary-language span in the post-injection document. */
+        SecondaryMorphologySpan: {
+            /**
+             * Format: int64
+             * @description One-based morphology-item position within that utterance.
+             */
+            first_word: number;
+            /** @description Requested CHAT language code. */
+            language: string;
+            /**
+             * Format: int64
+             * @description One-based utterance ordinal, not a physical text line.
+             */
+            utterance: number;
+            /**
+             * Format: int64
+             * @description Morphology items in the span, not expanded clitic chunks.
+             */
+            words: number;
+        };
+        /** @description A primary-injection failure before a secondary span could be planned. */
+        SecondaryMorphologyUnplacedUtterance: {
+            /** @description Typed extraction boundary. */
+            cause: components["schemas"]["SecondaryExtractionFailure"];
+            /** @description Bounded producer explanation. */
+            detail: string;
+            /**
+             * Format: int64
+             * @description One-based utterance ordinal.
+             */
+            utterance: number;
+            /**
+             * Format: int64
+             * @description Secondary words left as placeholders.
+             */
+            words: number;
+        };
         /** @description A validated lowercase SHA-256 digest. */
         Sha256Digest: string;
         /**
@@ -1619,6 +1737,11 @@ export interface components {
          * @enum {string}
          */
         UnusableAnchorsTrace: "no_reliable_anchors" | "anchors_refused" | "anchors_describe_other_words" | "no_interior_cut";
+        /**
+         * @description Which timing-recovery attempt a failure belongs to.
+         * @enum {string}
+         */
+        UtrPass: "initial" | "fallback";
         /** @description What the server decided about one worker key's latest capability report. */
         WorkerCapabilityAdmission: {
             /** @description Admitted or refused. */

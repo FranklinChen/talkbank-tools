@@ -472,6 +472,7 @@ mod tests {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("fa-raw-2"),
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
+                attention_capture: None,
                 tokens: vec![WhisperTokenTimingV2 {
                     text: "hello".to_owned(),
                     time_s: AudioPositionSeconds::try_from(0.1).expect("fixture onset"),
@@ -566,6 +567,7 @@ mod tests {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("fa-raw-fallback"),
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
+                attention_capture: None,
                 tokens: vec![WhisperTokenTimingV2 {
                     text: "hello".to_owned(),
                     time_s: AudioPositionSeconds::try_from(0.1).expect("fixture onset"),
@@ -606,6 +608,7 @@ mod tests {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("fa-raw-unlabelled-fallback"),
             TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
+                attention_capture: None,
                 tokens: Vec::new(),
             }),
             NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),

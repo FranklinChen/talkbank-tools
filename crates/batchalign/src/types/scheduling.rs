@@ -146,25 +146,32 @@ pub enum FailureCategory {
     ModelAccessDenied,
 }
 
+impl FailureCategory {
+    /// Stable wire spelling, suitable for bounded structured provenance.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::ParseError => "parse_error",
+            Self::InputMissing => "input_missing",
+            Self::EvidenceUnavailable => "evidence_unavailable",
+            Self::AnalysisUnavailable => "analysis_unavailable",
+            Self::WorkerCrash => "worker_crash",
+            Self::WorkerTimeout => "worker_timeout",
+            Self::WorkerProtocol => "worker_protocol",
+            Self::WorkerBootstrap => "worker_bootstrap",
+            Self::ProviderTransient => "provider_transient",
+            Self::ProviderTerminal => "provider_terminal",
+            Self::MemoryPressure => "memory_pressure",
+            Self::Cancelled => "cancelled",
+            Self::System => "system",
+            Self::ModelAccessDenied => "model_access_denied",
+        }
+    }
+}
+
 impl std::fmt::Display for FailureCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Validation => write!(f, "validation"),
-            Self::ParseError => write!(f, "parse_error"),
-            Self::InputMissing => write!(f, "input_missing"),
-            Self::EvidenceUnavailable => write!(f, "evidence_unavailable"),
-            Self::AnalysisUnavailable => write!(f, "analysis_unavailable"),
-            Self::WorkerCrash => write!(f, "worker_crash"),
-            Self::WorkerTimeout => write!(f, "worker_timeout"),
-            Self::WorkerProtocol => write!(f, "worker_protocol"),
-            Self::WorkerBootstrap => write!(f, "worker_bootstrap"),
-            Self::ProviderTransient => write!(f, "provider_transient"),
-            Self::ProviderTerminal => write!(f, "provider_terminal"),
-            Self::MemoryPressure => write!(f, "memory_pressure"),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::System => write!(f, "system"),
-            Self::ModelAccessDenied => write!(f, "model_access_denied"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

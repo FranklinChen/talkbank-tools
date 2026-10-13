@@ -83,9 +83,10 @@ pub struct JobSubmission {
     /// before file against its corresponding source_path and only
     /// reprocesses changed utterances.
     ///
-    /// Must be the same length as `source_paths` when non-empty.
+    /// Must be the same length as `source_paths` when non-empty. A null entry
+    /// selects fresh processing for that source only; it never shifts later priors.
     #[serde(default)]
-    pub before_paths: Vec<batchalign_types::paths::ClientPath>,
+    pub before_paths: Vec<Option<batchalign_types::paths::ClientPath>>,
 }
 
 pub(crate) fn default_lang() -> LanguageSpec {

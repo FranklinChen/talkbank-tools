@@ -334,19 +334,27 @@ impl Job {
     /// A file that wrote its output keeps it, clean or diagnosed: a
     /// diagnosed file's output is the producer's verdict on that recording,
     /// not a failure a rerun would repair, so it is never retried.
-    pub(crate) fn prepare_for_restart(&mut self) {
+    pub(crate) fn prepare_for_restart(&mut self) -> Result<(), crate::error::ServerError> {
+        // Validate before ANY mutation: recovered incompatible rows must stay
+        // visible, non-runnable and unchanged, even through a manual restart.
+        crate::command_model::command_spec(self.dispatch.command)
+            .selected_output_policy(&self.dispatch.options)?;
+        if !self.execution.status.can_restart() {
+            return Err(crate::error::ServerError::JobConflict {
+                message: format!(
+                    "Job {} is {}, only cancelled or failed jobs can be restarted.",
+                    self.identity.job_id, self.execution.status
+                ),
+                conflicts: Vec::new(),
+            });
+        }
         for file_status in self.execution.file_statuses.values_mut() {
             if !file_status.status().wrote_output() {
                 file_status.requeue();
             }
         }
 
-        // Cannot fail: `JobRegistry::restart_job` checks `can_restart()`
-        // before calling, and the Restart arm asks the same question.
-        debug_assert!(
-            self.execution.status.can_restart(),
-            "restart_job must pre-check can_restart"
-        );
+        // Admission above checks the same transition before mutating files.
         let _ = self.set_status(JobStatus::Queued, StatusChange::Restart);
         self.execution.error = None;
         self.schedule.completed_at = None;
@@ -369,6 +377,7 @@ impl Job {
         self.execution
             .results
             .retain(|result| result.error.is_none());
+        Ok(())
     }
 
     /// Reconcile a persisted interrupted/running job during startup recovery.

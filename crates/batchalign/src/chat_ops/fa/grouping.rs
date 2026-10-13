@@ -34,8 +34,8 @@ pub struct FaGroup {
 
 /// How a group's audio is presented to the aligner.
 ///
-/// Only `Anchored` may exceed the engine budget, and only through pieces that
-/// each fit it; `Single` is always within budget.
+/// Only `Anchored` may exceed the engine budget. Its request pieces each fit;
+/// unavailable pieces keep their words but grant no request. `Single` fits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupSpan {
     /// One window, within budget, covering every word of the group.
@@ -69,7 +69,7 @@ pub(crate) struct GroupUnit<'g> {
 pub(crate) enum GroupUnits<'g> {
     /// A single group's one request over all its words.
     Whole(GroupUnit<'g>),
-    /// An anchored group's pieces, in word order.
+    /// An anchored partition, including explicit unavailable word ranges.
     Pieces(Pieces<'g>),
 }
 
@@ -201,9 +201,8 @@ impl FaGroup {
     }
 
     /// The requests this group is executed as: one for a single group, one
-    /// per piece for an anchored one. The units' words concatenate to
-    /// [`FaGroup::words`], which is what lets per-unit timings be reassembled
-    /// into the group's.
+    /// per admitted piece for an anchored one. Unavailable pieces also own
+    /// their words; assembly supplies their untimed slots before injection.
     pub(crate) fn units(&self) -> GroupUnits<'_> {
         match &self.span {
             GroupSpan::Single(single) => GroupUnits::Whole(GroupUnit {
@@ -381,10 +380,10 @@ pub struct Grouping {
 ///
 /// Every [`GroupSpan::Single`] window fits `max_group_ms`, including trailing
 /// padding. A single utterance that cannot fit is split at the word anchors
-/// UTR recovered for it when they allow every piece to fit (a
-/// [`GroupSpan::Anchored`] group, recorded as a `window_split_at_anchors`
-/// decision), and otherwise refused with durable evidence: `anchor_gap` when
-/// the anchors leave a stretch longer than the budget, `anchors_unusable`
+/// UTR recovered for it. An [`GroupSpan::Anchored`] partition retains bounded
+/// requests even when another part is unavailable. Complete partitions record
+/// `window_split_at_anchors`; partial ones record each unavailable `anchor_gap`.
+/// A whole utterance is still refused as `anchors_unusable`
 /// when recovery matched the utterance but gave no usable cut, `over_budget`
 /// when recovery has nothing to say about it. Its supplied timing and words
 /// are preserved rather than clipped or fabricated.
@@ -507,16 +506,39 @@ pub fn group_utterances(
                         match AnchoredSplit::plan(over, utterance, words, anchors.lookup(utterance))
                         {
                             Ok(split) => {
-                                let decision = split.decision();
-                                decisions.push(DecisionRecord::new_and_trace(
-                                    line_idx,
-                                    speaker,
-                                    DecisionStrategy::Fa(FaStrategy::WindowSplitAtAnchors(
-                                        decision,
-                                    )),
-                                    decision.to_string(),
-                                    false,
-                                ));
+                                let refused: Vec<_> = split
+                                    .pieces()
+                                    .filter_map(|part| match part {
+                                        super::AnchoredPart::Request(_) => None,
+                                        super::AnchoredPart::Unavailable(piece) => {
+                                            Some(piece.refusal())
+                                        }
+                                    })
+                                    .collect();
+                                if refused.is_empty() {
+                                    let decision = split.decision();
+                                    decisions.push(DecisionRecord::new_and_trace(
+                                        line_idx,
+                                        speaker,
+                                        DecisionStrategy::Fa(FaStrategy::WindowSplitAtAnchors(
+                                            decision,
+                                        )),
+                                        decision.to_string(),
+                                        false,
+                                    ));
+                                } else {
+                                    for refused in refused {
+                                        decisions.push(DecisionRecord::new_and_trace(
+                                            line_idx,
+                                            speaker.clone(),
+                                            DecisionStrategy::Fa(FaStrategy::WindowRefused(
+                                                refused,
+                                            )),
+                                            refused.to_string(),
+                                            true,
+                                        ));
+                                    }
+                                }
                                 // Held until the next utterance's start is
                                 // known, so its last piece can be padded.
                                 pending = Some(Pending::Anchored(split));

@@ -1,13 +1,12 @@
 #![warn(missing_docs)]
-//! Numeric core for Whisper forced alignment: median filter, column
-//! standardization, and DTW. A LEAF crate (thiserror only) so both the
-//! batchalign server crate and the whisper pilot depend on the same
-//! implementation without either depending on the other's stack.
+//! Numeric core for Whisper alignment: median filter, column standardization,
+//! and DTW. The Python ASR and FA consumers share the lexical boundary through
+//! PyO3; this leaf crate needs no model or tensor runtime.
 //!
-//! Faithful port of the two numeric primitives the Python FA path uses
+//! Port of the numeric primitives the Python FA path uses
 //! from `transformers.models.whisper.generation_whisper`
 //! (`_median_filter`, `_dynamic_time_warping`), so the Rust FA path can
-//! reproduce the HF alignment algorithm exactly: teacher-forced forward
+//! apply the same alignment stages: teacher-forced forward
 //! pass -> alignment-head cross-attentions -> per-head standardize ->
 //! median filter -> head-mean cost matrix -> DTW -> token jump times at
 //! 20 ms per audio frame.
@@ -29,6 +28,9 @@ pub struct CostMatrix {
 /// Everything that can go wrong in the numeric FA core.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FaDtwError {
+    /// A cost cannot participate in a finite shortest-path comparison.
+    #[error("cost matrix contains a non-finite value at offset {0}")]
+    NonFinite(usize),
     /// Matrix dimensions do not match the value buffer.
     #[error("cost matrix shape mismatch: {rows}x{cols} != {len} values")]
     ShapeMismatch {
@@ -58,12 +60,15 @@ impl CostMatrix {
         if rows == 0 || cols == 0 {
             return Err(FaDtwError::Empty { rows, cols });
         }
-        if values.len() != rows * cols {
+        if rows.checked_mul(cols) != Some(values.len()) {
             return Err(FaDtwError::ShapeMismatch {
                 rows,
                 cols,
                 len: values.len(),
             });
+        }
+        if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+            return Err(FaDtwError::NonFinite(index));
         }
         Ok(Self { rows, cols, values })
     }
@@ -93,24 +98,64 @@ pub struct PathPoint {
 }
 
 /// Monotone alignment path through the cost matrix, cheapest-first, as
-/// `transformers`' `_dynamic_time_warping` computes it (moves: diagonal,
-/// down, right; ties prefer the diagonal, then the text axis, matching
-/// the `argmin` order of the reference implementation).
+/// the closed-begin variant (moves: diagonal, down, right). Ties prefer
+/// the diagonal, then the text axis. Accumulation uses f64 for finite f32 costs.
 pub fn dynamic_time_warping(matrix: &CostMatrix) -> Result<Vec<PathPoint>, FaDtwError> {
+    Ok(warp(matrix, BeginBoundary::Closed))
+}
+
+#[derive(Clone, Copy)]
+enum BeginBoundary {
+    Closed,
+    Open,
+}
+
+/// Complete, ordered row-entry frames produced by open-begin, fixed-end DTW.
+/// Every input label is represented; only an audio prefix may be unassigned.
+/// This proves path geometry, not acoustic correctness or a unique occurrence.
+#[derive(Debug)]
+pub struct LexicalFrameAlignment {
+    row_entries: Vec<usize>,
+}
+
+impl LexicalFrameAlignment {
+    /// Align every row while allowing the first row to start after frame zero.
+    pub fn align(matrix: &CostMatrix) -> Self {
+        let path = warp(matrix, BeginBoundary::Open);
+        let mut row_entries = Vec::with_capacity(matrix.rows);
+        for point in path {
+            if point.text_idx == row_entries.len() {
+                row_entries.push(point.time_idx);
+            }
+        }
+        Self { row_entries }
+    }
+
+    /// One bounded, monotone frame index per input row, in input row order.
+    pub fn row_entries(&self) -> &[usize] {
+        &self.row_entries
+    }
+}
+
+fn warp(matrix: &CostMatrix, begin: BeginBoundary) -> Vec<PathPoint> {
     // Shape validity is a `CostMatrix::new` invariant; fields are private.
     let (n, m) = (matrix.rows, matrix.cols);
     // cost[(i, j)] over a (n+1) x (m+1) grid with an infinite border,
     // trace stores which move produced each cell (0 diag, 1 down, 2 right).
     let width = m + 1;
-    let mut cost = vec![f32::INFINITY; (n + 1) * width];
+    // f64 accumulation keeps finite f32 input costs finite along long paths.
+    let mut cost = vec![f64::INFINITY; (n + 1) * width];
     let mut trace = vec![u8::MAX; (n + 1) * width];
     cost[0] = 0.0;
+    if matches!(begin, BeginBoundary::Open) {
+        cost[..width].fill(0.0);
+    }
     for i in 1..=n {
         for j in 1..=m {
             let c0 = cost[(i - 1) * width + (j - 1)];
             let c1 = cost[(i - 1) * width + j];
             let c2 = cost[i * width + (j - 1)];
-            // Reference tie-break: argmin([diag, down, right]).
+            // Deterministic minimum: ties prefer diagonal, then text axis.
             let (best, mv) = if c0 <= c1 && c0 <= c2 {
                 (c0, 0u8)
             } else if c1 <= c2 {
@@ -118,7 +163,7 @@ pub fn dynamic_time_warping(matrix: &CostMatrix) -> Result<Vec<PathPoint>, FaDtw
             } else {
                 (c2, 2u8)
             };
-            cost[i * width + j] = matrix.at(i - 1, j - 1) + best;
+            cost[i * width + j] = f64::from(matrix.at(i - 1, j - 1)) + best;
             trace[i * width + j] = mv;
         }
     }
@@ -140,7 +185,7 @@ pub fn dynamic_time_warping(matrix: &CostMatrix) -> Result<Vec<PathPoint>, FaDtw
         }
     }
     path.reverse();
-    Ok(path)
+    path
 }
 
 /// In-place median filter along the frame (column) axis with reflect
@@ -244,6 +289,93 @@ pub fn token_jump_times_s(path: &[PathPoint]) -> Vec<f64> {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_begin_skips_prefix_but_covers_all_labels_and_fixed_end() {
+        let matrix = CostMatrix::new(2, 4, vec![9., 9., -4., 9., 9., 9., 9., -4.]).unwrap();
+        let path = warp(&matrix, BeginBoundary::Open);
+        assert_eq!(LexicalFrameAlignment::align(&matrix).row_entries(), &[2, 3]);
+        assert_eq!(
+            path.last(),
+            Some(&PathPoint {
+                text_idx: 1,
+                time_idx: 3
+            })
+        );
+        assert_eq!(dynamic_time_warping(&matrix).unwrap()[0].time_idx, 0);
+    }
+
+    #[test]
+    fn open_begin_agrees_with_exhaustive_small_signed_cost_oracle() {
+        // Independent enumeration of every legal start and monotone path.
+        fn cheapest(matrix: &CostMatrix, row: usize, col: usize) -> f64 {
+            let value = f64::from(matrix.at(row, col));
+            if row + 1 == matrix.rows && col + 1 == matrix.cols {
+                return value;
+            }
+            let mut suffix = f64::INFINITY;
+            if row + 1 < matrix.rows {
+                suffix = suffix.min(cheapest(matrix, row + 1, col));
+            }
+            if col + 1 < matrix.cols {
+                suffix = suffix.min(cheapest(matrix, row, col + 1));
+            }
+            if row + 1 < matrix.rows && col + 1 < matrix.cols {
+                suffix = suffix.min(cheapest(matrix, row + 1, col + 1));
+            }
+            value + suffix
+        }
+        for rows in 1..=3 {
+            for cols in 1..=3 {
+                for bits in 0..(1usize << (rows * cols)) {
+                    let values = (0..rows * cols)
+                        .map(|index| if bits & (1 << index) == 0 { -1. } else { 2. })
+                        .collect();
+                    let matrix = CostMatrix::new(rows, cols, values).unwrap();
+                    let path = warp(&matrix, BeginBoundary::Open);
+                    let observed: f64 = path
+                        .iter()
+                        .map(|p| f64::from(matrix.at(p.text_idx, p.time_idx)))
+                        .sum();
+                    let expected = (0..cols)
+                        .map(|col| cheapest(&matrix, 0, col))
+                        .fold(f64::INFINITY, f64::min);
+                    assert_eq!(observed, expected);
+                    let entries = LexicalFrameAlignment::align(&matrix);
+                    assert_eq!(entries.row_entries().len(), rows);
+                    assert!(entries.row_entries().windows(2).all(|p| p[0] <= p[1]));
+                    assert!(entries.row_entries().iter().all(|&col| col < cols));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_labels_and_zero_cost_ties_do_not_drop_rows() {
+        let matrix = CostMatrix::new(4, 2, vec![0.; 8]).unwrap();
+        assert_eq!(
+            LexicalFrameAlignment::align(&matrix).row_entries(),
+            &[0, 0, 0, 1]
+        );
+        // Negative costs may still favor assigning the prefix. Open-begin is
+        // permission to skip, never evidence that a frame is physically silent.
+        let matrix = CostMatrix::new(1, 4, vec![-1.; 4]).unwrap();
+        assert_eq!(LexicalFrameAlignment::align(&matrix).row_entries(), &[0]);
+    }
+
+    #[test]
+    fn rejects_nonfinite_and_overflowing_shapes() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                CostMatrix::new(1, 1, vec![value]).unwrap_err(),
+                FaDtwError::NonFinite(0)
+            );
+        }
+        assert!(matches!(
+            CostMatrix::new(usize::MAX, 2, vec![]),
+            Err(FaDtwError::ShapeMismatch { .. })
+        ));
+    }
 
     #[test]
     fn dtw_identity_diagonal() {

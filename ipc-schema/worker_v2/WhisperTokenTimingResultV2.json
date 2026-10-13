@@ -4,6 +4,17 @@
   "description": "Forced-alignment token response returned before Rust token-to-word\nreconciliation.",
   "type": "object",
   "properties": {
+    "attention_capture": {
+      "description": "Optional durable diagnostic receipt, not used for timing projection.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WhisperAttentionCaptureReceiptV2"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "tokens": {
       "description": "Raw token timings in model order.",
       "type": "array",
@@ -22,6 +33,45 @@
       "format": "double",
       "minimum": 0.0
     },
+    "WhisperAttentionCaptureReceiptV2": {
+      "description": "Small receipt for numeric evidence retained outside the JSON transport.",
+      "type": "object",
+      "properties": {
+        "blake3": {
+          "description": "BLAKE3 of the closed SQLite file, verified by the server before use.",
+          "type": "string"
+        },
+        "capture": {
+          "description": "Request capability, retained whole rather than independently relabelled.",
+          "$ref": "#/$defs/WhisperAttentionCaptureRequestV2"
+        },
+        "request_id": {
+          "description": "Worker request that produced this artifact.",
+          "$ref": "#/$defs/WorkerRequestIdV2"
+        }
+      },
+      "required": [
+        "capture",
+        "request_id",
+        "blake3"
+      ]
+    },
+    "WhisperAttentionCaptureRequestV2": {
+      "description": "A request-bound destination for a new diagnostic SQLite artifact.",
+      "type": "object",
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "semantic_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination",
+        "semantic_key"
+      ]
+    },
     "WhisperTokenTimingV2": {
       "description": "One raw Whisper forced-alignment token span returned by Python.\n\nTiming fields validated upstream by Python Pydantic models (see module docs).",
       "type": "object",
@@ -39,6 +89,14 @@
         "text",
         "time_s"
       ]
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
+      "type": "string"
     }
   }
 }

@@ -8,13 +8,15 @@
 //! unit of EXECUTION: one window of audio, within the engine budget, and the
 //! words aligned against it. For an ordinary group the two coincide. For an
 //! anchored group (one over-budget utterance split at recovered word anchors)
-//! they do not: it is one group and several requests, one per piece.
+//! they do not: it is one group and requests only for admitted pieces.
+//! Unavailable pieces own their original words but have no request or cache key.
 //!
 //! So everything that is about a REQUEST (cache keys, cache admission, worker
 //! dispatch, raw evidence, fallback) is per [`DispatchUnit`], and everything
 //! that is about the TRANSCRIPT (`%wor` reuse, injection, post-processing)
 //! stays per group. [`UnitLedger::assemble`] is the one place unit timings
-//! become group timings, concatenated in word order.
+//! become group timings, concatenated in word order with explicit untimed slots
+//! for unavailable ranges. No later timing can shift over a missing range.
 //!
 //! ```mermaid
 //! flowchart LR
@@ -50,7 +52,7 @@ use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::chat_ops::fa::{
-    AnchoredPiece, FaGroup, FaWord, GroupUnit, GroupUnits, WordTiming, cache_key,
+    AnchoredPart, FaGroup, FaWord, GroupUnit, GroupUnits, UnavailablePiece, WordTiming, cache_key,
 };
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
@@ -203,13 +205,20 @@ struct PlannedPiece<'g> {
     last_word: WordIdx,
 }
 
+/// One original word range, either an actual request or an explicit non-request.
+#[derive(Debug)]
+enum PlannedPart<'g> {
+    Request(PlannedPiece<'g>),
+    Unavailable(&'g UnavailablePiece),
+}
+
 /// A group's requests, in the group's own shape.
 #[derive(Debug)]
 enum PlannedUnits<'g> {
     /// A single group's one request.
     Whole(DispatchUnit<'g>),
     /// An anchored group's pieces, in word order.
-    Pieces(Vec<PlannedPiece<'g>>),
+    Pieces(Vec<PlannedPart<'g>>),
 }
 
 /// One group and its requests.
@@ -226,7 +235,12 @@ impl<'g> PlannedGroup<'g> {
             PlannedUnits::Whole(unit) => (Some(unit), [].iter()),
             PlannedUnits::Pieces(pieces) => (None, pieces.iter()),
         };
-        whole.into_iter().chain(pieces.map(|piece| &piece.unit))
+        whole
+            .into_iter()
+            .chain(pieces.filter_map(|part| match part {
+                PlannedPart::Request(piece) => Some(&piece.unit),
+                PlannedPart::Unavailable(_) => None,
+            }))
     }
 }
 
@@ -275,22 +289,25 @@ impl<'g> DispatchPlan<'g> {
                     GroupUnits::Pieces(pieces) => PlannedUnits::Pieces(
                         pieces
                             .enumerate()
-                            .map(
-                                |(position, piece): (usize, &'g AnchoredPiece)| PlannedPiece {
-                                    unit: DispatchUnit::keyed(
-                                        mint(),
-                                        ordinal,
-                                        UnitRole::Piece(PieceOrdinal(position)),
-                                        GroupUnit {
-                                            words: piece.words(),
-                                            window: piece.window(),
-                                        },
-                                        &key,
-                                    ),
-                                    first_word: piece.first_word(),
-                                    last_word: piece.last_word(),
-                                },
-                            )
+                            .map(|(position, part)| match part {
+                                AnchoredPart::Request(piece) => {
+                                    PlannedPart::Request(PlannedPiece {
+                                        unit: DispatchUnit::keyed(
+                                            mint(),
+                                            ordinal,
+                                            UnitRole::Piece(PieceOrdinal(position)),
+                                            GroupUnit {
+                                                words: piece.words(),
+                                                window: piece.window(),
+                                            },
+                                            &key,
+                                        ),
+                                        first_word: piece.first_word(),
+                                        last_word: piece.last_word(),
+                                    })
+                                }
+                                AnchoredPart::Unavailable(piece) => PlannedPart::Unavailable(piece),
+                            })
                             .collect(),
                     ),
                 };
@@ -323,7 +340,16 @@ enum GroupResolution<'p, 'g> {
     /// A single group's one request.
     Whole(Slot<'p, 'g>),
     /// An anchored group's pieces, each paired with its bounds.
-    Pieces(Vec<(Slot<'p, 'g>, &'p PlannedPiece<'g>)>),
+    Pieces(Vec<PartResolution<'p, 'g>>),
+}
+
+/// An unavailable part has no reply slot and cannot receive a worker result.
+enum PartResolution<'p, 'g> {
+    Request {
+        slot: Slot<'p, 'g>,
+        piece: &'p PlannedPiece<'g>,
+    },
+    Unavailable(&'g UnavailablePiece),
 }
 
 /// What has been resolved so far, one entry per group in plan order, each
@@ -351,7 +377,15 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                         PlannedUnits::Pieces(pieces) => GroupResolution::Pieces(
                             pieces
                                 .iter()
-                                .map(|piece| ((&piece.unit, None), piece))
+                                .map(|part| match part {
+                                    PlannedPart::Request(piece) => PartResolution::Request {
+                                        slot: (&piece.unit, None),
+                                        piece,
+                                    },
+                                    PlannedPart::Unavailable(piece) => {
+                                        PartResolution::Unavailable(piece)
+                                    }
+                                })
                                 .collect(),
                         ),
                     },
@@ -381,7 +415,10 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                 GroupResolution::Reused(_) => {}
                 GroupResolution::Whole(slot) => slots.push(slot),
                 GroupResolution::Pieces(pieces) => {
-                    slots.extend(pieces.iter_mut().map(|(slot, _)| slot));
+                    slots.extend(pieces.iter_mut().filter_map(|part| match part {
+                        PartResolution::Request { slot, .. } => Some(slot),
+                        PartResolution::Unavailable(_) => None,
+                    }));
                 }
             }
         }
@@ -406,8 +443,12 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
         let slot = match (group, unit.role) {
             (GroupResolution::Whole((_, slot)), UnitRole::Whole) => slot,
             (GroupResolution::Pieces(pieces), UnitRole::Piece(index)) => {
-                let ((_, slot), _) = pieces.get_mut(index.0).ok_or_else(not_awaited)?;
-                slot
+                match pieces.get_mut(index.0).ok_or_else(not_awaited)? {
+                    PartResolution::Request {
+                        slot: (_, slot), ..
+                    } => slot,
+                    PartResolution::Unavailable(_) => return Err(not_awaited()),
+                }
             }
             (GroupResolution::Reused(_), UnitRole::Whole | UnitRole::Piece(_))
             | (GroupResolution::Whole(_), UnitRole::Piece(_))
@@ -439,7 +480,22 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                         PlannedUnits::Pieces(pieces) => FaGroupSpanTrace::Anchored {
                             pieces: pieces
                                 .iter()
-                                .map(|piece| piece_trace(piece, FaEvidenceSourceTrace::WorReuse))
+                                .filter_map(|part| match part {
+                                    PlannedPart::Request(piece) => {
+                                        Some(piece_trace(piece, FaEvidenceSourceTrace::WorReuse))
+                                    }
+                                    PlannedPart::Unavailable(_) => None,
+                                })
+                                .collect(),
+                            unrequested: pieces
+                                .iter()
+                                .filter_map(|part| match part {
+                                    PlannedPart::Request(_) => None,
+                                    PlannedPart::Unavailable(piece) => Some(unrequested_trace(
+                                        piece,
+                                        FaEvidenceSourceTrace::WorReuse,
+                                    )),
+                                })
                                 .collect(),
                         },
                     };
@@ -456,14 +512,27 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                 GroupResolution::Pieces(pieces) => {
                     let mut timings = Vec::new();
                     let mut traces = Vec::with_capacity(pieces.len());
+                    let mut unrequested = Vec::new();
                     let missing_before = missing.len();
-                    for ((unit, answer), piece) in pieces {
-                        match answer {
-                            None => missing.push(unit.ordinal),
-                            Some(answer) => {
-                                traces.push(piece_trace(piece, answer.source));
-                                timings.extend(answered(unit, answer, context)?);
+                    for part in pieces {
+                        match part {
+                            PartResolution::Unavailable(piece) => {
+                                timings.extend(std::iter::repeat_n(None, piece.words().len()));
+                                unrequested.push(unrequested_trace(
+                                    piece,
+                                    FaEvidenceSourceTrace::Unaligned,
+                                ));
                             }
+                            PartResolution::Request {
+                                slot: (unit, answer),
+                                piece,
+                            } => match answer {
+                                None => missing.push(unit.ordinal),
+                                Some(answer) => {
+                                    traces.push(piece_trace(piece, answer.source));
+                                    timings.extend(answered(unit, answer, context)?);
+                                }
+                            },
                         }
                     }
                     // A group with an unresolved request has nothing to
@@ -472,7 +541,13 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                     if missing.len() > missing_before {
                         continue;
                     }
-                    (timings, FaGroupSpanTrace::Anchored { pieces: traces })
+                    (
+                        timings,
+                        FaGroupSpanTrace::Anchored {
+                            pieces: traces,
+                            unrequested,
+                        },
+                    )
                 }
             };
             resolved.push(ResolvedGroup {
@@ -526,6 +601,18 @@ fn piece_trace(piece: &PlannedPiece<'_>, source: FaEvidenceSourceTrace) -> FaPie
         last_word: piece.last_word.raw(),
         source,
         cache_key: piece.unit.cache_key.as_str().to_owned(),
+    }
+}
+
+fn unrequested_trace(
+    piece: &UnavailablePiece,
+    source: FaEvidenceSourceTrace,
+) -> crate::types::traces::FaUnrequestedPieceTrace {
+    crate::types::traces::FaUnrequestedPieceTrace {
+        first_word: piece.first_word().raw(),
+        last_word: piece.last_word().raw(),
+        window: piece.refusal().into(),
+        source,
     }
 }
 
@@ -702,6 +789,13 @@ pub(super) async fn resolve_group_timings(
         // evidence is unavailable. This ordering is what makes local algorithm
         // experiments inference-free.
         let key = unit.cache_key.as_str();
+        if services.attention_capture_dir.is_some()
+            && fa_params.engine == crate::types::engines::FaEngineName::Whisper
+            && !super::attention_capture::cached_available(cached_raw.get(key), key).await
+        {
+            misses.push(unit);
+            continue;
+        }
         let resolution =
             FaCacheUnitAdmission::new(unit, fa_params.engine, services.cache_namespace)
                 .resolve(cached_raw.get(key), cached.get(key));
@@ -1033,7 +1127,11 @@ mod tests {
             ]
         );
         match &evidence[1].group.span {
-            FaGroupSpanTrace::Anchored { pieces } => {
+            FaGroupSpanTrace::Anchored {
+                pieces,
+                unrequested,
+            } => {
+                assert!(unrequested.is_empty());
                 let summary: Vec<_> = pieces
                     .iter()
                     .map(|p| (p.start_ms, p.end_ms, p.first_word, p.last_word))
@@ -1132,12 +1230,113 @@ mod tests {
             split_parts(ledger.assemble("test").expect("reuse covers the group"));
         assert_eq!(timings, vec![whole]);
         match &evidence[0].group.span {
-            FaGroupSpanTrace::Anchored { pieces } => assert!(
+            FaGroupSpanTrace::Anchored { pieces, .. } => assert!(
                 pieces
                     .iter()
                     .all(|piece| matches!(piece.source, FaEvidenceSourceTrace::WorReuse))
             ),
             other => panic!("expected an anchored span, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unavailable_parts_have_no_request_slots_and_keep_their_original_offsets() {
+        use crate::chat_ops::fa::coordinates::{FileMs, Ms, Recording};
+        use crate::chat_ops::fa::{AnchorIndex, AnchoredSplit, UtteranceAnchors, WordAnchor};
+        let recording = Recording::of_duration(Ms(40_000)).expect("recording");
+        let anchors = AnchorIndex::fixture([(
+            UtteranceIdx::new(0),
+            UtteranceAnchors::fixture(
+                5,
+                vec![
+                    WordAnchor::fixture(1, 3_000, 4_000),
+                    WordAnchor::fixture(2, 29_000, 30_000),
+                ],
+            ),
+        )]);
+        let split = AnchoredSplit::plan_for_test(
+            FaWindow::within(&recording, FileMs::new(0), FileMs::new(40_000)).expect("window"),
+            Ms(15_000),
+            (0..5).map(|i| word(0, i, "word")).collect(),
+            anchors.lookup(UtteranceIdx::new(0)),
+        );
+        let groups = vec![FaGroup::anchored_test_fixture(split)];
+        let plan = plan_for(&groups);
+        let units: Vec<_> = plan.units().collect();
+        assert_eq!(units.len(), 2, "no request for original word 2");
+        let mut ledger = UnitLedger::open(&plan, |_| None);
+        assert_eq!(ledger.open_slots().len(), 2);
+        ledger
+            .record(
+                units[1],
+                answer(
+                    vec![timing(31_000, 32_000), timing(33_000, 34_000)],
+                    FaEvidenceSourceTrace::Cache,
+                ),
+            )
+            .expect("suffix reply");
+        ledger
+            .record(
+                units[0],
+                answer(
+                    vec![timing(100, 200), timing(300, 400)],
+                    FaEvidenceSourceTrace::Cache,
+                ),
+            )
+            .expect("prefix reply");
+        let (timings, evidence) =
+            split_parts(ledger.assemble("partial").expect("all requests answered"));
+        assert_eq!(
+            timings[0],
+            vec![
+                timing(100, 200),
+                timing(300, 400),
+                None,
+                timing(31_000, 32_000),
+                timing(33_000, 34_000)
+            ]
+        );
+        let FaGroupSpanTrace::Anchored { unrequested, .. } = &evidence[0].group.span else {
+            panic!("anchored")
+        };
+        insta::assert_json_snapshot!(unrequested, @r#"
+        [
+          {
+            "first_word": 2,
+            "last_word": 2,
+            "window": {
+              "cause": "anchor_gap",
+              "start_ms": 4000,
+              "end_ms": 30000,
+              "budget_ms": 15000,
+              "gap_start_ms": 4000,
+              "gap_end_ms": 30000
+            },
+            "source": "unaligned"
+          }
+        ]
+        "#);
+        // Reuse remains whole-group evidence, including timing on the range
+        // that this run could not freshly request. No request slot is opened.
+        let whole = vec![timing(100, 200); 5];
+        let mut reused = UnitLedger::open(&plan, |_| Some(whole.clone()));
+        assert!(reused.open_slots().is_empty());
+        let (timings, evidence) = split_parts(reused.assemble("reuse").expect("retained evidence"));
+        assert_eq!(timings[0], whole);
+        let FaGroupSpanTrace::Anchored { unrequested, .. } = &evidence[0].group.span else {
+            panic!("anchored")
+        };
+        assert!(matches!(
+            unrequested[0].source,
+            FaEvidenceSourceTrace::WorReuse
+        ));
+    }
+
+    #[test]
+    fn old_complete_anchored_trace_remains_readable_without_unrequested_ranges() {
+        let old = serde_json::json!({"kind":"anchored","pieces":[]});
+        let trace: FaGroupSpanTrace =
+            serde_json::from_value(old.clone()).expect("schema 6 anchored span");
+        assert_eq!(serde_json::to_value(trace).expect("roundtrip"), old);
     }
 }

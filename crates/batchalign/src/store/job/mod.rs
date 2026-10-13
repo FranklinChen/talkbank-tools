@@ -210,7 +210,7 @@ mod tests {
         );
         job.runtime.runner_active = true;
 
-        job.prepare_for_restart();
+        job.prepare_for_restart().expect("admitted restart");
 
         assert_eq!(job.execution.status, JobStatus::Queued);
         assert_eq!(job.execution.error, None);
@@ -431,7 +431,7 @@ mod tests {
         );
 
         job.execution.status = crate::api::JobStatus::Failed;
-        job.prepare_for_restart();
+        job.prepare_for_restart().expect("admitted restart");
 
         let a = job.execution.file_statuses["a.cha"].to_entry();
         assert_eq!(a.status, FileStatusKind::Diagnosed, "never retried");

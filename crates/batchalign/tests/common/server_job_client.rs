@@ -221,7 +221,10 @@ impl<'a> LiveServerJobClient<'a> {
             output_paths: output_paths.iter().map(|s| s.as_str().into()).collect(),
             display_names: vec![],
             debug_traces: false,
-            before_paths: before_paths.iter().map(|s| s.as_str().into()).collect(),
+            before_paths: before_paths
+                .iter()
+                .map(|s| Some(s.as_str().into()))
+                .collect(),
         };
 
         let resp = self

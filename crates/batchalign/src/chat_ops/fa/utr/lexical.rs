@@ -437,13 +437,18 @@ impl<'source> UtrLexicalStream<'source> {
     /// The lexical producer owns reference projection, joint proof and its
     /// materialization together. Consumers cannot pair a proof with another
     /// provider stream or authorize hints from the diagnostic local relaxation.
-    pub(super) fn plan_interleaving<'c>(
+    pub(super) fn plan_interleaving<
+        'c,
+        C: batchalign_transform::dp_align::control::WorkControl + ?Sized,
+    >(
         &self,
         searched: super::regions::SearchedCensus<'c>,
         mode: batchalign_transform::dp_align::MatchMode,
         participation: super::GlobalUtrParticipation,
         contested: &super::ContestedTokens,
-    ) -> super::evidence::LocalRegionPlan<'c> {
+        control: &C,
+    ) -> Result<super::evidence::LocalRegionPlan<'c>, C::Error> {
+        control.check()?;
         use batchalign_transform::dp_align::interleaving::{LocalInterleaving, SpeakerTurn};
         let source = searched.infos();
         let region = searched.span();
@@ -480,34 +485,35 @@ impl<'source> UtrLexicalStream<'source> {
                 }
             })
             .collect();
-        let analysis = match LocalInterleaving::observe(&turns, &reference, mode) {
-            Ok(analysis) => analysis,
-            Err(refusal) => {
-                let refusal = super::UtrBudgetRefusal {
-                    region,
-                    budget: super::UtrSearchBudget::interleaved(refusal),
-                };
-                tracing::warn!(
-                    region = %region.describe(),
-                    budget = ?refusal.budget,
-                    "joint UTR correspondence proof refused for this region; \
-                     other regions are unaffected and no monotonic fallback is taken"
-                );
-                let selection = super::UtrMatchSelection {
-                    selected: Vec::new(),
-                    admission: super::CorrespondenceProof::BudgetExhausted(refusal),
-                    per_utterance: searched.map(|_| super::UtteranceSelection::UNSEARCHED),
-                };
-                return super::build_alignment_plan(
-                    super::UtrAlignmentStrategy::LocalInterleaving,
-                    &payload,
-                    self,
-                    selection,
-                    participation,
-                    contested,
-                );
-            }
-        };
+        let analysis =
+            match LocalInterleaving::observe_controlled(&turns, &reference, mode, control)? {
+                Ok(analysis) => analysis,
+                Err(refusal) => {
+                    let refusal = super::UtrBudgetRefusal {
+                        region,
+                        budget: super::UtrSearchBudget::interleaved(refusal),
+                    };
+                    tracing::warn!(
+                        region = %region.describe(),
+                        budget = ?refusal.budget,
+                        "joint UTR correspondence proof refused for this region; \
+                         other regions are unaffected and no monotonic fallback is taken"
+                    );
+                    let selection = super::UtrMatchSelection {
+                        selected: Vec::new(),
+                        admission: super::CorrespondenceProof::BudgetExhausted(refusal),
+                        per_utterance: searched.map(|_| super::UtteranceSelection::UNSEARCHED),
+                    };
+                    return Ok(super::build_alignment_plan(
+                        super::UtrAlignmentStrategy::LocalInterleaving,
+                        &payload,
+                        self,
+                        selection,
+                        participation,
+                        contested,
+                    ));
+                }
+            };
         let mut positions = source
             .iter()
             .map(|info| vec![None; info.words.len()])
@@ -529,6 +535,7 @@ impl<'source> UtrLexicalStream<'source> {
         let mut seen = vec![0usize; source.len()];
         let mut extents = vec![EndpointExtents::UNOBSERVED; source.len()];
         for (evidence, word) in analysis.words().zip(&payload) {
+            control.check()?;
             let ordinal = word.address.utterance_index.index();
             seen[ordinal] += 1;
             // An endpoint matched in every optimum, if not to one token, is
@@ -688,14 +695,14 @@ impl<'source> UtrLexicalStream<'source> {
                 endpoints: extents[ordinal],
             }),
         };
-        super::build_alignment_plan(
+        Ok(super::build_alignment_plan(
             super::UtrAlignmentStrategy::LocalInterleaving,
             &payload,
             self,
             selection,
             participation,
             contested,
-        )
+        ))
     }
 }
 

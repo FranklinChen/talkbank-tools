@@ -264,7 +264,10 @@ pub async fn submit_paths_with_before_and_complete_direct(
         output_paths: output_paths.iter().map(|s| s.as_str().into()).collect(),
         display_names: vec![],
         debug_traces: false,
-        before_paths: before_paths.iter().map(|s| s.as_str().into()).collect(),
+        before_paths: before_paths
+            .iter()
+            .map(|s| Some(s.as_str().into()))
+            .collect(),
     };
 
     let (info, detail) = session.run_submission(submission).await;

@@ -259,7 +259,8 @@ async fn build_comparison_artifacts(
     };
     let morphotagged_main =
         crate::pipeline::morphosyntax::run_admitted_morphosyntax(parsed, services, &mor_params)
-            .await?;
+            .await?
+            .without_reports()?;
     Ok(build_comparison_artifacts_from_proof(
         morphotagged_main,
         reference,

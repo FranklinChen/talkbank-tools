@@ -10,22 +10,29 @@ import logging
 import threading
 import time
 import unicodedata
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from pydantic import BaseModel, ValidationError, model_validator
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference._english_verb_reading import annotate_verb_reading_lemmas
+from batchalign.inference._morphosyntax_graph import (
+    AnalyzableSentence,
+    DependencyGraph,
+    DependencyProjectionError,
+    ProjectionFailure,
+)
 from batchalign.worker._pipeline_cache import (
     LoadedPipeline,
     PipelineLookup,
     retokenize_key,
 )
-from batchalign.worker._types_v2 import MorphosyntaxPipelineV2
+from batchalign.worker._types_v2 import MorphosyntaxPipelineV2, UdRelationRepairKindV2
 
 if TYPE_CHECKING:
     from batchalign.inference._tokenizer_realign import TokenizerContext
@@ -136,9 +143,8 @@ class StanzaInput:
 
     Both the text and the realigner's boundary list are DERIVED here rather
     than stored, so they cannot disagree with each other or with `chat_words`.
-    That also makes the terminator's position knowable by construction, which
-    is how it is removed on the way back: no inspection of what Stanza made of
-    it, and therefore nothing to get wrong when Stanza tags it unexpectedly.
+    The realigned output must admit these logical boundaries before its cue
+    can be projected out of the dependency graph, regardless of its POS tag.
     """
 
     item_index: int
@@ -155,31 +161,6 @@ class StanzaInput:
         """The text handed to Stanza."""
         return " ".join(self.boundaries)
 
-    def without_terminator(self, sentence: list[JSONObject]) -> list[JSONObject]:
-        """The sentence with the cue we appended taken back off.
-
-        Symmetric with `boundaries`: the type that added the boundary is the
-        type that removes it, so the two cannot be changed apart. It is the
-        LAST boundary, hence the last UD word, which is why nothing here
-        inspects what Stanza made of it.
-
-        Only valid where we chose the boundaries; the caller gates on that.
-        """
-        if len(sentence) <= 1:
-            # The realigner did not hold, so there is no trustworthy last
-            # word to remove. Leave it and let the count-mismatch machinery
-            # downstream report the misalignment, but say so here: a silent
-            # special case is how this class of bug hides.
-            L.warning(
-                "morphotag: item %d produced %d UD words for %d boundaries; "
-                "leaving the terminator in place for the misalignment audit",
-                self.item_index,
-                len(sentence),
-                len(self.boundaries),
-            )
-            return sentence
-        return sentence[:-1]
-
 
 @dataclass(frozen=True, slots=True)
 class Realigned:
@@ -191,7 +172,19 @@ class Realigned:
     """
 
     context: TokenizerContext
-    inputs: list[StanzaInput]
+    inputs: tuple[StanzaInput, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CueFreeRealigned:
+    """One bounded retry: lexical boundaries only, with no cue to remove."""
+
+    context: TokenizerContext
+    words: tuple[str, ...]
+
+    @property
+    def text(self) -> str:
+        return " ".join(self.words)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +211,9 @@ class UnrealignedFallback:
 # to "who tokenizes this batch, and can we hold Stanza to our boundaries",
 # which refines `Preserve` into the case where we have a realignment context
 # and the case where we asked for it and do not. Two concepts, two names.
-RealignmentMode = Realigned | StanzaOwnsTokenization | UnrealignedFallback
+RealignmentMode = (
+    Realigned | CueFreeRealigned | StanzaOwnsTokenization | UnrealignedFallback
+)
 
 
 def _realignment_mode(
@@ -240,15 +235,21 @@ def _realignment_mode(
         return StanzaOwnsTokenization()
     if context is None:
         return UnrealignedFallback(lang_code=lang_code)
-    return Realigned(context=context, inputs=inputs)
+    return Realigned(context=context, inputs=tuple(inputs))
 
 
 @contextlib.contextmanager
-def _realignment_applied(mode: RealignmentMode) -> Iterator[None]:
+def _realignment_applied(mode: RealignmentMode) -> Generator[None]:
     """Install the realigner's boundaries for the duration of one Stanza call."""
     match mode:
         case Realigned(context=context, inputs=inputs):
             context.original_words = [list(item.boundaries) for item in inputs]
+            try:
+                yield
+            finally:
+                context.original_words = []
+        case CueFreeRealigned(context=context, words=words):
+            context.original_words = [list(words)]
             try:
                 yield
             finally:
@@ -264,24 +265,6 @@ def _realignment_applied(mode: RealignmentMode) -> Iterator[None]:
                 lang_code,
             )
             yield
-
-
-def _drops_appended_terminator(mode: RealignmentMode) -> bool:
-    """Whether the terminator we appended must be taken back off the output.
-
-    Only under `Realigned`, because that is the only mode in which we chose
-    the boundaries and therefore know where the terminator went. In the other
-    two nothing knows, and the Rust side's recognition-based filter is their
-    answer.
-
-    Resolved once per language batch rather than per utterance: the mode is
-    fixed for the whole group.
-    """
-    match mode:
-        case Realigned():
-            return True
-        case StanzaOwnsTokenization() | UnrealignedFallback():
-            return False
 
 
 # The 37 Universal Dependencies relation heads (UD v2). Subtypes after a
@@ -431,8 +414,8 @@ def _segment_cantonese(words: list[str]) -> list[str]:
 
 
 def _override_pos_with_pycantonese(
-    ud_words: list[dict[str, object]],
-) -> list[dict[str, object]]:
+    ud_words: list[JSONObject],
+) -> list[JSONObject]:
     """Override Stanza POS tags with PyCantonese POS for Cantonese words.
 
     Stanza's Mandarin-trained model misclassifies core Cantonese vocabulary
@@ -440,7 +423,7 @@ def _override_pos_with_pycantonese(
     This function replaces ``upos`` in each UD word dict while preserving
     all other fields (lemma, deprel, head, etc.) from Stanza.
 
-    Called as a post-processing step when ``retokenize=True`` and ``lang=yue``.
+    Applied to the admitted lexical rows of the Cantonese pipeline variant.
     """
     import pycantonese
 
@@ -475,23 +458,9 @@ def _is_bogus_lemma(text: str, lemma: str) -> bool:
     return text_has_letters and lemma_all_punct
 
 
-class RelationRepairKind(StrEnum):
-    """Why a relation Stanza produced is not the relation we apply.
-
-    Closed, and the same four names the Rust side knows
-    (``UdRelationRepairKindV2``): a rewrite must be named here before it can be
-    reported, so none reaches a transcript under a name its reader does not
-    know.
-    """
-
-    PAD_RELATION = "pad_relation"
-    """A padding label (``<PAD>``, ``<UNK>``), which is no relation at all."""
-    RELATION_CASE = "relation_case"
-    """A UD relation in the wrong case (``NSUBJ``), lowercased."""
-    RELATION_ALIAS = "relation_alias"
-    """A known non-UD spelling of a UD relation (``iob`` for ``iobj``)."""
-    UNKNOWN_RELATION = "unknown_relation"
-    """No UD relation and no known equivalent, degraded to ``dep``."""
+# The Python wire owner supplies the vocabulary; inference cannot add a third
+# copy beside the Rust schema and its Python boundary model.
+RelationRepairKind = UdRelationRepairKindV2
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,6 +564,14 @@ def _repaired_relation(deprel: str, word: str) -> tuple[str, RelationRepair | No
     return _repair(RelationRepairKind.UNKNOWN_RELATION, word, deprel, "dep")
 
 
+@dataclass(frozen=True, slots=True)
+class _RowRepair:
+    """A relation rewrite bound to its producing row, not its surface string."""
+
+    position: int
+    repair: RelationRepair
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class RepairedSentence:
     """One Stanza sentence, validated and with its relations repaired.
@@ -612,13 +589,22 @@ class RepairedSentence:
     signature could have said so.
     """
 
-    words: tuple[JSONObject, ...]
-    repairs: tuple[RelationRepair, ...]
+    _words: tuple[JSONObject, ...]
+    repair_rows: tuple[_RowRepair, ...]
+
+    @property
+    def words(self) -> tuple[JSONObject, ...]:
+        """Return copies; consumers cannot mutate row admission evidence."""
+        return deepcopy(self._words)
+
+    @property
+    def repairs(self) -> tuple[RelationRepair, ...]:
+        return tuple(entry.repair for entry in self.repair_rows)
 
     def __init__(self, raw_words: list[UdWordRaw]) -> None:
         words: list[JSONObject] = []
-        repairs: list[RelationRepair] = []
-        for raw in raw_words:
+        repairs: list[_RowRepair] = []
+        for position, raw in enumerate(raw_words):
             raw_id = raw.get("id")
             # Copied rather than coerced in place: Stanza's MWT ranges arrive
             # as tuples, and the caller's document is not ours to rewrite.
@@ -642,12 +628,12 @@ class RepairedSentence:
             relation, repair = _repaired_relation(validated.deprel, validated.text)
             if repair is not None:
                 validated.deprel = relation
-                repairs.append(repair)
+                repairs.append(_RowRepair(position, repair))
 
             words.append(validated.model_dump())
 
-        object.__setattr__(self, "words", tuple(words))
-        object.__setattr__(self, "repairs", tuple(repairs))
+        object.__setattr__(self, "_words", tuple(words))
+        object.__setattr__(self, "repair_rows", tuple(repairs))
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +738,7 @@ def _pipeline_variant(
 
 
 def _analysis(
-    sentence: RepairedSentence,
+    sentence: AnalyzableSentence,
     *,
     lang: LanguageCode,
     stanza_version: str | None,
@@ -760,9 +746,8 @@ def _analysis(
 ) -> ItemOutcome:
     """One analyzed item, carrying the model identity every analysis names.
 
-    Takes the repaired sentence, not raw words and a repair list: the type
-    pairs them, so an analysis cannot report one sentence's words beside
-    another's repairs, nor claim repairs for words that were never repaired.
+    Takes the graph-owned emission capability, never raw/repaired rows or a
+    separate repair list. Projection cannot leave a deleted target behind.
 
     Built as the wire's tagged ``analyzed`` shape
     (``MorphosyntaxAnalyzedItemV2``) directly rather than through the pydantic
@@ -777,7 +762,7 @@ def _analysis(
     return ItemProduced(
         result={
             "kind": "analyzed",
-            "raw_sentences": [list(sentence.words)],
+            "raw_sentences": [sentence.wire_rows()],
             "model": {
                 "stanza_version": stanza_version,
                 "lang": lang,
@@ -789,32 +774,95 @@ def _analysis(
 
 
 def _analyzed_item(
-    item: StanzaInput,
-    sentence: list[JSONObject],
+    sentence_index: int,
+    sentence: list[UdWordRaw],
     *,
-    drop_terminator: bool,
+    mode: RealignmentMode,
     apply_pyc_pos: bool,
     lang: LanguageCode,
     stanza_version: str | None,
     pipeline: MorphosyntaxPipelineV2,
+    retry_cue_free: Callable[[StanzaInput], ItemOutcome] | None = None,
 ) -> ItemOutcome:
     """One item's own post-Stanza work, as a single call that can be timed.
 
     Everything here is attributable to THIS item: taking back the terminator
     cue we appended, the Cantonese POS override, the relation repair and the
-    analysis. The Stanza call itself is deliberately not, because it runs once
-    per language group over the joined text of every item in that group, so
-    its cost is a fact about the group rather than about any one utterance.
+    analysis. The initial Stanza call runs once per language group; its cost
+    belongs to the group. A bounded lexical-only retry belongs to this item
+    and is included in its elapsed time.
     """
-    sent = item.without_terminator(sentence) if drop_terminator else sentence
-    if apply_pyc_pos:
-        sent = _override_pos_with_pycantonese(sent)
+    try:
+        graph = DependencyGraph(RepairedSentence(sentence))
+        match mode:
+            case Realigned(inputs=inputs):
+                admitted = graph.project_cue(len(inputs[sentence_index].boundaries))
+            case CueFreeRealigned(words=words):
+                admitted = graph.preserve_boundaries(len(words))
+            case StanzaOwnsTokenization() | UnrealignedFallback():
+                admitted = graph.preserve()
+            case _ as unreachable:
+                assert_never(unreachable)
+        if apply_pyc_pos:
+            admitted = admitted.with_pos(_override_pos_with_pycantonese)
+    except (DependencyProjectionError, ValidationError) as error:
+        if (
+            isinstance(error, DependencyProjectionError)
+            and error.kind is ProjectionFailure.AMBIGUOUS_ROOT
+            and isinstance(mode, Realigned)
+            and retry_cue_free is not None
+        ):
+            L.warning(
+                "morphotag: cue-root ambiguity; requesting one lexical-only parse"
+            )
+            retried = retry_cue_free(mode.inputs[sentence_index])
+            if isinstance(retried, ItemFailed):
+                return ItemFailed(
+                    error=f"morphosyntax dependency projection: {error}; cue-free retry: {retried.error}"
+                )
+            return retried
+        # This item's graph failed; do not relabel the entire language group.
+        return ItemFailed(error=f"morphosyntax dependency projection: {error}")
     return _analysis(
-        RepairedSentence(sent),
+        admitted,
         lang=lang,
         stanza_version=stanza_version,
         pipeline=pipeline,
     )
+
+
+def _reanalyze_without_cue(
+    source: StanzaInput,
+    *,
+    mode: Realigned,
+    entry: LoadedPipeline,
+    lock: Callable[[], contextlib.AbstractContextManager[None]],
+    apply_pyc_pos: bool,
+    lang: LanguageCode,
+    stanza_version: str | None,
+    pipeline: MorphosyntaxPipelineV2,
+) -> ItemOutcome:
+    """Ask the same model for lexical heads once, with no removable cue."""
+    lexical = CueFreeRealigned(mode.context, source.chat_words)
+    try:
+        with lock():
+            with _realignment_applied(lexical):
+                retry_rows = entry.nlp(lexical.text).to_dict()
+            if lang == "eng":
+                annotate_verb_reading_lemmas(retry_rows, entry.nlp)
+        if len(retry_rows) != 1:
+            return ItemFailed(error="cue-free model returned the wrong sentence count")
+        return _analyzed_item(
+            0,
+            retry_rows[0],
+            mode=lexical,
+            apply_pyc_pos=apply_pyc_pos,
+            lang=lang,
+            stanza_version=stanza_version,
+            pipeline=pipeline,
+        )
+    except Exception as error:
+        return ItemFailed(error=f"cue-free model failed: {error}")
 
 
 def _finalized(results: list[InferResponse | None]) -> BatchInferResponse:
@@ -902,7 +950,7 @@ def batch_infer_morphosyntax(
     """
 
     @contextlib.contextmanager
-    def _maybe_lock() -> Iterator[None]:
+    def _maybe_lock() -> Generator[None]:
         if free_threaded:
             yield
         else:
@@ -1104,8 +1152,21 @@ def batch_infer_morphosyntax(
                 apply_pyc_pos = (
                     pipeline is MorphosyntaxPipelineV2.CANTONESE_PYCANTONESE_POS
                 )
-                # Both decisions are fixed for the whole language group.
-                drop_terminator = _drops_appended_terminator(mode)
+
+                retry_cue_free = (
+                    partial(
+                        _reanalyze_without_cue,
+                        mode=mode,
+                        entry=entry,
+                        lock=_maybe_lock,
+                        apply_pyc_pos=apply_pyc_pos,
+                        lang=lang_code,
+                        stanza_version=stanza_version,
+                        pipeline=pipeline,
+                    )
+                    if isinstance(mode, Realigned)
+                    else None
+                )
 
                 for i, idx in enumerate(indices):
                     # Measured as it runs, so the duration this item reports is
@@ -1120,13 +1181,14 @@ def batch_infer_morphosyntax(
                     results[idx] = InferResponse.timed(
                         partial(
                             _analyzed_item,
-                            lang_items[i],
+                            i,
                             sents[i],
-                            drop_terminator=drop_terminator,
+                            mode=mode,
                             apply_pyc_pos=apply_pyc_pos,
                             lang=lang_code,
                             stanza_version=stanza_version,
                             pipeline=pipeline,
+                            retry_cue_free=retry_cue_free,
                         )
                     )
         except Exception as e:

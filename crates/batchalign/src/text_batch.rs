@@ -336,11 +336,12 @@ pub(crate) struct TextBatchFileResult {
     pub filename: DisplayPath,
     /// File-local workflow outcome.
     ///
-    /// The success side is a [`PostValidated`] proof, not a bare string: the
+    /// The success side carries a [`PostValidated`] proof and analysis report,
+    /// not a bare string: the
     /// writer (`execution::text_io::write_text_results`) reads this field, so
     /// output that has not passed the post-validation gate has no route to
     /// disk.
-    pub result: Result<PostValidated, TextWorkflowFileError>,
+    pub result: Result<crate::morphosyntax::report::MorphosyntaxOutput, TextWorkflowFileError>,
 }
 
 /// Cross-file outputs for one text workflow family.
@@ -353,11 +354,14 @@ impl TextBatchFileResult {
     /// is to hold evidence that its output passed the post-validation gate
     /// (or that the command left the document untouched). See
     /// [`PostValidated`] for the full enumeration of routes to that proof.
-    pub(crate) fn ok(filename: impl Into<DisplayPath>, output: PostValidated) -> Self {
+    pub(crate) fn ok(
+        filename: impl Into<DisplayPath>,
+        output: impl Into<crate::morphosyntax::report::MorphosyntaxOutput>,
+    ) -> Self {
         Self {
             stamp: FileStampOutcome::Unrecorded,
             filename: filename.into(),
-            result: Ok(output),
+            result: Ok(output.into()),
         }
     }
 
@@ -371,7 +375,7 @@ impl TextBatchFileResult {
         Self {
             stamp,
             filename: filename.into(),
-            result: Ok(output),
+            result: Ok(output.into()),
         }
     }
 

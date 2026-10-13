@@ -355,8 +355,88 @@ fn budget_admission_precedes_graph_construction() {
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &a)];
     assert!(matches!(
         LocalInterleaving::observe(&turns, &reference, MatchMode::Exact),
-        Err(LocalInterleavingRefusal::WorkBudgetExceeded)
+        Err(LocalInterleavingRefusal::MemoryBudgetExceeded)
     ));
+}
+
+#[test]
+fn long_banded_dialogue_preserves_omissions_insertions_and_ambiguity() {
+    let payload: Vec<Vec<String>> = (0..280)
+        .map(|turn| {
+            (0..10)
+                .map(|word| format!("lexical{}", turn * 10 + word))
+                .collect()
+        })
+        .collect();
+    let turns: Vec<_> = payload
+        .iter()
+        .enumerate()
+        .map(|(i, words)| SpeakerTurn::new(if i % 2 == 0 { "A" } else { "B" }, words))
+        .collect();
+    let original: Vec<_> = payload.iter().flatten().cloned().collect();
+    for missing in [
+        vec![],
+        vec![0, 1, 2],
+        vec![2797, 2798, 2799],
+        vec![10, 700, 1400, 2100],
+    ] {
+        for inserted in [false, true] {
+            let mut reference = Vec::new();
+            let mut expected = Vec::new();
+            for (i, word) in original.iter().enumerate() {
+                if inserted && i % 101 == 0 {
+                    reference.push("noise".into());
+                }
+                if missing.contains(&i) {
+                    expected.push(None);
+                } else {
+                    expected.push(Some(reference.len()));
+                    reference.push(word.clone());
+                }
+            }
+            let analysis =
+                LocalInterleaving::observe(&turns, &reference, MatchMode::Exact).unwrap();
+            assert_eq!(analysis.matched_words(), original.len() - missing.len());
+            for (word, reference) in analysis.words().zip(expected) {
+                assert_eq!(word.can_be_missing(), reference.is_none());
+                assert_eq!(
+                    word.common().map(|m| m.matched().reference_index()),
+                    reference
+                );
+            }
+        }
+    }
+    // A narrow band must not turn repetitions into unjustified common matches.
+    let repeated = vec![vec!["same".into(); 10]; 280];
+    let turns: Vec<_> = repeated
+        .iter()
+        .enumerate()
+        .map(|(i, words)| SpeakerTurn::new(if i % 2 == 0 { "A" } else { "B" }, words))
+        .collect();
+    let reference = vec!["same".into(); 2799];
+    let analysis = LocalInterleaving::observe(&turns, &reference, MatchMode::Exact).unwrap();
+    assert_eq!(analysis.matched_words(), 2799);
+    assert!(
+        analysis
+            .words()
+            .all(|word| word.can_be_missing() && word.common().is_none())
+    );
+}
+
+#[test]
+fn band_uses_the_same_case_and_fuzzy_relation_as_matching() {
+    let a = words("HELLO world");
+    let b = words("elephant");
+    let reference = words("hello world elephant");
+    let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
+    for mode in [
+        MatchMode::CaseInsensitive,
+        MatchMode::Fuzzy { threshold: 0.8 },
+    ] {
+        let analysis = LocalInterleaving::observe(&turns, &reference, mode).unwrap();
+        assert_eq!(analysis.matched_words(), 3);
+        assert!(analysis.words().all(|word| word.common().is_some()));
+    }
 }
 
 #[test]
@@ -396,9 +476,9 @@ fn ordinary_following_monologues_are_not_implicitly_one_overlap_episode() {
         1,
         "only the adjacent turn is a local unmarked hypothesis"
     );
-    let budget = Budget::admit(&turns, 201).expect("linear source size");
+    let nodes = Budget::nodes(&turns).expect("linear source size");
     assert!(
-        budget.nodes < 250,
+        nodes < 250,
         "ordinary continuation cannot explode the source graph"
     );
 }

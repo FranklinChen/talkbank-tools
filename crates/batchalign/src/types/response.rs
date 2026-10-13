@@ -588,11 +588,68 @@ impl OptionalStage {
     }
 }
 
+/// Which timing-recovery attempt a failure belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum UtrPass {
+    /// Recovery before the first forced-alignment attempt.
+    Initial,
+    /// The single recovery opportunity before an FA worker retry.
+    Fallback,
+}
+
+impl UtrPass {
+    /// Stable name used by the wire record, provenance and presentation.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
 /// Requested work a written document does not carry, and why.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputShortfallRecord {
+    /// A particular timing-recovery attempt was unavailable. A later pass may
+    /// have contributed timing; this record does not invalidate that evidence.
+    UtrUnavailable {
+        /// Selected backend, not an engine claimed to have produced timing.
+        engine: String,
+        /// Which attempt failed; initial and fallback failures remain distinct.
+        pass: UtrPass,
+        /// Typed control-plane cause, also recorded in the CHAT stamp.
+        category: FailureCategory,
+        /// Bounded explanatory detail. Raw provider text is never stamp syntax.
+        detail: String,
+    },
+    /// Morphology was retained/written, but its complete provenance could not
+    /// be reconstructed. Original records remain in CHAT as evidence.
+    MorphologyProvenanceIncomplete {
+        /// First metadata defect, bounded independently of retained evidence.
+        detail: String,
+    },
+    /// Primary injection could not locate secondary words safely for dispatch.
+    SecondaryMorphologyUnplaced {
+        /// Number of affected utterances.
+        utterances: u64,
+        /// Secondary words not dispatched.
+        words: u64,
+        /// Bounded utterance locations; exact morphology positions are unknown.
+        first_utterances: Vec<SecondaryMorphologyUnplacedUtterance>,
+    },
+    /// Secondary morphology retained placeholders for requested spans.
+    SecondaryMorphologyIncomplete {
+        /// Number of spans whose requested analysis was not installed.
+        spans: u64,
+        /// Number of morphology positions in those spans.
+        words: u64,
+        /// Transcript-ordered, bounded examples with producer causes.
+        first_spans: Vec<SecondaryMorphologyFailure>,
+    },
     /// The stage requires an admitted document, and the generated output was
     /// diagnosed, so the stage did not run.
     StageSkipped {
@@ -633,6 +690,82 @@ pub enum OutputShortfallRecord {
         /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
         first_untimed: Vec<UntimedUtteranceRecord>,
     },
+}
+
+/// A primary-injection failure before a secondary span could be planned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct SecondaryMorphologyUnplacedUtterance {
+    /// One-based utterance ordinal.
+    pub utterance: u64,
+    /// Secondary words left as placeholders.
+    pub words: u64,
+    /// Typed extraction boundary.
+    pub cause: SecondaryExtractionFailure,
+    /// Bounded producer explanation.
+    pub detail: String,
+}
+
+/// Why secondary positions could not be established from primary injection.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SecondaryExtractionFailure {
+    /// Primary analysis does not align with the words.
+    Alignment,
+    /// Text and analysis tokenization disagree.
+    TokenizationDisagrees,
+    /// A secondary word became multiple morphology items.
+    SplitWord,
+    /// An analysis word has no morphology-item address.
+    UnmappedWord,
+}
+
+/// Address of a secondary-language span in the post-injection document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct SecondaryMorphologySpan {
+    /// One-based utterance ordinal, not a physical text line.
+    pub utterance: u64,
+    /// One-based morphology-item position within that utterance.
+    pub first_word: u64,
+    /// Morphology items in the span, not expanded clitic chunks.
+    pub words: u64,
+    /// Requested CHAT language code.
+    pub language: String,
+}
+
+/// Which producer boundary could not supply secondary morphology.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SecondaryMorphologyFailureKind {
+    /// The requested code cannot be dispatched.
+    InvalidLanguage,
+    /// No runtime language capability registry was available.
+    RegistryUnavailable,
+    /// Inference failed after its normal retry handling.
+    Worker,
+    /// Responses could not be paired with the requested spans.
+    ResponseCount,
+    /// No usable sentence was returned.
+    EmptyAnalysis,
+    /// Secondary analysis could not be merged with the planned span.
+    Merge,
+    /// The final coordinated splice refused or rolled back.
+    Splice,
+}
+
+/// One secondary span's failure, distinct from an unsupported-language exclusion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct SecondaryMorphologyFailure {
+    /// Where the retained placeholders belong.
+    pub span: SecondaryMorphologySpan,
+    /// Typed producer boundary.
+    pub cause: SecondaryMorphologyFailureKind,
+    /// Bounded explanation from that boundary.
+    pub detail: String,
 }
 
 /// One utterance forced alignment left with untimed words.
@@ -678,10 +811,10 @@ pub enum UntimedCauseRecord {
     },
 }
 
-/// Part of the input a command left out of its work on purpose, because the
-/// transcript asks for it by a convention with a recorded ruling.
+/// Part of the input a command left out under its documented scope policy:
+/// a transcript convention, or an explicitly unsupported secondary language.
 ///
-/// Information, never a shortfall: the command did what the transcript asks,
+/// Information, never a shortfall: the command stayed within that scope,
 /// so an exclusion does not make the file diagnosed, and a file whose only
 /// untimed utterances are exclusions is clean. Reported beside the written
 /// output, on a `done` file as on a `diagnosed` one
@@ -691,6 +824,15 @@ pub enum UntimedCauseRecord {
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputExclusionRecord {
+    /// The runtime registry explicitly lacks morphology for these languages.
+    UnsupportedSecondaryMorphology {
+        /// Number of spans excluded.
+        spans: u64,
+        /// Number of morphology positions excluded.
+        words: u64,
+        /// Transcript-ordered examples, bounded like output diagnostics.
+        first_spans: Vec<SecondaryMorphologySpan>,
+    },
     /// Forced alignment did not look for these utterances in the recording,
     /// because the transcript marks them as not speech in it (a
     /// `[+ diary]` note). Their words are written untimed; a bullet the
@@ -723,6 +865,10 @@ pub struct ExcludedUtteranceRecord {
 impl std::fmt::Display for OutputExclusionRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedSecondaryMorphology { spans, words, .. } => write!(
+                f,
+                "secondary morphology excluded: {spans} span(s), {words} words in unsupported languages; L2 placeholders retained"
+            ),
             Self::NotInRecording {
                 excluded_utterances,
                 excluded_words,
@@ -821,6 +967,56 @@ impl std::fmt::Display for UntimedCauseRecord {
 impl std::fmt::Display for OutputShortfallRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UtrUnavailable {
+                engine,
+                pass,
+                category,
+                detail,
+            } => write!(
+                f,
+                "UTR {} pass unavailable ({engine}, {category}): {detail}; CHAT and available timing retained",
+                pass.name()
+            ),
+            Self::MorphologyProvenanceIncomplete { detail } => write!(
+                f,
+                "morphology provenance incomplete: {detail}; morphology and original records retained"
+            ),
+            Self::SecondaryMorphologyUnplaced {
+                utterances,
+                words,
+                first_utterances,
+            } => {
+                write!(
+                    f,
+                    "secondary morphology not dispatched: {words} words in {utterances} utterance(s) could not be placed"
+                )?;
+                if let Some(first) = first_utterances.first() {
+                    write!(
+                        f,
+                        " (first: utterance {}: {})",
+                        first.utterance, first.detail
+                    )?;
+                }
+                Ok(())
+            }
+            Self::SecondaryMorphologyIncomplete {
+                spans,
+                words,
+                first_spans,
+            } => {
+                write!(
+                    f,
+                    "secondary morphology incomplete: {spans} span(s), {words} words retain L2 placeholders"
+                )?;
+                if let Some(first) = first_spans.first() {
+                    write!(
+                        f,
+                        " (first: utterance {}, {}: {})",
+                        first.span.utterance, first.span.language, first.detail
+                    )?;
+                }
+                Ok(())
+            }
             Self::StageSkipped { stage } => write!(
                 f,
                 "skipped {}: it requires an admitted document, and the generated \

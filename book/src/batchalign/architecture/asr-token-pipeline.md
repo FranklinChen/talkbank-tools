@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-06 23:58 EDT
+**Last updated:** 2026-10-09 15:48 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -16,6 +16,19 @@ dedicated newtype that encodes what transformations the text has undergone.
 > [Retokenization, Overview](../reference/retokenization-overview.md).
 
 ## Segmentation admission travels with the ASR plan
+
+Whisper generation and forced alignment share `LexicalFrameAlignment` in
+`batchalign-fa-core`, exposed through PyO3 as `whisper_lexical_frame_indices`.
+After excluding decoder conditioning and padded audio, both callers normalize
+and filter their attention as before. The shared operation uses open-begin,
+fixed-end DTW: an audio prefix may remain unassigned, but every supplied label
+row is covered in order and the path ends at the final observed frame. Finite
+f32 costs accumulate in f64; ties choose diagonal, then the text axis. Invalid
+shapes and non-finite costs are refused at the native boundary. This is a path
+geometry contract, not a silence detector or a claim of acoustic accuracy.
+Repeated labels are not deduplicated. Existing terminal-token handling stays
+with each caller. ASR and FA cache identities distinguish these outputs from
+closed-begin alignment outputs.
 
 `AdmittedTranscribePlan<P>` owns the ASR plan and its segmentation admission.
 The constructor resolves a requested language before inference, records a
@@ -279,6 +292,26 @@ different type with the same representation, so neither can be passed where
 the other belongs. What a single value cannot carry, that an end does not
 precede its start, is still checked by the consumer that needs it (the Rev
 evidence admission, legacy replay, `MonotoneChunkSpans`).
+
+**Whisper windows retain source ownership.** The managed Python route uses
+`WindowOwnedWhisperPipeline` to decode each generated window independently,
+before any cross-window text matching. Generation, batching, model weights and
+timestamp extraction remain unchanged. `WhisperObservationsV2` carries either
+the native/legacy unwindowed list or an admitted `WhisperWindowsV2` sequence;
+it never pairs window metadata with a second, already-merged word list.
+Sample offsets, lengths and context widths establish contiguous owned interiors.
+The Python adapter also checks that the sequence covers the prepared waveform.
+
+Rust reconciles these observations before monotone fitting. Equal text is a
+duplicate candidate only when both complete spans lie within shared source
+audio and intersect one another. Disjoint repetitions and words with missing
+timestamps are retained. Multiple or crossing matches refuse the response as
+ambiguous instead of choosing a deletion. Shared observations anchor the
+remaining word order, including untimed words between anchors. This is a
+conservative observation rule, not proof that model timestamps are acoustically
+correct. The Whisper UTR namespace `utr-asr-owned-windows-v4` excludes all
+earlier, already-merged cache evidence. The frozen direct Python compatibility
+helper explicitly selects the old observation mode; managed inference does not.
 
 **What crosses the boundary at all.** `py_to_json_value`
 (`crates/batchalign-pyo3/src/py_json_bridge.rs`) dispatches on EXACT Python

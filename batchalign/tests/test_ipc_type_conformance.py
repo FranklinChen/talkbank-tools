@@ -198,6 +198,12 @@ class TestBatchItemConformance:
 class TestWorkerV2Conformance:
     """Verify selected V2 protocol types match Rust schemas."""
 
+    def test_whisper_window_ownership(self) -> None:
+        from batchalign.worker._types_v2 import WhisperWindowsV2, WhisperWindowV2
+
+        for model in (WhisperWindowV2, WhisperWindowsV2):
+            _assert_fields_match(_load_schema("worker_v2", model.__name__), model)
+
     def test_execute_request(self) -> None:
         from batchalign.worker._types_v2 import ExecuteRequestV2
 
@@ -325,6 +331,18 @@ class TestWorkerV2Conformance:
         _assert_fields_match(
             schema, ForcedAlignmentRequestV2, known_extra_python=frozenset({"kind"})
         )
+
+    def test_whisper_attention_capture(self) -> None:
+        from batchalign.worker._types_v2 import (
+            WhisperAttentionCaptureReceiptV2,
+            WhisperAttentionCaptureRequestV2,
+        )
+
+        for model in (
+            WhisperAttentionCaptureRequestV2,
+            WhisperAttentionCaptureReceiptV2,
+        ):
+            _assert_fields_match(_load_schema("worker_v2", model.__name__), model)
 
     def test_asr_request(self) -> None:
         from batchalign.worker._types_v2 import AsrRequestV2

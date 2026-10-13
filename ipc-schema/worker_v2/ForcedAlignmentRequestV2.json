@@ -4,6 +4,17 @@
   "description": "V2 forced-alignment request payload.",
   "type": "object",
   "properties": {
+    "attention_capture": {
+      "description": "Opt-in file-backed diagnostic capture, supported only by Whisper.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WhisperAttentionCaptureRequestV2"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "audio_ref_id": {
       "description": "Reference to the prepared audio span.",
       "$ref": "#/$defs/WorkerArtifactIdV2"
@@ -73,8 +84,28 @@
         }
       ]
     },
+    "WhisperAttentionCaptureRequestV2": {
+      "description": "A request-bound destination for a new diagnostic SQLite artifact.",
+      "type": "object",
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/WorkerArtifactPathV2"
+        },
+        "semantic_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination",
+        "semantic_key"
+      ]
+    },
     "WorkerArtifactIdV2": {
       "description": "Stable identifier for one prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerArtifactPathV2": {
+      "description": "Filesystem path to a prepared worker artifact.",
       "type": "string"
     }
   }

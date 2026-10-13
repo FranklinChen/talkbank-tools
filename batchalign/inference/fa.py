@@ -18,7 +18,7 @@ from batchalign.inference._domain_types import (
     SampleRate,
     TimestampMs,
 )
-from batchalign.inference.types import Wave2VecWordAlignment
+from batchalign.inference.types import Wave2VecWordAlignment, WhisperModelIdentity
 
 if TYPE_CHECKING:
     from transformers import WhisperProcessor
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         Wave2VecFAResult,
         WhisperFAHandle,
     )
+    from batchalign.inference.whisper_attention import WhisperAttentionCapture
 
 
 L = logging.getLogger("batchalign.worker")
@@ -89,7 +90,26 @@ class Wave2VecIndexedResponse(BaseModel):
 
 # Namespace the callback's acoustic-window algorithm, not only its checkpoint.
 # Old padded-grid token evidence must not enter this implementation's cache.
-WHISPER_FA_ENGINE_ID = "whisper-fa-large-v2-lexical-window-v2"
+WHISPER_FA_ENGINE_ID = "whisper-fa-large-v2-open-begin-v3"
+
+
+def _resolve_whisper_identity(model: str) -> WhisperModelIdentity | None:
+    """Resolve one small config artifact before loading that exact hub revision.
+
+    Local custom directories remain usable without claiming a hub identity.
+    Do not resolve the symlink: the snapshot directory, not its blob, names
+    the commit. This does not depend on private Transformers config fields.
+    """
+    from pathlib import Path
+
+    from huggingface_hub import hf_hub_download
+
+    if Path(model).is_dir():
+        return None
+    config = Path(hf_hub_download(model, "config.json"))
+    if config.parent.parent.name != "snapshots":
+        raise ValueError("Whisper config did not resolve to a hub snapshot")
+    return WhisperModelIdentity(model, config.parent.name)
 
 
 def load_whisper_fa(
@@ -125,18 +145,21 @@ def load_whisper_fa(
         model, kind="forced alignment", artifacts=HF_ARTIFACTS_WHISPER
     )
 
+    identity = _resolve_whisper_identity(model)
+    revision = identity.revision if identity is not None else None
     whisper_model = WhisperForConditionalGeneration.from_pretrained(
-        model, attn_implementation="eager", torch_dtype=torch_dtype
+        model, revision=revision, attn_implementation="eager", torch_dtype=torch_dtype
     )
     bind_whisper_token_timestamp_extractor(whisper_model)
     whisper_model.to(device)
     whisper_model.eval()
-    processor = WhisperProcessor.from_pretrained(model)
+    processor = WhisperProcessor.from_pretrained(model, revision=revision)
 
     return WhisperFAHandle(
         model=whisper_model,
         processor=processor,
         sample_rate=target_sample_rate,
+        model_identity=identity,
     )
 
 
@@ -222,15 +245,16 @@ def infer_whisper_fa(
     handle: WhisperFAHandle,
     audio_chunk: torch.Tensor,
     text: str,
+    *,
+    capture: WhisperAttentionCapture | None = None,
 ) -> list[tuple[str, float]]:
     """Run Whisper forced alignment. Returns [(token_text, timestamp_sec), ...]."""
     import torch
     from transformers.models.whisper.generation_whisper import (
-        _dynamic_time_warping as dtw,
-    )
-    from transformers.models.whisper.generation_whisper import (
         _median_filter as median_filter,
     )
+
+    from batchalign_core import whisper_lexical_frame_indices
 
     device = next(handle.model.parameters()).device
 
@@ -271,9 +295,31 @@ def infer_whisper_fa(
     )
     matrix = weights.mean(dim=0)
 
-    text_idx, time_idx = dtw(-matrix)
-    jumps = np.pad(np.diff(text_idx), (1, 0), constant_values=1).astype(bool)
-    return window.timed_tokens(handle.processor, text_idx[jumps], time_idx[jumps])
+    indices = np.asarray(
+        whisper_lexical_frame_indices(-matrix.float().numpy()), dtype=np.int64
+    )
+    result = window.timed_tokens(handle.processor, np.arange(matrix.shape[0]), indices)
+    if capture is not None:
+        identity = handle.model_identity
+        if identity is None:
+            raise ValueError("attention capture requires a resolved model identity")
+        capture.record(
+            token_ids=tokens.tolist(),
+            token_texts=[handle.processor.decode(token) for token in tokens],
+            prefix_length=window._prefix_length,
+            heads=[
+                (head[0], head[1])
+                for head in handle.model.generation_config.alignment_heads
+            ],
+            raw_attention=window._weights.float().numpy(),
+            costs=-matrix.float().numpy(),
+            row_entries=indices,
+            hop_length=handle.processor.feature_extractor.hop_length,
+            median_width=handle.model.config.median_filter_width,
+            model_id=identity.model_id,
+            model_revision=identity.revision,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
