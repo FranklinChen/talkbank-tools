@@ -1,7 +1,7 @@
 # eval
 
 **Status:** Current
-**Last updated:** 2026-10-06 23:37 EDT
+**Last updated:** 2026-10-14 10:48 EDT
 
 `batchalign3 eval` contains offline evaluators. They consume retained artifacts
 and never submit ordinary processing jobs.
@@ -39,7 +39,12 @@ nonpositive timing proposal.
 Schema 5 distinguishes `interior_only`: common-to-every-optimum words remain
 anchor evidence, but an unresolved first or last word prevents a whole-utterance
 timing proposal. `missing_endpoints` records `first`, `last` or `both`.
-The selected path remains inspectable in either state. Retained schema 4
+In schema 11 the selected path is separately bounded: `inspection_refusal`
+replaces `matches` when diagnostic work or score storage is refused. Admitted
+common matches and timing proposals remain available independently. With no
+admitted match and unavailable inspection, `uninspected` does not claim lexical
+absence or acoustic failure. Ordinary completed paths keep their old fields.
+Retained schema 4
 reports may contain partial-word hulls; those hulls do not prove utterance
 boundaries. This is research evidence, not permission to overwrite main-tier or
 `%wor` timing, and it never generates `%xalign`.

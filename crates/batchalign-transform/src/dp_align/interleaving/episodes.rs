@@ -10,7 +10,10 @@ use super::{Alignable, FuzzyComparison, MatchMode, PreparedFuzzyWord, WordEviden
 use crate::dp_align::control::{Uninterrupted, WorkControl, uninterrupted};
 
 mod band;
-use band::Band;
+use band::{Band, ForwardScores};
+mod packed;
+pub use packed::{PackedSearchCost, PackedSearchStage, PackedSearchStatus};
+mod projection;
 
 const WORK_CELLS: usize = 64_000_000;
 const SCORE_CELLS: usize = 2_097_152;
@@ -53,9 +56,39 @@ impl<'source> SpeakerTurn<'source> {
 
 /// Bounded analysis refusal, never an assertion of absence or ambiguity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalInterleavingWorkPhase {
+    /// Checked graph-size arithmetic overflowed before graph construction.
+    GraphShape,
+    /// Constructing the canonical-order feasible score is too expensive.
+    FeasibleWitness,
+    /// The proven score bound still admits too many source/reference cells.
+    BandedSearch,
+    /// Complete packed graph passes, reconstruction and edge observation.
+    PackedSearch,
+}
+
+impl LocalInterleavingWorkPhase {
+    /// Stable diagnostic spelling, not a correspondence certificate.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::GraphShape => "graph_shape",
+            Self::FeasibleWitness => "feasible_witness",
+            Self::BandedSearch => "banded_search",
+            Self::PackedSearch => "packed_search",
+        }
+    }
+}
+
+/// Bounded analysis refusal, never an assertion of absence or ambiguity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalInterleavingRefusal {
     /// Feasible-witness work plus admitted source-DAG/reference cells exceed the limit.
-    WorkBudgetExceeded,
+    WorkBudgetExceeded {
+        /// Which admission stage exceeded its budget.
+        phase: LocalInterleavingWorkPhase,
+        /// Required work known when admission stopped, saturated on overflow.
+        required_at_least: usize,
+    },
     /// Checkpoints and one reconstructed block exceed the score-memory limit.
     MemoryBudgetExceeded,
     /// The population of possible addressed matches exceeds its limit.
@@ -64,11 +97,12 @@ pub enum LocalInterleavingRefusal {
 
 impl LocalInterleavingRefusal {
     /// The production limit the refused budget enforces, in its own unit:
-    /// witness work plus banded source/reference cells, retained score cells, or
+    /// witness scalar cells/packed-word passes plus banded source/reference
+    /// cells, retained score cells, or
     /// distinct addressed candidate matches.
     pub fn limit(self) -> usize {
         match self {
-            Self::WorkBudgetExceeded => WORK_CELLS,
+            Self::WorkBudgetExceeded { .. } => WORK_CELLS,
             Self::MemoryBudgetExceeded => SCORE_CELLS,
             Self::CandidateBudgetExceeded => CANDIDATES,
         }
@@ -308,108 +342,10 @@ impl<'source> LocalInterleaving<'source> {
         mode: MatchMode,
         control: &C,
     ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
-        control.check()?;
-        let nodes = match Budget::nodes(turns) {
-            Ok(nodes) => nodes,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
-        let (graph, addresses) = Graph::of(turns, nodes);
-        control.check()?;
-        let source: Vec<_> = addresses
-            .iter()
-            .map(|a| turns[a.utterance].words[a.word].as_str())
-            .collect();
-        let relation = Relation::new(source, reference, mode);
-        let band = match Band::admit(&graph, &relation, addresses.len(), reference.len(), control)?
-        {
-            Ok(band) => band,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
-        let mut row = band.initial();
-        let mut checkpoints = vec![row.clone()];
-        for k in 0..reference.len() {
-            control.check()?;
-            row = band.forward(&row, k, &relation);
-            if (k + 1) % band.block == 0 {
-                checkpoints.push(row.clone());
-            }
+        match projection::SearchProjection::admit(turns, reference, mode, control)? {
+            Ok(projection) => projection.observe(control),
+            Err(refusal) => Ok(Err(refusal)),
         }
-        let optimum = row.get(graph.rank[graph.end]);
-        let mut words = addresses
-            .iter()
-            .map(|_| WordEvidence {
-                candidates: Vec::new(),
-                can_be_missing: false,
-            })
-            .collect::<Vec<_>>();
-        let mut backward = band.terminal();
-        band.observe_edges(&row, &backward, None, &relation, optimum, &mut words);
-        let mut candidate_count = 0usize;
-        let mut end = reference.len();
-        // Backward scores prove all optimal correspondences. Traceback uses
-        // the same source graph and retained forward checkpoints, never an
-        // independent monotonic rematch.
-        while end > 0 {
-            let start = (end - 1) / band.block * band.block;
-            let mut block = Vec::with_capacity(end - start + 1);
-            block.push(checkpoints[start / band.block].clone());
-            for k in start..end {
-                control.check()?;
-                block.push(band.forward(&block[k - start], k, &relation));
-            }
-            for k in (start..end).rev() {
-                control.check()?;
-                let next = backward;
-                backward = band.backward(&next, k, &relation);
-                candidate_count += band.observe_edges(
-                    &block[k - start],
-                    &backward,
-                    Some((&next, k)),
-                    &relation,
-                    optimum,
-                    &mut words,
-                );
-                if candidate_count > CANDIDATES {
-                    return Ok(Err(LocalInterleavingRefusal::CandidateBudgetExceeded));
-                }
-            }
-            end = start;
-        }
-        for word in &mut words {
-            word.candidates.reverse();
-        }
-        // Common proof does not depend on traceback. Select one optimum using
-        // the retained forward checkpoints, recomputing only a bounded block.
-        let selected = band.traceback(
-            &checkpoints,
-            band.block,
-            reference.len(),
-            &relation,
-            control,
-        )?;
-        let required = words
-            .iter()
-            .enumerate()
-            .filter_map(|(index, evidence)| {
-                (!evidence.can_be_missing && !evidence.candidates.is_empty()).then_some(index)
-            })
-            .collect();
-        let search_frontiers = search_frontiers(turns)
-            .into_iter()
-            .map(|frontier| SearchFrontier {
-                before: addresses.partition_point(|a| a.utterance < frontier.before),
-                after: addresses.partition_point(|a| a.utterance < frontier.after),
-            })
-            .collect();
-        Ok(Ok(Self {
-            turns: turns.to_vec(),
-            reference,
-            addresses,
-            words,
-            selected,
-            search_frontiers,
-            required,
-        }))
     }
 
     /// Maximum matched population under the declared bounded order model.
@@ -508,7 +444,10 @@ fn search_frontiers(turns: &[SpeakerTurn<'_>]) -> Vec<SearchFrontier> {
 
 impl Budget {
     fn nodes(turns: &[SpeakerTurn<'_>]) -> Result<usize, LocalInterleavingRefusal> {
-        let refused = LocalInterleavingRefusal::WorkBudgetExceeded;
+        let refused = LocalInterleavingRefusal::WorkBudgetExceeded {
+            phase: LocalInterleavingWorkPhase::GraphShape,
+            required_at_least: usize::MAX,
+        };
         let mut nodes = turns.len().checked_add(1).ok_or(refused)?;
         for turn in turns {
             nodes = nodes

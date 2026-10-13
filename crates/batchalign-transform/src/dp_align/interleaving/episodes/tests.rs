@@ -6,7 +6,10 @@ fn words(text: &str) -> Vec<String> {
 }
 
 /// Independent legal-order and matching-assignment enumeration, not graph DP.
-fn oracle(turns: &[SpeakerTurn<'_>], reference: &[String]) -> Vec<BTreeSet<(usize, usize, usize)>> {
+pub(super) fn oracle(
+    turns: &[SpeakerTurn<'_>],
+    reference: &[String],
+) -> Vec<BTreeSet<(usize, usize, usize)>> {
     fn shuffle(a: &[Address], b: &[Address]) -> Vec<Vec<Address>> {
         if a.is_empty() {
             return vec![b.to_vec()];
@@ -356,6 +359,148 @@ fn budget_admission_precedes_graph_construction() {
     assert!(matches!(
         LocalInterleaving::observe(&turns, &reference, MatchMode::Exact),
         Err(LocalInterleavingRefusal::MemoryBudgetExceeded)
+    ));
+}
+
+#[test]
+fn unmatchable_words_do_not_force_rectangular_work() {
+    let a: Vec<_> = (0..30_000).map(|i| format!("source{i}")).collect();
+    let b = words("absent");
+    let mut reference: Vec<_> = a[..400]
+        .iter()
+        .enumerate()
+        .flat_map(|(i, word)| [word.clone(), format!("noise{i}")])
+        .collect();
+    reference.extend((800..2000).map(|i| format!("noise{i}")));
+    let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
+    let analysis = LocalInterleaving::observe(&turns, &reference, MatchMode::Exact)
+        .expect("unmatchable words must not consume joint score cells");
+    assert_eq!(analysis.matched_words(), 400);
+    assert_eq!(analysis.words().count(), 30_001);
+    for (i, word) in analysis.words().enumerate() {
+        if i < 400 {
+            assert!(!word.can_be_missing());
+            assert_eq!(word.common().unwrap().matched().reference_index(), 2 * i);
+        } else {
+            assert!(word.can_be_missing());
+            assert!(word.candidates().next().is_none());
+        }
+    }
+}
+
+#[test]
+fn projection_preserves_empty_turns_marked_runs_and_all_optimal_assignments() {
+    let a = words("drop a");
+    let b = words("b drop");
+    let absent = words("drop");
+    for reference in [
+        words("noise a b"),
+        words("b noise a"),
+        words("a a"),
+        Vec::new(),
+    ] {
+        for speakers in 0..8 {
+            for missing in 0..8 {
+                for marked in [false, true] {
+                    let turns: Vec<_> = (0..3)
+                        .map(|i| {
+                            let speaker = if speakers & (1 << i) == 0 { "A" } else { "B" };
+                            let text = if missing & (1 << i) != 0 {
+                                &absent
+                            } else if i % 2 == 0 {
+                                &a
+                            } else {
+                                &b
+                            };
+                            if marked {
+                                SpeakerTurn::overlapping_continuation(speaker, text)
+                            } else {
+                                SpeakerTurn::new(speaker, text)
+                            }
+                        })
+                        .collect();
+                    check(&turns, &reference);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn projected_evidence_lifts_original_addresses_without_selected_only_authority() {
+    let a = words("absent head repeat");
+    let b = words("gap repeat tail");
+    let reference = words("noise repeat head tail");
+    let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
+    check(&turns, &reference);
+    let analysis = LocalInterleaving::observe(&turns, &reference, MatchMode::Exact).unwrap();
+    let snapshot = analysis
+        .addresses
+        .iter()
+        .zip(analysis.words())
+        .map(|(address, word)| {
+            let text = &turns[address.utterance].words[address.word];
+            let candidates: Vec<_> = word.candidates().map(|m| m.reference_index()).collect();
+            let common = word.common().map(|m| m.matched().reference_index());
+            format!(
+                "{}:{} {text} missing={} candidates={candidates:?} common={common:?}",
+                address.utterance,
+                address.word,
+                word.can_be_missing(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(snapshot, @"
+    0:0 absent missing=true candidates=[] common=None
+    0:1 head missing=false candidates=[2] common=Some(2)
+    0:2 repeat missing=true candidates=[] common=None
+    1:0 gap missing=true candidates=[] common=None
+    1:1 repeat missing=false candidates=[1] common=Some(1)
+    1:2 tail missing=false candidates=[3] common=Some(3)
+    ");
+}
+
+#[test]
+fn projection_uses_ascii_equality_and_keeps_fuzzy_inputs() {
+    let source = words("É A absent");
+    let reference = words("noise é a");
+    let turns = [SpeakerTurn::new("A", &source)];
+    let case = LocalInterleaving::observe(&turns, &reference, MatchMode::CaseInsensitive).unwrap();
+    assert_eq!(case.matched_words(), 1);
+    assert_eq!(case.words().count(), 3);
+    assert!(case.words().next().unwrap().candidates().next().is_none());
+    assert_eq!(
+        case.words()
+            .nth(1)
+            .unwrap()
+            .common()
+            .unwrap()
+            .matched()
+            .reference_index(),
+        2
+    );
+
+    let fuzzy_source = words("cot");
+    let fuzzy_reference = words("cat");
+    let fuzzy_turns = [SpeakerTurn::new("A", &fuzzy_source)];
+    let fuzzy = LocalInterleaving::observe(
+        &fuzzy_turns,
+        &fuzzy_reference,
+        MatchMode::Fuzzy { threshold: 0.5 },
+    )
+    .unwrap();
+    assert_eq!(fuzzy.matched_words(), 1);
+    assert!(fuzzy.words().next().unwrap().common().is_some());
+}
+
+#[test]
+fn projection_refuses_excess_empty_turns_at_its_constructor() {
+    let empty = Vec::new();
+    let turns = vec![SpeakerTurn::new("A", &empty); SCORE_CELLS / 6];
+    assert!(matches!(
+        projection::SearchProjection::admit(&turns, &empty, MatchMode::Exact, &Uninterrupted),
+        Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded))
     ));
 }
 

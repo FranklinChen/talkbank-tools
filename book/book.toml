@@ -28,3 +28,6 @@ command = "python3 ../scripts/mdbook_git_dates.py"
 [output.html]
 git-repository-url = "https://github.com/FranklinChen/talkbank-tools"
 edit-url-template = "https://github.com/FranklinChen/talkbank-tools/edit/main/book/{path}"
+# Local runtime assets produced by `mdbook-mermaid@0.17.1 install book`
+# from the repository root; the preprocessor alone leaves unrendered diagrams.
+additional-js = ["mermaid.min.js", "mermaid-init.js"]

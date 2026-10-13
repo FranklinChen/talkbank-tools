@@ -95,11 +95,13 @@ pub enum MatchMode {
 mod comparison;
 pub mod control;
 mod correspondence;
+mod packed_literal;
 use control::{Uninterrupted, WorkControl, uninterrupted};
 pub mod interleaving;
 use comparison::{Alignable, FuzzyComparison, LiteralMatchMode, PreparedFuzzyWord};
 pub use correspondence::{
-    CommonCorrespondences, CorrespondenceAdmission, CorrespondenceAnalysis, CorrespondenceBudget,
+    CommonCorrespondences, CompletedInspection, CorrespondenceAdmission, CorrespondenceAnalysis,
+    CorrespondenceBudget, InspectionAdmission, InspectionBudget, InspectionLimit,
 };
 
 // ---------------------------------------------------------------------------
@@ -135,6 +137,7 @@ pub fn align_controlled<C: WorkControl + ?Sized>(
             control,
         ),
         MatchMode::Fuzzy { threshold } => {
+            control.alignment_work(payload.len().saturating_add(reference.len()))?;
             let payload: Vec<_> = payload
                 .iter()
                 .map(|word| PreparedFuzzyWord::new(word))
@@ -182,22 +185,32 @@ fn align_generic<T: Alignable, C: WorkControl + ?Sized>(
 ) -> Result<Vec<AlignResult>, C::Error> {
     control.check()?;
     // Strip common prefix
-    let prefix_len = payload
-        .iter()
-        .zip(reference.iter())
-        .take_while(|(p, r)| p.matches(r, mode))
-        .count();
+    let mut prefix_len = 0;
+    for (p, r) in payload.iter().zip(reference) {
+        control.alignment_work(1)?;
+        if !p.matches(r, mode) {
+            break;
+        }
+        prefix_len += 1;
+    }
 
     // Strip common suffix (after prefix)
-    let suffix_len = payload[prefix_len..]
+    let mut suffix_len = 0;
+    for (p, r) in payload[prefix_len..]
         .iter()
         .rev()
         .zip(reference[prefix_len..].iter().rev())
-        .take_while(|(p, r)| p.matches(r, mode))
-        .count();
+    {
+        control.alignment_work(1)?;
+        if !p.matches(r, mode) {
+            break;
+        }
+        suffix_len += 1;
+    }
 
     // Build prefix matches
-    let mut result = Vec::with_capacity(payload.len().max(reference.len()));
+    control.alignment_work(prefix_len)?;
+    let mut result = Vec::new();
     for (i, ref_item) in reference.iter().enumerate().take(prefix_len) {
         result.push(AlignResult::Match {
             key: ref_item.to_key(),
@@ -209,9 +222,9 @@ fn align_generic<T: Alignable, C: WorkControl + ?Sized>(
     // DP on the middle part only
     let mid_pay = &payload[prefix_len..payload.len() - suffix_len];
     let mid_ref = &reference[prefix_len..reference.len() - suffix_len];
-    result.extend(hirschberg(
-        mid_pay, mid_ref, prefix_len, prefix_len, mode, control,
-    )?);
+    let middle = hirschberg(mid_pay, mid_ref, prefix_len, prefix_len, mode, control)?;
+    control.alignment_work(middle.len().saturating_add(suffix_len))?;
+    result.extend(middle);
 
     // Build suffix matches
     let pay_suffix_start = payload.len() - suffix_len;
@@ -238,6 +251,7 @@ fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
 ) -> Result<Vec<AlignResult>, C::Error> {
     control.check()?;
     if reference.is_empty() {
+        control.alignment_work(payload.len())?;
         return Ok(payload
             .iter()
             .enumerate()
@@ -248,6 +262,7 @@ fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
             .collect());
     }
     if payload.is_empty() {
+        control.alignment_work(reference.len())?;
         return Ok(reference
             .iter()
             .enumerate()
@@ -258,7 +273,9 @@ fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
             .collect());
     }
 
-    if reference.len() <= 1 || payload.len() <= 1 || reference.len() * payload.len() <= SMALL_CUTOFF
+    if reference.len() <= 1
+        || payload.len() <= 1
+        || reference.len().saturating_mul(payload.len()) <= SMALL_CUTOFF
     {
         return align_small(payload, reference, pay_offset, ref_offset, mode, control);
     }
@@ -267,12 +284,17 @@ fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
     let left_ref = &reference[..mid];
     let right_ref = &reference[mid..];
 
+    // One saved forward row plus the reverse pass's two scratch rows. Drop
+    // both completed rows before recursion so this is the actual peak.
+    control.alignment_score_storage(payload.len().saturating_add(1).saturating_mul(3))?;
+
     let score_left = row_costs(left_ref, payload, mode, control)?;
     let score_right = row_costs_rev(right_ref, payload, mode, control)?;
 
     let pay_len = payload.len();
     let mut split = 0;
     let mut best = usize::MAX;
+    control.alignment_work(pay_len.saturating_add(1))?;
     for k in 0..=pay_len {
         let cost = score_left[k] + score_right[pay_len - k];
         if cost < best {
@@ -280,6 +302,8 @@ fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
             split = k;
         }
     }
+    drop(score_left);
+    drop(score_right);
 
     let mut left_result = hirschberg(
         &payload[..split],
@@ -297,6 +321,7 @@ fn hirschberg<T: Alignable, C: WorkControl + ?Sized>(
         mode,
         control,
     )?;
+    control.alignment_work(right_result.len())?;
     left_result.extend(right_result);
     Ok(left_result)
 }
@@ -313,11 +338,13 @@ fn row_costs<T: Alignable, C: WorkControl + ?Sized>(
     control: &C,
 ) -> Result<Vec<usize>, C::Error> {
     let pay_len = payload.len();
+    control.alignment_work(pay_len.saturating_add(1))?;
     let mut prev: Vec<usize> = (0..=pay_len).collect();
     let mut cur = Vec::with_capacity(pay_len + 1);
 
     for ref_item in reference.iter() {
         control.check()?;
+        control.alignment_work(pay_len.saturating_add(1))?;
         cur.clear();
         cur.push(prev[0] + COST_GAP);
         for (pay_idx, pay_item) in payload.iter().enumerate() {
@@ -343,11 +370,13 @@ fn row_costs_rev<T: Alignable, C: WorkControl + ?Sized>(
     control: &C,
 ) -> Result<Vec<usize>, C::Error> {
     let pay_len = payload.len();
+    control.alignment_work(pay_len.saturating_add(1))?;
     let mut prev: Vec<usize> = (0..=pay_len).collect();
     let mut cur = Vec::with_capacity(pay_len + 1);
 
     for ref_item in reference.iter().rev() {
         control.check()?;
+        control.alignment_work(pay_len.saturating_add(1))?;
         cur.clear();
         cur.push(prev[0] + COST_GAP);
         for (pay_idx, pay_item) in payload.iter().rev().enumerate() {
@@ -390,6 +419,9 @@ fn align_small<T: Alignable, C: WorkControl + ?Sized>(
 ) -> Result<Vec<AlignResult>, C::Error> {
     let rows = reference.len() + 1;
     let cols = payload.len() + 1;
+    let cells = rows.saturating_mul(cols);
+    control.alignment_score_storage(cells)?;
+    control.alignment_work(cells)?;
 
     // Flat table: dp[i * cols + j] instead of dp[i][j]
     let mut dp = vec![(0usize, Action::Start, 0usize, 0usize); rows * cols];
@@ -433,6 +465,11 @@ fn align_small<T: Alignable, C: WorkControl + ?Sized>(
 
     while i > 0 || j > 0 {
         let (_, action, pi, pj) = dp[idx(i, j)];
+        control.alignment_work(if matches!(action, Action::Substitution) {
+            2
+        } else {
+            1
+        })?;
         match action {
             Action::Match => {
                 output.push(AlignResult::Match {

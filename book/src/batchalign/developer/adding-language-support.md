@@ -1,7 +1,7 @@
 # Adding Support for a New Language
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:57 EDT
+**Last updated:** 2026-10-13 08:08 EDT
 
 This page is the checklist to run through when someone says "let's add
 language X." Skipping any of these checks produces silent quality bugs
@@ -77,6 +77,7 @@ pipeline is Rust-only (no Python IPC) and is NOT Stanza-gated.
 What determines whether digits get spelled out:
 
 - **CJK (`zho`/`cmn`/`jpn`/`yue`)**, **English ordinals/years/decades**,
+  **Dutch suffix ordinals**,
   and **the per-language cardinal table**: all owned by chatter's
   `talkbank_transform::num_words::expand_number` (the pinned chatter
   release; tables at `crates/talkbank-transform/data/num2lang.json` in

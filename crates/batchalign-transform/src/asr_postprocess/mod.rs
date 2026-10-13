@@ -307,10 +307,18 @@ mod integration_tests {
     /// (which validates every word for `lang`), serialize it, and assert it
     /// reparses cleanly. Returns the serialized CHAT.
     fn build_and_reparse(utterances: &[Utterance], lang: &str) -> String {
+        build_and_reparse_with_speakers(utterances, lang, &["PAR".to_string()])
+    }
+
+    fn build_and_reparse_with_speakers(
+        utterances: &[Utterance],
+        lang: &str,
+        speakers: &[String],
+    ) -> String {
         let parser = talkbank_parser::TreeSitterParser::new().unwrap();
         let desc = crate::build_chat::transcript_from_asr_utterances(
             utterances,
-            &["PAR".to_string()],
+            speakers,
             &[lang.to_string()],
             Some("clip"),
             true,
@@ -390,6 +398,83 @@ mod integration_tests {
         let utterances = process_raw_asr(&output, "yue")
             .expect("test: ASR post-processing must not refuse this input");
         build_and_reparse(&utterances, "yue");
+    }
+
+    /// Dutch expansion must preserve raw-ASR punctuation, speaker and timings.
+    #[test]
+    fn dutch_ordinals_keep_timing_speaker_and_sentence_boundary() {
+        for (token, expected) in [
+            ("29e.", "negenentwintigste"),
+            ("22de!", "tweeëntwintigste"),
+            ("101ste?", "honderdeerste"),
+            ("1000ᵉ.", "duizendste"),
+        ] {
+            let mut output = single_element(token, 1.0, 1.5);
+            output.monologues[0].speaker = SpeakerIndex(2);
+            let prepared = prepare_words_pre_expansion(&output.monologues[0].elements, "nld")
+                .expect("synthetic ASR preparation");
+            assert_eq!(prepared[0].text.as_str(), &token[..token.len() - 1]);
+            let utterances = process_raw_asr(&output, "nld").expect("synthetic ASR pipeline");
+            assert_eq!(utterances.len(), 1);
+            assert_eq!(utterances[0].speaker, SpeakerIndex(2));
+            let words = &utterances[0].words;
+            assert_eq!(words[0].text.as_str(), expected);
+            assert_eq!(
+                (words[0].start_ms, words[0].end_ms),
+                (Some(1000), Some(1500))
+            );
+            assert_eq!(words.len(), 2);
+            assert_eq!(words[1].text.as_str(), &token[token.len() - 1..]);
+            assert_eq!((words[1].start_ms, words[1].end_ms), (None, None));
+            let chat = build_and_reparse_with_speakers(
+                &utterances,
+                "nld",
+                &["PAR".to_string(), "INV".to_string(), "MOT".to_string()],
+            );
+            assert!(chat.contains(expected), "{chat}");
+        }
+    }
+
+    /// Completeness of the renderer does not replace CHAT word admission.
+    #[test]
+    fn every_dutch_ordinal_is_admitted_as_a_dutch_chat_word() {
+        let language = talkbank_model::model::LanguageCode::new("nld").unwrap();
+        for rank in 1..=1000 {
+            for suffix in ["e", "de", "ste", "ᵉ"] {
+                let token = format!("{rank}{suffix}");
+                let text = expand_number(&token, "nld");
+                assert_ne!(text, token);
+                assert!(
+                    ChatWordText::try_from_lang(&text, &language).is_ok(),
+                    "{token}: {text}"
+                );
+            }
+        }
+    }
+
+    /// Unknown per-word language must not acquire a guessed Dutch reading.
+    #[test]
+    fn dutch_ordinal_rewrite_abstains_for_code_switching_and_keeps_missing_time() {
+        let output = single_element("29e.", 1.0, 1.5);
+        let utterances = process_raw_asr(
+            &output,
+            super::AsrTextLanguage::CodeSwitched { primary: "nld" },
+        )
+        .expect("synthetic code-switched input");
+        assert_eq!(texts(&utterances[0]), ["29e", "."]);
+        assert_eq!(utterances[0].speaker, SpeakerIndex(0));
+
+        let mut untimed = single_element("29e.", 1.0, 1.5);
+        untimed.monologues[0].elements[0].ts = None;
+        untimed.monologues[0].elements[0].end_ts = None;
+        let utterances = process_raw_asr(&untimed, "nld").expect("synthetic untimed input");
+        assert_eq!(texts(&utterances[0]), ["negenentwintigste", "."]);
+        assert!(
+            utterances[0]
+                .words
+                .iter()
+                .all(|word| word.start_ms.is_none() && word.end_ms.is_none())
+        );
     }
 
     /// Real-data shape: a timed-word ASR provider (Rev-style) emitted the

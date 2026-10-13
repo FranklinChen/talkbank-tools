@@ -221,19 +221,61 @@ fn formerly_over_budget_file_recovers_fully_through_its_anchors() {
 }
 
 #[test]
+fn long_unanchored_dialogue_with_missing_end_words_recovers_proven_interior_turns() {
+    let turns = dialogue(3000, |_| false);
+    let mut tokens = heard(&turns);
+    tokens.first_mut().expect("first token").text = "absentfirst".into();
+    tokens.last_mut().expect("last token").text = "absentlast".into();
+    let mut document = chat(&turns);
+    let result = inject_utr_timing(&mut document, &tokens);
+    let recovered = bullets(&document);
+    assert_eq!(result.injected(), turns.len() - 2);
+    assert_eq!(
+        recovered[0], None,
+        "an unobserved first endpoint grants no timing"
+    );
+    assert_eq!(
+        recovered[turns.len() - 1],
+        None,
+        "an unobserved last endpoint grants no timing"
+    );
+    for (index, turn) in turns.iter().enumerate().skip(1).take(turns.len() - 2) {
+        assert_eq!(
+            recovered[index],
+            Some((turn.start_ms, turn.start_ms + 850)),
+            "turn {index}"
+        );
+    }
+}
+
+#[test]
 fn one_oversized_region_is_refused_alone_and_its_neighbours_recover() {
     // Timed anchors around small gaps at both ends, and one stretch of
-    // 1,200 untimed turns between two anchors in the middle.
-    const BIG: std::ops::Range<usize> = 3..1_203;
+    // two untimed turns whose overlap product exceeds graph memory admission.
+    // A 1,200-short-turn work-refusal fixture is now exactly searchable; do not
+    // silently turn a proof improvement into a supposed budget regression.
+    const BIG: std::ops::Range<usize> = 3..5;
     let total = BIG.end + 3;
     let timed = |index: usize| index.is_multiple_of(2) && !BIG.contains(&index);
-    let turns = dialogue(total, |index| timed(index) || index == BIG.end);
-    let mut tokens = heard(&turns);
-    // No feasible lexical witness in the large region: its exact band remains
-    // wide and must still respect the budget. Neighbours retain their evidence.
-    for token in &mut tokens[BIG.start * 3..BIG.end * 3] {
-        token.text = "unheard".into();
+    let mut turns = dialogue(total, |index| timed(index) || index == BIG.end);
+    for index in BIG.clone() {
+        turns[index].words = (0..600)
+            .map(|j| word(9_000 + (index - BIG.start) * 600 + j))
+            .collect();
     }
+    let tokens: Vec<_> = turns
+        .iter()
+        .flat_map(|turn| {
+            turn.words
+                .iter()
+                .enumerate()
+                .map(|(j, text)| AsrTimingToken {
+                    text: text.clone(),
+                    start_ms: turn.start_ms + (j * 800 / turn.words.len()) as u64,
+                    end_ms: turn.start_ms + (j * 800 / turn.words.len()) as u64 + 1,
+                })
+        })
+        .collect();
     let mut document = chat(&turns);
     let before = bullets(&document);
     let result = inject_utr_timing(&mut document, &tokens);
@@ -259,6 +301,20 @@ fn one_oversized_region_is_refused_alone_and_its_neighbours_recover() {
             } => {
                 assert!(BIG.contains(&index), "only the oversized region is refused");
                 assert_eq!(refusal.region(), refused_region);
+                if let UtrSearchBudget::InterleavingWork {
+                    limit,
+                    phase,
+                    required_at_least,
+                } = refusal.budget()
+                {
+                    let wire = serde_json::to_value(refusal.budget()).expect("budget wire");
+                    assert_eq!(wire["kind"], "interleaving_work");
+                    assert_eq!(wire["limit"], limit);
+                    assert_eq!(wire["phase"], phase);
+                    assert_eq!(wire["required_at_least"], required_at_least);
+                    assert!(required_at_least > limit);
+                    assert_eq!(phase, "banded_search");
+                }
                 assert!(matches!(
                     refusal.budget(),
                     UtrSearchBudget::InterleavingWork { .. }
@@ -306,6 +362,85 @@ fn one_oversized_region_is_refused_alone_and_its_neighbours_recover() {
         budget_decisions,
         BIG.len(),
         "each refusal is a visible decision"
+    );
+}
+
+#[test]
+fn previously_work_refused_reversed_region_is_proved_without_inventing_hints() {
+    const BIG: std::ops::Range<usize> = 3..1_203;
+    let timed = |index: usize| index.is_multiple_of(2) && !BIG.contains(&index);
+    let turns = dialogue(BIG.end + 3, |index| timed(index) || index == BIG.end);
+    let mut tokens = heard(&turns);
+    let reversed: Vec<_> = tokens[BIG.start * 3..BIG.end * 3]
+        .iter()
+        .rev()
+        .map(|token| token.text.clone())
+        .collect();
+    for (token, text) in tokens[BIG.start * 3..BIG.end * 3].iter_mut().zip(reversed) {
+        token.text = text;
+    }
+    let mut document = chat(&turns);
+    let before = bullets(&document);
+    let result = inject_utr_timing(&mut document, &tokens);
+    let after = bullets(&document);
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    assert!(!plan.utterances().iter().any(|evidence| matches!(
+        evidence,
+        UtrUtteranceAlignmentEvidence::Refused { .. }
+            | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
+    )));
+    for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+        if let Some(original) = was {
+            assert_eq!(now.as_ref(), Some(original));
+        } else if BIG.contains(&i) {
+            assert_eq!(*now, None, "no endpoint authority for turn {i}");
+        } else {
+            assert!(now.is_some(), "neighbour {i} recovered");
+        }
+    }
+}
+
+#[test]
+fn large_unmatchable_region_completes_without_budget_refusal_or_invented_timing() {
+    const BIG: std::ops::Range<usize> = 3..1_203;
+    let timed = |index: usize| index.is_multiple_of(2) && !BIG.contains(&index);
+    let turns = dialogue(BIG.end + 3, |index| timed(index) || index == BIG.end);
+    let mut tokens = heard(&turns);
+    for token in &mut tokens[BIG.start * 3..BIG.end * 3] {
+        token.text = "unheard".into();
+    }
+    let mut document = chat(&turns);
+    let before = bullets(&document);
+    let result = inject_utr_timing(&mut document, &tokens);
+    let after = bullets(&document);
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    for index in BIG.clone() {
+        assert!(matches!(
+            &plan.utterances()[index],
+            UtrUtteranceAlignmentEvidence::Unmatched {
+                alignable_words: 3,
+                ..
+            }
+        ));
+        assert_eq!(after[index], None);
+    }
+    for (index, (was, now)) in before.iter().zip(&after).enumerate() {
+        if let Some(original) = was {
+            assert_eq!(now.as_ref(), Some(original));
+        } else if !BIG.contains(&index) {
+            assert!(now.is_some(), "neighbour {index} recovers");
+        }
+    }
+    assert_eq!(result.unmatched(), BIG.len());
+    assert!(
+        !plan
+            .utterances()
+            .iter()
+            .any(|evidence| matches!(evidence, UtrUtteranceAlignmentEvidence::Refused { .. }))
     );
 }
 

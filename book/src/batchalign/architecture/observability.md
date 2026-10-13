@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-06 22:34 EDT
+**Last updated:** 2026-10-14 10:48 EDT
 
 ## Release boundary
 
@@ -273,6 +273,16 @@ correspondence. A pre-selection proof refusal is `refused` with a
 inspection path. The refusal covers that region only; a timed utterance in it
 is `retained_unsearched` (schema 9). See
 [the bounded order model](../developer/backchannel-aware-alignment.md#bounded-partial-order-correspondence-kernel).
+
+Schema 11 separates monotonic diagnostic inspection from common proof. An
+independent 64,000,000-work-unit or 1,048,576-score-cell limit produces
+`inspection_refusal` (`kind`, `limit`, `used`, `required_at_least`) rather than
+publishing a partial `matches` population. Completed common proof still supplies
+`admitted_matches`, proposals and anchors in `matched`/`interior_only` states.
+An utterance without admitted common matches is `uninspected`, not `unmatched`;
+if common proof is also refused, its existing refusal and the independent
+inspection refusal are both recorded. Caller interruption produces no completed
+observation. Ordinary completed selection retains its existing evidence fields.
 
 The diagnostic relaxation uses the entire retained ASR lexical stream for
 each pair; it does not reserve other turns' words or establish acoustic speaker

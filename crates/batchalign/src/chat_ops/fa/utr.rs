@@ -2,7 +2,8 @@
 //!
 //! When a CHAT file has a mix of timed and untimed utterances, UTR uses ASR
 //! output to recover utterance-level bullets for the untimed ones. This is a
-//! pre-pass before forced alignment, FA then operates on a fully-timed file.
+//! pre-pass before forced alignment. Recovery may remain incomplete; FA consumes
+//! admitted hints/search evidence and retains unavailable ranges explicitly.
 //!
 //! Algorithm:
 //! 0. Partition the census into anchored regions (`regions`): the bullets the
@@ -13,13 +14,15 @@
 //!    to one source census. Adjacent different-speaker turns use a joint bounded
 //!    singleton/speaker-run composition, preserving each turn's order and assigning
 //!    each ASR word at most once within the region.
-//! 2. A single-speaker region retains the cheap O(n+m) fast path: if the words are a
+//! 2. A monotonic file's region retains the cheap O(n+m) fast path: if the words are a
 //!    *uniquely embedded* exact monotonic subsequence of the region's tokens,
 //!    use that directly.
-//! 3. For that monotonic region, if the subsequence is missing or ambiguous, use one
-//!    Hirschberg DP alignment of the region's words against its tokens
+//! 3. For that monotonic region, if the subsequence is missing or ambiguous, retain a
+//!    Hirschberg selection separately from budgeted common-correspondence proof
 //!    (`dp_align::CorrespondenceAnalysis::observe`, which runs
-//!    `dp_align::align`).
+//!    `dp_align::align`). Interleaved files instead retain every optimum in a
+//!    joint speaker-episode DAG, pruned only by a relation-bound feasible score;
+//!    large literal canonical witnesses use packed LCS rows.
 //! 4. Retain selection separately from correspondences common to every optimum
 //!    of the declared order model. Only common endpoint proof permits a hint;
 //!    a complete candidate hull can bound FA search without choosing a repeat,
@@ -68,9 +71,9 @@ use evidence::UtrWordOrdinal;
 pub use evidence::{
     NonEmptyUtrWordMatches, PositiveUtrInterval, UtrAlignmentEvidence, UtrAlignmentPlan,
     UtrAlignmentStrategy, UtrAsrTokenAddress, UtrBudgetRefusal, UtrCorrespondenceRefusal,
-    UtrLexicalRelation, UtrOrderModel, UtrOverlapRecovery, UtrRegionSummary, UtrResult,
-    UtrSearchBudget, UtrTimingProposal, UtrUtteranceAlignmentEvidence, UtrUtteranceOrdinal,
-    UtrWordAddress, UtrWordMatch,
+    UtrInspectionMatches, UtrLexicalRelation, UtrOrderModel, UtrOverlapRecovery, UtrRegionSummary,
+    UtrResult, UtrSearchBudget, UtrTimingProposal, UtrUtteranceAlignmentEvidence,
+    UtrUtteranceOrdinal, UtrWordAddress, UtrWordMatch,
 };
 pub use lexical::{
     AdmittedUtrWordMatch, EndpointBoundUtrWordMatches, MissingUtrEndpoints,
@@ -124,13 +127,12 @@ pub trait UtrStrategy: Send + Sync {
 #[error("utterance timing recovery cancelled")]
 pub struct UtrCancelled;
 
-/// Global single-pass UTR strategy.
+/// Census-bound UTR strategy with one declared order model per file.
 ///
-/// Flattens all utterance words into one reference sequence and runs a single
-/// alignment pass (exact-subsequence fast path or Hirschberg DP fallback).
-/// This is the original UTR algorithm, monotonic, works well when transcript
-/// order matches audio order, but cannot correctly place `+<` overlap
-/// backchannels whose words appear at the wrong position in the global sequence.
+/// Retained bullets partition searches into anchored regions. Monotonic files
+/// use unique embedding or budgeted common-correspondence proof; interleaved
+/// files use the bounded joint speaker-episode DAG. Inspection selection never
+/// substitutes for the complete correspondence evidence that admits timing.
 pub struct GlobalUtr;
 
 pub use two_pass::{
@@ -138,7 +140,7 @@ pub use two_pass::{
     UtrMatchMode, UtrOverlapDensityThreshold,
 };
 
-/// Select the best UTR strategy for a given CHAT file.
+/// Compatibility selector based on a CHAT file's explicit overlap markers.
 ///
 /// Returns [`TwoPassOverlapUtr`] when any utterance has a `+<` lazy overlap
 /// linker or CA overlap markers (⌊), [`GlobalUtr`] otherwise. When no overlap
@@ -146,6 +148,8 @@ pub use two_pass::{
 ///
 /// When `grouping_context` is provided, the two-pass strategy uses FA group
 /// counts to detect and avoid the wider-window regression on non-English files.
+/// The managed runner instead uses its explicitly resolved strategy; this helper
+/// does not define that runner's default or change the global order model.
 pub fn select_strategy(
     chat_file: &ChatFile,
     grouping_context: Option<GroupingContext>,
@@ -319,7 +323,7 @@ pub(super) fn run_global_utr_controlled<C: WorkControl + ?Sized>(
                     &[],
                     &lexical::UtrLexicalStream::from_tokens(asr_tokens),
                     UtrMatchSelection {
-                        selected: Vec::new(),
+                        selected: Ok(Vec::new()),
                         admission: CorrespondenceProof::Complete(Vec::new()),
                         per_utterance: region
                             .searched(&utt_infos)
@@ -728,6 +732,16 @@ impl<'a> PreparedGlobalUtr<'a> {
                         "UTR plan marks an untimed utterance as retained; left untimed"
                     );
                 }
+                UtrUtteranceAlignmentEvidence::Uninspected {
+                    alignable_words,
+                    inspection_refusal,
+                    ..
+                } => {
+                    result.unmatched += 1;
+                    result.decisions.extend(decision(utt_idx,
+                        batchalign_transform::decisions::UtrStrategy::InspectionBudgetExhausted,
+                        format!("words={alignable_words} inspection_budget={inspection_refusal:?} no_admitted_correspondence; lexical_absence_not_established"), true));
+                }
                 UtrUtteranceAlignmentEvidence::Unmatched {
                     alignable_words, ..
                 }
@@ -1130,7 +1144,7 @@ fn plan_utr_alignment_controlled<'c, C: WorkControl + ?Sized>(
             payload,
             lexical,
             UtrMatchSelection {
-                selected: reference_indices.indices.into_iter().enumerate().collect(),
+                selected: Ok(reference_indices.indices.into_iter().enumerate().collect()),
                 admission: CorrespondenceProof::Complete(admitted),
                 per_utterance,
             },
@@ -1162,19 +1176,22 @@ fn plan_utr_alignment_controlled<'c, C: WorkControl + ?Sized>(
             CorrespondenceProof::BudgetExhausted(refusal)
         }
     };
-    let matched_indices = alignment
-        .selected()
-        .iter()
-        .filter_map(|item| match item {
-            dp_align::AlignResult::Match {
-                payload_idx,
-                reference_idx,
-                ..
-            } => Some((*payload_idx, *reference_idx)),
-            dp_align::AlignResult::ExtraPayload { .. }
-            | dp_align::AlignResult::ExtraReference { .. } => None,
-        })
-        .collect();
+    let matched_indices = match alignment.inspection() {
+        dp_align::InspectionAdmission::Complete(complete) => Ok(complete
+            .path()
+            .iter()
+            .filter_map(|item| match item {
+                dp_align::AlignResult::Match {
+                    payload_idx,
+                    reference_idx,
+                    ..
+                } => Some((*payload_idx, *reference_idx)),
+                dp_align::AlignResult::ExtraPayload { .. }
+                | dp_align::AlignResult::ExtraReference { .. } => None,
+            })
+            .collect()),
+        dp_align::InspectionAdmission::BudgetExhausted(refusal) => Err(*refusal),
+    };
     let mut plan = build_alignment_plan(
         UtrAlignmentStrategy::GlobalDp,
         payload,
@@ -1245,7 +1262,7 @@ fn greedy_reverse_match_indices(payload: &[String], reference: &[String]) -> Opt
 }
 
 struct UtrMatchSelection<'c> {
-    selected: Vec<(usize, usize)>,
+    selected: Result<Vec<(usize, usize)>, dp_align::InspectionBudget>,
     admission: CorrespondenceProof,
     /// What the producer knows about each searched utterance, carried with
     /// the census it describes.
@@ -1307,6 +1324,10 @@ fn build_alignment_plan<'c>(
         }
         admitted_by_utterance[matched.matched().word.utterance_index()].push(matched);
     }
+    let (selected, inspection_refusal) = match selected {
+        Ok(selected) => (selected, None),
+        Err(refusal) => (Vec::new(), Some(refusal)),
+    };
     for (payload_idx, reference_idx) in selected {
         let payload_word = &payload[payload_idx];
         by_utterance[payload_word.address.utterance_index.index()].push(asr_tokens.matched_word(
@@ -1329,7 +1350,10 @@ fn build_alignment_plan<'c>(
             let evidence = utterance_evidence(
                 UtrUtteranceOrdinal(utterance_index),
                 info,
-                std::mem::take(&mut by_utterance[utterance_index]),
+                match inspection_refusal {
+                    Some(refusal) => Err(refusal),
+                    None => Ok(std::mem::take(&mut by_utterance[utterance_index])),
+                },
                 std::mem::take(&mut admitted_by_utterance[utterance_index]),
                 refusal,
                 endpoints,
@@ -1345,14 +1369,14 @@ fn build_alignment_plan<'c>(
 fn utterance_evidence(
     utterance_index: UtrUtteranceOrdinal,
     info: &UtrUtteranceInfo,
-    matches: Vec<UtrWordMatch>,
+    matches: Result<Vec<UtrWordMatch>, dp_align::InspectionBudget>,
     admitted: Vec<AdmittedUtrWordMatch>,
     refusal: UtrCorrespondenceRefusal,
     endpoints: lexical::EndpointExtents,
     participation: GlobalUtrParticipation,
 ) -> UtrUtteranceAlignmentEvidence {
     let alignable_words = info.words.len();
-    if info.excluded_from(participation) && matches.is_empty() {
+    if info.excluded_from(participation) && matches.as_ref().map_or(true, Vec::is_empty) {
         return UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap {
             utterance_index,
             alignable_words,
@@ -1361,6 +1385,10 @@ fn utterance_evidence(
     if info.words.is_empty() {
         return UtrUtteranceAlignmentEvidence::NoAlignableWords { utterance_index };
     }
+    let (matches, inspection_refusal) = match matches {
+        Ok(matches) => (matches, None),
+        Err(refusal) => (Vec::new(), Some(refusal)),
+    };
     // A budget refusal refuses correspondence, never timing: an utterance
     // that already has its bullet keeps it and says so.
     if let (UtrCorrespondenceRefusal::BudgetExhausted(unsearched), Some(_)) =
@@ -1370,29 +1398,58 @@ fn utterance_evidence(
             utterance_index,
             alignable_words,
             unsearched,
+            inspection_refusal,
         };
     }
-    let Some(matches) = NonEmptyUtrWordMatches::from_vec(matches) else {
-        return match refusal {
-            UtrCorrespondenceRefusal::BudgetExhausted(_) => {
-                UtrUtteranceAlignmentEvidence::Refused {
+    let matches = NonEmptyUtrWordMatches::from_vec(matches);
+    let inspection = match (matches, inspection_refusal) {
+        (Some(matches), None) => evidence::UtrInspectionMatches::Selected { matches },
+        (_, Some(inspection_refusal)) => {
+            evidence::UtrInspectionMatches::BudgetExhausted { inspection_refusal }
+        }
+        (None, None) => {
+            return match refusal {
+                UtrCorrespondenceRefusal::BudgetExhausted(_) => {
+                    UtrUtteranceAlignmentEvidence::Refused {
+                        utterance_index,
+                        alignable_words,
+                        reason: refusal,
+                        inspection_refusal: None,
+                    }
+                }
+                UtrCorrespondenceRefusal::Ambiguous => UtrUtteranceAlignmentEvidence::Unmatched {
                     utterance_index,
                     alignable_words,
+                },
+            };
+        }
+    };
+    let Some(admitted_matches) = NonEmptyAdmittedUtrWordMatches::from_vec(admitted) else {
+        return match inspection {
+            evidence::UtrInspectionMatches::Selected { matches } => {
+                UtrUtteranceAlignmentEvidence::SelectedOnly {
+                    utterance_index,
+                    alignable_words,
+                    matches,
                     reason: refusal,
                 }
             }
-            UtrCorrespondenceRefusal::Ambiguous => UtrUtteranceAlignmentEvidence::Unmatched {
-                utterance_index,
-                alignable_words,
+            evidence::UtrInspectionMatches::BudgetExhausted { inspection_refusal } => match refusal
+            {
+                UtrCorrespondenceRefusal::BudgetExhausted(_) => {
+                    UtrUtteranceAlignmentEvidence::Refused {
+                        utterance_index,
+                        alignable_words,
+                        reason: refusal,
+                        inspection_refusal: Some(inspection_refusal),
+                    }
+                }
+                UtrCorrespondenceRefusal::Ambiguous => UtrUtteranceAlignmentEvidence::Uninspected {
+                    utterance_index,
+                    alignable_words,
+                    inspection_refusal,
+                },
             },
-        };
-    };
-    let Some(admitted_matches) = NonEmptyAdmittedUtrWordMatches::from_vec(admitted) else {
-        return UtrUtteranceAlignmentEvidence::SelectedOnly {
-            utterance_index,
-            alignable_words,
-            matches,
-            reason: refusal,
         };
     };
     match admitted_matches.admit_endpoints(alignable_words, endpoints) {
@@ -1401,7 +1458,7 @@ fn utterance_evidence(
             UtrUtteranceAlignmentEvidence::Matched {
                 utterance_index,
                 alignable_words,
-                matches,
+                inspection,
                 admitted_matches,
                 proposal,
             }
@@ -1412,7 +1469,7 @@ fn utterance_evidence(
         } => UtrUtteranceAlignmentEvidence::InteriorOnly {
             utterance_index,
             alignable_words,
-            matches,
+            inspection,
             admitted_matches,
             missing_endpoints: missing,
         },
@@ -2026,21 +2083,23 @@ mod tests {
             UtrUtteranceAlignmentEvidence::Matched {
                 utterance_index: UtrUtteranceOrdinal(0),
                 alignable_words: 2,
-                matches: NonEmptyUtrWordMatches {
-                    first: UtrWordMatch {
-                        word: payload[0].address,
-                        token: test_token_address(1),
-                        chat_text: "the".to_string(),
-                        asr_text: "the".to_string(),
-                        relation: UtrLexicalRelation::Exact,
-                    },
-                    rest: vec![UtrWordMatch {
-                        word: payload[1].address,
-                        token: test_token_address(2),
-                        chat_text: "cat".to_string(),
-                        asr_text: "cat".to_string(),
-                        relation: UtrLexicalRelation::Exact,
-                    }],
+                inspection: evidence::UtrInspectionMatches::Selected {
+                    matches: NonEmptyUtrWordMatches {
+                        first: UtrWordMatch {
+                            word: payload[0].address,
+                            token: test_token_address(1),
+                            chat_text: "the".to_string(),
+                            asr_text: "the".to_string(),
+                            relation: UtrLexicalRelation::Exact,
+                        },
+                        rest: vec![UtrWordMatch {
+                            word: payload[1].address,
+                            token: test_token_address(2),
+                            chat_text: "cat".to_string(),
+                            asr_text: "cat".to_string(),
+                            relation: UtrLexicalRelation::Exact,
+                        }],
+                    }
                 },
                 admitted_matches: match NonEmptyAdmittedUtrWordMatches::from_vec(
                     lexical::UtrLexicalStream::from_tokens(&asr_tokens).unique_embedding_matches(
@@ -2180,9 +2239,10 @@ mod tests {
             MatchMode::Fuzzy { threshold: 0.85 },
             GlobalUtrParticipation::AllUtterances,
         );
-        let UtrUtteranceAlignmentEvidence::Matched { matches, .. } = &plan.utterances[0] else {
+        let UtrUtteranceAlignmentEvidence::Matched { inspection, .. } = &plan.utterances[0] else {
             panic!("fuzzy plan should match the utterance");
         };
+        let matches = inspection.selected().expect("tiny inspection completes");
 
         assert!(matches!(
             matches.first.relation,

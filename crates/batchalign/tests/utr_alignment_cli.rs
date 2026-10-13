@@ -21,6 +21,50 @@ const CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Partici
 const TOKENS: &str = r#"[{"text":"hello","start_ms":100,"end_ms":300}]"#;
 
 #[test]
+fn offline_utr_reports_inspection_refusal_without_claiming_lexical_absence() {
+    let harness = CliHarness::new();
+    let chat = harness.home_dir().join("input.cha");
+    let tokens = harness.home_dir().join("tokens.json");
+    let output = harness.home_dir().join("report.json");
+    std::fs::write(&chat, CHAT).expect("CHAT");
+    let mut reference =
+        vec![serde_json::json!({"text":"noise", "start_ms":100, "end_ms":300}); 524_289];
+    reference[10]["text"] = serde_json::json!("hello");
+    reference[20]["text"] = serde_json::json!("hello");
+    std::fs::write(&tokens, serde_json::to_vec(&reference).expect("tokens")).expect("tokens");
+    harness
+        .cmd()
+        .args(["eval", "utr-alignment"])
+        .arg("--chat")
+        .arg(&chat)
+        .arg("--tokens")
+        .arg(&tokens)
+        .arg("--output")
+        .arg(&output)
+        .assert()
+        .success();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output).expect("report")).expect("JSON");
+    assert_eq!(report["schema_version"], 11);
+    let utterance = &report["plan"]["utterances"][0];
+    assert!(utterance.get("matches").is_none());
+    assert!(utterance.get("proposal").is_none());
+    insta::assert_json_snapshot!(utterance, @r###"
+    {
+      "alignable_words": 1,
+      "inspection_refusal": {
+        "kind": "score_storage",
+        "limit": 1048576,
+        "required_at_least": 1048580,
+        "used": 0
+      },
+      "status": "uninspected",
+      "utterance_index": 0
+    }
+    "###);
+}
+
+#[test]
 fn offline_utr_correspondence_separates_selected_path_from_timing_authority() {
     let harness = CliHarness::new();
     let chat = harness.home_dir().join("input.cha");
@@ -49,7 +93,7 @@ fn offline_utr_correspondence_separates_selected_path_from_timing_authority() {
         .success();
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output).expect("report")).expect("JSON");
-    assert_eq!(report["schema_version"], 10);
+    assert_eq!(report["schema_version"], 11);
     let utterance = &report["plan"]["utterances"][0];
     assert_eq!(utterance["matches"]["first"]["chat_text"], "hello");
     assert_eq!(utterance["admitted_matches"]["first"]["chat_text"], "now");
@@ -199,7 +243,7 @@ fn offline_utr_replay_checks_declared_original_name_without_debug_suffix_guessin
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output).expect("read admitted report"))
             .expect("report JSON");
-    assert_eq!(report["schema_version"], 10);
+    assert_eq!(report["schema_version"], 11);
     assert_eq!(
         report["source_name"],
         serde_json::json!({
@@ -335,7 +379,7 @@ fn offline_utr_projects_segment_words_and_retains_provider_timing() {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(output).expect("read report"))
                 .expect("report JSON");
-        assert_eq!(report["schema_version"], 10);
+        assert_eq!(report["schema_version"], 11);
         let utterances = report["plan"]["utterances"].as_array().expect("utterances");
         assert_eq!(utterances.len(), 2);
         for utterance in utterances {

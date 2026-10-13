@@ -7,6 +7,13 @@ use super::*;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
+mod witness;
+use witness::CanonicalWitness;
+mod checkpoints;
+pub(super) use checkpoints::ForwardScores;
+mod capacity;
+use capacity::ReferenceCapacity;
+
 type Score = Option<NonZeroUsize>;
 
 /// None is unreachable, not a zero score. Reachable scores store score + 1.
@@ -44,22 +51,108 @@ fn combined(a: Score, b: Score, matched: usize) -> Score {
 
 /// Owns admission and the graph binding; consumers cannot pair rows with a
 /// different depth layout or choose an unproven pruning threshold.
-pub(super) struct Band<'graph> {
+pub(super) struct Band<'graph, 'source> {
     graph: &'graph Graph,
+    relation: &'graph Relation<'source>,
     source_len: usize,
     reference_len: usize,
     feasible: usize,
     pub(super) block: usize,
+    scoring_cells: usize,
+    capacity: Option<ReferenceCapacity<'graph, 'source>>,
 }
 
-impl<'graph> Band<'graph> {
+/// A failed admission retains actual input ownership and already-paid work.
+/// Only this producer constructs it; an alternative cannot substitute inputs
+/// or forget preliminary witness/capacity costs.
+#[derive(Clone, Copy)]
+pub(super) struct RefusedBand<'graph, 'source> {
+    graph: &'graph Graph,
+    relation: &'graph Relation<'source>,
+    refusal: LocalInterleavingRefusal,
+    preparation: usize,
+    feasible: usize,
+}
+
+impl std::fmt::Debug for RefusedBand<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.refusal.fmt(f)
+    }
+}
+
+impl<'graph, 'source> RefusedBand<'graph, 'source> {
+    pub(super) fn refusal(&self) -> LocalInterleavingRefusal {
+        self.refusal
+    }
+    pub(super) fn graph(&self) -> &'graph Graph {
+        self.graph
+    }
+    pub(super) fn relation(&self) -> &'graph Relation<'source> {
+        self.relation
+    }
+    pub(super) fn preparation(&self) -> usize {
+        self.preparation
+    }
+    pub(super) fn feasible(&self) -> usize {
+        self.feasible
+    }
+    #[cfg(test)]
+    pub(super) fn testing_lower_bound(mut self, feasible: usize) -> Self {
+        assert!(feasible <= self.feasible);
+        self.feasible = feasible;
+        self
+    }
+    #[cfg(test)]
+    pub(super) fn testing(graph: &'graph Graph, relation: &'graph Relation<'source>) -> Self {
+        Self {
+            graph,
+            relation,
+            preparation: 0,
+            feasible: match relation {
+                Relation::Literal {
+                    source, reference, ..
+                } => uninterrupted(CanonicalWitness::observe(
+                    relation,
+                    source.len(),
+                    reference.len(),
+                    &Uninterrupted,
+                ))
+                .map(|witness| witness.score())
+                .unwrap_or(0),
+                Relation::Fuzzy {
+                    source, reference, ..
+                } => uninterrupted(CanonicalWitness::observe(
+                    relation,
+                    source.len(),
+                    reference.len(),
+                    &Uninterrupted,
+                ))
+                .map(|witness| witness.score())
+                .unwrap_or(0),
+            },
+            refusal: LocalInterleavingRefusal::WorkBudgetExceeded {
+                phase: LocalInterleavingWorkPhase::BandedSearch,
+                required_at_least: WORK_CELLS + 1,
+            },
+        }
+    }
+}
+
+impl<'graph, 'source> Band<'graph, 'source> {
     pub(super) fn admit<C: WorkControl + ?Sized>(
         graph: &'graph Graph,
-        relation: &Relation<'_>,
+        relation: &'graph Relation<'source>,
         source_len: usize,
         reference_len: usize,
         control: &C,
-    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
+    ) -> Result<Result<Self, RefusedBand<'graph, 'source>>, C::Error> {
+        let refused = |refusal, preparation, feasible| RefusedBand {
+            graph,
+            relation,
+            refusal,
+            preparation,
+            feasible,
+        };
         // The witness uses this exact relation, including case/fuzzy policy.
         // Prefix/suffix matches are a feasible path even for non-transitive
         // fuzzy relations; we need a lower bound, not a monotonic optimum.
@@ -78,62 +171,97 @@ impl<'graph> Band<'graph> {
         // Do not spend a quadratic witness merely to make a previously
         // affordable dense search exceed its work limit. L=0 is always a
         // feasible path and uses this same scoring implementation unpruned.
-        let (feasible, preliminary_work) = if dense_work > WORK_CELLS / 2
+        let witness = if dense_work > WORK_CELLS / 2
             && dense_work <= WORK_CELLS
             && dense_memory <= SCORE_CELLS
         {
-            (0, 0)
+            CanonicalWitness::zero(relation)
         } else {
-            match witness(relation, source_len, reference_len, control)? {
+            match CanonicalWitness::observe(relation, source_len, reference_len, control)? {
                 Ok(witness) => witness,
-                Err(refusal) => return Ok(Err(refusal)),
+                Err(refusal) => return Ok(Err(refused(refusal, 0, 0))),
             }
         };
-        let band = Self {
+        let mut band = Self {
             graph,
+            relation: witness.relation(),
             source_len,
             reference_len,
-            feasible,
+            feasible: witness.score(),
             block,
+            scoring_cells: 0,
+            capacity: None,
         };
-        let mut work = preliminary_work;
-        let mut checkpoints = 0usize;
+        let mut preparation = witness.work();
+        let (mut work, mut working_cells) = band.geometry(preparation, control)?;
+        if work > WORK_CELLS
+            && let Some(capacity) = ReferenceCapacity::observe(&witness, control)?
+        {
+            preparation = preparation.saturating_add(capacity.work());
+            band.capacity = Some(capacity);
+            (work, working_cells) = band.geometry(preparation, control)?;
+        }
+        // Admission counts the whole band without allocating/scoring it. Keep
+        // the complete required-work diagnostic, not the first over-limit row.
+        if work > WORK_CELLS {
+            return Ok(Err(refused(
+                LocalInterleavingRefusal::WorkBudgetExceeded {
+                    phase: LocalInterleavingWorkPhase::BandedSearch,
+                    required_at_least: work,
+                },
+                preparation,
+                witness.score(),
+            )));
+        }
+        // Capacity payload stays owned by this band through all recomputation.
+        band.scoring_cells = working_cells
+            .saturating_add(band.capacity.as_ref().map_or(0, ReferenceCapacity::cells));
+        if band.scoring_cells > SCORE_CELLS {
+            return Ok(Err(refused(
+                LocalInterleavingRefusal::MemoryBudgetExceeded,
+                preparation,
+                witness.score(),
+            )));
+        }
+        Ok(Ok(band))
+    }
+
+    fn geometry<C: WorkControl + ?Sized>(
+        &self,
+        preparation: usize,
+        control: &C,
+    ) -> Result<(usize, usize), C::Error> {
+        let mut work = preparation;
         let mut peak_row = 0usize;
         let mut block_cells = 0usize;
         let mut peak_block = 0usize;
-        for k in 0..=reference_len {
+        for k in 0..=self.reference_len {
             control.check()?;
-            let cells = band.slots(k).len();
+            let cells = self.slots(k).len();
             work = work.saturating_add(cells);
-            if work > WORK_CELLS {
-                return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded));
-            }
             peak_row = peak_row.max(cells);
             block_cells = block_cells.saturating_add(cells);
-            if k % block == 0 {
-                checkpoints = checkpoints.saturating_add(cells);
+            if k % self.block == 0 {
                 peak_block = peak_block.max(block_cells);
                 block_cells = cells;
             }
         }
         peak_block = peak_block.max(block_cells);
-        // Retained checkpoints, one reconstructed inclusive block, and spare
-        // forward/backward/cloned rows. Row uses one machine word per score.
-        if checkpoints
-            .saturating_add(peak_block)
-            .saturating_add(4 * peak_row)
-            > SCORE_CELLS
-        {
-            return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
-        }
-        Ok(Ok(band))
+        // Reserve dense working rows and one inclusive reconstructed block.
+        // Retained checkpoint score/index payload is admitted separately,
+        // before allocation, under this same machine-word storage limit.
+        Ok((work, peak_block.saturating_add(4 * peak_row)))
     }
 
     fn slots(&self, k: usize) -> Range<usize> {
-        let low = k.saturating_sub(self.reference_len - self.feasible);
-        let high = self
-            .source_len
-            .min(k.saturating_add(self.source_len - self.feasible));
+        let (low, high) = match &self.capacity {
+            Some(capacity) => capacity.depths(k),
+            None => (
+                k.saturating_sub(self.reference_len - self.feasible),
+                self.source_len
+                    .min(k.saturating_add(self.source_len - self.feasible)),
+            ),
+        };
         let order = &self.graph.order;
         order.partition_point(|&node| self.graph.depth[node] < low)
             ..order.partition_point(|&node| self.graph.depth[node] <= high)
@@ -155,7 +283,7 @@ impl<'graph> Band<'graph> {
         self.row(self.reference_len, NonZeroUsize::new(1))
     }
 
-    pub(super) fn forward(&self, previous: &Row, k: usize, relation: &Relation<'_>) -> Row {
+    pub(super) fn forward(&self, previous: &Row, k: usize) -> Row {
         let mut row = self.row(k + 1, None);
         for slot in row.slots() {
             row.improve(slot, previous.get(slot));
@@ -164,7 +292,7 @@ impl<'graph> Band<'graph> {
             for edge in &self.graph.incoming[self.graph.order[slot]] {
                 let from = self.graph.rank[edge.to];
                 row.improve(slot, row.get(from));
-                if edge.word.is_some_and(|word| relation.matches(word, k)) {
+                if edge.word.is_some_and(|word| self.relation.matches(word, k)) {
                     row.improve(slot, increment(previous.get(from)));
                 }
             }
@@ -172,14 +300,14 @@ impl<'graph> Band<'graph> {
         row
     }
 
-    pub(super) fn backward(&self, next: &Row, k: usize, relation: &Relation<'_>) -> Row {
+    pub(super) fn backward(&self, next: &Row, k: usize) -> Row {
         let mut row = self.row(k, None);
         for slot in row.slots().rev() {
             row.improve(slot, next.get(slot));
             for edge in &self.graph.edges[self.graph.order[slot]] {
                 let to = self.graph.rank[edge.to];
                 row.improve(slot, row.get(to));
-                if edge.word.is_some_and(|word| relation.matches(word, k)) {
+                if edge.word.is_some_and(|word| self.relation.matches(word, k)) {
                     row.improve(slot, increment(next.get(to)));
                 }
             }
@@ -192,7 +320,6 @@ impl<'graph> Band<'graph> {
         forward: &Row,
         backward: &Row,
         next: Option<(&Row, usize)>,
-        relation: &Relation<'_>,
         optimum: Score,
         words: &mut [WordEvidence],
     ) -> usize {
@@ -210,7 +337,7 @@ impl<'graph> Band<'graph> {
                     words[word].can_be_missing = true;
                 }
                 if let Some((next, k)) = next
-                    && relation.matches(word, k)
+                    && self.relation.matches(word, k)
                     && combined(Some(prefix), next.get(to), 1)
                         .is_some_and(|score| Some(score) == optimum)
                     && words[word].candidates.last() != Some(&k)
@@ -224,65 +351,6 @@ impl<'graph> Band<'graph> {
         }
         added
     }
-
-    pub(super) fn traceback<C: WorkControl + ?Sized>(
-        &self,
-        checkpoints: &[Row],
-        width: usize,
-        reference_len: usize,
-        relation: &Relation<'_>,
-        control: &C,
-    ) -> Result<Vec<Selected>, C::Error> {
-        let mut node = self.graph.end;
-        let mut k = reference_len;
-        let mut selected = Vec::new();
-        while k > 0 {
-            let start = (k - 1) / width * width;
-            let mut rows = vec![checkpoints[start / width].clone()];
-            for reference in start..k {
-                control.check()?;
-                rows.push(self.forward(&rows[reference - start], reference, relation));
-            }
-            while k > start {
-                control.check()?;
-                let current = &rows[k - start];
-                let previous = &rows[k - start - 1];
-                let score = current.get(self.graph.rank[node]);
-                debug_assert!(score.is_some());
-                if score == previous.get(self.graph.rank[node]) {
-                    k -= 1;
-                    continue;
-                }
-                let mut advanced = false;
-                for edge in &self.graph.incoming[node] {
-                    let from = self.graph.rank[edge.to];
-                    if let Some(word) = edge.word
-                        && relation.matches(word, k - 1)
-                        && increment(previous.get(from)) == score
-                    {
-                        selected.push(Selected {
-                            source: word,
-                            reference: k - 1,
-                        });
-                        node = edge.to;
-                        k -= 1;
-                        advanced = true;
-                        break;
-                    }
-                    if current.get(from) == score {
-                        node = edge.to;
-                        advanced = true;
-                        break;
-                    }
-                }
-                // The admitted band retains every optimum and its incoming
-                // edges. Rows and graph never come from an external producer.
-                debug_assert!(advanced);
-            }
-        }
-        selected.reverse();
-        Ok(selected)
-    }
 }
 
 /// Construct a feasible canonical-order path score with linear retained memory.
@@ -294,7 +362,10 @@ fn witness<C: WorkControl + ?Sized>(
     control: &C,
 ) -> Result<Result<(usize, usize), LocalInterleavingRefusal>, C::Error> {
     if m.max(n) > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded));
+        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
+            phase: LocalInterleavingWorkPhase::FeasibleWitness,
+            required_at_least: m.max(n),
+        }));
     }
     let mut prefix = 0;
     while prefix < m.min(n) && relation.matches(prefix, prefix) {
@@ -314,7 +385,10 @@ fn witness<C: WorkControl + ?Sized>(
     let b = n - prefix - suffix;
     let work = a.saturating_mul(b).saturating_add(prefix + suffix + 2);
     if work > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded));
+        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
+            phase: LocalInterleavingWorkPhase::FeasibleWitness,
+            required_at_least: work,
+        }));
     }
     if b.saturating_add(1) > SCORE_CELLS {
         return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
@@ -343,6 +417,157 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reference_multiplicity_bounds_admit_a_wide_joint_band() {
+        let payload: Vec<_> = (0..100)
+            .map(|i| vec![if i % 2 == 0 { "a" } else { "b" }.to_owned(); 10])
+            .collect();
+        let turns: Vec<_> = payload
+            .iter()
+            .enumerate()
+            .map(|(i, words)| SpeakerTurn::new(if i % 2 == 0 { "A" } else { "B" }, words))
+            .collect();
+        let reference: Vec<_> = std::iter::repeat_n("a".to_owned(), 6000)
+            .chain(payload.iter().flatten().cloned())
+            .collect();
+        let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let relation = Relation::new(
+            payload.iter().flatten().map(String::as_str).collect(),
+            &reference,
+            MatchMode::Exact,
+        );
+        let band = uninterrupted(Band::admit(&graph, &relation, 1000, 7000, &Uninterrupted))
+            .expect("word-count upper bounds fit the unchanged joint work limit");
+        assert_eq!(band.feasible, 1000);
+        assert!(band.capacity.is_some());
+        assert_eq!(
+            band.scoring_cells,
+            band.geometry(0, &Uninterrupted).unwrap().1 + band.capacity.as_ref().unwrap().cells()
+        );
+        assert!((0..=7000).map(|k| band.slots(k).len()).sum::<usize>() < WORK_CELLS);
+        let original = Band {
+            capacity: None,
+            ..band
+        };
+        assert!(original.geometry(0, &Uninterrupted).unwrap().0 > WORK_CELLS);
+    }
+
+    #[test]
+    fn capacity_pruning_preserves_all_candidates_and_missingness_on_small_joint_graphs() {
+        fn evidence(band: &Band<'_, '_>, words: usize) -> (Score, Vec<(Vec<usize>, bool)>) {
+            let mut forward = vec![band.initial()];
+            for k in 0..band.reference_len {
+                forward.push(band.forward(forward.last().unwrap(), k));
+            }
+            let optimum = forward.last().unwrap().get(band.graph.rank[band.graph.end]);
+            let mut backward = band.terminal();
+            let mut words: Vec<_> = (0..words)
+                .map(|_| WordEvidence {
+                    candidates: Vec::new(),
+                    can_be_missing: false,
+                })
+                .collect();
+            band.observe_edges(
+                forward.last().unwrap(),
+                &backward,
+                None,
+                optimum,
+                &mut words,
+            );
+            for k in (0..band.reference_len).rev() {
+                let previous = band.backward(&backward, k);
+                band.observe_edges(
+                    &forward[k],
+                    &previous,
+                    Some((&backward, k)),
+                    optimum,
+                    &mut words,
+                );
+                backward = previous;
+            }
+            (
+                optimum,
+                words
+                    .into_iter()
+                    .map(|word| (word.candidates, word.can_be_missing))
+                    .collect(),
+            )
+        }
+        for m in 0..=4 {
+            for n in 0..=4 {
+                for a in 0..1usize << m {
+                    let source: Vec<_> = (0..m)
+                        .map(|i| if a & (1 << i) == 0 { "a" } else { "b" }.to_owned())
+                        .collect();
+                    for b in 0..1usize << n {
+                        let reference: Vec<_> = (0..n)
+                            .map(|i| if b & (1 << i) == 0 { "a" } else { "b" }.to_owned())
+                            .collect();
+                        for split in 0..=m {
+                            let turns = [
+                                SpeakerTurn::new("A", &source[..split]),
+                                SpeakerTurn::new("B", &source[split..]),
+                            ];
+                            let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+                            let relation = Relation::new(
+                                source.iter().map(String::as_str).collect(),
+                                &reference,
+                                MatchMode::Exact,
+                            );
+                            let mut pruned =
+                                uninterrupted(Band::admit(&graph, &relation, m, n, &Uninterrupted))
+                                    .unwrap();
+                            // Exercise the new producer even though small graphs need no rescue.
+                            let witness = uninterrupted(CanonicalWitness::observe(
+                                &relation,
+                                m,
+                                n,
+                                &Uninterrupted,
+                            ))
+                            .unwrap();
+                            pruned.capacity =
+                                ReferenceCapacity::observe(&witness, &Uninterrupted).unwrap();
+                            let dense = Band {
+                                graph: &graph,
+                                relation: &relation,
+                                source_len: m,
+                                reference_len: n,
+                                feasible: 0,
+                                block: pruned.block,
+                                scoring_cells: 0,
+                                capacity: None,
+                            };
+                            assert_eq!(
+                                evidence(&dense, m),
+                                evidence(&pruned, m),
+                                "m={m} n={n} a={a} b={b} split={split}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_near_perfect_canonical_witness_does_not_require_quadratic_work() {
+        let payload: Vec<_> = (0..9000).map(|i| format!("word{i}")).collect();
+        let mut reference = payload.clone();
+        reference[0] = "inserted_first".to_owned();
+        reference[8999] = "inserted_last".to_owned();
+        let turns = [SpeakerTurn::new("A", &payload)];
+        let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let relation = Relation::new(
+            payload.iter().map(String::as_str).collect(),
+            &reference,
+            MatchMode::Exact,
+        );
+        let band =
+            uninterrupted(Band::admit(&graph, &relation, 9000, 9000, &Uninterrupted)).unwrap();
+        assert_eq!(band.feasible, 8998);
+        assert!((0..=9000).map(|k| band.slots(k).len()).sum::<usize>() < 50_000);
+    }
+
+    #[test]
     fn an_affordable_dense_search_does_not_pay_for_a_quadratic_witness() {
         let payload = vec!["source".to_owned(); 6000];
         let reference = vec!["other".to_owned(); 6000];
@@ -356,7 +581,31 @@ mod tests {
         let band =
             uninterrupted(Band::admit(&graph, &relation, 6000, 6000, &Uninterrupted)).unwrap();
         assert_eq!(band.feasible, 0);
+        assert!(band.capacity.is_none());
         assert_eq!(band.slots(3000).len(), 6001);
+    }
+
+    #[test]
+    fn compressible_checkpoints_fit_without_relaxing_work_or_memory_limits() {
+        let payload: Vec<_> = (0..17_000).map(|i| format!("word{i}")).collect();
+        let other = vec!["unobserved".to_owned()];
+        let reference = payload[..400].to_vec();
+        let turns = [
+            SpeakerTurn::new("A", &payload),
+            SpeakerTurn::new("B", &other),
+        ];
+        let observed = LocalInterleaving::observe(&turns, &reference, MatchMode::Exact)
+            .expect("losslessly compressed checkpoints fit the existing score budget");
+        assert_eq!(observed.matched_words(), 400);
+        for (index, word) in observed.words().enumerate() {
+            if index < 400 {
+                assert_eq!(word.common().unwrap().matched().reference_index(), index);
+                assert!(!word.can_be_missing());
+            } else {
+                assert!(word.can_be_missing());
+                assert!(word.common().is_none());
+            }
+        }
     }
 
     #[test]

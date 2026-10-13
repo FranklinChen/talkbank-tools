@@ -100,6 +100,9 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
         }
     };
     let report = UtrAlignmentReport {
+        // 11: monotonic selected-path inspection has independent work/storage
+        // caps. Refusal omits `matches`, retains admitted proof and proposals,
+        // and records `inspection_refusal`; no proved match is `uninspected`.
         // 10: a `matched` utterance's endpoint may be bounded by every
         // token it can match rather than proved by one; its proposal then
         // covers those tokens; a region lists `withdrawn_claims`, tokens
@@ -107,7 +110,7 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
         // model; `regions` records each anchored region's span and
         // algorithm; a budget refusal names its region and budget;
         // `retained_unsearched` marks a timed utterance in a refused region.
-        schema_version: 10,
+        schema_version: 11,
         build: crate::build_hash(),
         chat: InputIdentity::of(&args.chat, &chat_bytes),
         source_name: ReportedSourceName {
@@ -247,7 +250,7 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&output).expect("read report"))
                 .expect("parse report");
-        assert_eq!(report["schema_version"], 10);
+        assert_eq!(report["schema_version"], 11);
         assert_eq!(report["interleaving"], serde_json::json!([]));
         assert_eq!(
             report["source_name"],

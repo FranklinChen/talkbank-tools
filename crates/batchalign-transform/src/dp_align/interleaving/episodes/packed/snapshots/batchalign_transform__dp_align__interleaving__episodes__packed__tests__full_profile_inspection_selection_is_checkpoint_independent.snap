@@ -1,0 +1,23 @@
+---
+source: crates/batchalign-transform/src/dp_align/interleaving/episodes/packed/tests.rs
+expression: selections
+---
+[
+    [
+        "0:0",
+        "2:1",
+        "3:2",
+    ],
+    [
+        "2:1",
+        "0:2",
+        "1:3",
+        "3:4",
+    ],
+    [
+        "2:1",
+        "3:2",
+        "0:3",
+        "1:4",
+    ],
+]

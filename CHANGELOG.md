@@ -5,6 +5,54 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Dependency refresh
+
+- Pin Chatter 0.30.0's updated generated traversal and source-bound consumers
+  to an immutable source revision.
+  Kind visibility, normalized ID fields and explicit recovery are handled by
+  Chatter; this dependency update does not select different ASR/FA engines or
+  certify acoustic output.
+
+- Update proptest to 1.12 and refresh the locked Rust/Python dependency
+  graphs, including NumPy 2.5.4 and Pydantic 2.14.1. Worker wire contracts,
+  engine selection and application versions are unchanged. Dependency
+  compatibility tests do not establish acoustic-model accuracy.
+- Lock Rustls 0.23.46, addressing RUSTSEC-2026-0346 through
+  RUSTSEC-2026-0349 without changing TLS policy or ignoring advisories.
+
+### Bounded packed UTR proof and independent inspection
+
+- Long exact/case-insensitive canonical score witnesses use packed LCS rows
+  and sparse word masks instead of quadratic scalar comparisons. The witness
+  is bound to its match relation and only admits pruning; it cannot authorize
+  a correspondence or timing. Fuzzy policy and all-optimal proof are unchanged.
+- Interleaving-work refusals additionally report `phase` and
+  `required_at_least`, distinguishing graph-shape overflow, feasible-witness
+  work and banded-search work. The existing budget kind and limit remain;
+  long weak-evidence regions can still be refused rather than guessed.
+- Work-refused exact/ASCII-case-insensitive joint searches can use lossless
+  packed score profiles and checkpoints, retaining all optimal paths within
+  the existing limits. Full and score-viable profiles share one input-bound
+  proof lifecycle. Live proof blocks serve inspection traceback, and owned
+  row maxima avoid redundant suffix reductions; no heuristic window or
+  timing authority is introduced.
+- Global monotonic selected-path inspection has separate work and live-score
+  storage caps. Completed common proof and its timing proposals survive an
+  inspection refusal. Evidence reports `inspection_refusal` without `matches`;
+  `uninspected` means unavailable inspection with no admitted common match,
+  not absent recognition. Offline UTR evaluation reports use schema 11.
+- Two-pass overlap recovery computes common proof without the unused
+  selected-path inspection. Matching, endpoint admission, ambiguity and
+  retained-timing policies remain unchanged.
+
+### Dutch ordinal expansion at the ASR boundary
+
+- Adopt Chatter's bounded Dutch suffix-ordinal generation for ranks 1–1000.
+  ASR tokenization may separate trailing punctuation before expansion;
+  unsupported forms remain unchanged. Other-language and Dutch cardinal
+  policies are retained. Number expansion does not certify CHAT validity
+  or a speaker's intended pronunciation.
+
 ### Owned secondary morphology boundaries
 
 - Secondary-language batches own their CHAT spans through inference and return

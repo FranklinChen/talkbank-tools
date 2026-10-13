@@ -6,21 +6,27 @@
 //! optimal edge at its rank. Forward/backward Fenwick passes establish ranks
 //! without a quadratic-memory DP matrix. Prefix/suffix stripping is deliberately
 //! not used here: even a selected identical prefix may be ambiguous.
+//! A bounded packed-frontier route can instead prune nonoptimal literal edges
+//! before admission; it applies the same sole-optimal-edge-at-rank theorem.
 
 use std::collections::BTreeMap;
 
 use super::comparison::{Alignable, FuzzyComparison, PreparedFuzzyWord};
 use super::control::{Uninterrupted, WorkControl, uninterrupted};
+use super::packed_literal::key;
 use super::{AlignResult, MatchMode};
+mod inspection;
+mod literal;
+pub use inspection::{CompletedInspection, InspectionAdmission, InspectionBudget, InspectionLimit};
 
 const _: () = assert!(super::COST_SUB == 2 * super::COST_GAP);
 const MAX_EDGES: usize = 1_048_576;
 const MAX_FUZZY_COMPARISONS: usize = 64_000_000;
 
-/// Selected alignment and separately admitted common correspondences.
+/// Independently completed or refused inspection and common correspondence proof.
 /// Only the alignment producer can construct this paired observation.
 pub struct CorrespondenceAnalysis {
-    selected: Vec<AlignResult>,
+    inspection: InspectionAdmission,
     admission: CorrespondenceAdmission,
 }
 
@@ -31,6 +37,36 @@ pub enum CorrespondenceAdmission {
     /// No assertion of ambiguity or uniqueness: proof work was bounded.
     /// Names the bound that was reached, so a refusal can say which one.
     BudgetExhausted(CorrespondenceBudget),
+}
+
+impl CorrespondenceAdmission {
+    /// Observe only common correspondences under the production proof caps.
+    /// This producer never computes an arbitrarily selected inspection path.
+    pub fn observe(payload: &[String], reference: &[String], mode: MatchMode) -> Self {
+        uninterrupted(Self::observe_controlled(
+            payload,
+            reference,
+            mode,
+            &Uninterrupted,
+        ))
+    }
+
+    /// Interruption cannot produce completed proof or a budget-refusal result.
+    pub fn observe_controlled<C: WorkControl + ?Sized>(
+        payload: &[String],
+        reference: &[String],
+        mode: MatchMode,
+        control: &C,
+    ) -> Result<Self, C::Error> {
+        admit_controlled(
+            payload,
+            reference,
+            mode,
+            MAX_EDGES,
+            MAX_FUZZY_COMPARISONS,
+            control,
+        )
+    }
 }
 
 /// Which fixed proof budget a correspondence analysis reached.
@@ -67,7 +103,7 @@ impl CommonCorrespondences {
 }
 
 impl CorrespondenceAnalysis {
-    /// Keep the existing path for inspection; prove common matches separately.
+    /// Prove common matches and attempt the original diagnostic path separately.
     pub fn observe(payload: &[String], reference: &[String], mode: MatchMode) -> Self {
         uninterrupted(Self::observe_controlled(
             payload,
@@ -84,22 +120,28 @@ impl CorrespondenceAnalysis {
         mode: MatchMode,
         control: &C,
     ) -> Result<Self, C::Error> {
+        let admission =
+            CorrespondenceAdmission::observe_controlled(payload, reference, mode, control)?;
+        let inspection =
+            inspection::PendingInspection::bind(payload, reference, mode, control).finish()?;
         Ok(Self {
-            selected: super::align_controlled(payload, reference, mode, control)?,
-            admission: admit_controlled(
-                payload,
-                reference,
-                mode,
-                MAX_EDGES,
-                MAX_FUZZY_COMPARISONS,
-                control,
-            )?,
+            inspection,
+            admission,
         })
     }
 
-    /// Inspection is not authority to use the selected path as timing evidence.
-    pub fn selected(&self) -> &[AlignResult] {
-        &self.selected
+    /// Completed inspection, if available; refusal is not an empty path.
+    /// Inspection is never authority to use selected pairs as timing evidence.
+    pub fn selected(&self) -> Option<&[AlignResult]> {
+        match &self.inspection {
+            InspectionAdmission::Complete(complete) => Some(complete.path()),
+            InspectionAdmission::BudgetExhausted(_) => None,
+        }
+    }
+
+    /// Inspection refusal is independent of common proof admission.
+    pub fn inspection(&self) -> &InspectionAdmission {
+        &self.inspection
     }
 
     /// Read the producer's bounded proof, not a consumer-selected certainty flag.
@@ -113,6 +155,11 @@ struct Edge {
     reference: usize,
     forward: usize,
     backward: usize,
+}
+
+enum PreparedCorrespondences {
+    Sparse(Vec<Edge>),
+    Certified(CommonCorrespondences),
 }
 
 #[cfg(test)]
@@ -143,7 +190,10 @@ fn admit_controlled<C: WorkControl + ?Sized>(
 ) -> Result<CorrespondenceAdmission, C::Error> {
     let mut edges =
         match candidate_edges(payload, reference, mode, edge_limit, fuzzy_limit, control)? {
-            Ok(edges) => edges,
+            Ok(PreparedCorrespondences::Sparse(edges)) => edges,
+            Ok(PreparedCorrespondences::Certified(common)) => {
+                return Ok(CorrespondenceAdmission::Complete(common));
+            }
             Err(budget) => return Ok(CorrespondenceAdmission::BudgetExhausted(budget)),
         };
     let mut ranks = PrefixMaximum::new(reference.len());
@@ -208,7 +258,7 @@ fn candidate_edges<C: WorkControl + ?Sized>(
     edge_limit: usize,
     fuzzy_limit: usize,
     control: &C,
-) -> Result<Result<Vec<Edge>, CorrespondenceBudget>, C::Error> {
+) -> Result<Result<PreparedCorrespondences, CorrespondenceBudget>, C::Error> {
     control.check()?;
     let mut edges = Vec::new();
     let mut push = |payload, reference| {
@@ -225,18 +275,26 @@ fn candidate_edges<C: WorkControl + ?Sized>(
     };
     match mode {
         MatchMode::Exact | MatchMode::CaseInsensitive => {
-            let key = |word: &str| match mode {
-                MatchMode::Exact => word.to_owned(),
-                _ => word.to_ascii_lowercase(),
+            let literal_mode = match mode {
+                MatchMode::Exact => super::LiteralMatchMode::Exact,
+                _ => super::LiteralMatchMode::AsciiInsensitive,
             };
-            let mut postings: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-            for (index, word) in reference.iter().enumerate() {
-                control.check()?;
-                postings.entry(key(word)).or_default().push(index);
+            let input =
+                literal::LiteralCandidates::observe(payload, reference, literal_mode, control)?;
+            if input.raw_edges() > edge_limit {
+                match input.certify(edge_limit, control)? {
+                    Some(CorrespondenceAdmission::Complete(common)) => {
+                        return Ok(Ok(PreparedCorrespondences::Certified(common)));
+                    }
+                    Some(CorrespondenceAdmission::BudgetExhausted(budget)) => {
+                        return Ok(Err(budget));
+                    }
+                    None => {} // The original bounded sparse producer remains.
+                }
             }
-            for (index, word) in payload.iter().enumerate() {
+            for index in 0..payload.len() {
                 control.check()?;
-                if let Some(references) = postings.get(&key(word)) {
+                if let Some(references) = input.references(index) {
                     for reference in references {
                         control.check()?;
                         if let Err(budget) = push(index, *reference) {
@@ -277,7 +335,7 @@ fn candidate_edges<C: WorkControl + ?Sized>(
             }
         }
     }
-    Ok(Ok(edges))
+    Ok(Ok(PreparedCorrespondences::Sparse(edges)))
 }
 
 /// Maximum chain length over reference positions strictly before a position.

@@ -270,8 +270,9 @@ pub enum AnchorLookup<'a> {
     /// Recovery has nothing to say about this utterance: it did not run, had
     /// no tokens, or matched none of its words.
     NotRecovered,
-    /// Recovery matched words of this utterance, but none is an anchor:
-    /// matches were ambiguous, fuzzy or to multi-word tokens.
+    /// Observed correspondence supplied no admitted anchor. Matches may be
+    /// ambiguous, fuzzy or multi-word, or inspection may be unavailable; this
+    /// does not itself assert lexical absence or an acoustic failure.
     NoReliableMatch,
     /// Reliable matches existed and were refused as a set.
     Refused(&'a AnchorDisorder),
@@ -359,6 +360,9 @@ impl AnchorIndex {
                     utterance_index, ..
                 }
                 | UtrUtteranceAlignmentEvidence::Refused {
+                    utterance_index, ..
+                }
+                | UtrUtteranceAlignmentEvidence::Uninspected {
                     utterance_index, ..
                 } => {
                     by_utterance.insert(

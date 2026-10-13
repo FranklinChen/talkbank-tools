@@ -479,6 +479,25 @@ mod interval_tests {
     use super::*;
 
     #[test]
+    fn packed_joint_refusal_preserves_the_named_budget_wire_contract() {
+        use batchalign_transform::dp_align::interleaving::{
+            LocalInterleavingRefusal, LocalInterleavingWorkPhase,
+        };
+        let budget = UtrSearchBudget::interleaved(LocalInterleavingRefusal::WorkBudgetExceeded {
+            phase: LocalInterleavingWorkPhase::PackedSearch,
+            required_at_least: 64_000_001,
+        });
+        insta::assert_json_snapshot!(budget, @r###"
+        {
+          "kind": "interleaving_work",
+          "limit": 64000000,
+          "phase": "packed_search",
+          "required_at_least": 64000001
+        }
+        "###);
+    }
+
+    #[test]
     fn interval_admission_and_clipping_never_extend_observed_evidence() {
         assert_eq!(PositiveUtrInterval::admit(100, 100), None);
         assert_eq!(PositiveUtrInterval::admit(200, 100), None);
@@ -509,6 +528,41 @@ mod interval_tests {
     }
 }
 
+/// Complete inspection or an explicit refusal, independent of common proof.
+/// Flattening preserves the historical `matches` field when inspection exists.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum UtrInspectionMatches {
+    /// A completed selected path's non-empty match population.
+    Selected {
+        /// Diagnostic matches, not timing authority.
+        matches: NonEmptyUtrWordMatches,
+    },
+    /// No partial or invented selected population is published.
+    BudgetExhausted {
+        /// The independent inspection limit reached.
+        inspection_refusal: batchalign_transform::dp_align::InspectionBudget,
+    },
+}
+
+impl UtrInspectionMatches {
+    /// Completed diagnostic selection, if available.
+    pub fn selected(&self) -> Option<&NonEmptyUtrWordMatches> {
+        match self {
+            Self::Selected { matches } => Some(matches),
+            Self::BudgetExhausted { .. } => None,
+        }
+    }
+    fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+        match self {
+            Self::Selected { matches } => Self::Selected {
+                matches: matches.placed_after(region_start),
+            },
+            Self::BudgetExhausted { .. } => self,
+        }
+    }
+}
+
 /// Complete evidence state for one CHAT utterance in a global UTR plan.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -519,8 +573,9 @@ pub enum UtrUtteranceAlignmentEvidence {
         utterance_index: UtrUtteranceOrdinal,
         /// Number of alignable CHAT words in the utterance.
         alignable_words: usize,
-        /// Non-empty matched word population.
-        matches: NonEmptyUtrWordMatches,
+        /// Diagnostic inspection availability, never timing authority.
+        #[serde(flatten)]
+        inspection: UtrInspectionMatches,
         /// Common-to-every-optimum matches admitted by the lexical producer.
         admitted_matches: super::lexical::EndpointBoundUtrWordMatches,
         /// Timing hull implied only by admitted correspondences.
@@ -532,8 +587,9 @@ pub enum UtrUtteranceAlignmentEvidence {
         utterance_index: UtrUtteranceOrdinal,
         /// Number of alignable CHAT words.
         alignable_words: usize,
-        /// Selected optimum retained for inspection, not timing authority.
-        matches: NonEmptyUtrWordMatches,
+        /// Inspection can be unavailable while interior proof remains usable.
+        #[serde(flatten)]
+        inspection: UtrInspectionMatches,
         /// Common correspondences retained even without endpoint proof.
         admitted_matches: super::lexical::NonEmptyAdmittedUtrWordMatches,
         /// Precisely which endpoint proof is missing.
@@ -558,6 +614,9 @@ pub enum UtrUtteranceAlignmentEvidence {
         alignable_words: usize,
         /// Refusal does not claim lexical absence or acoustic ambiguity.
         reason: UtrCorrespondenceRefusal,
+        /// Independent diagnostic refusal, if the selected path is unavailable.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        inspection_refusal: Option<batchalign_transform::dp_align::InspectionBudget>,
     },
     /// Already timed and kept unchanged. Its region's correspondence search
     /// exceeded its budget, so no word correspondence (and no forced-alignment
@@ -569,6 +628,19 @@ pub enum UtrUtteranceAlignmentEvidence {
         alignable_words: usize,
         /// The region and the budget it exceeded.
         unsearched: UtrBudgetRefusal,
+        /// Independent diagnostic refusal, not a refusal of retained timing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        inspection_refusal: Option<batchalign_transform::dp_align::InspectionBudget>,
+    },
+    /// Common proof completed without an admitted match, but selection could
+    /// not finish. This does not assert absence, ambiguity or acoustic failure.
+    Uninspected {
+        /// Source utterance ordinal.
+        utterance_index: UtrUtteranceOrdinal,
+        /// Number of alignable CHAT words.
+        alignable_words: usize,
+        /// Why diagnostic inspection is unavailable.
+        inspection_refusal: batchalign_transform::dp_align::InspectionBudget,
     },
     /// The utterance had words, but none matched an ASR token.
     Unmatched {
@@ -600,26 +672,26 @@ impl UtrUtteranceAlignmentEvidence {
             Self::Matched {
                 utterance_index,
                 alignable_words,
-                matches,
+                inspection,
                 admitted_matches,
                 proposal,
             } => Self::Matched {
                 utterance_index: utterance_index.placed_after(region_start),
                 alignable_words,
-                matches: matches.placed_after(region_start),
+                inspection: inspection.placed_after(region_start),
                 admitted_matches: admitted_matches.placed_after(region_start),
                 proposal,
             },
             Self::InteriorOnly {
                 utterance_index,
                 alignable_words,
-                matches,
+                inspection,
                 admitted_matches,
                 missing_endpoints,
             } => Self::InteriorOnly {
                 utterance_index: utterance_index.placed_after(region_start),
                 alignable_words,
-                matches: matches.placed_after(region_start),
+                inspection: inspection.placed_after(region_start),
                 admitted_matches: admitted_matches.placed_after(region_start),
                 missing_endpoints,
             },
@@ -638,19 +710,32 @@ impl UtrUtteranceAlignmentEvidence {
                 utterance_index,
                 alignable_words,
                 reason,
+                inspection_refusal,
             } => Self::Refused {
                 utterance_index: utterance_index.placed_after(region_start),
                 alignable_words,
                 reason,
+                inspection_refusal,
             },
             Self::RetainedUnsearched {
                 utterance_index,
                 alignable_words,
                 unsearched,
+                inspection_refusal,
             } => Self::RetainedUnsearched {
                 utterance_index: utterance_index.placed_after(region_start),
                 alignable_words,
                 unsearched,
+                inspection_refusal,
+            },
+            Self::Uninspected {
+                utterance_index,
+                alignable_words,
+                inspection_refusal,
+            } => Self::Uninspected {
+                utterance_index: utterance_index.placed_after(region_start),
+                alignable_words,
+                inspection_refusal,
             },
             Self::Unmatched {
                 utterance_index,
@@ -770,6 +855,7 @@ impl<'c> LocalRegionPlan<'c> {
                     | UtrUtteranceAlignmentEvidence::Refused { .. }
                     | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
                     | UtrUtteranceAlignmentEvidence::Unmatched { .. }
+                    | UtrUtteranceAlignmentEvidence::Uninspected { .. }
                     | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
                     | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => (None, None),
                 };
@@ -903,15 +989,21 @@ impl UtrAlignmentPlan {
         self.utterances
             .iter()
             .map(|utterance| match utterance {
-                UtrUtteranceAlignmentEvidence::Matched { matches, .. }
-                | UtrUtteranceAlignmentEvidence::InteriorOnly { matches, .. }
-                | UtrUtteranceAlignmentEvidence::SelectedOnly { matches, .. } => {
+                UtrUtteranceAlignmentEvidence::Matched { inspection, .. }
+                | UtrUtteranceAlignmentEvidence::InteriorOnly { inspection, .. } => {
+                    inspection.selected().map(|matches| {
+                        let (minimum, maximum) = matches.token_extent();
+                        (minimum.index(), maximum.index())
+                    })
+                }
+                UtrUtteranceAlignmentEvidence::SelectedOnly { matches, .. } => {
                     let (minimum, maximum) = matches.token_extent();
                     Some((minimum.index(), maximum.index()))
                 }
                 UtrUtteranceAlignmentEvidence::Refused { .. }
                 | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
                 | UtrUtteranceAlignmentEvidence::Unmatched { .. }
+                | UtrUtteranceAlignmentEvidence::Uninspected { .. }
                 | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
                 | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => None,
             })
@@ -969,10 +1061,14 @@ pub enum UtrSearchBudget {
         /// Comparison limit.
         limit: usize,
     },
-    /// Interleaved proof: source-graph nodes times reference positions.
+    /// Interleaved proof: witness/preparation, scalar cells or packed-word work.
     InterleavingWork {
         /// Work-cell limit.
         limit: usize,
+        /// Admission stage, not evidence of ambiguity or absence.
+        phase: &'static str,
+        /// Required work known when admission stopped, saturated on overflow.
+        required_at_least: usize,
     },
     /// Interleaved proof: retained score cells.
     InterleavingMemory {
@@ -1004,7 +1100,14 @@ impl UtrSearchBudget {
         use batchalign_transform::dp_align::interleaving::LocalInterleavingRefusal;
         let limit = refusal.limit();
         match refusal {
-            LocalInterleavingRefusal::WorkBudgetExceeded => Self::InterleavingWork { limit },
+            LocalInterleavingRefusal::WorkBudgetExceeded {
+                phase,
+                required_at_least,
+            } => Self::InterleavingWork {
+                limit,
+                phase: phase.name(),
+                required_at_least,
+            },
             LocalInterleavingRefusal::MemoryBudgetExceeded => Self::InterleavingMemory { limit },
             LocalInterleavingRefusal::CandidateBudgetExceeded => {
                 Self::InterleavingCandidates { limit }

@@ -944,13 +944,13 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
 
     let windowed_texts = windowed.texts();
 
-    let alignment = dp_align::CorrespondenceAnalysis::observe_controlled(
+    let admission = dp_align::CorrespondenceAdmission::observe_controlled(
         words,
         &windowed_texts,
         dp_match_mode,
         control,
     )?;
-    let dp_align::CorrespondenceAdmission::Complete(common) = alignment.admission() else {
+    let dp_align::CorrespondenceAdmission::Complete(common) = admission else {
         return Ok(None);
     };
     let payload = words
@@ -965,7 +965,7 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
         })
         .collect::<Vec<_>>();
     let Some(admitted) =
-        super::NonEmptyAdmittedUtrWordMatches::from_vec(windowed.common_matches(common, &payload))
+        super::NonEmptyAdmittedUtrWordMatches::from_vec(windowed.common_matches(&common, &payload))
     else {
         return Ok(None);
     };
@@ -985,11 +985,15 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
 mod timing_hull_tests;
 
 #[cfg(test)]
+#[path = "two_pass/tests/proof_only.rs"]
+mod proof_only_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat_ops::fa::coordinates::Ms;
 
-    fn expected_interval(start_ms: u64, end_ms: u64) -> PositiveUtrInterval {
+    pub(super) fn expected_interval(start_ms: u64, end_ms: u64) -> PositiveUtrInterval {
         PositiveUtrInterval::admit(start_ms, end_ms).expect("positive expected interval")
     }
 
@@ -1060,7 +1064,7 @@ mod tests {
     }
     use talkbank_parser::TreeSitterParser;
 
-    fn make_asr_tokens(words_with_times: &[(&str, u64, u64)]) -> Vec<AsrTimingToken> {
+    pub(super) fn make_asr_tokens(words_with_times: &[(&str, u64, u64)]) -> Vec<AsrTimingToken> {
         words_with_times
             .iter()
             .map(|(text, start, end)| AsrTimingToken {

@@ -76,7 +76,7 @@ nutype = { version = "=0.8.0", features = ["serde"] }
 # Testing
 insta = { version = "1.49", features = ["json", "yaml"] }
 predicates = "3.1"
-proptest = "1.11.0"
+proptest = "1.12.0"
 # pyo3 moves in lockstep with the numpy crate (pyo3-ffi's `links = "python"`
 # forbids two pyo3 versions in one graph); see crates/batchalign-pyo3/Cargo.toml.
 pyo3 = "0.29"
@@ -108,11 +108,11 @@ batchalign-transform = { path = "crates/batchalign-transform" }
 # Keep every CHAT crate on the same revision; never commit path overrides.
 # talkbank-transform is the GENERIC transform;
 # batchalign-transform (above) holds the ML accretion.
-talkbank-transform = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb", default-features = false }
+talkbank-transform = { git = "https://github.com/TalkBank/chatter", rev = "6773389b820ab29c7cc7c4d9093379480493bf60", default-features = false }
 # Stage 1 dedup: talkbank-tools no longer carries its own copies of these.
-talkbank-model = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb" }
-talkbank-parser = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb" }
-talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", rev = "3b857bbe71a23f1a26e8a9bda5c51b9783d389eb" }
+talkbank-model = { git = "https://github.com/TalkBank/chatter", rev = "6773389b820ab29c7cc7c4d9093379480493bf60" }
+talkbank-parser = { git = "https://github.com/TalkBank/chatter", rev = "6773389b820ab29c7cc7c4d9093379480493bf60" }
+talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", rev = "6773389b820ab29c7cc7c4d9093379480493bf60" }
 
 tempfile = "3.27"
 thiserror = "^2.0.21"

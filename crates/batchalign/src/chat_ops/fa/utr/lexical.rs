@@ -500,7 +500,7 @@ impl<'source> UtrLexicalStream<'source> {
                          other regions are unaffected and no monotonic fallback is taken"
                     );
                     let selection = super::UtrMatchSelection {
-                        selected: Vec::new(),
+                        selected: Ok(Vec::new()),
                         admission: super::CorrespondenceProof::BudgetExhausted(refusal),
                         per_utterance: searched.map(|_| super::UtteranceSelection::UNSEARCHED),
                     };
@@ -688,7 +688,7 @@ impl<'source> UtrLexicalStream<'source> {
             )
         };
         let selection = super::UtrMatchSelection {
-            selected,
+            selected: Ok(selected),
             admission: super::CorrespondenceProof::Complete(admitted),
             per_utterance: searched.map(|(ordinal, info)| super::UtteranceSelection {
                 envelope: envelope(ordinal, info),

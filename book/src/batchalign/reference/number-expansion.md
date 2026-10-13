@@ -1,7 +1,7 @@
 # Number Expansion
 
 **Status:** Current
-**Last updated:** 2026-09-15 09:35 EDT
+**Last updated:** 2026-10-13 08:08 EDT
 
 ASR engines emit digit-bearing tokens (`"3"`, `"$5"`, `"1950s"`,
 `"3rd"`, `"80%"`) that the CHAT format does not allow on the main
@@ -29,6 +29,8 @@ forms before they reach validation.
 | `"54ª"` (por) | `"quinquagésima quarta"` |
 | `"1.º"` (por) | `"primeiro"` |
 | `"54.ºs"` (por) | `"quinquagésimos quartos"` |
+| `"29e"` (nld) | `"negenentwintigste"` |
+| `"101ste"` (nld) | `"honderdeerste"` |
 | `"$12"` (any) | `"twelve dollars"` |
 | `"€50"` (any) | `"fifty euros"` |
 | `"80%"` (eng) | `"eighty percent"` |
@@ -89,13 +91,36 @@ gender and number the abbreviation marks, for ranks 1 through 1000:
 period after it still does. Outside that range (`0ª`, `1001.º`) the
 token is left as written and validation reports E220.
 
+## Dutch ordinals
+
+Chatter's generic generator expands whole-token Dutch (`nld`, case-insensitive)
+ASCII ranks 1–1000 followed by lowercase `e`, `de`, `ste` or `ᵉ`. It preserves
+irregular forms (`eerste`, `derde`, `achtste`) and joins hundreds directly to
+their final ordinal part (`honderdtweede`, `negenhonderdnegenennegentigste`).
+`1000e` becomes `duizendste`. The chosen hundred spelling is deterministic;
+other written variants with `en` may also be correct.
+
+Leading zeros and all four suffixes are compatibility inputs independent of
+rank: `00029e` becomes `negenentwintigste`, `2ste` becomes `tweede`.
+Superscript `ᵉ` is accepted for normalization, not recommended typography.
+Zero, overflow, ranks above 1000, uppercase suffixes, non-ASCII digits,
+degree signs, embedded letters and ordinal-hyphen compounds remain unchanged.
+
+Raw ASR tokenization separates a sentence mark before expansion: `29e.`
+becomes `negenentwintigste` plus `.`. The lexical word retains its observed
+speaker and timing span; untimed words do not gain invented timing. When the
+per-word language is unknown in code-switched output, expansion abstains.
+This is transcript generation, not repair of existing delivered CHAT or
+inference of what a speaker said. See the
+[developer ownership contract](../architecture/number-expansion.md#dutch-suffix-ordinals).
+
 ## Other ordinal conventions
 
 Other ordinal or decade conventions (Spanish `"3º"`, German `"3."`,
 French `"1950s"`) currently pass the digit through; no observed
 production traffic has needed them. File a request if your corpus
-contains them; the implementation pattern is the same as for English
-and Portuguese.
+contains them; the implementation pattern is the same as for English,
+Dutch and Portuguese.
 
 ## Currency, percent, and dash ranges
 

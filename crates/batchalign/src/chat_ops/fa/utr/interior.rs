@@ -40,6 +40,7 @@ fn proved_matches(evidence: &UtrUtteranceAlignmentEvidence) -> Vec<&AdmittedUtrW
         | UtrUtteranceAlignmentEvidence::Refused { .. }
         | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
         | UtrUtteranceAlignmentEvidence::Unmatched { .. }
+        | UtrUtteranceAlignmentEvidence::Uninspected { .. }
         | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
         | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => Vec::new(),
     }

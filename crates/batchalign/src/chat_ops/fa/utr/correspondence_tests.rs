@@ -36,6 +36,118 @@ fn tokens(text: &str) -> Vec<AsrTimingToken> {
         .collect()
 }
 
+#[test]
+fn inspection_storage_refusal_preserves_proof_projection_and_honest_unknowns() {
+    // A one-word full table would exceed the inspection score-storage cap.
+    // Sparse common proof is cheap and must remain independent of that table.
+    let mut reference = vec![
+        AsrTimingToken {
+            text: "noise".to_owned(),
+            start_ms: 100,
+            end_ms: 200
+        };
+        524_289
+    ];
+    reference[10].text = "needle".to_owned();
+    let mut document = admitted_chat("needle");
+    let result = PreparedGlobalUtr::plan(
+        &mut document,
+        &reference,
+        GlobalUtrParticipation::AllUtterances,
+        MatchMode::Exact,
+    )
+    .project();
+    assert_eq!((result.injected(), result.unmatched()), (1, 0));
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global evidence")
+    };
+    assert_eq!(
+        plan.token_extents(),
+        vec![None],
+        "no selected path was completed"
+    );
+    let UtrUtteranceAlignmentEvidence::Matched {
+        inspection,
+        admitted_matches,
+        ..
+    } = &plan.utterances()[0]
+    else {
+        panic!("common endpoint proof survives")
+    };
+    assert!(inspection.selected().is_none());
+    assert_eq!(admitted_matches.iter().count(), 1);
+    assert!(matches!(
+        result.anchors.lookup(talkbank_model::UtteranceIdx::new(0)),
+        AnchorLookup::Anchored(_)
+    ));
+    let wire = serde_json::to_value(&plan.utterances()[0]).expect("wire");
+    assert!(wire.get("matches").is_none());
+    insta::assert_json_snapshot!(serde_json::json!({"status": wire["status"], "inspection_refusal": wire["inspection_refusal"], "proposal": wire["proposal"]}), @r###"
+    {
+      "inspection_refusal": {
+        "kind": "score_storage",
+        "limit": 1048576,
+        "required_at_least": 1048580,
+        "used": 0
+      },
+      "proposal": {
+        "end_ms": 200,
+        "start_ms": 100,
+        "status": "positive"
+      },
+      "status": "matched"
+    }
+    "###);
+    // Existing timing is not refused by the independent diagnostic cap.
+    let before = batchalign_transform::serialize::to_chat_string(&document);
+    let kept = PreparedGlobalUtr::plan(
+        &mut document,
+        &reference,
+        GlobalUtrParticipation::AllUtterances,
+        MatchMode::Exact,
+    )
+    .project();
+    assert_eq!((kept.injected(), kept.skipped()), (0, 1));
+    assert_eq!(
+        batchalign_transform::serialize::to_chat_string(&document),
+        before
+    );
+
+    // Two possible positions remove common proof. Unavailable inspection must
+    // not become `unmatched`, `selected_only`, or a lexical-absence decision.
+    reference[20].text = "needle".to_owned();
+    let mut document = admitted_chat("needle");
+    let result = PreparedGlobalUtr::plan(
+        &mut document,
+        &reference,
+        GlobalUtrParticipation::AllUtterances,
+        MatchMode::Exact,
+    )
+    .project();
+    assert_eq!((result.injected(), result.unmatched()), (0, 1));
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global evidence")
+    };
+    assert!(matches!(
+        plan.utterances()[0],
+        UtrUtteranceAlignmentEvidence::Uninspected { .. }
+    ));
+    assert!(matches!(
+        result.anchors.lookup(talkbank_model::UtteranceIdx::new(0)),
+        AnchorLookup::NoReliableMatch
+    ));
+    assert!(result.decisions().iter().any(|decision| matches!(
+        decision.strategy,
+        batchalign_transform::decisions::DecisionStrategy::Utr(
+            batchalign_transform::decisions::UtrStrategy::InspectionBudgetExhausted
+        )
+    )));
+    let wire = serde_json::to_value(&plan.utterances()[0]).expect("wire");
+    assert!(wire.get("matches").is_none());
+    assert!(wire.get("proposal").is_none());
+    assert_eq!(wire["inspection_refusal"]["kind"], "score_storage");
+}
+
 fn admitted_dialogue(turns: &str) -> ChatFile {
     let text = format!(
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant, INV Investigator\n@ID:\teng|test|PAR|||||Participant|||\n@ID:\teng|test|INV|||||Investigator|||\n{turns}\n@End\n"
@@ -744,7 +856,7 @@ fn correspondence_partial_certainty_retains_anchor_and_complete_candidate_range(
     };
     let UtrUtteranceAlignmentEvidence::InteriorOnly {
         admitted_matches,
-        matches,
+        inspection,
         missing_endpoints,
         ..
     } = &plan.utterances[0]
@@ -753,7 +865,11 @@ fn correspondence_partial_certainty_retains_anchor_and_complete_candidate_range(
     };
     assert_eq!(*missing_endpoints, MissingUtrEndpoints::First);
     assert_eq!(
-        matches.rest.len(),
+        inspection
+            .selected()
+            .expect("tiny inspection completes")
+            .rest
+            .len(),
         1,
         "selected path remains complete for inspection"
     );

@@ -8,7 +8,7 @@
 //! The general generator belongs to chatter:
 //! [`talkbank_transform::num_words::expand_number`] owns the per-language
 //! cardinal tables, English short-scale composition, Chinese/Japanese/Cantonese
-//! numerals, English suffix ordinals and decades, currency symbols, dash ranges
+//! numerals, English and Dutch suffix ordinals, English decades, currency symbols, dash ranges
 //! and digit-leading hyphen compounds. Batchalign calls it rather than keeping
 //! a copy, so a correction there (for example chatter 0.26.0's English scale
 //! composition, `2024` as "two thousand twenty-four") reaches ASR output by

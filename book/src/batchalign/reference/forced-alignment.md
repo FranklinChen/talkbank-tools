@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-10-09 17:39 EDT
+**Last updated:** 2026-10-14 14:09 EDT
 
 ## Overview
 
@@ -33,22 +33,22 @@ and an audio file, it determines exactly where each word appears in the recordin
 flowchart TD
     chat["CHAT file + audio"]
     parse["Parse CHAT → AST"]
-    reuse{"Complete reusable\n%wor timing?"}
-    refresh["Refresh main-tier bullets\nfrom %wor + optionally\nregenerate %wor"]
-    partial{"Per-utterance\npartial %wor?"}
-    partial_refresh["Refresh clean utterances\nfrom %wor, track reusable set"]
-    count{"Untimed\nutterances?"}
-    utr["UTR pre-pass:\nrun_utr_pass() with ASR caching\n+ partial-window optimization"]
-    group["Group utterances\nby time window + token limit"]
+    reuse{"Complete reusable<br/>%wor timing?"}
+    refresh["Refresh main-tier bullets<br/>from %wor + optionally<br/>regenerate %wor"]
+    partial{"Per-utterance<br/>partial %wor?"}
+    partial_refresh["Refresh clean utterances<br/>from %wor, track reusable set"]
+    count{"Untimed<br/>utterances?"}
+    utr["UTR pre-pass:<br/>run_utr_pass() with ASR caching<br/>+ partial-window optimization"]
+    group["Group utterances<br/>by time window + token limit"]
     extract["Extract words per group"]
-    cache{"Cache\nlookup"}
-    fa["execute_v2('fa', prepared_audio + prepared_text)\n→ Whisper/Wave2Vec"]
-    dp["DP alignment\n(Hirschberg O(n+m) space)\ntokens → transcript words"]
-    inject["Inject timings\n+ generate %wor tier"]
-    mono["Enforce document order\nstrip backward starts; resolve same-speaker\noverlap by speaker stream, not file adjacency"]
+    cache{"Cache<br/>lookup"}
+    fa["execute_v2('fa', prepared_audio + prepared_text)<br/>→ Whisper/Wave2Vec"]
+    dp["Admit/map indexed or lexical timings<br/>into original CHAT word slots"]
+    inject["Inject timings<br/>+ generate %wor tier"]
+    mono["Enforce document order<br/>strip backward starts; resolve same-speaker<br/>overlap by speaker stream, not file adjacency"]
     out["Serialize → CHAT"]
-    retry{"FA failed +\nuntimed?"}
-    fallback["Fallback UTR:\nrun_utr_pass() (once)"]
+    retry{"FA failed +<br/>untimed?"}
+    fallback["Fallback UTR:<br/>run_utr_pass() (once)"]
 
     chat --> parse --> reuse
     reuse -->|"yes"| refresh --> out
@@ -163,17 +163,17 @@ place (no serialization). FA receives the same AST directly via
 ```mermaid
 flowchart TD
     start["align request"]
-    host{"direct or\n--server?"}
-    direct["DirectHost\ninline execution"]
-    server["ServerBackend\nqueued paths_mode job"]
-    media["Resolve media on the\nexecution host"]
-    wav["ensure_wav()\ncontainer → cached WAV if needed"]
-    parse["Parse CHAT → ChatFile AST\n(single parse)"]
-    utr["UTR: mutate ChatFile in-place\n(no serialize)"]
-    fa["run_fa_from_ast(ChatFile)\nFA grouping + worker dispatch\n(no re-parse)"]
+    host{"direct or<br/>--server?"}
+    direct["DirectHost<br/>inline execution"]
+    server["ServerBackend<br/>queued paths_mode job"]
+    media["Resolve media on the<br/>execution host"]
+    wav["ensure_wav()<br/>container → cached WAV if needed"]
+    parse["Parse CHAT → ChatFile AST<br/>(single parse)"]
+    utr["UTR: mutate ChatFile in-place<br/>(no serialize)"]
+    fa["run_fa_from_ast(ChatFile)<br/>FA grouping + worker dispatch<br/>(no re-parse)"]
     inject["Inject timings + %wor"]
-    finalize["FaFinalized\noptional repair, then typed monotonicity"]
-    serial["Serialize ChatFile → CHAT text\n(single serialize)"]
+    finalize["FaFinalized<br/>optional repair, then typed monotonicity"]
+    serial["Serialize ChatFile → CHAT text<br/>(single serialize)"]
 
     start --> host
     host --> direct --> media
@@ -226,13 +226,13 @@ refreshed main tier (no cache lookup or worker call needed).
 ```mermaid
 flowchart TD
     start["Parse CHAT"]
-    wor{"Complete reusable\n%wor timing?"}
-    map["Verify main↔%wor mapping\nand collect word timings"]
-    rehydrate["Rehydrate main-tier word bullets\nfrom %wor"]
-    refresh["Refresh utterance bullets\n+ optionally regenerate %wor"]
-    partial{"Any utterances with\nclean %wor?"}
-    partial_refresh["Refresh clean utterances\ntrack reusable set"]
-    normal["Continue to UTR/FA pipeline\n(stale groups only need workers)"]
+    wor{"Complete reusable<br/>%wor timing?"}
+    map["Verify main↔%wor mapping<br/>and collect word timings"]
+    rehydrate["Rehydrate main-tier word bullets<br/>from %wor"]
+    refresh["Refresh utterance bullets<br/>+ optionally regenerate %wor"]
+    partial{"Any utterances with<br/>clean %wor?"}
+    partial_refresh["Refresh clean utterances<br/>track reusable set"]
+    normal["Continue to UTR/FA pipeline<br/>(stale groups only need workers)"]
 
     start --> wor
     wor -->|"yes"| map --> rehydrate --> refresh
@@ -256,7 +256,8 @@ production CHAT files from CLAN).
 (`--utr`, the default), the `run_utr_pass()` helper:
 
 1. Checks the **ASR cache** for a prior result (key includes audio identity + lang).
-   On hit, skips inference entirely, repeat runs are instant.
+   On an admitted hit, skips ASR inference; correspondence search and any
+   required FA still run. A cache hit does not certify timing accuracy.
 2. Chooses **partial-window** or **full-file** mode:
    - **Partial-window** (when >50% timed and audio >60s): `find_untimed_windows()`
      identifies time regions covering only the untimed utterances (with 500ms
@@ -271,20 +272,22 @@ production CHAT files from CLAN).
    into **anchored regions** (see "Anchored regions" below): the bullets the
    file already has bound both the utterances and the ASR onsets each region
    may match, and each region is solved on its own, within its own budget.
-   Within a region it first tries a cheap exact monotonic subsequence match of
-   the region's word list against the region's ASR words. If that match is
-   unique, timing assignment is linear-time and no DP is needed. If the match
-   is missing or ambiguous, UTR falls back to one **Hirschberg DP alignment** of
-   the region's words (timed + untimed) against its projected ASR words, using
-   **case-insensitive exact matching** for the default global strategy. Timed
-   utterances participate in the alignment to anchor their neighbors but their
-   bullets are left unchanged. The selected path is retained for inspection, but timing uses
-   only correspondences proven common to **every** optimal lexical alignment.
+   The file's order model determines each region's proof. Monotonic files first
+   try a unique exact subsequence; otherwise a selected Hirschberg path is kept
+   separately from a budgeted sparse proof of common matches. Interleaved files
+   use the joint source-bound speaker-episode graph, even where one region has
+   only one participating speaker. Its feasible score band preserves every
+   optimum; long literal witnesses use the packed score producer described
+   below. The default global strategy uses **case-insensitive exact matching**.
+   Timed utterances participate to anchor their neighbors but their bullets
+   stay unchanged. A selected path is inspection evidence only: timing uses
+   correspondences proven common to **every** optimal alignment of the declared
+   order model.
    For each untimed utterance, the timing hull of those admitted provider
    observations determines the provisional span. The global alignment
    avoids the token-exhaustion problem that per-utterance windowed approaches
-   suffer from. It is still a monotonic aligner, so dense overlap /
-   text-audio reordering remains a known limitation.
+   suffer from. The joint graph permits bounded adjacent-speaker episodes, not
+   arbitrary text/audio reordering, three-way overlap or acoustic speaker proof.
 
    Before mutation, a private prepared pass owns the mutable transcript borrow,
    census, selected plan, anchors and following retained timing bounds.
@@ -307,18 +310,25 @@ production CHAT files from CLAN).
 ```mermaid
 flowchart TD
     words["Transcript words + ASR words"]
-    regions["Partition at retained bullets\ninto anchored regions"]
-    budget{"Region within\nits search budget?"}
-    refused["Refuse this region only:\nuntimed turns refused with\nregion + budget named;\ntimed turns keep their bullets"]
-    unique{"Unique exact\nmonotonic subsequence?"}
-    exact["Assign utterance token ranges\nwithout DP"]
-    dp["Run one Hirschberg DP\nover the region"]
-    bullets["Inject/recover\nutterance bullets"]
+    regions["Partition at retained bullets<br/>into anchored regions"]
+    budget{"Region within<br/>its search budget?"}
+    refused["Refuse this region only:<br/>untimed turns refused with<br/>region + budget named;<br/>timed turns keep their bullets"]
+    order{"File order model?"}
+    unique{"Unique exact<br/>monotonic subsequence?"}
+    exact["Observe unique common matches<br/>without DP"]
+    monotonic["Selected path +<br/>sparse all-optimal proof"]
+    joint["Joint speaker-episode DAG<br/>exact feasible-score band"]
+    common["Admit common endpoint evidence<br/>selection alone grants no timing"]
+    bullets["Inject/recover<br/>utterance bullets"]
 
-    words --> regions --> unique
-    unique -->|"yes"| exact --> bullets
-    unique -->|"no"| budget
-    budget -->|"yes"| dp --> bullets
+    words --> regions --> order
+    order -->|"monotonic"| unique
+    order -->|"interleaved"| joint
+    unique -->|"yes"| exact --> common
+    unique -->|"no"| monotonic
+    monotonic --> budget
+    joint --> budget
+    budget -->|"yes"| common --> bullets
     budget -->|"no"| refused
 ```
 
@@ -380,14 +390,103 @@ refused, and no other region is affected. A transcript with no bullets at all
 is one region, so it behaves as before.
 
 This remains a practical limitation for long, fully untimed conversations.
-There is no fixed word-count cutoff: turn lengths and speaker changes determine
-the joint graph's size. A regression control with 280 alternating ten-word turns
-(2,800 words) exceeds the budget despite complete, uniquely matching ASR words
-and recovers no utterance hints. With the same words and ASR timings but retained
-bullets on alternating turns, all 140 untimed turns recover and all 140 original
-bullets are preserved. Regional recovery therefore fixes the whole-file limit
-only where anchors actually divide the problem; it does not solve unanchored
-recovery. This control measures UTR hints, not end-to-end acoustic alignment.
+There is no fixed word-count cutoff: turn lengths, speaker changes and lexical
+agreement determine the joint graph's admitted score band. A canonical-order
+match score supplies a feasible lower bound; only states that cannot attain it
+are removed. Perfect long dialogue can therefore recover without initial
+bullets, while weak lexical evidence can leave the band too wide to search.
+Retained bullets can further divide that work, but unanchored recovery is not
+guaranteed. These controls measure UTR hints, not end-to-end acoustic alignment.
+
+When a literal joint-search band would exceed its work limit, recovery also
+checks how many occurrences of each reference word can match the source.
+Prefix/suffix word-count bounds can safely narrow that band, especially when
+ASR repeats words more often than the transcript. Every optimal assignment and
+missing-word possibility is preserved; no repeated occurrence is chosen merely
+to make recovery succeed. This is automatic for exact and ASCII-case-insensitive
+matching, with no new option, and does not alter fuzzy matching. Existing work,
+memory and candidate limits still apply, so some unanchored conversations remain
+refused. A recovered lexical hint still needs FA and final timing validation.
+
+The shared algorithm is corpus- and ASR-provider-independent: long conversations
+from any source can benefit when they reach the joint literal-witness path.
+No new option is needed. This is not a guarantee of recovery on every input,
+and it does not change morphotag, acoustic FA models, the separate monotonic
+proof or fuzzy witnesses.
+
+Large exact/case-insensitive feasible witnesses use bit-parallel LCS row
+differences with sparse word masks. Small witnesses retain prefix/suffix
+stripping and scalar rows; fuzzy relations retain the general scalar method.
+The owned witness is bound to the scoring relation, and the admitted band uses
+that same relation throughout forward, backward and selected-path analysis.
+A feasible score is not a correspondence certificate: only the subsequent
+all-optimal proof can grant a common match or timing hint. Work, score memory
+and candidate limits remain enforced, without heuristic chunks or guessed
+anchors.
+
+An `interleaving_work` budget record also reports `phase` (`graph_shape`,
+`feasible_witness`, `banded_search` or `packed_search`) and `required_at_least`. Banded admission
+counts the complete score band before allocating/scoring it. The required work
+counts scalar witness cells or packed-word passes, optional word-count
+preparation passes, and admitted band cells,
+not elapsed time. Graph-shape arithmetic overflow saturates the count. These
+diagnostics distinguish proof work that was not performed from ambiguity.
+
+A work-refused exact/ASCII-case-insensitive joint band can use an optional packed
+proof over the same complete legal-order graph. It retains only score-viable
+prefixes derived from the witnessed lower bound, not heuristic chunks or guessed
+anchors. Complete forward/backward proof still determines all possible matches
+and omissions; a selected path alone never grants a timing hint. Affordable
+dense searches and fuzzy policies are unchanged, with no new CLI option.
+Storage is admitted before allocation and packed work is reserved or charged
+before each operation under the unchanged limits. A `packed_search` refusal
+reports the known work floor plus its next required operation; it is not a
+claim of missing ASR evidence or a full-run cost estimate. Finite budgets can
+still refuse a recording. See the
+[packed joint proof](../developer/backchannel-aware-alignment.md#optional-packed-joint-proof)
+for the ownership, pruning argument and independent-oracle tests. Recovered UTR
+hints remain distinct from acoustic FA, coverage and publication acceptance.
+
+The viable packed proof fuses row preparation and the paired deletion/matching
+scan to reduce work without changing what is proved. It avoids dense temporary
+equality masks and padded parent copies, and shares actual score origins across
+both edge observations. Empty domains and matching-only boundary cuts remain
+distinct from missingness evidence. The same graph, equality policy, ownership,
+candidate deduplication and finite budgets apply; this is not a new heuristic,
+normalization or timing policy. See the
+[fused-pass implementation](../developer/backchannel-aware-alignment.md#fused-profile-and-edge-passes).
+
+Rows also retain their producer-owned terminal score, avoiding a repeated
+population scan during suffix preparation. This general packed-kernel reduction
+applies wherever exact/ASCII joint proof is eligible; it uses no transcript,
+provider or corpus-specific rule. Its viable work charge reflects the removed
+pass, while full-profile conservative reservations and all finite caps remain
+unchanged. Complete candidate/missingness proof, inspection tie order and timing
+admission are unchanged; lower search work is not acoustic-accuracy evidence.
+
+The shared canonical witness and monotonic packed row also stream sparse masks
+directly, reducing preparatory work without changing their scores or matching
+policy. Library callers can observe read-only, stage-bound viable-search cost
+receipts through cooperative control; this does not add a CLI option or change
+UTR evidence on the wire. Counts include preparation/metadata reservations,
+not wall time, and neither a completed cost receipt nor recovered hints certify
+final acoustic timing. See
+[cost receipts and witness streams](../developer/backchannel-aware-alignment.md#stage-bound-cost-receipts-and-sparse-witness-streams).
+
+Packed search reuses live proof blocks for inspection traceback instead of
+reconstructing them a second time. This exact reduction can admit cases that
+previously exhausted work during inspection; it does not raise budgets or let
+one selected path stand in for complete candidate/missingness evidence. The
+pending proof owns the cursor, and no partial result survives refusal or
+interruption. See
+[live-block inspection](../developer/backchannel-aware-alignment.md#live-block-inspection-trace).
+
+Full and viable packed rows now share one input-bound proof lifecycle. The
+representation and its budgeting policy are admitted together: full passes
+remain pre-reserved, viable passes remain incrementally charged, and candidate
+visits stay bounded under both. This consolidation preserves order models,
+matching policy, scalar/fuzzy support and public strategy/wire contracts. It is
+not a new fallback from a storage refusal or permission to exceed a cap.
 
 Bullets are trusted as region bounds. A provider token far outside the bullets
 around it (seconds, not the usual few hundred milliseconds of boundary
@@ -457,8 +556,26 @@ chains. Sparse forward/backward chain ranks identify the edges on optimal chains
 the sole optimal edge at a rank is common to every optimum. This avoids a
 quadratic-memory matrix. Exact/case-insensitive modes use word posting lists;
 fuzzy words are prepared once before comparison. The proof admits at most
-1,048,576 candidate edges and 64,000,000 fuzzy comparisons per region, and the
-joint interleaved proof has its own work, score-memory and candidate limits.
+1,048,576 candidate edges and 64,000,000 fuzzy comparisons per region. When raw
+literal postings exceed the edge allowance, a bounded packed-score proof may
+discard edges proved nonoptimal before admission. It retains every optimal
+assignment, certifies only the sole optimal edge at each rank, and uses the same
+edge limit. If that optional workspace cannot be admitted, the existing sparse
+route and its raw-edge refusal remain. This does not replace joint search with
+a monotonic fallback. See
+[packed monotonic proof and limits](../developer/backchannel-aware-alignment.md#packed-monotonic-common-proof).
+The joint interleaved proof has its own work, score-memory and candidate limits.
+Retained joint-search checkpoints use lossless equal-score runs when smaller
+than dense rows; working rows remain dense. The same score-memory limit counts
+both run indices and scores. This may admit compressible memory-refused cases,
+but does not relax work/candidate limits or authorize guessed timing. See
+[checkpoint ownership and accounting](../developer/backchannel-aware-alignment.md#lossless-retained-checkpoints).
+For exact/ASCII-case-insensitive joint search, words with no possible counterpart
+are omitted only from the computational layout. The full original word census,
+turn/overlap boundaries and reference indices remain in the returned evidence;
+an omitted source word is definitely unmatched, never silently deleted from
+CHAT. Fuzzy matching keeps its existing layout. See
+[lossless projection and proof lifting](../developer/backchannel-aware-alignment.md#lossless-literal-projection).
 Exceeding any limit means `budget_exhausted` for that region, naming the budget
 (`candidate_edges`, `fuzzy_comparisons`, `interleaving_work`,
 `interleaving_memory` or `interleaving_candidates`) and its limit; it is not a
@@ -492,13 +609,16 @@ existing output. Omit
 `--participation exclude-marked-overlap` to
 replay the participation rule used by the first pass of two-pass UTR.
 
-Offline report schema 9 records the plan's `strategy` as the pass's order
-model (`monotonic` or `interleaved`), adds `regions` (each anchored region's
-span and the algorithm it used), names the region and budget in every budget
-refusal, and adds `retained_unsearched`. Since schema 4 it retains the
+Offline report schema 11 retains the schema-9 plan's `strategy` as the pass's order
+model (`monotonic` or `interleaved`), `regions` (each anchored region's
+span and the algorithm it used), named region/budget refusals, and
+`retained_unsearched`. Since schema 4 it retains the
 within-token word address and checked source-name identity, `admitted_matches`,
-and the distinction between `selected_only` and timing-authorized `matched`. `matches` still describes the selected
-path; do not treat it as timing authority. For renamed debug snapshots,
+and the distinction between `selected_only` and timing-authorized `matched`.
+Completed inspection's `matches` describes only the selected path, not timing
+authority. When independently bounded inspection is unavailable, schema 11
+omits `matches` and records `inspection_refusal`; completed common proof
+remains available. For renamed debug snapshots,
 `--source-name` declares the original filename; otherwise admission uses the
 actual input filename. It neither guesses suffixes nor exempts filename checks.
 The declaration is not independently verified historical provenance.
@@ -542,9 +662,21 @@ These tests measure synthetic correspondence, not model or corpus accuracy.
 
 #### Overlap Strategy Selection
 
-When a CHAT file contains overlapping speech (`+<` linkers or `⌊` CA markers),
-the standard global UTR alignment degrades because the monotonic matcher cannot
-represent the temporal crossing of overlapping speakers.
+Local recovery in the explicit two-pass strategy computes common lexical
+correspondence directly, without the unused diagnostic selected-path alignment.
+This reduces unnecessary search work; it does not alter its proof budgets,
+endpoint admission, ambiguity refusals or timing policy. Global-plan diagnostic
+inspection now has independent work and score-storage caps: refusal drops only
+the selected path, preserving completed common proof and its admitted timing.
+Evidence uses `inspection_refusal` instead of `matches` when inspection could
+not finish. `uninspected` means no admitted common match and unavailable
+inspection, not absent recognition or an acoustic failure. Existing bullets
+remain unchanged; selected-only evidence never authorizes a hint.
+
+Global UTR observes the file's speaker order: monotonic or a bounded joint
+adjacent-speaker composition. It is not solely a monotonic matcher. Typed
+`+<` and CA overlap markers affect source participation/episode continuity;
+their presence does not automatically select the experimental two-pass strategy.
 
 **Current default:** `auto` always uses `GlobalUtr`. The experimental
 two-pass strategy is available via `--utr-strategy two-pass` but is not
@@ -556,24 +688,27 @@ The two strategies are:
 ```mermaid
 flowchart TD
     start(["UTR alignment requested"])
-    scan{"Any utterance has\n+&lt; linker or ⌊ CA\noverlap markers?"}
-    scan -->|No| global["GlobalUtr\n(crates/batchalign/src/chat_ops/fa/utr.rs)\nSingle monotonic DP\nover all words"]
-    scan -->|Yes| twopass["TwoPassOverlapUtr\n(crates/batchalign/src/chat_ops/fa/utr/two_pass.rs)"]
-    twopass --> density{"Overlap density\n> max_exclusion_density?"}
-    density -->|"Yes (>30%)"| global_anyway["Include +&lt; utterances\nin global DP\n(too many to exclude)"]
-    density -->|"No (≤30%)"| pass1["Pass 1: Global DP\nexcluding +&lt; utterances"]
-    pass1 --> pass2["Pass 2: Per-overlap recovery\nnarrow ASR window around\nprevious utterance's bullet"]
+    scan{"Explicit two-pass opt-in?"}
+    start --> scan
+    scan -->|No: auto/global| global["GlobalUtr<br/>Joint source-bound lexical proof<br/>monotonic or speaker-episode DAG"]
+    scan -->|Yes| twopass["TwoPassOverlapUtr<br/>Configured participation + local recovery"]
+    twopass --> density{"Overlap density<br/>> max_exclusion_density?"}
+    density -->|"Yes (>30%)"| global_anyway["Include overlap utterances<br/>in joint global proof"]
+    density -->|"No (≤30%)"| pass1["Pass 1: Joint global proof<br/>excluding marked overlap utterances"]
+    pass1 --> pass2["Pass 2: Per-overlap recovery<br/>narrow ASR window around<br/>previous utterance's bullet"]
+    compare["Compare with global candidate<br/>Prefer groups, then timed count"]
     global --> result(["UtrResult"])
-    global_anyway --> result
-    pass2 --> result
+    global_anyway --> compare
+    pass2 --> compare --> result
 ```
 
-**Strategy selection** (`select_strategy()` in `crates/batchalign/src/chat_ops/fa/utr.rs`):
+**Managed strategy selection** (`ResolvedUtrStrategy::from_options` in
+`crates/batchalign/src/runner/dispatch/options.rs`):
 
 | Strategy | When selected | Behavior |
 |----------|--------------|----------|
-| `GlobalUtr` | No `+<` or `⌊` markers in file | Single monotonic DP over all words (original algorithm) |
-| `TwoPassOverlapUtr` | Any utterance has `+<` or `⌊` | Pass 1 excludes overlap utterances from global DP; Pass 2 recovers their timing from a narrow ASR window around the previous utterance |
+| `GlobalUtr` | `auto` or `global`, whether overlap markers exist or not | One source-bound proof per anchored region; monotonic or bounded speaker-episode order |
+| `TwoPassOverlapUtr` | Explicit `two-pass` | Configured global participation followed by bounded local overlap recovery; compared with a global candidate using the same configured relation |
 
 The two-pass approach prevents overlap utterances from desynchronizing the
 global alignment. Pass 2 uses CA markers (`⌈⌉⌊⌋`) when present to narrow the
@@ -581,13 +716,16 @@ search window further (±`tight_buffer_ms` around the CA onset position).
 
 When overlap density exceeds `max_exclusion_density` (default 30%), excluding
 overlaps would starve the global DP of context, so all utterances are included
-in a single pass instead.
+in the global participation pass instead. The two-pass implementation also
+computes a global candidate. With grouping context it prefers more FA groups,
+then timed-utterance count; without that context it uses timed-utterance count.
+This comparison is a strategy heuristic, not an acoustic-accuracy certificate.
 
 **CLI flags for overlap control:**
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--utr-strategy auto\|global\|two-pass` | `auto` | Override automatic strategy selection |
+| `--utr-strategy auto\|global\|two-pass` | `auto` | `auto` and `global` both use global; `two-pass` is explicit opt-in |
 | `--utr-ca-markers enabled\|disabled` | `enabled` | Whether Pass 2 uses CA markers for window narrowing |
 | `--utr-density-threshold <0.0-1.0>` | `0.30` | Overlap fraction above which two-pass falls back to global |
 | `--utr-tight-buffer <ms>` | `500` | Buffer around previous utterance for Pass 2 recovery window |
@@ -730,14 +868,14 @@ seconds. Both crashed Whisper FA.
 
 ```mermaid
 flowchart TD
-    utt(["Next utterance\n(with timing bullet or estimate)"])
-    extract["collect_fa_words()\nExtract words → count UTF-8 bytes\n(utt_bytes)"]
-    over_time{"(current duration +\nnew duration) > max_group_ms\nor time went backwards?"}
-    over_chars{"current_bytes +\nutt_bytes > 448?"}
-    flush["Flush current group\nReset: current_bytes = 0\nExtend audio window into gap"]
-    add["Add utterance words to group\ncurrent_bytes += utt_bytes"]
-    more{"More\nutterances?"}
-    final["Flush final group\n(extend into trailing audio)"]
+    utt(["Next utterance<br/>(with timing bullet or estimate)"])
+    extract["collect_fa_words()<br/>Extract words → count UTF-8 bytes<br/>(utt_bytes)"]
+    over_time{"(current duration +<br/>new duration) > max_group_ms<br/>or time went backwards?"}
+    over_chars{"current_bytes +<br/>utt_bytes > 448?"}
+    flush["Flush current group<br/>Reset: current_bytes = 0<br/>Extend audio window into gap"]
+    add["Add utterance words to group<br/>current_bytes += utt_bytes"]
+    more{"More<br/>utterances?"}
+    final["Flush final group<br/>(extend into trailing audio)"]
 
     utt --> extract --> over_time
     over_time -->|"yes"| flush
@@ -860,18 +998,18 @@ utterance at those words.
 
 ```mermaid
 flowchart TD
-    long["utterance window > max_group_ms\n(OverBudgetWindow)"]
-    lookup{"what did UTR\nobserve here?"}
-    cuts{"any interior cut?\n(anchored word end,\nnot the last word)"}
-    split["AnchoredSplit: source-owned partition\n(all original words)"]
+    long["utterance window > max_group_ms<br/>(OverBudgetWindow)"]
+    lookup{"what did UTR<br/>observe here?"}
+    cuts{"any interior cut?<br/>(anchored word end,<br/>not the last word)"}
+    split["AnchoredSplit: source-owned partition<br/>(all original words)"]
     gap{"this piece fits budget?"}
     request["request this piece"]
-    refuse_gap["keep this piece untimed\nanchor_gap (needs review)"]
-    refuse_unusable["refuse: anchors_unusable\n(cause)"]
+    refuse_gap["keep this piece untimed<br/>anchor_gap (needs review)"]
+    refuse_unusable["refuse: anchors_unusable<br/>(cause)"]
     refuse_over["refuse: over_budget"]
     long --> lookup
-    lookup -->|"nothing (not run, no tokens,\nutterance unmatched)"| refuse_over
-    lookup -->|"only fuzzy / multi-word,\nrefused set, other words"| refuse_unusable
+    lookup -->|"nothing (not run, no tokens,<br/>utterance unmatched)"| refuse_over
+    lookup -->|"only fuzzy / multi-word,<br/>refused set, other words"| refuse_unusable
     lookup -->|"admitted anchors"| cuts
     cuts -->|"no"| refuse_unusable
     cuts -->|"yes"| split
@@ -903,27 +1041,27 @@ entry arrow in the diagram: `run_fa_from_ast()` / `process_fa_incremental()`.
 
 ```mermaid
 flowchart TD
-    start(["process_one_fa_file()\nfa_pipeline.rs"])
-    media["Resolve audio\n(5-tier search)"]
-    parse["Parse CHAT → ChatFile AST\n(single parse, fa/mod.rs)"]
-    utr_check{"Untimed\nutterances?"}
-    utr_run["UTR pre-pass\nrun_utr_pass()\n(crates/batchalign/src/chat_ops/fa/utr.rs)"]
-    utr_warn["WARN: untimed utterances,\nno UTR engine, proportional\ninterpolation only"]
-    incremental{"--before PATH\nprovided?"}
-    fa_full["run_fa_from_ast()\n(fa/mod.rs)"]
-    fa_inc["process_fa_incremental()\n(fa/incremental.rs)"]
-    fa_groups["Group utterances\n+ per-request dispatch\n(fa/units.rs, fa/transport.rs)"]
-    fa_ok{"All groups\nresolved?"}
-    finalize["FaFinalized\noptional bullet repair first"]
-    mono["enforce_monotonicity_with_policy()\nstrip non-monotonic starts\nclamp ends per typed policy\n(chat_ops/fa/orchestrate.rs)"]
-    mono_warn["WARN monotonicity:\nend_clamped / start_stripped\nfor affected utterances"]
-    post_val["Post-validation\n(warn-only, never fatal)"]
-    out["Serialize → CHAT\nwrite output"]
+    start(["process_one_fa_file()<br/>fa_pipeline.rs"])
+    media["Resolve audio<br/>(5-tier search)"]
+    parse["Parse CHAT → ChatFile AST<br/>(single parse, fa/mod.rs)"]
+    utr_check{"Untimed<br/>utterances?"}
+    utr_run["UTR pre-pass<br/>run_utr_pass()<br/>(crates/batchalign/src/chat_ops/fa/utr.rs)"]
+    utr_warn["WARN: untimed utterances,<br/>no UTR engine, proportional<br/>interpolation only"]
+    incremental{"--before PATH<br/>provided?"}
+    fa_full["run_fa_from_ast()<br/>(fa/mod.rs)"]
+    fa_inc["process_fa_incremental()<br/>(fa/incremental.rs)"]
+    fa_groups["Group utterances<br/>+ per-request dispatch<br/>(fa/units.rs, fa/transport.rs)"]
+    fa_ok{"All groups<br/>resolved?"}
+    finalize["FaFinalized<br/>optional bullet repair first"]
+    mono["enforce_monotonicity_with_policy()<br/>strip non-monotonic starts<br/>clamp ends per typed policy<br/>(chat_ops/fa/orchestrate.rs)"]
+    mono_warn["WARN monotonicity:<br/>end_clamped / start_stripped<br/>for affected utterances"]
+    post_val["Post-validation<br/>(warn-only, never fatal)"]
+    out["Serialize → CHAT<br/>write output"]
     fa_err{"Error type?"}
-    utr_fallback{"Retryable +\nuntimed +\nfallback UTR\nnot yet tried?"}
-    utr_fb["Fallback UTR:\nrun_utr_pass() once\nthen retry FA"]
-    backoff["Retry with\nexponential backoff"]
-    terminal["Terminal file error\nwith real message"]
+    utr_fallback{"Retryable +<br/>untimed +<br/>fallback UTR<br/>not yet tried?"}
+    utr_fb["Fallback UTR:<br/>run_utr_pass() once<br/>then retry FA"]
+    backoff["Retry with<br/>exponential backoff"]
+    terminal["Terminal file error<br/>with real message"]
 
     start --> media --> parse --> utr_check
     utr_check -->|"all timed"| incremental
@@ -938,7 +1076,7 @@ flowchart TD
     fa_err -->|"retryable worker error"| utr_fallback
     utr_fallback -->|"yes"| utr_fb --> fa_groups
     utr_fallback -->|"no"| backoff --> fa_groups
-    fa_err -->|"non-retryable\nor retry budget exhausted"| terminal
+    fa_err -->|"non-retryable<br/>or retry budget exhausted"| terminal
 ```
 
 > Source files: `crates/batchalign/src/runner/dispatch/fa_pipeline.rs`,
@@ -955,25 +1093,25 @@ file-level failure.
 
 ```mermaid
 flowchart TD
-    group(["FA request\n(audio window + words)"])
-    wor{"Reusable corroborated\n%wor timing?"}
-    raw{"Raw FA evidence\nadmitted?"}
-    replay["Replay raw response through\ncurrent Rust projection"]
-    derived{"Derived timing vector\nadmitted?"}
-    cached_timings["Reuse derived timings\n(compatibility fallback)"]
-    policy{"Cache policy permits\ninference?"}
-    required_fail["RequireCache failure\n(no dispatch authority)"]
-    build["build_forced_alignment_request_v2()\n(worker/request_builder_v2.rs)"]
-    empty{"EmptyAudioSegment?\n(0 PCM frames after ffmpeg)"}
-    skip_empty["WARN: request decoded no audio samples\nLeave words unaligned\n→ continue to next request"]
-    dispatch["dispatch_execute_v2()\n→ Python worker"]
-    parse{"parse_unit_response()\nparse_forced_alignment_result_v2()"}
+    group(["FA request<br/>(audio window + words)"])
+    wor{"Reusable corroborated<br/>%wor timing?"}
+    raw{"Raw FA evidence<br/>admitted?"}
+    replay["Replay raw response through<br/>current Rust projection"]
+    derived{"Derived timing vector<br/>admitted?"}
+    cached_timings["Reuse derived timings<br/>(compatibility fallback)"]
+    policy{"Cache policy permits<br/>inference?"}
+    required_fail["RequireCache failure<br/>(no dispatch authority)"]
+    build["build_forced_alignment_request_v2()<br/>(worker/request_builder_v2.rs)"]
+    empty{"EmptyAudioSegment?<br/>(0 PCM frames after ffmpeg)"}
+    skip_empty["WARN: request decoded no audio samples<br/>Leave words unaligned<br/>→ continue to next request"]
+    dispatch["dispatch_execute_v2()<br/>→ Python worker"]
+    parse{"parse_unit_response()<br/>parse_forced_alignment_result_v2()"}
     ok["Request timings resolved"]
-    err_kind{"Error kind?\n(is_fa_runtime_failure,\nfa_group_retry,\nis_whisper_model_unavailable)"}
-    ctc["Wave2Vec CTC fallback\n(see diagram below)"]
-    model_unavail["ModelUnavailable: \ncapability gap\nLeave words unaligned\n+ WARN in server log"]
-    runtime_fail["RuntimeFailure: \ndata-driven model error\nLeave words unaligned\n+ WARN in server log"]
-    other["Other error: \ninfrastructure failure\n→ propagate to file loop"]
+    err_kind{"Error kind?<br/>(is_fa_runtime_failure,<br/>fa_group_retry,<br/>is_whisper_model_unavailable)"}
+    ctc["Wave2Vec CTC fallback<br/>(see diagram below)"]
+    model_unavail["ModelUnavailable: <br/>capability gap<br/>Leave words unaligned<br/>+ WARN in server log"]
+    runtime_fail["RuntimeFailure: <br/>data-driven model error<br/>Leave words unaligned<br/>+ WARN in server log"]
+    other["Other error: <br/>infrastructure failure<br/>→ propagate to file loop"]
 
     group --> wor
     wor -->|"yes"| ok
@@ -988,9 +1126,9 @@ flowchart TD
     empty -->|"no"| dispatch --> parse
     parse -->|"OK"| ok
     parse -->|"error"| err_kind
-    err_kind -->|"Wave2Vec engine\n+ CTC overflow"| ctc
-    err_kind -->|"ModelUnavailable:\nno whisper FA host"| model_unavail
-    err_kind -->|"RuntimeFailure:\nmodel exception"| runtime_fail
+    err_kind -->|"Wave2Vec engine<br/>+ CTC overflow"| ctc
+    err_kind -->|"ModelUnavailable:<br/>no whisper FA host"| model_unavail
+    err_kind -->|"RuntimeFailure:<br/>model exception"| runtime_fail
     err_kind -->|"other"| other
 ```
 
@@ -1002,27 +1140,27 @@ FA.  No other error triggers this retry.
 
 ```mermaid
 flowchart TD
-    w2v["Wave2Vec worker response\n(parse_unit_response fails)"]
-    reason{"fa_group_retry()\n(fa/transport.rs)"}
+    w2v["Wave2Vec worker response<br/>(parse_unit_response fails)"]
+    reason{"fa_group_retry()<br/>(fa/transport.rs)"}
 
     w2v --> reason
 
-    r1["Reason: targets length\nis too long for CTC\n, group has too many words\nfor CTC context window"]
-    r2["Reason: targets Tensor\nshouldn't contain blank index\n, word contains char that\nmaps to CTC blank token"]
-    r3["Reason: Kernel size\ncan't be greater than\nactual input size\n, audio segment &lt; ~25ms\n(Wave2Vec conv layer 7\nneeds ≥ 2 samples after\n6 conv layers at 16 kHz)"]
-    none["None, no fallback:\nerror propagates to\nfile-level handler"]
+    r1["Reason: targets length<br/>is too long for CTC<br/>, group has too many words<br/>for CTC context window"]
+    r2["Reason: targets Tensor<br/>shouldn't contain blank index<br/>, word contains char that<br/>maps to CTC blank token"]
+    r3["Reason: Kernel size<br/>can't be greater than<br/>actual input size<br/>, audio segment &lt; ~25ms<br/>(Wave2Vec conv layer 7<br/>needs ≥ 2 samples after<br/>6 conv layers at 16 kHz)"]
+    none["None, no fallback:<br/>error propagates to<br/>file-level handler"]
 
-    reason -->|"'targets length is too long\nfor CTC'"| r1
-    reason -->|"'targets Tensor shouldn't\ncontain blank index'"| r2
-    reason -->|"'Kernel size can't be greater\nthan actual input size'"| r3
+    reason -->|"'targets length is too long<br/>for CTC'"| r1
+    reason -->|"'targets Tensor shouldn't<br/>contain blank index'"| r2
+    reason -->|"'Kernel size can't be greater<br/>than actual input size'"| r3
     reason -->|"any other error"| none
 
-    whisper["Retry group with\nFaEngineName::Whisper\n(new request namespace\nto avoid artifact collision)"]
-    fallback_ok["Group timings resolved\n+ FaFallbackEventTrace\nrecorded in job traces"]
+    whisper["Retry group with<br/>FaEngineName::Whisper<br/>(new request namespace<br/>to avoid artifact collision)"]
+    fallback_ok["Group timings resolved<br/>+ FaFallbackEventTrace<br/>recorded in job traces"]
     fallback_err{"Whisper response OK?"}
-    model_unavail_err["ModelUnavailable:\nno Whisper model loaded: \nleave words unaligned\n+ WARN in server log\n(is_whisper_model_unavailable())"]
-    runtime_fail_err["RuntimeFailure:\nmodel exception on this input, \nleave words unaligned\n+ WARN in server log\n(is_fa_runtime_failure())"]
-    other_whisper_err["Other error\n(infrastructure failure)\n→ file-level failure"]
+    model_unavail_err["ModelUnavailable:<br/>no Whisper model loaded: <br/>leave words unaligned<br/>+ WARN in server log<br/>(is_whisper_model_unavailable())"]
+    runtime_fail_err["RuntimeFailure:<br/>model exception on this input, <br/>leave words unaligned<br/>+ WARN in server log<br/>(is_fa_runtime_failure())"]
+    other_whisper_err["Other error<br/>(infrastructure failure)<br/>→ file-level failure"]
 
     r1 --> whisper
     r2 --> whisper
@@ -1298,23 +1436,23 @@ override or narrow this intermediate coverage; see the
 
 ```mermaid
 flowchart TD
-    inject_words["inject_timings_for_utterance()\nSets word.inline_bullet on each\naligned word in the utterance"]
+    inject_words["inject_timings_for_utterance()<br/>Sets word.inline_bullet on each<br/>aligned word in the utterance"]
 
-    inject_words --> postprocess["postprocess_utterance_timings()\nChains word end times;\nclamps word timings to utterance bullet range"]
+    inject_words --> postprocess["postprocess_utterance_timings()<br/>Chains word end times;<br/>clamps word timings to utterance bullet range"]
 
-    postprocess --> update["update_utterance_bullet()\nRecomputes utterance bullet\nfrom word inline_bullets"]
+    postprocess --> update["update_utterance_bullet()<br/>Recomputes utterance bullet<br/>from word inline_bullets"]
 
-    update --> source{"utterance bullet\nBulletSource?"}
+    update --> source{"utterance bullet<br/>BulletSource?"}
 
-    source -->|"Utr\n(UTR provisional hint)"| overwrite["Overwrite: bullet = word span\nFA is authoritative.\nUTR estimate discarded."]
-    source -->|"Authoritative\n(hand-linked or FA-derived)"| union_op["Union: bullet = min(word.start, existing.start)\n             ..max(word.end, existing.end)\nNever shrink, preserves\nfiller/gesture coverage"]
-    source -->|"None\n(untimed, UTR also failed)"| set_new["Set: bullet = word span"]
+    source -->|"Utr<br/>(UTR provisional hint)"| overwrite["Overwrite: bullet = word span<br/>FA is authoritative.<br/>UTR estimate discarded."]
+    source -->|"Authoritative<br/>(hand-linked or FA-derived)"| union_op["Union: bullet = min(word.start, existing.start)<br/>             ..max(word.end, existing.end)<br/>Never shrink, preserves<br/>filler/gesture coverage"]
+    source -->|"None<br/>(untimed, UTR also failed)"| set_new["Set: bullet = word span"]
 
     overwrite --> mark["Result marked Authoritative"]
     union_op --> mark
     set_new --> mark
 
-    mark --> wor["add_wor_tier()\nGenerates %wor dependent tier\nfrom word inline_bullets"]
+    mark --> wor["add_wor_tier()<br/>Generates %wor dependent tier<br/>from word inline_bullets"]
 ```
 
 **Why `BulletSource` matters:** utterance bullets can come from two very
@@ -1367,14 +1505,14 @@ does not itself carry the main-bullet choice).
 
 ```mermaid
 flowchart TD
-    parse["align dispatch: single parse"] --> bind["MainBulletAuthority::bind\n(classify each input bullet;\nBackward refuses the file)"]
-    bind --> utr["UTR pre-pass, rescue, filler expansion\n(may widen bullets for grouping)"]
-    utr --> apply["apply_fa_results_with_projection_policy\nkept: skip the bullet update"]
-    apply --> impose["then_finalize: impose\nrestore kept bullets, clamp words on\nmain tier and %wor -> ImposedBullets"]
-    impose --> repair["bullet repair (optional)\nrequires ImposedBullets"]
-    repair --> mono["monotonicity\nrequires ImposedBullets"]
+    parse["align dispatch: single parse"] --> bind["MainBulletAuthority::bind<br/>(classify each input bullet;<br/>Backward refuses the file)"]
+    bind --> utr["UTR pre-pass, rescue, filler expansion<br/>(may widen bullets for grouping)"]
+    utr --> apply["apply_fa_results_with_projection_policy<br/>kept: skip the bullet update"]
+    apply --> impose["then_finalize: impose<br/>restore kept bullets, clamp words on<br/>main tier and %wor -> ImposedBullets"]
+    impose --> repair["bullet repair (optional)<br/>requires ImposedBullets"]
+    repair --> mono["monotonicity<br/>requires ImposedBullets"]
     mono --> wor["%wor written (main-tier cuts folded in)"]
-    wor --> held["restore_and_verify: restore given bullets\nof utterances not in the recording,\nthen KeptBulletsHeld or KeptBulletError\n(fails the file)"]
+    wor --> held["restore_and_verify: restore given bullets<br/>of utterances not in the recording,<br/>then KeptBulletsHeld or KeptBulletError<br/>(fails the file)"]
 ```
 
 The ordering is carried by types, not comments. Repair and monotonicity each
@@ -1533,11 +1671,16 @@ Today the implemented fast paths are:
 - skip UTR when every utterance already has timing
 - use a unique exact-subsequence UTR match when the transcript and ASR word
   streams line up without ambiguity
+- use score-viable packed joint profiles when an exact/ASCII-case-insensitive
+  legal-order band exceeds its work cap and the alternative proof fits the
+  unchanged limits; this preserves all optimal matches and omissions
 
-The next possible optimization is more selective escalation inside UTR:
-identify local divergence regions ("trouble windows") and run global DP only
-there. That is **not** implemented yet. The current global-DP path remains the
-correctness baseline for difficult files.
+Retained anchors already partition UTR into independently admitted regions.
+Within each region, the source-bound monotonic or joint correspondence proof
+remains the correctness baseline. The packed witness reduces preliminary score
+work; the optional packed joint producer also reduces score/proof storage and
+work while preserving that graph. Further subdivision would need proof that no optimal candidate or
+missing-word possibility crosses a new boundary.
 
 ## Why Two Steps
 
@@ -1551,21 +1694,22 @@ the same purpose.
 
 ## Untimed Utterance Handling
 
-Four tiers of coverage for untimed utterances, in order of preference:
+Recovery and search-window routes for untimed utterances are distinct from
+observed final word timing:
 
 ```mermaid
 flowchart TD
-    start{Untimed\nutterances?} -->|No| done([All timed: skip UTR])
-    start -->|Yes| engine{UTR engine\nconfigured?}
+    start{Untimed<br/>utterances?} -->|No| done([All timed: skip UTR])
+    start -->|Yes| engine{UTR engine<br/>configured?}
 
-    engine -->|Yes| ratio{">50% timed\n+ audio >60s?"}
-    ratio -->|Yes| partial["Tier 1a: Partial-window ASR\nASR only on untimed regions\n(saves time on first run)"]
-    ratio -->|No| full["Tier 1b: Full-file ASR\nASR on entire audio"]
+    engine -->|Yes| ratio{">50% timed<br/>+ audio >60s?"}
+    ratio -->|Yes| partial["Tier 1a: Partial-window ASR<br/>ASR only on untimed regions<br/>(saves time on first run)"]
+    ratio -->|No| full["Tier 1b: Full-file ASR<br/>ASR on entire audio"]
 
-    partial --> inject["inject_utr_timing()\n~100% coverage"]
+    partial --> inject["inject_utr_timing()<br/>Common endpoint hints only"]
     full --> inject
 
-    engine -->|No| interp["Tier 2: Proportional interpolation\nEstimate from neighbors\n~96% coverage"]
+    engine -->|No| interp["Proportional grouping estimates<br/>Search proposals, not timings<br/>Containment / feasibility admission"]
 
     inject -->|"unmatched > 0"| interp
     inject -->|"all matched"| done2([Proceed to FA])
@@ -1573,7 +1717,7 @@ flowchart TD
     interp --> done2
 
     done2 --> fa_fail{FA failed?}
-    fa_fail -->|Yes + untimed| fallback["Tier 3: Fallback UTR\nrun_utr_pass() once\nbefore next retry"]
+    fa_fail -->|Yes + untimed| fallback["Tier 3: Fallback UTR<br/>run_utr_pass() once<br/>before next retry"]
     fallback --> retry([Retry FA])
     fa_fail -->|No| output([Output])
 ```
@@ -1584,21 +1728,24 @@ flowchart TD
    First run saves time proportional to the untimed fraction; repeat runs hit
    cache.
 2. **UTR full-file (default, mostly-untimed files):** ASR runs on the full
-   audio. The result is cached for instant repeat runs.
-3. **Proportional interpolation:** When UTR is disabled (`--no-utr`) or when
+   audio. Cached ASR evidence avoids repeated inference, not correspondence
+   search or final FA work.
+3. **Proportional grouping estimates:** When UTR is disabled (`--no-utr`) or when
    UTR's ASR inference fails, the grouping algorithm interpolates untimed
    utterances between neighboring timed utterances by word count, with a
-   2-second buffer. Achieves ~96% coverage.
+   2-second buffer and feasibility checks. These are search proposals, not
+   observed word timestamps or UTR hints; admission can refuse them. No fixed
+   coverage percentage is promised.
 4. **Fallback UTR:** When FA fails with a retryable error and untimed
    utterances were not recovered, UTR is attempted once before the next retry.
    This can recover files where bad interpolated timing caused the FA failure.
 5. **Skip:** When `total_audio_ms` is unavailable and no timed neighbors exist,
    untimed utterances are excluded from FA grouping.
 
-This is **smarter than ba2's skip logic**: ba2 skipped UTR for the entire file
-if *any* utterance had timing (potentially missing untimed ones). ba3 skips
-UTR only if *all* utterances are timed, and when UTR can't match a specific
-utterance, proportional interpolation provides a fallback.
+BA3 skips UTR when all required utterances are already timed. Retained bullets
+can bound recovery for remaining regions; an unmatched or budget-refused
+utterance does not receive invented timing. A grouping proposal may still be
+admitted for FA, whose actual observations must satisfy final timing acceptance.
 
 ### Utterances not in the recording
 
@@ -2029,11 +2176,11 @@ the trace payload if the condition is reproduced.
 ```mermaid
 flowchart TD
     run["Run align with --debug-dir"]
-    mode{"direct or\nserver?"}
-    direct["DirectHost\nexports debug-traces.json\nin job staging dir"]
-    server["GET /jobs/{id}/traces\nreturns JobTraces JSON"]
+    mode{"direct or<br/>server?"}
+    direct["DirectHost<br/>exports debug-traces.json<br/>in job staging dir"]
+    server["GET /jobs/{id}/traces<br/>returns JobTraces JSON"]
     fa_trace["fa_timeline"]
-    fallback["fallback_events[]\n(group_index, from_engine,\nto_engine, reason,\naudio_start_ms, audio_end_ms)"]
+    fallback["fallback_events[]<br/>(group_index, from_engine,<br/>to_engine, reason,<br/>audio_start_ms, audio_end_ms)"]
 
     run --> mode
     mode -->|direct| direct --> fa_trace

@@ -82,6 +82,17 @@ struct NamedStructInfo {
 /// into the sealed ASR plan).
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
+        path: "crates/batchalign-transform/src/dp_align/interleaving/episodes/packed/kernel/cost.rs",
+        struct_name: "PackedSearchCost",
+        max_fields: 11,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "immutable diagnostic projection of one consumed input-bound ledger: \
+                 populations and geometry come from its admitted plan, costs from typed stage \
+                 scopes, and outcome remains separate from correspondence/timing authority; \
+                 private fields with no consumer constructor or mutable accessor",
+    },
+    WideStructAllowance {
         path: "crates/batchalign-transform/src/compare/cross_mode/morphotag.rs",
         struct_name: "MorphotagTokenDifference",
         max_fields: 10,

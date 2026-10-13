@@ -30,16 +30,23 @@ ALLOWED_DP_ALIGN_CALLS = {
 }
 
 # Allowlisted `CorrespondenceAnalysis::observe[_controlled]` call sites. Each runs one
-# `dp_align::align` (the selected path) and a budgeted common-correspondence
-# admission over the same pair, so each call is the same O(n*m) decision:
+# selected-path scalar alignment and common-correspondence admission over the
+# same pair. Inspection has independent work/storage caps; proof has its own
+# edge/comparison caps. New call sites still need a scoped policy decision:
 #
 # - chat_ops/fa/utr.rs: UTR alignment of one anchored region's words against
 #   its ASR tokens, correctness critical and not avoidable; regions bound n
 #   and m.
-# - chat_ops/fa/utr/two_pass.rs: overlap-aware UTR timing recovery, one
-#   windowed utterance at a time.
 ALLOWED_CORRESPONDENCE_OBSERVE_CALLS = {
     "crates/batchalign/src/chat_ops/fa/utr.rs": 1,
+}
+
+# Proof-only callers do not run selected-path Hirschberg. Literal proof uses
+# capped sparse edges or packed admission; fuzzy proof caps pair comparisons.
+# - correspondence.rs: paired observation delegates to the same proof producer.
+# - two_pass.rs: windowed overlap timing needs common proof, not inspection.
+ALLOWED_CORRESPONDENCE_ADMISSION_CALLS = {
+    "crates/batchalign-transform/src/dp_align/correspondence.rs": 1,
     "crates/batchalign/src/chat_ops/fa/utr/two_pass.rs": 1,
 }
 
@@ -88,6 +95,9 @@ def test_chat_ops_dp_calls_are_allowlisted() -> None:
     observe_hits = _scan_paths(
         dp_call_src, r"\bCorrespondenceAnalysis::observe(?:_controlled)?\s*\("
     )
+    admission_hits = _scan_paths(
+        dp_call_src, r"\bCorrespondenceAdmission::observe(?:_controlled)?\s*\("
+    )
 
     actual = Counter(rel for rel, _, _ in align_hits)
     assert dict(sorted(actual.items())) == ALLOWED_DP_ALIGN_CALLS, (
@@ -119,4 +129,16 @@ def test_chat_ops_dp_calls_are_allowlisted() -> None:
         "O(n*m) DP; same rule as dp_align::align above.\n"
         f"expected: {ALLOWED_CORRESPONDENCE_OBSERVE_CALLS}\n"
         f"got:      {dict(sorted(actual_observe.items()))}"
+    )
+    actual_admission = Counter(
+        rel
+        for rel, _, _ in admission_hits
+        if not rel.endswith("/tests.rs") and "/tests/" not in rel
+    )
+    assert (
+        dict(sorted(actual_admission.items())) == ALLOWED_CORRESPONDENCE_ADMISSION_CALLS
+    ), (
+        "Proof-only correspondence call sites changed; review their bounded relation.\n"
+        f"expected: {ALLOWED_CORRESPONDENCE_ADMISSION_CALLS}\n"
+        f"got:      {dict(sorted(actual_admission.items()))}"
     )

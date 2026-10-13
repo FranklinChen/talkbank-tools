@@ -1,7 +1,7 @@
 # Number Expansion in ASR Post-Processing
 
 **Status:** Current
-**Last updated:** 2026-10-06 23:58 EDT
+**Last updated:** 2026-10-13 08:08 EDT
 
 This page is the **single source of truth** for how batchalign3 turns
 ASR-emitted number tokens (`"3"`, `"$5"`, `"1950s"`, `"3rd"`,
@@ -29,6 +29,7 @@ several shapes:
 | Spelled words | `"three"` | Most ASR for small English numbers |
 | Decade | `"1950s"` | Year-context heuristic |
 | Ordinal | `"3rd"`, `"21st"` | English-specific suffixes |
+| Dutch ordinal | `"29e"`, `"22ste"`, `"1000ᵉ"` | Dutch suffix forms |
 | Indicator ordinal | `"54ª"`, `"1.º"`, `"54.ºs"` | Printed Portuguese ordinal abbreviation |
 | Currency | `"$5"`, `"€3"` | Symbol-prefixed, locale-driven |
 | Percent | `"80%"` | Symbol-suffixed |
@@ -58,7 +59,7 @@ crossings (the Python `num2words` IPC is gone). The generic generator
 is **chatter's**, not Batchalign's:
 `talkbank_transform::num_words::expand_number` (from the pinned chatter
 release) owns the per-language cardinal tables, English short-scale
-composition, CJK numerals, English suffix ordinals and decades,
+composition, CJK numerals, English/Dutch suffix ordinals and English decades,
 currency, dash ranges and digit-leading hyphen compounds. Batchalign's
 `asr_postprocess::expand_number` (`num2text.rs`) adds only what chatter
 does not provide, Portuguese indicator ordinals, in front of it:
@@ -70,7 +71,7 @@ flowchart TD
     Por -->|"rank 1..=1000"| PorRust["ordinal_por: gendered ordinal words"]
     Por -->|"rank out of range"| PorPass["return unchanged<br/>(E220 catches at validate)"]
     Por -->|"no"| Chatter["talkbank_transform::num_words::expand_number<br/>(chatter)"]
-    Chatter --> Forms["English ordinals/decades, digit-leading hyphen,<br/>currency, dash ranges, CJK numerals,<br/>per-language cardinal tables"]
+    Chatter --> Forms["English/Dutch ordinals, English decades, digit-leading hyphen,<br/>currency, dash ranges, CJK numerals,<br/>per-language cardinal tables"]
     Forms --> Out(["expanded text, or the token unchanged<br/>(E220 catches at validate)"])
 ```
 
@@ -124,7 +125,31 @@ sentence end) and is returned unchanged, the policy for every expansion
 this module cannot perform, so E220 reports the digits instead of a
 guessed word.
 
-**Other ordinal and decade conventions pass through unchanged**: suffix
+### Dutch suffix ordinals
+
+Chatter's `num_words/ordinal_nld.rs` owns the Dutch rule. Whole-token ASCII
+digits with lowercase `e`, `de`, `ste` or `ᵉ` are admitted into the private
+`SupportedDutchOrdinal`, bounded to 1..=1000. Only that value reaches
+composition. The composer reuses Chatter's existing Dutch cardinal lexicon;
+missing lexical evidence refuses expansion rather than guessing or performing
+generic arithmetic decomposition of table phrases. No new BA3 renderer,
+JSON router or Python number runtime is introduced.
+
+Hundreds join directly to their final ordinal component, with irregular 1/3/8
+and `duizendste` at 1000. Lowercase suffixes are compatibility inputs, not a
+rank/suffix agreement checker; leading zeros are interpreted numerically.
+Other spellings/ranks stay unchanged. The tokenizer already handles the
+following sentence punctuation, so no Dutch-specific punctuation protection
+is needed. One-word output retains the original speaker, kind and optional
+timing. Code-switched language uncertainty still prevents number rewriting.
+
+The Chatter public API controls exercise all 1000 ranks and authored spellings;
+BA3 checks all 4000 rank/suffix outputs through `ChatWordText` admission,
+raw sentence-boundary/timing/speaker preservation and code-switch abstention.
+The existing 3150-row number baseline is unchanged; Dutch controls are an
+additional deck, not regenerated expectations for unaffected languages.
+
+**Other ordinal and decade conventions pass through unchanged**: English suffix
 ordinals outside English (`13th` in `spa`), indicator ordinals outside
 Portuguese (`3º` in `spa`), and non-English decades. Add a per-language
 expander if a real corpus surfaces the need.

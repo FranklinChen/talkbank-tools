@@ -1,6 +1,6 @@
 # Architecture reference
 
-**Last modified:** 2026-10-01 09:50 EDT
+**Last modified:** 2026-10-14 16:21 EDT
 
 Read the sections relevant to your task. [AGENTS.md](../../AGENTS.md)
 is the canonical policy entry point and resolves workflow conflicts here.
@@ -25,27 +25,20 @@ chatter on 2026-06-18.
 
 ### How the CHAT core is consumed
 
-`[workspace.dependencies]` in `Cargo.toml` points `talkbank-model`,
-`talkbank-parser`, `talkbank-parser-re2c`, `talkbank-parser-tests`, and
-`talkbank-transform` at the published, public chatter via git deps pinned to a
-release tag (see `Cargo.toml` for the current tag; e.g. `{ git = "https://github.com/TalkBank/chatter", tag = "v0.3.5" }`).
-A plain checkout builds with no `../chatter` sibling. Adopt a newer chatter by
-bumping the tag (then `cargo update`). **Do NOT re-introduce copies of those
+`[workspace.dependencies]` in `Cargo.toml` pins `talkbank-model`,
+`talkbank-parser`, `talkbank-parser-tests` and `talkbank-transform` to one
+exact Chatter Git revision. The manifest and lockfile own the current identity;
+application version strings do not identify the compiled dependency.
+Adopt a newer reviewed Chatter commit by updating all pins and the lockfile
+together, then verify the consuming targets. **Do NOT re-introduce copies of those
 crates here**; chatter owns them. New CHAT-format / grammar / spec / parser /
 validation / CLAN work goes in chatter, not here.
 
-To co-develop chatter+batchalign locally, add an UNCOMMITTED `[patch]` that
-points the git deps at your local checkout (never commit it; committed builds
-stay self-contained):
-
-```toml
-[patch."https://github.com/TalkBank/chatter"]
-talkbank-model = { path = "../chatter/crates/talkbank-model" }
-talkbank-parser = { path = "../chatter/crates/talkbank-parser" }
-talkbank-parser-re2c = { path = "../chatter/crates/talkbank-parser-re2c" }
-talkbank-parser-tests = { path = "../chatter/crates/talkbank-parser-tests" }
-talkbank-transform = { path = "../chatter/crates/talkbank-transform" }
-```
+Co-development uses an immutable, buildable Chatter checkpoint, not an
+uncommitted dependency tree or a committed local path patch. Local qualification
+of an unpublished checkpoint is not clean-machine installation evidence.
+Publish Chatter before claiming that a dependent candidate is publicly
+reproducible; a published dependency builds without a sibling checkout.
 
 ## Crates in this workspace
 
