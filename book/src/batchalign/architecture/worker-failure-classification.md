@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-04 07:49 EDT
+**Last updated:** 2026-10-16 09:58 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -678,13 +678,25 @@ starts. Utterances with no alignable words cannot alter a pending audio window.
 A single utterance with an empty, inverted or out-of-recording window receives a
 durable FA `window_refused` decision, which carries the refused window's bounds
 and a typed cause (evidence schema version 5). An oversized one is first offered
-for splitting at the words utterance timing recovery heard: when every piece
-fits the budget it becomes one anchored group, aligned as one request per piece
-(`window_split_at_anchors`, schema 6); otherwise it is refused as `anchor_gap`,
-`anchors_unusable` or `over_budget`. No request is dispatched for a refused
-utterance. Grouping preserves the supplied words and timing rather than clipping an
-uncertain long window or guessing finer word positions. Later pipeline timing
-repair remains a separate, recorded operation. Refusal means narrower timing
+for partitioning at recovered word anchors. Schema 7 retains supported pieces
+alongside explicit unrequested ranges; unusable anchors or a lack of any
+supported piece still refuse the whole window. Schema 8 separates disjoint word
+ownership from overlapping acoustic and lexical context. Within each supported
+run, requests borrow the longest source-bounded context that fits the configured
+budget. An anchored tail of an unavailable prefix can join the following
+request, but is not isolated merely because its anchor has positive duration.
+Requests never borrow across an unavailable range. Exact lexical correspondence
+does not certify an acoustic cut or correct model alignment.
+
+Cache keys and raw replies cover the full context; assembly admits the complete
+reply before projecting only owned words. The request window stays attached to
+each admitted timing through postprocessing. Derived terminal ends are bounded
+by that window, with the original assumption and overshoot retained in the
+origin chain. Later healing cannot extend them beyond it. Out-of-window measured
+timings are refused, not silently clipped. Derived cache schema 2 excludes old
+schema-1 onset-only projections; unchanged direct interval projections remain
+compatible, and raw evidence is replayed through the current parser first.
+Refusal means narrower timing
 evidence is required; it does not mean the source speech is invalid or that the
 corpus is complete.
 

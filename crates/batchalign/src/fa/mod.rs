@@ -328,7 +328,7 @@ impl AdmittedFaResult {
     }
 }
 
-const FA_DERIVED_EVIDENCE_SCHEMA_VERSION: u8 = 1;
+const FA_DERIVED_EVIDENCE_SCHEMA_VERSION: u8 = 2;
 
 /// Persisted local timing projection with the request facts needed for replay.
 ///
@@ -404,7 +404,12 @@ impl AdmittedCachedFaTimings {
         cache_key: &CacheKey,
     ) -> Result<Self, FaDerivedEvidenceError> {
         let cached: VersionedCachedFaTimings = serde_json::from_value(value)?;
-        if cached.schema_version != FA_DERIVED_EVIDENCE_SCHEMA_VERSION {
+        // Schema 1's onset-only terminal assumption could escape its request.
+        // Direct interval evidence is unchanged. Raw model evidence keeps its
+        // identity and is always replayed through the current parser first.
+        let compatible_interval_v1 = cached.schema_version == 1
+            && cached.requested_engine == crate::types::engines::FaEngineName::Wave2Vec;
+        if cached.schema_version != FA_DERIVED_EVIDENCE_SCHEMA_VERSION && !compatible_interval_v1 {
             return Err(FaDerivedEvidenceError::SchemaVersion(cached.schema_version));
         }
         if cached.requested_engine != requested_engine {
@@ -1134,13 +1139,7 @@ mod tests {
                 "words": 3,
                 "untimed_words": 3,
                 "cause": {
-                  "kind": "window_refused",
-                  "window": {
-                    "cause": "over_budget",
-                    "start_ms": 0,
-                    "end_ms": 300017,
-                    "budget_ms": 15000
-                  }
+                  "kind": "localization_unavailable"
                 }
               }
             ]
@@ -1161,9 +1160,8 @@ mod tests {
 
     /// Run the real FA entry point on `source` against a real 300 s
     /// recording, with a pool that has no workers: every case using it is
-    /// decided without inference. An untimed utterance's estimated window
-    /// spans the whole recording, far over the 15 s budget, so grouping
-    /// refuses it.
+    /// decided without inference. Unsupported untimed utterances have no
+    /// authorized request, regardless of recording length or engine budget.
     async fn run_on_a_long_recording(source: &str) -> Result<AdmittedFaResult, ServerError> {
         use crate::cache::UtteranceCache;
         use crate::worker::pool::{PoolConfig, WorkerPool};
@@ -1176,7 +1174,14 @@ mod tests {
             audio_identity: &identity,
             audio_duration: None,
         };
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig {
+            python_path: dir
+                .path()
+                .join("inference-is-forbidden")
+                .to_string_lossy()
+                .into_owned(),
+            ..PoolConfig::default()
+        });
         let cache = UtteranceCache::sqlite(Some(dir.path().join("cache")))
             .await
             .expect("cache");
@@ -1188,6 +1193,7 @@ mod tests {
         };
         let params = FaParams {
             gap_healing: WordGapHealing::Heal,
+            whisper_text: crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
             existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy::Preserve,
             end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy::ClampAllAdjacent,
             main_bullets: crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
@@ -1223,6 +1229,64 @@ mod tests {
 {media_line}*CHI:\thello world .\n\
 *CHI:\tmore words .\n@End\n"
         )
+    }
+
+    /// A long untimed transcript must not acquire narrow FA windows merely
+    /// because dividing the recording by its word count fits the model budget.
+    /// The deliberately unavailable worker makes any inference attempt fail;
+    /// this exercises request planning through durable completion without ML.
+    #[tokio::test]
+    async fn unsupported_utterances_do_not_acquire_proportional_request_windows() {
+        let source = never_aligned("@Media:\tsample, audio, unlinked\n").replace(
+            "*CHI:\thello world .\n*CHI:\tmore words .\n",
+            &"*CHI:\thello world .\n".repeat(80),
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_on_a_long_recording(&source),
+        )
+        .await
+        .expect("planning must not wait for inference")
+        .expect("unsupported speech is explicitly diagnosed");
+        let AlignedOutput {
+            document,
+            shortfalls,
+            ..
+        } = result.into_document();
+        assert!(
+            document
+                .as_str()
+                .contains("@Media:\tsample, audio, unlinked")
+        );
+        assert!(
+            !document.as_str().contains("%wor:"),
+            "no inferred timing was produced"
+        );
+        let [
+            crate::api::OutputShortfallRecord::TimingIncomplete {
+                required_words,
+                untimed_words,
+                untimed_utterances,
+                first_untimed,
+            },
+        ] = shortfalls.as_slice()
+        else {
+            panic!("expected one incomplete-timing report: {shortfalls:?}")
+        };
+        assert_eq!(
+            (*required_words, *untimed_words, *untimed_utterances),
+            (160, 160, 80)
+        );
+        assert!(!first_untimed.is_empty());
+        assert!(first_untimed.iter().all(|utterance| matches!(
+            utterance.cause,
+            crate::api::UntimedCauseRecord::LocalizationUnavailable
+        )));
+        insta::assert_json_snapshot!(first_untimed[0].cause, @r#"
+        {
+          "kind": "localization_unavailable"
+        }
+        "#);
     }
 
     /// Through the real entry point: a linked
@@ -1442,6 +1506,42 @@ mod tests {
         .into_timings();
 
         assert_eq!(timings, vec![None, None]);
+    }
+
+    #[test]
+    fn derived_cache_schema_admission_distinguishes_interval_and_onset_evidence() {
+        use crate::types::engines::FaEngineName;
+        let key = CacheKey::from_content("derived-schema");
+        let namespace = FaCacheNamespace::for_test("test-fa-v1");
+        for (schema, engine, admitted) in [
+            (1, FaEngineName::Wave2Vec, true),
+            (1, FaEngineName::Whisper, false),
+            (2, FaEngineName::Wave2Vec, true),
+            (2, FaEngineName::Whisper, true),
+            (3, FaEngineName::Wave2Vec, false),
+        ] {
+            let value = serde_json::to_value(VersionedCachedFaTimings {
+                schema_version: schema,
+                requested_engine: engine,
+                request_engine_version: namespace.name().clone(),
+                expected_words: 1,
+                cache_key: key.clone(),
+                timings: vec![None],
+            })
+            .unwrap();
+            let result = AdmittedCachedFaTimings::decode(value, engine, &namespace, 1, &key);
+            assert_eq!(
+                result.is_ok(),
+                admitted,
+                "schema {schema}, engine {engine:?}"
+            );
+            if !admitted {
+                assert!(matches!(
+                    result,
+                    Err(FaDerivedEvidenceError::SchemaVersion(_))
+                ));
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # NLP Pipeline Decision Architecture
 
 **Status:** Current
-**Last updated:** 2026-09-24 00:10 EDT
+**Last updated:** 2026-10-15 18:33 EDT
 
 This chapter documents how batchalign3's four NLP pipelines (morphotag,
 utseg, coref, forced alignment) represent per-utterance decisions, how
@@ -249,6 +249,12 @@ always a real bug, and `InjectionFailed` covers CHAT validation
 failures during `%xcoref` tier construction.
 
 ### Forced alignment
+
+The [current FA decision contract](../reference/forced-alignment.md#current-decision-contract-and-evidence-limits)
+lists what the pipeline chooses and what each check establishes. In particular,
+missing localization now produces `localization_unavailable` without a request,
+not a proportional guess. Typed decision records and structurally valid model
+results still do not establish acoustic correctness.
 
 FA is intentionally different. Unlike morphotag/utseg/coref, a single
 utterance passes through three independent decision points (UTR

@@ -323,8 +323,8 @@ speaker evidence received from ASR and diarization.
 3. Timings are injected back into the AST via
    `inject_timings_for_utterance()`, stored on each word's
    `timing_alignment` field
-4. Post-processing (`postprocess_utterance_timings`) heals small gaps between
-   words unless `--pauses` was given (`WordGapHealing`), and **conditionally**
+4. Post-processing (`postprocess_utterance_timings`) preserves measured ends
+   by default; `--word-gaps heal` opts into small-gap healing. It **conditionally**
    clamps word timings to the utterance
    bullet range. Clamping only applies when BOTH conditions hold: the bullet is
    `BulletSource::Authoritative` (not a runtime UTR hint) AND a `%wor` tier

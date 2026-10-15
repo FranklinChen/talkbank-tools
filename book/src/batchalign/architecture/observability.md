@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-14 10:48 EDT
+**Last updated:** 2026-10-16 09:58 EDT
 
 ## Release boundary
 
@@ -350,6 +350,13 @@ repair history. Current FA evidence retains pre-injection timings, scores,
 origin chains, and typed decisions, but final post-processing still lowers
 word timings into CHAT before a group-shaped evidence value can own them. The
 resulting CHAT remains necessary when evaluating final word boundaries.
+
+FA evidence schema 8 distinguishes an anchored piece's owned `first_word` and
+`last_word` from its `context` word range and nominal ownership window. The
+piece's `start_ms` and `end_ms` name the actual model audio request. Contexts
+may overlap; their endpoints must not be interpreted as a shared acoustic cut.
+Schema-7 pieces remain readable without `context`. A consumer that assumes
+nonoverlapping request windows must explicitly refuse schema 8 until updated.
 
 ### Submit-path retries
 

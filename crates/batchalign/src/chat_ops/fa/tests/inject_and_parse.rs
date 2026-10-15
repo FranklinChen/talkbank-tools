@@ -4,7 +4,6 @@
 
 use super::*;
 
-use crate::chat_ops::fa::Placement;
 use crate::chat_ops::fa::alignment::token_map::{UntimedReason, WordTimingOutcome};
 use crate::chat_ops::fa::alignment::{IndexedWordTimings, apply_indexed_timings};
 use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Ms, Recording};
@@ -14,21 +13,6 @@ use crate::chat_ops::nlp::FaIndexedTiming;
 use talkbank_model::UtteranceIdx;
 use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
-
-/// The span an estimate placed, failing the test if it refused.
-///
-/// `estimate_untimed_boundaries` returns a `Placement` because a run whose
-/// remaining audio cannot physically hold its words has no span. These fixtures
-/// are all comfortably placeable, so a refusal here is a real failure rather
-/// than something to unwrap past.
-fn placed(estimates: &[Placement], idx: usize) -> TimeSpan {
-    match estimates[idx] {
-        Placement::Placed(span) => span,
-        Placement::Unplaceable(rate) => {
-            panic!("estimate {idx} was refused as unplaceable: {rate}")
-        }
-    }
-}
 
 /// A window starting at `start_ms` inside a recording comfortably longer than
 /// any timing these tests use.
@@ -85,7 +69,7 @@ fn test_fa_cache_key() {
         &AudioIdentity::from_metadata("test.mp3", 1234, 5678),
         0,
         5000,
-        WordGapHealing::PreserveMeasured,
+        WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Whisper,
     );
     // Verify it's a valid hex BLAKE3 (64 chars)
@@ -98,18 +82,18 @@ fn test_fa_cache_key() {
         &AudioIdentity::from_metadata("test.mp3", 1234, 5678),
         0,
         5000,
-        WordGapHealing::PreserveMeasured,
+        WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Whisper,
     );
     assert_eq!(key, key2);
 
-    // Different timing mode -> different key
+    // Different Whisper text shaping -> different key
     let key3 = cache_key(
         &words,
         &AudioIdentity::from_metadata("test.mp3", 1234, 5678),
         0,
         5000,
-        WordGapHealing::Heal,
+        WhisperTextMode::SpaceJoined,
         crate::types::engines::FaEngineName::Whisper,
     );
     assert_ne!(key, key3);
@@ -127,7 +111,7 @@ fn word_interval_cache_key_retires_scoreless_entries_only() {
         &identity,
         0,
         5000,
-        WordGapHealing::PreserveMeasured,
+        WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Wave2Vec,
     );
     assert_ne!(score_bearing_interval_key, legacy_interval_key);
@@ -143,7 +127,7 @@ fn word_interval_cache_key_retires_scoreless_entries_only() {
         &identity,
         0,
         5000,
-        WordGapHealing::PreserveMeasured,
+        WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Whisper,
     );
     assert_eq!(current_whisper_key, legacy_whisper_key);
@@ -877,98 +861,31 @@ fn test_parse_fa_response_indexed_length_mismatch_rejected() {
     }
 }
 
-/// A gap whose bounds lie PAST the end of the recording must not yield an
-/// inverted window.
-///
-/// The producer clamps both ends now. Before that it clamped only the end, so a
-/// buffered start beyond the audio met an end cut down to it and
-/// `TimeSpan::new(start, end)` was built with `end < start`, which its own
-/// docstring says the caller must prevent. Transcript bullets past the end of
-/// the recording are exactly the case the coordinate work exists for, so this
-/// is reachable rather than theoretical.
+/// Neighbour timing cannot localize the intervening words by arithmetic.
 #[test]
-fn a_gap_beyond_the_recording_is_refused_not_inverted() {
-    let input = "\
-@UTF8\n\
-@Begin\n\
-@Languages:\teng\n\
-@Participants:\tCHI Target_Child\n\
-@ID:\teng|test|CHI|2;0.0||||Target_Child|||\n\
-*CHI:\thello . \u{0015}90000_95000\u{0015}\n\
-*CHI:\tuntimed words here .\n\
-*CHI:\tworld . \u{0015}96000_99000\u{0015}\n\
-@End\n\
-";
-    let chat = parse_chat(input);
-    // A recording far shorter than the bullets claim.
-    let estimated = estimate_untimed_boundaries(&chat, &test_recording(10_000));
-    for (idx, placement) in estimated.placements.iter().enumerate() {
-        if let Placement::Placed(span) = placement {
-            assert!(
-                span.end_ms >= span.start_ms,
-                "placement {idx} is inverted: {}..{}",
-                span.start_ms,
-                span.end_ms
-            );
-        }
-    }
-}
-
-#[test]
-fn test_estimate_boundaries_proportional() {
-    let input = include_str!("../../../../../../test-fixtures/fa_two_untimed_with_media.cha");
-    let chat = parse_chat(input);
-    // The count is asserted, not just the placements: `windows_clamped` exists
-    // because `.min(total_audio_ms)` made "this window overshot the recording"
-    // unobservable, and a counter nobody checks would reproduce that exactly.
-    // This fixture's second estimate is buffered past 10 s and cut back to it.
-    let estimated = estimate_untimed_boundaries(&chat, &test_recording(10_000));
-    assert!(
-        estimated.windows_clamped > 0,
-        "a window buffered past the end of a 10 s recording must be counted as clamped"
-    );
-    let estimates = estimated.placements;
-    assert_eq!(estimates.len(), 2);
-    assert_eq!(placed(&estimates, 0).start_ms, 0);
-    assert_eq!(placed(&estimates, 0).end_ms, 7000);
-    assert_eq!(placed(&estimates, 1).start_ms, 3000);
-    assert_eq!(placed(&estimates, 1).end_ms, 10000);
-}
-
-#[test]
-fn test_estimate_boundaries_interpolates_from_neighbors() {
+fn neighbouring_bullets_do_not_authorize_untimed_requests() {
     let input =
         include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed_interleaved.cha");
     let chat = parse_chat(input);
-    let estimates = estimate_untimed_boundaries(&chat, &test_recording(50_000)).placements;
-
-    // 6 utterances total
-    assert_eq!(estimates.len(), 6);
-
-    // utt 0: timed (10000-15000), estimate mirrors real bullet
-    assert_eq!(placed(&estimates, 0), TimeSpan::new(10000, 15000));
-
-    // utt 1: untimed, between timed utt 0 (end=15000) and utt 2 (start=20000)
-    // Gap = [15000, 20000], 4 words, only utterance in run
-    // raw: 15000-20000, with 2s buffer: 13000-22000
-    assert_eq!(placed(&estimates, 1).start_ms, 13000);
-    assert_eq!(placed(&estimates, 1).end_ms, 22000);
-
-    // utt 2: timed (20000-25000)
-    assert_eq!(placed(&estimates, 2), TimeSpan::new(20000, 25000));
-
-    // utt 3: untimed, in run [3,4] between timed utt 2 (end=25000) and utt 5 (start=40000)
-    // Gap = [25000, 40000] = 15000ms, run_words = 4+5 = 9
-    // utt 3 (4 words): raw 25000..31666, buffered 23000..33666
-    assert_eq!(placed(&estimates, 3).start_ms, 23000);
-    assert_eq!(placed(&estimates, 3).end_ms, 33666);
-
-    // utt 4 (5 words): raw 31666..40000, buffered 29666..42000
-    assert_eq!(placed(&estimates, 4).start_ms, 29666);
-    assert_eq!(placed(&estimates, 4).end_ms, 42000);
-
-    // utt 5: timed (40000-45000)
-    assert_eq!(placed(&estimates, 5), TimeSpan::new(40000, 45000));
+    let grouped = group_utterances(
+        &chat,
+        20_000,
+        &test_recording(50_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    let requested: Vec<_> = grouped
+        .groups
+        .iter()
+        .flat_map(|group| group.utterance_indices().iter().map(|index| index.raw()))
+        .collect();
+    assert_eq!(requested, [0, 2, 5]);
+    assert_eq!(grouped.decisions.len(), 3);
+    assert!(grouped.decisions.iter().all(|decision| matches!(
+        decision.strategy,
+        batchalign_transform::decisions::DecisionStrategy::Fa(
+            batchalign_transform::decisions::FaStrategy::LocalizationUnavailable
+        )
+    )));
 }
 
 #[test]

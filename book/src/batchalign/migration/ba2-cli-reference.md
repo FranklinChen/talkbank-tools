@@ -62,7 +62,7 @@ Forced alignment: adds word-level timing bullets to existing CHAT transcripts.
 |------|------|---------|------|------------|
 | `--whisper` / `--rev` | exclusive pair | `--rev` | UTR engine selection | Hidden compat alias → `--utr-engine` |
 | `--wav2vec` / `--whisper_fa` | exclusive pair | `--wav2vec` | FA engine selection | Hidden compat alias → `--fa-engine` |
-| `--pauses` | flag | off | Keep each word's own end time instead of healing small gaps into it. Applies to every FA engine. | Wired |
+| `--pauses` | flag | off | Retain legacy character-spaced Whisper input. Measured ends are now preserved by default; `--word-gaps heal` explicitly requests the old smoothing behavior. | Wired |
 | `--wor` / `--nowor` | bool | `True` | Write %wor tier | Wired (`default_value_t = true`) |
 | `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations | Wired | **(Feb 9 only)** |
 

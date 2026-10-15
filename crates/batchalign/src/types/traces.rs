@@ -185,7 +185,7 @@ pub struct UtteranceTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 8;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,7 +213,9 @@ pub struct FaTimelineTrace {
     /// `refused_window` gains the `anchor_gap` cause. Version 7 partitions an
     /// anchored group's words across requested `pieces` and `unrequested`
     /// ranges. Missing ranges carry no cache key or worker reply; older traces
-    /// default to an empty `unrequested` list.
+    /// default to an empty `unrequested` list. Version 8 separates each
+    /// piece's owned word range from its overlapping model context and nominal
+    /// ownership window. Request endpoints are not shared acoustic cuts.
     #[serde(default)]
     pub evidence_schema_version: u32,
     /// Forced-alignment engine selected for this run.
@@ -495,7 +497,8 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
                 | FaStrategy::WordsClampedToKeptBullet
                 | FaStrategy::WordsUntimedForKeptAbsence
                 | FaStrategy::TimingProvenance
-                | FaStrategy::UnplaceableRun,
+                | FaStrategy::UnplaceableRun
+                | FaStrategy::LocalizationUnavailable,
             )
             | DecisionStrategy::Utr(_)
             | DecisionStrategy::Monotonicity(_)
@@ -1034,6 +1037,24 @@ pub struct FaPieceTrace {
     pub source: FaEvidenceSourceTrace,
     /// Content-addressed FA cache key of the piece's request.
     pub cache_key: String,
+    /// Lexical context and nominal ownership span. Absent in schema <=7,
+    /// when each request contained only its owned words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<FaPieceContextTrace>,
+}
+
+/// A contextual request can overlap another request without owning its words.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FaPieceContextTrace {
+    /// First word supplied to the model (inclusive, utterance-relative).
+    pub first_word: usize,
+    /// Last word supplied to the model (inclusive, utterance-relative).
+    pub last_word: usize,
+    /// Start of the owned range's nominal partition, not the request audio.
+    pub ownership_start_ms: u64,
+    /// End of the owned range's nominal partition, not the request audio.
+    pub ownership_end_ms: u64,
 }
 
 /// How one group's word timing evidence was obtained.
@@ -1198,6 +1219,8 @@ impl From<&Origin> for OriginTrace {
             } => Self::ClampedTo {
                 bound: match bound {
                     ClampBound::RecordingEnd => "recording_end",
+                    ClampBound::RequestEnd => "request_end",
+                    ClampBound::RequestStart => "request_start",
                     ClampBound::UtteranceBullet => "utterance_bullet",
                     ClampBound::NextOnset => "next_onset",
                 }
@@ -1269,6 +1292,28 @@ mod tests {
     use crate::chat_ops::fa::origin::EngineId;
     use crate::chat_ops::fa::{ModelAlignmentScore, WordTiming};
     use crate::time::{FileMs, Ms};
+
+    #[test]
+    fn piece_trace_reads_legacy_ownership_and_roundtrips_context() {
+        let old = serde_json::json!({
+            "start_ms": 100, "end_ms": 900, "first_word": 2, "last_word": 3,
+            "source": "inference", "cache_key": "test-piece"
+        });
+        let mut piece: FaPieceTrace = serde_json::from_value(old.clone()).unwrap();
+        assert!(piece.context.is_none());
+        assert_eq!(serde_json::to_value(&piece).unwrap(), old);
+        piece.context = Some(FaPieceContextTrace {
+            first_word: 0,
+            last_word: 4,
+            ownership_start_ms: 300,
+            ownership_end_ms: 700,
+        });
+        let value = serde_json::to_value(&piece).unwrap();
+        let roundtrip: FaPieceTrace = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(roundtrip).unwrap(), value);
+        assert_eq!(value["first_word"], 2);
+        assert_eq!(value["context"]["first_word"], 0);
+    }
 
     #[test]
     fn refused_window_is_serialized_only_for_window_refused() {

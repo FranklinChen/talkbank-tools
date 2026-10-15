@@ -33,6 +33,7 @@ expression: sub
       }
     },
     "pauses": true,
+    "word_gaps": "preserve_measured",
     "existing_wor_boundaries": "preserve",
     "end_overlap_policy": "preserve_cross_speaker",
     "main_bullets": "derive",

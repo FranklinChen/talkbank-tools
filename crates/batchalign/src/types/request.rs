@@ -1741,6 +1741,7 @@ mod fa_language_support_tests {
             declared,
             FaParams {
                 gap_healing: crate::chat_ops::fa::WordGapHealing::Heal,
+                whisper_text: crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
                 existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy::Preserve,
                 end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy::ClampAllAdjacent,
                 main_bullets: crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,

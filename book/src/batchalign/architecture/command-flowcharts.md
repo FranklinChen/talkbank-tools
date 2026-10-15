@@ -55,9 +55,9 @@ flowchart TD
     whisper_fa --> pause_check
     wav2vec_fa --> pause_check
 
-    pause_check{--pauses?}
-    pause_check -->|Yes| preserve[WordGapHealing::PreserveMeasured\nkeep each word's own end]
-    pause_check -->|No| heal[WordGapHealing::Heal\nextend a word to the next word's start\nwhen the gap is small and plausible]
+    pause_check{--word-gaps?}
+    pause_check -->|preserve-measured default| preserve[WordGapHealing::PreserveMeasured\nkeep each word's own end]
+    pause_check -->|heal explicit| heal[WordGapHealing::Heal\nextend a word to the next word's start\nwhen the gap is small and plausible]
 
     preserve --> cache_check
     heal --> cache_check

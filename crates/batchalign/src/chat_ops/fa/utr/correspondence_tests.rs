@@ -277,8 +277,8 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
         .unwrap();
     assert_eq!(
         (search.start_ms, search.end_ms),
-        (100, 480),
-        "the adjacent backchannel is not a boundary"
+        (200, 480),
+        "the proved first word bounds onset; the backchannel does not bound the missing end"
     );
     let mut wrong_source = words;
     wrong_source[1].text = "different".to_owned();
@@ -322,7 +322,7 @@ fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time()
                 &recording,
             )
             .unwrap();
-        assert_eq!((search.start_ms, search.end_ms), (0, end));
+        assert_eq!((search.start_ms, search.end_ms), (100, end));
         let grouping =
             super::super::grouping::group_utterances(&chat, 500, &recording, &result.anchors);
         assert!(
@@ -350,6 +350,88 @@ fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time()
                 batchalign_transform::decisions::FaStrategy::WindowRefused(_)
             )
         )));
+    }
+}
+
+#[test]
+fn partial_search_bounds_only_the_endpoint_actually_observed() {
+    use super::super::{
+        FaWord, TimeSpan,
+        coordinates::{Ms, Recording},
+    };
+    use talkbank_model::{UtteranceIdx, WordIdx};
+
+    // The other speaker's following word cannot bound an absent endpoint:
+    // that speaker may interleave. This speaker's own proved endpoint can.
+    for (source, expected) in [
+        ("missing red blue", (100, 380)),
+        ("red blue missing", (200, 70_000)),
+        ("missing red blue missing", (100, 70_000)),
+    ] {
+        let mut chat = admitted_dialogue(&format!(
+            "*PAR:\tbefore .\n*PAR:\t{source} .\n*INV:\tafter ."
+        ));
+        let mut observed = tokens("before red blue after");
+        observed[3].start_ms = 60_000;
+        observed[3].end_ms = 60_080;
+        let result = inject_utr_timing(&mut chat, &observed);
+        assert!(
+            chat.utterances()
+                .nth(1)
+                .unwrap()
+                .main
+                .content
+                .bullet
+                .is_none()
+        );
+        let words: Vec<_> = source
+            .split_whitespace()
+            .enumerate()
+            .map(|(index, text)| FaWord {
+                utterance_index: UtteranceIdx::new(1),
+                utterance_word_index: WordIdx::new(index),
+                text: text.to_owned(),
+            })
+            .collect();
+        let recording = Recording::of_duration(Ms(70_000)).unwrap();
+        let window = result
+            .anchors
+            .search_window(
+                UtteranceIdx::new(1),
+                &words,
+                TimeSpan::new(0, 70_000),
+                &recording,
+            )
+            .unwrap();
+        assert_eq!((window.start_ms, window.end_ms), expected, "{source}");
+        // Neither a reordered address nor a substituted lexical census may
+        // reuse the producer's endpoint capability.
+        let mut foreign = words.clone();
+        foreign[0].utterance_word_index = WordIdx::new(9);
+        assert!(
+            result
+                .anchors
+                .search_window(
+                    UtteranceIdx::new(1),
+                    &foreign,
+                    TimeSpan::new(0, 70_000),
+                    &recording,
+                )
+                .is_none()
+        );
+        foreign = words;
+        foreign[0].text = "substitute".into();
+        assert!(
+            result
+                .anchors
+                .search_window(
+                    UtteranceIdx::new(1),
+                    &foreign,
+                    TimeSpan::new(0, 70_000),
+                    &recording,
+                )
+                .is_none()
+        );
     }
 }
 

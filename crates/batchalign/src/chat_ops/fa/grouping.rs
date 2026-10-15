@@ -1,16 +1,15 @@
 //! Utterance grouping for forced alignment time windows.
 
-use talkbank_model::model::{ChatFile, Line};
+use talkbank_model::model::{ChatFile, Line, Utterance};
 use talkbank_model::{UtteranceIdx, WordIdx};
 
 use batchalign_transform::decisions::{
     DecisionRecord, DecisionStrategy, FaStrategy, RefusedWindow,
 };
 
-use super::coordinates::{Clamped, FaWindow, FileMs, Ms, Recording, WindowFault};
+use super::coordinates::{FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
 use super::presence::RecordingPresence;
-use super::speech_rate::SpeechRate;
 use super::split::{AnchoredSplit, NonEmptyWords, OverBudgetWindow, Pieces};
 use super::utr::AnchorIndex;
 use super::{FaWord, TimeSpan};
@@ -214,38 +213,6 @@ impl FaGroup {
     }
 }
 
-/// Where an utterance's audio is, or why it has none.
-///
-/// Returned per utterance by [`estimate_untimed_boundaries`]. The second
-/// variant is the one that matters: an untimed run whose remaining audio could
-/// not physically contain its words has no window, and saying so is better than
-/// computing one. A `TimeSpan` alone could not express it, so the question went
-/// unasked and every run got a window regardless.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Placement {
-    /// Audio this utterance can be aligned against.
-    Placed(TimeSpan),
-    /// No audio can hold these words; the rate says how badly.
-    Unplaceable(SpeechRate),
-}
-
-/// What [`estimate_untimed_boundaries`] worked out.
-///
-/// # Why this is not a bare `Vec<Placement>`
-///
-/// The pass LEARNS one thing besides where each utterance goes: how many of the
-/// windows it computed ran past the end of the recording and had to be cut down
-/// to fit. That is a fact about our own gap arithmetic, and the `.min()` it
-/// used to be made it unobservable, so nobody could tell a session where every
-/// window fitted from one where a dozen were trimmed.
-#[derive(Debug, PartialEq)]
-pub struct Estimates {
-    /// Where each utterance's audio is, in file order.
-    pub placements: Vec<Placement>,
-    /// How many computed windows overshot the recording and were cut to it.
-    pub windows_clamped: usize,
-}
-
 /// The most label BYTES any one FA group may carry, whatever engine aligns it.
 ///
 /// The number is Whisper's CTC decoder limit, which is stated in TOKENS:
@@ -355,8 +322,8 @@ const TRAILING_GAP_EXTENSION_MS: u64 = 1500;
 /// What grouping produced.
 ///
 /// Its decisions are durable evidence, not just log messages. Most are
-/// refusals (no request was made for those utterances): physically
-/// unplaceable runs, and windows requiring narrower evidence than this
+/// refusals (no request was made for those utterances): missing localization,
+/// and windows requiring narrower evidence than this
 /// engine can safely align. The rest record an over-budget utterance that
 /// WAS aligned, in pieces cut at its recovered word anchors.
 pub struct Grouping {
@@ -365,14 +332,8 @@ pub struct Grouping {
     /// One record per utterance grouping refused or split, for durable
     /// evidence.
     pub decisions: Vec<DecisionRecord>,
-    /// How many estimated windows overshot the recording and were cut to it.
-    ///
-    /// Carried here rather than logged and dropped. It survived one function
-    /// boundary in [`Estimates`] and then died in a `tracing::warn!`, which is
-    /// the shape this struct's own docstring above spends a paragraph refusing:
-    /// a caller could not branch on it, report it, or put it in the artifact.
-    /// A session where every window fitted and one where a dozen were trimmed
-    /// are different, and that difference is about OUR gap arithmetic.
+    /// Legacy reporting counter, now zero: proportional windows are no longer
+    /// produced. Kept for compatibility with existing result records.
     pub windows_clamped: usize,
 }
 
@@ -388,10 +349,9 @@ pub struct Grouping {
 /// when recovery has nothing to say about it. Its supplied timing and words
 /// are preserved rather than clipped or fabricated.
 ///
-/// Utterances with no timing bullet are placed by distributing the surrounding
-/// gap across them in proportion to word count, EXCEPT where the audio could not
-/// physically contain them: such a run is refused and reported in
-/// [`Grouping::decisions`] rather than handed to an aligner.
+/// Utterances require supplied timing or source-bound UTR search evidence.
+/// Word counts and neighbouring bullets cannot locate an unsupported utterance;
+/// missing localization is reported in [`Grouping::decisions`].
 ///
 /// * `chat_file` - The parsed CHAT file whose utterances will be grouped.
 /// * `max_group_ms` - Maximum audio window duration (in milliseconds) per
@@ -411,18 +371,6 @@ pub fn group_utterances(
     anchors: &AnchorIndex,
 ) -> Grouping {
     let total_audio_ms = recording.duration().get();
-    let Estimates {
-        placements: estimates,
-        windows_clamped,
-    } = estimate_untimed_boundaries(chat_file, recording);
-    if windows_clamped > 0 {
-        // Logged AND returned: the log is the convenience, `Grouping` is the
-        // contract.
-        tracing::warn!(
-            windows_clamped,
-            "estimated FA windows ran past the end of the recording and were cut to it"
-        );
-    }
 
     let mut groups = Vec::new();
     let mut decisions = Vec::new();
@@ -441,26 +389,9 @@ pub fn group_utterances(
         match RecordingPresence::of(utt) {
             RecordingPresence::InRecording => {}
             // Not speech in this recording: no window and no request.
-            // Completion reports it untimed with its cause; the estimates
-            // above gave it no share of any gap.
+            // Completion records the exclusion separately from refusals.
             RecordingPresence::NotInRecording(_) => continue,
         }
-        let span = match &utt.main.content.bullet {
-            Some(b) => TimeSpan::new(b.timing.start_ms, b.timing.end_ms),
-            None => match estimates[utt_idx] {
-                Placement::Placed(span) => span,
-                Placement::Unplaceable(rate) => {
-                    decisions.push(DecisionRecord::new_and_trace(
-                        line_idx,
-                        utt.main.speaker.as_str().to_owned(),
-                        DecisionStrategy::Fa(FaStrategy::UnplaceableRun),
-                        rate.to_string(),
-                        true,
-                    ));
-                    continue;
-                }
-            },
-        };
         collect_fa_words(&utt.main.content.content, &mut extracted);
         let label_bytes = LabelBytes::total(extracted.iter());
         let utterance = UtteranceIdx::new(utt_idx);
@@ -478,18 +409,24 @@ pub fn group_utterances(
         ) else {
             continue;
         };
-        // Original/UTR-admitted bullets remain authoritative. Only an untimed
-        // source can use a complete candidate envelope or a producer-bound
-        // partial-order corridor. Neither selects uncertain words or grants
-        // timing authority. This request still needs containment/budget admission.
-        let span = if utt.main.content.bullet.is_none() {
-            anchors
-                .search_window(utterance, words.as_slice(), span, recording)
-                .unwrap_or(span)
-        } else {
-            span
+        let Some(localized) =
+            LocalizedUtterance::from_source(utt, utterance, words, anchors, recording)
+        else {
+            // Do not merge supported neighbours across an unsupported turn.
+            if let Some(previous) = pending.take() {
+                groups.push(previous.finish(total_audio_ms));
+            }
+            decisions.push(DecisionRecord::new_and_trace(
+                line_idx,
+                utt.main.speaker.as_str().to_owned(),
+                DecisionStrategy::Fa(FaStrategy::LocalizationUnavailable),
+                "no supplied timing or source-bound UTR search evidence".to_owned(),
+                true,
+            ));
+            continue;
         };
-        let window = match GroupWindow::admit(span, budget, recording) {
+        let span = localized.span;
+        let window = match GroupWindow::admit(&localized, budget, recording) {
             Ok(window) => window,
             Err(refusal) => {
                 // Neither outcome below joins a pending group: a refused
@@ -503,8 +440,12 @@ pub fn group_utterances(
                 let speaker = utt.main.speaker.as_str().to_owned();
                 let refused = match refusal {
                     WindowRefusal::Oversized(over) => {
-                        match AnchoredSplit::plan(over, utterance, words, anchors.lookup(utterance))
-                        {
+                        match AnchoredSplit::plan(
+                            over,
+                            utterance,
+                            localized.words,
+                            anchors.lookup(utterance),
+                        ) {
                             Ok(split) => {
                                 let refused: Vec<_> = split
                                     .pieces()
@@ -565,7 +506,7 @@ pub fn group_utterances(
         };
         let next = PendingGroup {
             window,
-            words: words.into_vec(),
+            words: localized.words.into_vec(),
             utterances: vec![utterance],
             label_bytes,
         };
@@ -592,7 +533,41 @@ pub fn group_utterances(
     Grouping {
         groups,
         decisions,
-        windows_clamped,
+        // Retained reporting field; no proportional windows are produced.
+        windows_clamped: 0,
+    }
+}
+
+/// A source-localized population, before recording/budget admission.
+///
+/// Owns the words whose UTR evidence was checked. The constructor has no raw
+/// fallback-span argument: proportional arithmetic cannot grant localization.
+/// Supplied timing and UTR evidence can still be wrong acoustically.
+struct LocalizedUtterance {
+    words: NonEmptyWords,
+    span: TimeSpan,
+}
+
+impl LocalizedUtterance {
+    fn from_source(
+        source: &Utterance,
+        utterance: UtteranceIdx,
+        words: NonEmptyWords,
+        anchors: &AnchorIndex,
+        recording: &Recording,
+    ) -> Option<Self> {
+        let span = match &source.main.content.bullet {
+            Some(bullet) => TimeSpan::new(bullet.timing.start_ms, bullet.timing.end_ms),
+            None => anchors.search_window(
+                utterance,
+                words.as_slice(),
+                // Permit evidence anywhere in the recording, not only inside
+                // a guessed crop. This is a containment bound, never a fallback.
+                TimeSpan::new(0, recording.duration().get()),
+                recording,
+            )?,
+        };
+        Some(Self { words, span })
     }
 }
 
@@ -639,7 +614,12 @@ fn fault_refusal(fault: WindowFault, window_start: FileMs) -> RefusedWindow {
 }
 
 impl GroupWindow {
-    fn admit(span: TimeSpan, budget: Ms, recording: &Recording) -> Result<Self, WindowRefusal> {
+    fn admit(
+        localized: &LocalizedUtterance,
+        budget: Ms,
+        recording: &Recording,
+    ) -> Result<Self, WindowRefusal> {
+        let span = localized.span;
         let window = FaWindow::within(
             recording,
             FileMs::new(span.start_ms),
@@ -766,200 +746,4 @@ pub fn count_utterance_timing(chat_file: &ChatFile) -> (usize, usize) {
         }
     }
     (timed, untimed)
-}
-
-/// Pre-compute interpolated estimates for ALL utterances (indexed by utt_idx).
-///
-/// For timed utterances the estimate is unused (the real bullet is preferred).
-/// For untimed utterances the estimate is interpolated from the nearest
-/// neighboring timed utterances, with time distributed proportionally by
-/// word count within each gap. Falls back to proportional distribution
-/// across the full audio when no timed neighbors exist.
-///
-/// * `chat_file` - The parsed CHAT file to compute estimates for.
-/// * `recording` - The audio being aligned against. Taken as a [`Recording`]
-///   rather than as a raw `u64` bound, because a bound pulled out of the type
-///   one line into the function is a bound nothing can clamp against safely;
-///   `group_utterances` did exactly that before 2026-08-15.
-pub fn estimate_untimed_boundaries(chat_file: &ChatFile, recording: &Recording) -> Estimates {
-    const BUFFER_MS: u64 = 2000;
-
-    let total_audio_ms = recording.duration().get();
-    let mut windows_clamped = 0usize;
-
-    // Collect word counts and existing timing for each utterance. One not in
-    // the recording has no words to place and is no anchor: it takes no share
-    // of a gap and bounds none, whatever timing it carries.
-    let mut info: Vec<(usize, Option<TimeSpan>)> = Vec::new();
-    for line in &chat_file.lines {
-        if let Line::Utterance(utt) = line {
-            info.push(match RecordingPresence::of(utt) {
-                RecordingPresence::NotInRecording(_) => (0, None),
-                RecordingPresence::InRecording => {
-                    let mut words = Vec::new();
-                    collect_fa_words(&utt.main.content.content, &mut words);
-                    let span = utt
-                        .main
-                        .content
-                        .bullet
-                        .as_ref()
-                        .map(|b| TimeSpan::new(b.timing.start_ms, b.timing.end_ms));
-                    (words.len(), span)
-                }
-            });
-        }
-    }
-
-    if info.is_empty() {
-        return Estimates {
-            placements: Vec::new(),
-            windows_clamped: 0,
-        };
-    }
-
-    let mut estimates = vec![Placement::Placed(TimeSpan::new(0, 0)); info.len()];
-
-    // Process runs of consecutive untimed utterances between timed anchors.
-    // A "run" is a maximal sequence of untimed utterances.
-    let mut i = 0;
-    while i < info.len() {
-        // Skip timed utterances: their estimates are unused.
-        if let Some(span) = info[i].1 {
-            estimates[i] = Placement::Placed(span);
-            i += 1;
-            continue;
-        }
-
-        // Found start of an untimed run. Find its end.
-        let run_start = i;
-        while i < info.len() && info[i].1.is_none() {
-            i += 1;
-        }
-        let run_end = i; // exclusive
-
-        // Determine the gap boundaries from neighboring timed utterances.
-        let gap_start = if run_start > 0 {
-            // Previous timed utterance's end_ms
-            info[..run_start]
-                .iter()
-                .rev()
-                .find_map(|(_, span)| span.as_ref())
-                .map_or(0, |s| s.end_ms)
-        } else {
-            0
-        };
-        let gap_end = if run_end < info.len() {
-            // Next timed utterance's start_ms
-            info[run_end..]
-                .iter()
-                .find_map(|(_, span)| span.as_ref())
-                .map_or(total_audio_ms, |s| s.start_ms)
-        } else {
-            total_audio_ms
-        };
-
-        // Distribute the gap proportionally by word count.
-        let run_words: usize = info[run_start..run_end].iter().map(|(w, _)| w).sum();
-        if run_words == 0 {
-            // No words: give each utterance a zero-width span at gap_start.
-            for est in estimates.iter_mut().take(run_end).skip(run_start) {
-                *est = Placement::Placed(TimeSpan::new(gap_start, gap_start));
-            }
-            continue;
-        }
-
-        let gap_duration = gap_end.saturating_sub(gap_start);
-
-        // THE REFUSAL. Distributing words across a gap is arithmetic, and
-        // arithmetic will happily produce a window at any density; whether a
-        // human could have said those words in that audio is a separate
-        // question, and it was never asked. On one real session this placed 175
-        // words into 291 ms. The resulting window went to an aligner, which is
-        // how invented timings got into a transcript.
-        //
-        // Refusing is not the same as the skip this function's caller used to
-        // perform when the audio length was unknown: that fired on OUR ignorance
-        // and silently dropped words. This fires on a stated physical fact,
-        // names the rate, and the words stay unaligned because no aligner could
-        // have placed them anyway.
-        // Measured against the audio the ALIGNER will receive, not the raw gap:
-        // each estimate is widened by `BUFFER_MS` at both ends below, so the raw
-        // gap understates the window and would refuse runs that are perfectly
-        // placeable. An untimed utterance immediately before a timed one has a
-        // zero-width raw gap and a two-second real window.
-        //
-        // It does not rescue the case this check exists for: the measured
-        // failure was 175 words in 291 ms, and buffering takes that to 4.3
-        // seconds, still 40 words per second and still impossible.
-        let available = Ms(gap_duration + 2 * BUFFER_MS);
-        let rate = SpeechRate::of(run_words, available);
-        if !rate.is_possible() {
-            tracing::warn!(
-                first_utterance = run_start,
-                utterances = run_end - run_start,
-                %rate,
-                "untimed run cannot fit the audio left for it; leaving it unplaced \
-                 rather than handing an impossible window to an aligner"
-            );
-            for est in estimates.iter_mut().take(run_end).skip(run_start) {
-                *est = Placement::Unplaceable(rate);
-            }
-            continue;
-        }
-
-        let mut words_before: usize = 0;
-        for idx in run_start..run_end {
-            let count = info[idx].0;
-            let raw_start =
-                gap_start + (words_before as f64 / run_words as f64 * gap_duration as f64) as u64;
-            let raw_end = gap_start
-                + ((words_before + count) as f64 / run_words as f64 * gap_duration as f64) as u64;
-
-            // The START is clamped too, and this is not symmetry for its own
-            // sake. `gap_start` and `gap_end` come from transcript BULLETS,
-            // which can lie past the end of the recording; that is the whole
-            // phantom-timing story. So a buffered start could exceed the audio
-            // while the end below was cut down to it, producing a window whose
-            // end precedes its start. `TimeSpan::new`'s doc says "caller is
-            // responsible for ensuring start <= end" and this is the caller
-            // that could not.
-            let start =
-                match recording.clamp_bound(FileMs::new(raw_start.saturating_sub(BUFFER_MS))) {
-                    Clamped::AsGiven(at) => at.get(),
-                    Clamped::ClampedTo { bound } => {
-                        windows_clamped += 1;
-                        bound.get()
-                    }
-                };
-            // `.min(total_audio_ms)` until 2026-08-15, which is correct
-            // arithmetic and invisible behaviour: a window that FITTED and one
-            // cut down to fit read identically afterwards. Both arms are named
-            // here so the second is acknowledged, and it is counted, because a
-            // computed window running past the end of the audio is a fact about
-            // OUR gap arithmetic rather than about the recording.
-            let end = match recording.clamp_bound(FileMs::new(raw_end + BUFFER_MS)) {
-                Clamped::AsGiven(at) => at.get(),
-                Clamped::ClampedTo { bound } => {
-                    windows_clamped += 1;
-                    bound.get()
-                }
-            };
-
-            // A window with no extent is REFUSED rather than handed on as an
-            // inverted or empty `TimeSpan`. `SpeechRate::NoAudio` already means
-            // exactly this and already reports `is_possible() == false`, so the
-            // case needs no new variant: it is the same answer as the density
-            // refusal above, reached a different way.
-            estimates[idx] = match end > start {
-                true => Placement::Placed(TimeSpan::new(start, end)),
-                false => Placement::Unplaceable(SpeechRate::of(count, Ms(0))),
-            };
-            words_before += count;
-        }
-    }
-
-    Estimates {
-        placements: estimates,
-        windows_clamped,
-    }
 }

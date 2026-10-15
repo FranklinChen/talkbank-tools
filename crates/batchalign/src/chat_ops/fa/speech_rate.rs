@@ -1,26 +1,8 @@
-//! How fast speech would have to be for some words to fit some audio.
+//! A configurable-policy speech-density screen for supplied timing spans.
 //!
-//! # Why this is a type and not an `f64` beside a threshold
-//!
-//! "These words cannot fit this span" is a physical fact about human speech,
-//! and it is the fact that decides whether a piece of audio can be aligned at
-//! all. It was known in exactly one place: a private `classify_bullet` in
-//! `rescue_narrow_bullets`, over a private `CATASTROPHIC_DENSITY_THRESHOLD_WPS`.
-//!
-//! The place that needed it most could not see it. `estimate_untimed_boundaries`
-//! distributes utterances that carry no bullet across whatever audio is left,
-//! in proportion to word count, and asks nothing about whether the result is
-//! possible. On a real session it placed **175 words into 0.291 seconds**, a
-//! rate of 601 words per second, and handed the resulting window to an aligner.
-//! Wave2Vec correctly refused it ("targets length is too long for CTC"); the
-//! pipeline read that as an engine limitation and retried on Whisper, which pads
-//! its input to a fixed 30 second window, cannot refuse, and duly reported
-//! tokens across the padding. That is how 28.2 seconds of speech got timings in
-//! a recording that had already ended.
-//!
-//! The threshold is unchanged. What changes is that both callers now ask the
-//! same question of the same type, and a rate is a rate rather than a bare
-//! float that happens to be compared against the right constant.
+//! A plausible rate is not localization evidence. The former proportional FA
+//! placement caller has been removed: word counts cannot locate speech in a
+//! recording even when the resulting density passes this screen.
 
 use std::fmt;
 

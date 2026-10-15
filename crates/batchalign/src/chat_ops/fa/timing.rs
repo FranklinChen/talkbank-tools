@@ -31,7 +31,7 @@
 //! # The vocabulary
 //!
 //! * [`WordSpan`] is a word's extent. It cannot be built from integers: both
-//!   ends must be [`RecordedInstant`]s, which only a [`Recording`] issues, and
+//!   ends must be [`RecordedInstant`]s, which only a [`super::coordinates::Recording`] issues, and
 //!   which each carry an [`Origin`]. Provenance is therefore not something a
 //!   caller remembers to attach; it is the only way to construct the value.
 //! * Every way of obtaining an end is a NAMED CONSTRUCTOR
@@ -53,7 +53,9 @@
 //! where it can be read, rather than in control flow, where it must be
 //! reconstructed.
 
-use super::coordinates::{Clamped, FileMs, Ms, OutsideWindow, RecordedInstant, Recording};
+#[cfg(test)]
+use super::coordinates::Recording;
+use super::coordinates::{Clamped, FileMs, Ms, OutsideWindow, RecordedInstant};
 use super::origin::Origin;
 
 /// Why a proposed word span cannot exist.
@@ -94,7 +96,7 @@ pub enum SpanFault {
 ///
 /// # Why it cannot be built from integers
 ///
-/// The constructors take [`RecordedInstant`]s, which only a [`Recording`]
+/// The constructors take [`RecordedInstant`]s, which only a [`super::coordinates::Recording`]
 /// issues and which each carry their [`Origin`]. There is deliberately no
 /// `WordSpan::new(start_ms: u64, end_ms: u64)`: such a function would let any
 /// caller assert both containment and provenance from raw parts, which is the
@@ -166,10 +168,10 @@ impl WordSpan {
     pub fn end_assumed(
         start: RecordedInstant,
         assumed: Ms,
-        recording: &Recording,
+        window: &super::coordinates::FaWindow,
     ) -> Result<Clamped<Self>, SpanFault> {
         let proposed = FileMs::new(start.at().get() + assumed.0);
-        let clamped_end = recording.clamp(proposed, Origin::FallbackDuration { assumed });
+        let clamped_end = window.clamp_derived_end(proposed, Origin::FallbackDuration { assumed });
         match clamped_end {
             Clamped::AsGiven(end) => Self::between(start, end).map(Clamped::AsGiven),
             // The overshoot rides on `bound`'s own origin, so forwarding the
@@ -256,8 +258,11 @@ mod tests {
     #[test]
     fn an_assumed_end_says_it_was_assumed_and_how_long_for() {
         let rec = recording();
+        let window =
+            super::super::coordinates::FaWindow::within(&rec, FileMs::new(0), rec.duration())
+                .expect("whole recording request");
         let Ok(Clamped::AsGiven(span)) =
-            WordSpan::end_assumed(measured_at(&rec, 1_000), Ms(500), &rec)
+            WordSpan::end_assumed(measured_at(&rec, 1_000), Ms(500), &window)
         else {
             panic!("500ms after 1000ms fits inside a 10000ms recording")
         };
@@ -275,8 +280,11 @@ mod tests {
         // silence. Both facts survive into the type: it was assumed, and it was
         // then cut down.
         let rec = recording();
+        let window =
+            super::super::coordinates::FaWindow::within(&rec, FileMs::new(0), rec.duration())
+                .expect("whole recording request");
         let Ok(Clamped::ClampedTo { bound }) =
-            WordSpan::end_assumed(measured_at(&rec, 9_800), Ms(500), &rec)
+            WordSpan::end_assumed(measured_at(&rec, 9_800), Ms(500), &window)
         else {
             panic!("9800 + 500 overshoots a 10000ms recording")
         };

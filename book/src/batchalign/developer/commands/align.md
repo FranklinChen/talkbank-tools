@@ -1,10 +1,17 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-15 13:28 EDT
+**Last updated:** 2026-10-16 09:58 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
+
+The [current FA decision contract](../../reference/forced-alignment.md#current-decision-contract-and-evidence-limits)
+distinguishes request feasibility, model output, durable serialization and
+acoustic accuracy. The localized-population constructor requires supplied timing
+or source-bound UTR search evidence before request admission, without a
+proportional fallback. Passing structural admission must never
+be described as proof that the supplied words occur in the requested audio.
 
 ---
 
@@ -648,7 +655,10 @@ fail-closed when requested and includes:
 - each group's `span` (schema 6): `single`, with the request's source
   (`wor_reuse`, `cache`, `raw_evidence_replay`, `inference`, or `unaligned`)
   and cache key, or `anchored`, with one piece per request (window, first and
-  last word, source, cache key);
+  last word, source, cache key), plus explicit unrequested ranges (schema 7).
+  Schema 8 adds each piece's overlapping lexical `context` and nominal
+  ownership window; outer word indices remain disjoint owned output, whereas
+  outer times are actual request audio, not shared acoustic cuts;
 - pre-injection valid timings, optional model score, and exhaustive origin
   chains for both boundaries;
 - the exact typed decision records retained independently of CHAT output;

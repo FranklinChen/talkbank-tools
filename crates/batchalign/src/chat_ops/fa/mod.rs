@@ -44,8 +44,8 @@ pub use self::alignment::parse_fa_response;
 pub use self::expand_for_fillers::expand_bullets_for_edge_fillers;
 pub use self::extraction::collect_fa_words;
 pub use self::grouping::{
-    Estimates, FaGroup, GroupSpan, GroupWords, Grouping, MAX_GROUP_LABEL_BYTES, Placement,
-    SingleSpan, count_utterance_timing, estimate_untimed_boundaries, group_utterances,
+    FaGroup, GroupSpan, GroupWords, Grouping, MAX_GROUP_LABEL_BYTES, SingleSpan,
+    count_utterance_timing, group_utterances,
 };
 pub(crate) use self::grouping::{GroupUnit, GroupUnits};
 pub use self::injection::inject_timings_for_utterance;
@@ -155,6 +155,9 @@ impl TimeSpan {
 #[serde(try_from = "WordTimingWire", into = "WordTimingWire")]
 pub struct WordTiming {
     span: TimeSpan,
+    /// Ephemeral dispatch authority, rebound after cache admission. Persisted
+    /// timing alone cannot certify the context of the current request.
+    request_window: Option<coordinates::FaWindow>,
     /// Optional score emitted by the alignment model for this word.
     ///
     /// This is deliberately not called a probability or accuracy confidence:
@@ -238,10 +241,22 @@ impl WordTiming {
     ) -> Option<Self> {
         (end_ms > start_ms).then_some(Self {
             span: TimeSpan::new(start_ms, end_ms),
+            request_window: None,
             model_score: None,
             start_origin,
             end_origin,
         })
+    }
+
+    /// Bind admitted raw/derived request output before projection. A response
+    /// outside its request is returned intact for a diagnostic, never silently
+    /// cropped into a claimed model observation.
+    pub(crate) fn bind_request(mut self, window: coordinates::FaWindow) -> Result<Self, Self> {
+        if self.start_ms < window.audio_start().get() || self.end_ms > window.end().get() {
+            return Err(self);
+        }
+        self.request_window = Some(window);
+        Ok(self)
     }
 
     /// Attach the model's own alignment score to this otherwise valid timing.
@@ -300,6 +315,7 @@ impl WordTiming {
         let interval = slot.timing();
         Self {
             span: TimeSpan::new(interval.start().get(), interval.end().get()),
+            request_window: None,
             model_score: None,
             start_origin: Origin::TranscriptBullet,
             end_origin: Origin::TranscriptBullet,
@@ -516,17 +532,35 @@ pub const LAST_WORD_FALLBACK_MS: u64 = 500;
 /// The parser no longer has a choice to make: an onset-only engine reports no
 /// end, so the next word's onset is the only end available, and it always uses
 /// it. What remains is genuinely a policy, and this type names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum WordGapHealing {
     /// Extend a word to the next word's start when the gap between them is
     /// small and plausible, so words read as contiguous speech.
     ///
     /// See `postprocess::postprocess_utterance_timings` for the plausibility
     /// caps; the healing is bounded, not unconditional.
+    #[serde(alias = "Heal")]
     Heal,
     /// Leave each word ending where the engine said it ended, so silence
     /// between words survives into `%wor`.
+    #[default]
+    #[serde(alias = "PreserveMeasured")]
     PreserveMeasured,
+}
+
+/// Whisper input shaping, independent of downstream word-end projection.
+///
+/// The legacy `--pauses` request selects character-spaced text. Preserving
+/// measured ends by default must not select that different model input, and
+/// changing gap healing must not change the raw evidence cache identity.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum WhisperTextMode {
+    /// The established default: words joined by spaces.
+    #[default]
+    SpaceJoined,
+    /// Legacy pause-aware text: characters separated by spaces.
+    CharSpaced,
 }
 
 /// How an alignment projection treats main-tier boundaries from a prior `%wor` run.
@@ -898,8 +932,8 @@ pub struct FaInferItem {
     pub audio_path: String,
     /// The audio window, proven to lie inside the recording at `audio_path`.
     pub window: FaWindow,
-    /// How to handle word end times during post-processing.
-    pub gap_healing: WordGapHealing,
+    /// Whisper input shaping. No output projection policy reaches inference.
+    pub whisper_text: WhisperTextMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,13 +1415,13 @@ impl std::fmt::Display for AudioIdentity {
 
 /// Compute cache key for an FA result.
 ///
-/// Key = `BLAKE3("{audio_identity}|{start}|{end}|{text}|{healing_flag}|{engine}{schema}")`.
+/// Key = `BLAKE3("{audio_identity}|{start}|{end}|{text}|{text_mode}|{engine}{schema}")`.
 pub fn cache_key(
     words: &[String],
     audio_identity: &AudioIdentity,
     start_ms: u64,
     end_ms: u64,
-    gap_healing: WordGapHealing,
+    whisper_text: WhisperTextMode,
     engine: crate::types::engines::FaEngineName,
 ) -> crate::chat_ops::CacheKey {
     let text = words.join(" ");
@@ -1402,22 +1436,20 @@ pub fn cache_key(
     // - WORD-INTERVAL engines take their start and end from the model. The
     //   stored timings do not depend on the healing policy at all, and
     //   the healing policy cannot change what the model returns, so one
-    //   constant is correct. (The Cantonese request does carry `pauses` on the
-    //   wire; its runner binds it unused, so it changes no output today.) It keeps the literal the old code always hashed for these
-    //   engines, which is what lets the fleet's existing entries stay
-    //   reachable: re-running them would spend GPU hours to recompute
-    //   byte-identical values.
+    //   constant is correct. Keep the literal historically hashed for these
+    //   engines so compatible entries stay reachable without recomputing
+    //   byte-identical model observations.
     //
     // - TOKEN-ONSET engines get their ends derived by the parser, and that
     //   derivation changed on 2026-08-14: entries written before it hold ends
     //   equal to their own starts, which is no duration at all. New strings
-    //   retire exactly those, and the flag additionally stands in for the
-    //   tokenization, since the same `--pauses` value selects it.
-    let healing_flag = match engine.timing_resolution() {
+    //   retire exactly those. Preserve the historical literals, now selected
+    //   by text shaping itself rather than a downstream healing policy.
+    let text_mode_key = match engine.timing_resolution() {
         FaTimingResolution::WordIntervals => "no_pauses",
-        FaTimingResolution::TokenOnsets => match gap_healing {
-            WordGapHealing::Heal => "heal_gaps",
-            WordGapHealing::PreserveMeasured => "preserve_measured",
+        FaTimingResolution::TokenOnsets => match whisper_text {
+            WhisperTextMode::SpaceJoined => "heal_gaps",
+            WhisperTextMode::CharSpaced => "preserve_measured",
         },
     };
     // The ENGINE, so two models that share a parse strategy cannot share
@@ -1437,7 +1469,7 @@ pub fn cache_key(
         FaTimingResolution::TokenOnsets => "",
     };
     let input = format!(
-        "{}|{start_ms}|{end_ms}|{text}|{healing_flag}|{engine_str}{result_schema}",
+        "{}|{start_ms}|{end_ms}|{text}|{text_mode_key}|{engine_str}{result_schema}",
         audio_identity.0
     );
     crate::chat_ops::CacheKey::from_content(&input)

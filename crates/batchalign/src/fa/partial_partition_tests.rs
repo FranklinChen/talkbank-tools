@@ -19,8 +19,18 @@ use crate::worker::pool::{PoolConfig, WorkerPool};
 /// Prefix, interior and suffix gaps must keep the same original five-word
 /// population through dispatch, assembly, injection and output admission.
 #[tokio::test]
-async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
+async fn request_context_preserves_partial_partition_output() {
     let controls = [
+        (
+            "context_suffix",
+            [3_000, 6_000, 9_000, 14_800, 15_200],
+            vec![],
+        ),
+        (
+            "short_anchored_tail",
+            [1_000, 2_000, 16_080, 17_000, 19_000],
+            vec![0, 1],
+        ),
         ("prefix", [20_000, 22_000, 24_000, 26_000, 30_000], vec![0]),
         ("interior", [2_000, 4_000, 30_000, 32_000, 34_000], vec![2]),
         ("suffix", [2_000, 4_000, 6_000, 8_000, 50_000], vec![4]),
@@ -54,10 +64,15 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
             .iter()
             .zip(ends)
             .enumerate()
-            .filter(|(index, _)| label != "anchored_tail" || *index >= 2)
-            .map(|(_, (word, end))| AsrTimingToken {
+            .filter(|(index, _)| !label.ends_with("anchored_tail") || *index >= 2)
+            .map(|(index, (word, end))| AsrTimingToken {
                 text: (*word).to_owned(),
-                start_ms: end - 500,
+                start_ms: end
+                    - match (label, index) {
+                        ("short_anchored_tail", 2) => 80,
+                        ("context_suffix", 4) => 400,
+                        _ => 500,
+                    },
                 end_ms: end,
             })
             .collect();
@@ -111,21 +126,72 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
         let plan = units::DispatchPlan::build(
             &grouping.groups,
             &identity,
-            WordGapHealing::PreserveMeasured,
+            crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
             FaEngineName::Wave2Vec,
         );
         let mut expected_timings = vec![None; 5];
-        for unit in plan.units() {
+        if label == "short_anchored_tail" {
+            assert_eq!(
+                plan.units().count(),
+                1,
+                "the rescued word must share its following context"
+            );
+        }
+        if label == "context_suffix" {
+            let last = plan.units().last().expect("suffix request");
+            assert!(
+                last.words().len() > 1,
+                "the suffix must borrow lexical and acoustic context"
+            );
+        }
+        let requested = partition.pieces().filter_map(|part| match part {
+            AnchoredPart::Request(piece) => Some(piece),
+            AnchoredPart::Unavailable(_) => None,
+        });
+        for (unit, piece) in plan.units().zip(requested) {
             assert!(unit.window().len().0 <= 15_000);
+            assert_eq!(unit.words(), piece.request_words());
+            assert!(unit.window().audio_start() <= piece.ownership_window().audio_start());
+            assert!(unit.window().end() >= piece.ownership_window().end());
+            for word in unit.words() {
+                assert!(
+                    !expected_missing.contains(&word.utterance_word_index.raw()),
+                    "context must not cross an unavailable range"
+                );
+            }
+            for word in piece.words() {
+                let end = ends[word.utterance_word_index.raw()];
+                expected_timings[word.utterance_word_index.raw()] =
+                    WordTiming::fixture(end - 80, end);
+            }
+            let owned_only_key = crate::chat_ops::fa::cache_key(
+                &piece
+                    .words()
+                    .iter()
+                    .map(|word| word.text.clone())
+                    .collect::<Vec<_>>(),
+                &identity,
+                piece.ownership_window().audio_start().get(),
+                piece.ownership_window().end().get(),
+                crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
+                FaEngineName::Wave2Vec,
+            );
+            if piece.words() != piece.request_words() {
+                assert_ne!(
+                    unit.cache_key(),
+                    &owned_only_key,
+                    "expanded requests cannot reuse old request evidence"
+                );
+            }
             let timings: Vec<_> = unit
                 .words()
                 .iter()
-                .enumerate()
-                .map(|(offset, word)| {
-                    let start = unit.window().audio_start().get() + offset as u64 * 100;
-                    let timing = WordTiming::fixture(start, start + 80);
-                    expected_timings[word.utterance_word_index.raw()] = timing.clone();
-                    timing
+                .map(|word| {
+                    let end = ends[word.utterance_word_index.raw()];
+                    let borrowed = !piece.words().contains(word);
+                    // Borrowed words deliberately disagree with their owning
+                    // request. Only the owner's result may reach final CHAT.
+                    WordTiming::fixture(end - if borrowed { 40 } else { 80 }, end)
                 })
                 .collect();
             let response = ExecuteResponseV2::success(
@@ -159,6 +225,7 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
         }
         let mut params = FaParams {
             gap_healing: WordGapHealing::PreserveMeasured,
+            whisper_text: crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
             existing_wor_boundaries: ExistingWorBoundaryPolicy::Preserve,
             end_overlap_policy: EndOverlapPolicy::PreserveCrossSpeaker,
             main_bullets: MainBulletPolicy::DeriveFromWords,
@@ -191,6 +258,20 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
             panic!("anchored trace")
         };
         assert_eq!(pieces.len(), plan.units().count());
+        assert_eq!(trace.evidence_schema_version, 8);
+        for (trace_piece, unit) in pieces.iter().zip(plan.units()) {
+            let context = trace_piece.context.as_ref().expect("schema 8 context");
+            assert_eq!(
+                context.first_word,
+                unit.words()[0].utterance_word_index.raw()
+            );
+            assert_eq!(
+                context.last_word,
+                unit.words().last().unwrap().utterance_word_index.raw()
+            );
+            assert!(context.first_word <= trace_piece.first_word);
+            assert!(context.last_word >= trace_piece.last_word);
+        }
         assert_eq!(
             unrequested
                 .iter()
@@ -245,21 +326,29 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
                 output.document.as_str()
             );
         }
-        assert!(
-            matches!(output.shortfalls.as_slice(), [OutputShortfallRecord::TimingIncomplete { required_words: 5, untimed_words, .. }] if *untimed_words == expected_missing.len() as u64),
-            "{label}: {:?}",
-            output.shortfalls
-        );
-        assert!(
-            matches!(
-                crate::pipeline::post_validate::OutputReport::of(
-                    &crate::pipeline::post_validate::ProducedOutput::from(output.document),
-                    &output.shortfalls,
+        if expected_missing.is_empty() {
+            assert!(
+                output.shortfalls.is_empty(),
+                "{label}: {:?}",
+                output.shortfalls
+            );
+        } else {
+            assert!(
+                matches!(output.shortfalls.as_slice(), [OutputShortfallRecord::TimingIncomplete { required_words: 5, untimed_words, .. }] if *untimed_words == expected_missing.len() as u64),
+                "{label}: {:?}",
+                output.shortfalls
+            );
+            assert!(
+                matches!(
+                    crate::pipeline::post_validate::OutputReport::of(
+                        &crate::pipeline::post_validate::ProducedOutput::from(output.document),
+                        &output.shortfalls,
+                    ),
+                    crate::pipeline::post_validate::OutputReport::Diagnosed(_)
                 ),
-                crate::pipeline::post_validate::OutputReport::Diagnosed(_)
-            ),
-            "partial alignment is never clean success"
-        );
+                "partial alignment is never clean success"
+            );
+        }
         if label == "prefix" {
             // Real explicit --nowor path over the same synthetic cache-only
             // evidence. No provider/model work or compensating tier creation.
@@ -307,6 +396,19 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
     insta::assert_debug_snapshot!(summaries, @r#"
     [
         (
+            "context_suffix",
+            [],
+            2,
+        ),
+        (
+            "short_anchored_tail",
+            [
+                0,
+                1,
+            ],
+            1,
+        ),
+        (
             "prefix",
             [
                 0,
@@ -344,7 +446,7 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
                 0,
                 1,
             ],
-            2,
+            1,
         ),
     ]
     "#);

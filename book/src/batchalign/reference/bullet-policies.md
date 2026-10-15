@@ -26,7 +26,7 @@ other invalid output can still prevent writing; see [align](../user-guide/comman
 **Positive does not mean disjoint or ordered.** A word at `100_300` followed
 by one at `200_400` is possible, as is a later word with an earlier start.
 `WordTiming` validates one interval, not adjacency across a sequence.
-`--pauses` bypasses gap healing; neither it nor the default healing pass is a
+Measured ends are preserved by default; neither preservation nor opt-in healing is a
 general proof of disjoint word intervals. Main-tier monotonicity and
 end-overlap resolution likewise do not impose such a proof within `%wor`.
 No new within-tier overlap prohibition is implied by the zero-duration rule.
@@ -41,18 +41,25 @@ and positive out-of-order word intervals remain distinct from invalid duration.
 
 | Control | Default | What it controls |
 | --- | --- | --- |
-| `--pauses` | Off | Off: bounded gap healing. On: preserve engine-reported ends rather than heal gaps. For Whisper it also selects the historical character-spaced input mode. |
+| `--word-gaps {preserve-measured,heal}` | `preserve-measured` | Keep measured ends; `heal` explicitly enables bounded heuristic gap healing. It never changes model input or the raw cache key. |
+| `--pauses` | Off | Select historical character-spaced Whisper input. Independent of `--word-gaps`; old pause-aware requests still preserve ends when no gap policy is supplied. |
 | `--existing-wor-boundaries` | `preserve` | How fresh word evidence interacts with an existing `%wor` run's main-tier boundary; `rebuild-from-evidence` instead reconstructs coverage from the admitted word hull. |
 | `--main-bullets` | `derive` | Whether supplied main bullets, and optionally supplied absences, are immutable. |
 | `--end-overlap-policy` | `preserve-cross-speaker` | Whether utterance end-overlap resolution also acts on physically adjacent different-speaker turns. |
 | `--bullet-repair` | Off | Optional repair before final monotonicity, subject to the same kept-bullet authority. |
 | `--wor` / `--nowor` | `--wor` | Whether to generate the word-timing sidecar; not permission to invent timing or ignore an existing sidecar. |
 
-The three boundary projection options do not change raw FA cache identity.
+The word-gap and three boundary projection options do not change raw FA cache identity.
 They are not interchangeable with `--pauses`, which also affects Whisper input.
 `exact` additionally rejects enabled UTR before execution: it requires
 `--no-utr`. A projection flag alone neither authorizes fresh inference nor
 guarantees that an all-reusable input reaches raw-evidence replay.
+
+Requests that omit `word_gaps`, including older stored requests, now select
+`preserve_measured`. Explicit `heal` is the compatibility opt-in. This is an
+output-policy change, not evidence that raw model timings are always accurate.
+Previously healed timing already present in a reused `%wor` tier is not undone
+by selecting preservation; that input is a separate evidence source.
 
 ### Where word ends come from
 
@@ -60,12 +67,12 @@ Measured-end engines supply both boundaries. Whisper FA supplies onsets, so
 BA3 derives each end from the next onset even without `--pauses`. Coincident
 onsets cannot supply a positive interval for the earlier word. The last-word
 fallback is named `LAST_WORD_FALLBACK_MS` (500 ms), bounded by available audio;
-postprocessing may extend to a retained transcript boundary, never merely to
+opt-in healing may extend to a retained transcript boundary, never merely to
 a provisional UTR hint. Such derived timing is not a measured end.
 
-Default gap healing is bounded by plausibility checks, with special handling
+Opt-in gap healing is bounded by plausibility checks, with special handling
 for fillers, compounds, and very short words. It is not an unconditional
-instruction to join every pair of words. `--pauses` does not disable boundary
+instruction to join every pair of words. Preserving measured ends does not disable boundary
 clamping, kept-bullet authority, or utterance-level resolution.
 
 ### Prior boundaries and supplied main bullets

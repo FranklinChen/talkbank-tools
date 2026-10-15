@@ -195,7 +195,7 @@ Each task computes a cache key from its input payload, so identical inputs skip 
 | Morphosyntax | `BLAKE3("{words}|{lang}|mwt")` |
 | Utseg | `BLAKE3("{words}|{lang}")` |
 | Translation | `BLAKE3("{text}|{src_lang}|{tgt_lang}")` |
-| FA | `BLAKE3("{audio_identity}|{start}|{end}|{text}|{pauses}|{engine}")` |
+| FA | `BLAKE3("{audio_identity}|{start}|{end}|{text}|{text_mode}|{engine}")` |
 | UTR ASR | `BLAKE3("utr_asr|{audio_identity}|{lang}")` |
 | Coref | No caching (document-level context) |
 

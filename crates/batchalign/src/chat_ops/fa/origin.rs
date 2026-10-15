@@ -93,6 +93,10 @@ impl fmt::Display for EngineId {
 pub enum ClampBound {
     /// The end of the audio file.
     RecordingEnd,
+    /// The end of the acoustic context actually supplied to the model.
+    RequestEnd,
+    /// The beginning of the acoustic context actually supplied to the model.
+    RequestStart,
     /// The enclosing utterance's bullet.
     UtteranceBullet,
     /// The onset of the following word.
@@ -103,6 +107,8 @@ impl fmt::Display for ClampBound {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RecordingEnd => f.write_str("the end of the recording"),
+            Self::RequestEnd => f.write_str("the end of the acoustic request"),
+            Self::RequestStart => f.write_str("the start of the acoustic request"),
             Self::UtteranceBullet => f.write_str("the utterance bullet"),
             Self::NextOnset => f.write_str("the next word's onset"),
         }

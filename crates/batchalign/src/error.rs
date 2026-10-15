@@ -243,6 +243,9 @@ impl OffRecordTiming {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TimingRegenerationFailure {
+    LocalizationUnavailable {
+        line_idx: batchalign_transform::decisions::LineIdx,
+    },
     NoRequest {
         line_idx: batchalign_transform::decisions::LineIdx,
         window: batchalign_transform::decisions::RefusedWindow,
@@ -276,6 +279,13 @@ impl MissingTimingRegenerationEvidence {
             .decisions
             .iter()
             .find_map(|decision| match &decision.strategy {
+                DecisionStrategy::Fa(FaStrategy::LocalizationUnavailable) => Some(Self {
+                    header_span: outstanding.header_span(),
+                    origin: outstanding.origin(),
+                    reason: TimingRegenerationFailure::LocalizationUnavailable {
+                        line_idx: decision.line_idx,
+                    },
+                }),
                 DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => Some(Self {
                     header_span: outstanding.header_span(),
                     origin: outstanding.origin(),
@@ -311,6 +321,32 @@ impl std::fmt::Display for MissingTimingRegenerationEvidence {
         // Exhaustive over both axes: a new origin or failure must say what
         // the user can change, not inherit another case's sentence.
         match (&self.reason, self.origin) {
+            (
+                TimingRegenerationFailure::LocalizationUnavailable { line_idx },
+                TimingObligationOrigin::DiscardedWordTiming,
+            ) => write!(
+                formatter,
+                "timing regeneration has no admissible request at transcript entry {}: no supplied timing or source-bound UTR search evidence; recover timing with a compatible UTR backend or supply corrected timing; no output was written",
+                line_idx.raw() + 1,
+            ),
+            (
+                TimingRegenerationFailure::LocalizationUnavailable { line_idx },
+                TimingObligationOrigin::NeverTimed,
+            ) => write!(
+                formatter,
+                "alignment has no admissible request at transcript entry {}: no supplied timing or source-bound UTR search evidence; the @Media header declares a linked transcript, which requires timing (E544); recover timing with a compatible UTR backend or add `, unlinked` to the @Media header; no output was written",
+                line_idx.raw() + 1,
+            ),
+            (
+                TimingRegenerationFailure::LocalizationUnavailable { line_idx },
+                TimingObligationOrigin::OffRecordTimingOnly(notes),
+            ) => write!(
+                formatter,
+                "alignment has no admissible request at transcript entry {}: no supplied timing or source-bound UTR search evidence; {}; the linked transcript would have no timing (E544); {}; no output was written",
+                line_idx.raw() + 1,
+                notes.account(),
+                notes.remedy(),
+            ),
             (
                 TimingRegenerationFailure::NoRequest { line_idx, window },
                 TimingObligationOrigin::DiscardedWordTiming,

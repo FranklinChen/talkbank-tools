@@ -245,6 +245,7 @@ fn build_typed_options_with_cwd(
                 },
                 pauses: a.pauses,
                 boundaries: crate::options::AlignBoundaryOptions {
+                    word_gaps: a.boundaries.word_gaps,
                     existing_wor_boundaries: a.boundaries.existing_wor_boundaries,
                     end_overlap_policy: a.boundaries.end_overlap_policy,
                     main_bullets: a.boundaries.main_bullets,

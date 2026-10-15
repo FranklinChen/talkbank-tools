@@ -5,6 +5,13 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Preserve observed endpoints in partial alignment searches
+
+- Bound each side of a partial-order FA search by its admitted endpoint when
+  available. A missing first or last word retains its search obligation;
+  interior matches do not substitute for missing endpoints. Candidate sets,
+  supplied bullets, output-timing authority and engine budgets are unchanged.
+
 ### Task-scoped cache requirements and read-only admission
 
 - Add `--require-media-cache-tasks` for disjoint required/refresh policies,

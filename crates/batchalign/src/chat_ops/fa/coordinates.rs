@@ -53,12 +53,9 @@
 //! every `.min()` in them were a pending conversion. Nine sites were then read
 //! individually, and only one was this shape:
 //!
-//! * `grouping.rs::estimate_untimed_boundaries` computed an aligner window end
-//!   and cut it to the audio with `.min(total_audio_ms)`. That IS the shape,
-//!   and it now goes through [`Recording::clamp_bound`], which returns
-//!   [`Clamped`] so the call site names both arms and counts the second. A
-//!   window running past the end of the recording is a fact about our own gap
-//!   arithmetic, and it was unobservable.
+//! * The former proportional grouping estimator counted clamped bounds, but
+//!   even a contained estimate could select unrelated speech. That estimator
+//!   has been removed; bounds admission is not localization evidence.
 //! * `postprocess.rs` has two, and NEITHER is a defect. The fallback cap at the
 //!   next onset already records what it did in the value's [`Origin`]
 //!   (`ClampedTo { bound: NextOnset, .. }` wrapping the assumption), which is
@@ -536,6 +533,27 @@ impl FaWindow {
     /// The window's length.
     pub const fn len(&self) -> Ms {
         self.end.since(self.start)
+    }
+
+    /// Bound a derived end to the audio supplied, retaining both the
+    /// assumption and the adjustment. Engine measurements still use
+    /// `to_file`, which refuses an out-of-window report instead of clamping.
+    pub(super) fn clamp_derived_end(&self, at: FileMs, origin: Origin) -> Clamped<RecordedInstant> {
+        match at > self.end {
+            false => self.recording.clamp(at, origin),
+            true => Clamped::ClampedTo {
+                bound: RecordedInstant {
+                    at: self.end,
+                    recording: self.recording,
+                    origin: Origin::ClampedTo {
+                        bound: ClampBound::RequestEnd,
+                        was: Box::new(origin),
+                        original: at,
+                        overshoot: at.since(self.end),
+                    },
+                },
+            },
+        }
     }
 
     /// THE transition from engine coordinates into file coordinates.

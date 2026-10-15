@@ -397,6 +397,8 @@ function untimedCauseText(cause: UntimedCauseRecord): string {
   switch (cause.kind) {
     case "not_placed":
       return "no alignment request, the audio left for it could not contain its words";
+    case "localization_unavailable":
+      return "no alignment request, no supplied timing or source-bound UTR search evidence";
     case "no_usable_timing":
       return "no usable timing";
     case "window_refused":

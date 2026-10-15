@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use batchalign::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording};
 use batchalign::chat_ops::fa::origin::EngineId;
-use batchalign::chat_ops::fa::{FaInferItem, FaWord, WordGapHealing};
+use batchalign::chat_ops::fa::{FaInferItem, FaWord, WhisperTextMode};
 use batchalign::chat_ops::{UtteranceIdx, WordIdx};
 use batchalign::media::probe::MediaProbe;
 use batchalign::media::tools::MediaTool;
@@ -122,7 +122,7 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
                 audio_path: wav_path.to_string_lossy().into_owned(),
                 window: FaWindow::within(&recording, FileMs::new(0), FileMs::new(150))
                     .expect("request window inside the recording"),
-                gap_healing: WordGapHealing::Heal,
+                whisper_text: WhisperTextMode::SpaceJoined,
             },
             engine: batchalign::types::engines::FaEngineName::Whisper,
         },

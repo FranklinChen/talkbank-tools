@@ -1705,6 +1705,9 @@ export interface components {
             kind: "not_placed";
         } | {
             /** @enum {string} */
+            kind: "localization_unavailable";
+        } | {
+            /** @enum {string} */
             kind: "no_usable_timing";
         } | {
             /** @enum {string} */

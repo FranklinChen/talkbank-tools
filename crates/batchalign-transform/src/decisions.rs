@@ -127,6 +127,8 @@ pub enum FaStrategy {
     /// from an alignment failure, which is why it is a recorded decision rather
     /// than a log line.
     UnplaceableRun,
+    /// No supplied timing or source-bound UTR search evidence locates these words.
+    LocalizationUnavailable,
     /// No request was made because the utterance window cannot fit the recording or engine budget.
     ///
     /// Carries the refused window itself, so the evidence file states its
@@ -358,6 +360,7 @@ impl FaStrategy {
             Self::TimingStripped => "timing_stripped",
             Self::TimingProvenance => "timing_provenance",
             Self::UnplaceableRun => "unplaceable_run",
+            Self::LocalizationUnavailable => "localization_unavailable",
             Self::WindowRefused(_) => "window_refused",
             Self::WindowSplitAtAnchors(_) => "window_split_at_anchors",
             Self::WordsTimingDropped => "words_timing_dropped",
