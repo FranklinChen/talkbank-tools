@@ -15,8 +15,9 @@
 //! dispatch, raw evidence, fallback) is per [`DispatchUnit`], and everything
 //! that is about the TRANSCRIPT (`%wor` reuse, injection, post-processing)
 //! stays per group. [`UnitLedger::assemble`] is the one place unit timings
-//! become group timings, concatenated in word order with explicit untimed slots
-//! for unavailable ranges. No later timing can shift over a missing range.
+//! become group timings: full contextual replies are admitted against their
+//! request, then only owned words are concatenated, with explicit untimed slots
+//! for unavailable ranges. Context words are never injected twice.
 //!
 //! ```mermaid
 //! flowchart LR
@@ -52,7 +53,8 @@ use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::chat_ops::fa::{
-    AnchoredPart, FaGroup, FaWord, GroupUnit, GroupUnits, UnavailablePiece, WordTiming, cache_key,
+    AnchoredPart, AnchoredPiece, FaGroup, FaWord, GroupUnit, GroupUnits, UnavailablePiece,
+    WordTiming, cache_key,
 };
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
@@ -117,6 +119,30 @@ pub(super) enum UnitRole {
     Piece(PieceOrdinal),
 }
 
+/// Source-owned request capability. A piece keeps context, owned output range
+/// and window together, so dispatch cannot combine independently chosen parts.
+#[derive(Debug, Clone, Copy)]
+enum UnitRequest<'g> {
+    Whole(GroupUnit<'g>),
+    Piece(&'g AnchoredPiece),
+}
+
+impl<'g> UnitRequest<'g> {
+    fn words(self) -> &'g [FaWord] {
+        match self {
+            Self::Whole(request) => request.words,
+            Self::Piece(piece) => piece.request_words(),
+        }
+    }
+
+    fn window(self) -> FaWindow {
+        match self {
+            Self::Whole(request) => request.window,
+            Self::Piece(piece) => piece.window(),
+        }
+    }
+}
+
 /// One FA request: some consecutive words of one group, the window they are
 /// aligned against, and the request's cache identity.
 #[derive(Debug)]
@@ -124,7 +150,7 @@ pub(crate) struct DispatchUnit<'g> {
     ordinal: UnitOrdinal,
     group: GroupOrdinal,
     role: UnitRole,
-    request: GroupUnit<'g>,
+    request: UnitRequest<'g>,
     cache_key: CacheKey,
 }
 
@@ -134,16 +160,20 @@ impl<'g> DispatchUnit<'g> {
         ordinal: UnitOrdinal,
         group: GroupOrdinal,
         role: UnitRole,
-        request: GroupUnit<'g>,
+        request: UnitRequest<'g>,
         key: &RequestKeying<'_>,
     ) -> Self {
-        let texts: Vec<String> = request.words.iter().map(|word| word.text.clone()).collect();
+        let texts: Vec<String> = request
+            .words()
+            .iter()
+            .map(|word| word.text.clone())
+            .collect();
         let cache_key = cache_key(
             &texts,
             key.audio_identity,
-            request.window.audio_start().get(),
-            request.window.end().get(),
-            key.gap_healing,
+            request.window().audio_start().get(),
+            request.window().end().get(),
+            key.whisper_text,
             key.engine,
         );
         Self {
@@ -167,12 +197,12 @@ impl<'g> DispatchUnit<'g> {
 
     /// The words this request aligns, in order.
     pub(crate) fn words(&self) -> &'g [FaWord] {
-        self.request.words
+        self.request.words()
     }
 
     /// The window this request aligns against, within the engine budget.
     pub(crate) fn window(&self) -> FaWindow {
-        self.request.window
+        self.request.window()
     }
 
     /// The request's content-addressed cache identity.
@@ -183,7 +213,7 @@ impl<'g> DispatchUnit<'g> {
     /// The words' cleaned texts, as the aligner receives them.
     pub(crate) fn texts(&self) -> Vec<String> {
         self.request
-            .words
+            .words()
             .iter()
             .map(|word| word.text.clone())
             .collect()
@@ -193,7 +223,7 @@ impl<'g> DispatchUnit<'g> {
 /// The run facts every request's cache key is computed from.
 struct RequestKeying<'a> {
     audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
-    gap_healing: crate::chat_ops::fa::WordGapHealing,
+    whisper_text: crate::chat_ops::fa::WhisperTextMode,
     engine: crate::types::engines::FaEngineName,
 }
 
@@ -259,12 +289,12 @@ impl<'g> DispatchPlan<'g> {
     pub(super) fn build(
         groups: &'g [FaGroup],
         audio_identity: &crate::chat_ops::fa::AudioIdentity,
-        gap_healing: crate::chat_ops::fa::WordGapHealing,
+        whisper_text: crate::chat_ops::fa::WhisperTextMode,
         engine: crate::types::engines::FaEngineName,
     ) -> Self {
         let key = RequestKeying {
             audio_identity,
-            gap_healing,
+            whisper_text,
             engine,
         };
         let mut next_ordinal = 0usize;
@@ -283,7 +313,7 @@ impl<'g> DispatchPlan<'g> {
                         mint(),
                         ordinal,
                         UnitRole::Whole,
-                        request,
+                        UnitRequest::Whole(request),
                         &key,
                     )),
                     GroupUnits::Pieces(pieces) => PlannedUnits::Pieces(
@@ -296,10 +326,7 @@ impl<'g> DispatchPlan<'g> {
                                             mint(),
                                             ordinal,
                                             UnitRole::Piece(PieceOrdinal(position)),
-                                            GroupUnit {
-                                                words: piece.words(),
-                                                window: piece.window(),
-                                            },
+                                            UnitRequest::Piece(piece),
                                             &key,
                                         ),
                                         first_word: piece.first_word(),
@@ -573,7 +600,33 @@ fn answered(
     context: &str,
 ) -> Result<Vec<Option<WordTiming>>, ServerError> {
     match answer.timings.len() == unit.words().len() {
-        true => Ok(answer.timings),
+        true => {
+            let timings = answer
+                .timings
+                .into_iter()
+                .map(|timing| {
+                    let Some(timing) = timing else { return Ok(None) };
+                    timing.bind_request(unit.window()).map(Some).map_err(|refused| {
+                        ServerError::Validation(format!(
+                            "{context}: request {} of group {} returned timing {}..{} outside {}..{}",
+                            unit.ordinal, unit.group, refused.start_ms, refused.end_ms,
+                            unit.window().audio_start().get(), unit.window().end().get(),
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(match unit.request {
+                UnitRequest::Whole(_) => timings,
+                UnitRequest::Piece(piece) => {
+                    let owned = piece.owned_range();
+                    timings
+                        .into_iter()
+                        .skip(owned.start)
+                        .take(owned.len())
+                        .collect()
+                }
+            })
+        }
         false => Err(ServerError::Validation(format!(
             "{context}: request {} of group {} answered for {} words, not its {}",
             unit.ordinal,
@@ -601,6 +654,17 @@ fn piece_trace(piece: &PlannedPiece<'_>, source: FaEvidenceSourceTrace) -> FaPie
         last_word: piece.last_word.raw(),
         source,
         cache_key: piece.unit.cache_key.as_str().to_owned(),
+        context: match piece.unit.request {
+            UnitRequest::Piece(source) => Some(crate::types::traces::FaPieceContextTrace {
+                first_word: source.request_words()[0].utterance_word_index.raw(),
+                last_word: source.request_words()[source.request_words().len() - 1]
+                    .utterance_word_index
+                    .raw(),
+                ownership_start_ms: source.ownership_window().audio_start().get(),
+                ownership_end_ms: source.ownership_window().end().get(),
+            }),
+            UnitRequest::Whole(_) => None,
+        },
     }
 }
 
@@ -714,7 +778,7 @@ pub(super) async fn resolve_group_timings(
     let plan = DispatchPlan::build(
         groups,
         audio.audio_identity,
-        fa_params.gap_healing,
+        fa_params.whisper_text,
         fa_params.engine,
     );
     let total_units = plan.units().count();
@@ -862,7 +926,7 @@ pub(super) async fn resolve_group_timings(
                 audio_path: audio.audio_path,
                 worker_lang: worker_lang.into(),
                 engine: fa_params.engine,
-                gap_healing: fa_params.gap_healing,
+                whisper_text: fa_params.whisper_text,
             })
             .await?;
 
@@ -979,7 +1043,7 @@ pub(crate) mod test_support {
         DispatchPlan::build(
             groups,
             &identity,
-            crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
+            crate::chat_ops::fa::WhisperTextMode::CharSpaced,
             crate::types::engines::FaEngineName::Wave2Vec,
         )
     }
@@ -1038,6 +1102,14 @@ mod tests {
 
     fn answer(timings: Vec<Option<WordTiming>>, source: FaEvidenceSourceTrace) -> UnitResolution {
         UnitResolution { timings, source }
+    }
+
+    fn bound_timing(unit: &DispatchUnit<'_>, start: u64, end: u64) -> Option<WordTiming> {
+        timing(start, end).map(|timing| {
+            timing
+                .bind_request(unit.window())
+                .expect("fixture fits request")
+        })
     }
 
     fn split_parts(
@@ -1116,13 +1188,16 @@ mod tests {
         assert_eq!(
             timings,
             vec![
-                vec![timing(100, 400), timing(500, 800)],
                 vec![
-                    timing(1_000, 2_000),
-                    timing(11_000, 13_000),
-                    timing(14_000, 15_000),
+                    bound_timing(units[0], 100, 400),
+                    bound_timing(units[0], 500, 800)
+                ],
+                vec![
+                    bound_timing(units[1], 1_000, 2_000),
+                    bound_timing(units[1], 11_000, 13_000),
+                    bound_timing(units[2], 14_000, 15_000),
                     None,
-                    timing(30_000, 31_000),
+                    bound_timing(units[3], 30_000, 31_000),
                 ],
             ]
         );
@@ -1208,6 +1283,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assemble_refuses_a_measured_reply_outside_its_request() {
+        let groups = vec![anchored_group()];
+        let plan = plan_for(&groups);
+        let unit = plan.units().next().unwrap();
+        let end = unit.window().end().get();
+        let mut reply = vec![None; unit.words().len()];
+        reply[0] = timing(end - 10, end + 10);
+        let error = answered(unit, answer(reply, FaEvidenceSourceTrace::Cache), "test")
+            .expect_err("cache admission cannot grant timing outside the request");
+        assert!(error.to_string().contains("outside 0..13000"));
+    }
+
     /// A group reused from `%wor` takes its timings whole, records every one
     /// of its requests as reused, and awaits no reply: one is refused.
     #[test]
@@ -1289,11 +1377,11 @@ mod tests {
         assert_eq!(
             timings[0],
             vec![
-                timing(100, 200),
-                timing(300, 400),
+                bound_timing(units[0], 100, 200),
+                bound_timing(units[0], 300, 400),
                 None,
-                timing(31_000, 32_000),
-                timing(33_000, 34_000)
+                bound_timing(units[1], 31_000, 32_000),
+                bound_timing(units[1], 33_000, 34_000)
             ]
         );
         let FaGroupSpanTrace::Anchored { unrequested, .. } = &evidence[0].group.span else {

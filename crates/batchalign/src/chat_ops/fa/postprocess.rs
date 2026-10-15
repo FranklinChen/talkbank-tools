@@ -60,6 +60,7 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingTiming {
     span: TimeSpan,
+    request_window: Option<super::coordinates::FaWindow>,
     model_score: Option<super::ModelAlignmentScore>,
     start_origin: Origin,
     end_origin: Origin,
@@ -158,6 +159,7 @@ impl PendingTiming {
         let span = *timing;
         Self {
             model_score: timing.model_score(),
+            request_window: timing.request_window,
             start_origin: timing.start_origin().clone(),
             end_origin: timing.end_origin().clone(),
             span,
@@ -168,6 +170,7 @@ impl PendingTiming {
     fn from_transcript(span: TimeSpan) -> Self {
         Self {
             span,
+            request_window: None,
             model_score: None,
             start_origin: Origin::TranscriptBullet,
             end_origin: Origin::TranscriptBullet,
@@ -200,6 +203,7 @@ impl PendingTiming {
         let was = self.span;
         Self {
             span,
+            request_window: self.request_window,
             model_score: self.model_score,
             start_origin: match span.start_ms == was.start_ms {
                 true => self.start_origin,
@@ -236,6 +240,7 @@ impl PendingTiming {
     fn with_end(self, end_ms: u64, origin: Origin) -> Self {
         Self {
             span: TimeSpan::new(self.span.start_ms, end_ms),
+            request_window: self.request_window,
             model_score: self.model_score,
             start_origin: self.start_origin,
             end_origin: origin,
@@ -280,16 +285,44 @@ impl PendingTiming {
     /// `Result`, not `Option`: the caller counts refusals, and
     /// `if settled.is_none() { count += 1 }` after building `settled` is
     /// recomputing what this function already knew.
-    fn settle(self) -> Result<WordTiming, DegenerateWordTiming> {
+    fn settle(mut self) -> Result<WordTiming, DegenerateWordTiming> {
+        // Every postprocessing path converges here. Neither explicit healing,
+        // a retained bullet, nor a rebalance can erase dispatch containment.
+        // A clamp keeps the attempted derivation underneath its own origin.
+        if let Some(window) = self.request_window {
+            if self.span.start_ms < window.audio_start().get() {
+                let original = self.span.start_ms;
+                self.span.start_ms = window.audio_start().get();
+                self.start_origin = Origin::ClampedTo {
+                    bound: ClampBound::RequestStart,
+                    was: Box::new(self.start_origin),
+                    original: FileMs::new(original),
+                    overshoot: Ms(self.span.start_ms - original),
+                };
+            }
+            if self.span.end_ms > window.end().get() {
+                let original = self.span.end_ms;
+                self.span.end_ms = window.end().get();
+                self.end_origin = Origin::ClampedTo {
+                    bound: ClampBound::RequestEnd,
+                    was: Box::new(self.end_origin),
+                    original: FileMs::new(original),
+                    overshoot: Ms(original - self.span.end_ms),
+                };
+            }
+        }
         WordTiming::new(
             self.span.start_ms,
             self.span.end_ms,
             self.start_origin,
             self.end_origin,
         )
-        .map(|timing| match self.model_score {
-            Some(score) => timing.with_model_score(score),
-            None => timing,
+        .map(|mut timing| {
+            timing.request_window = self.request_window;
+            match self.model_score {
+                Some(score) => timing.with_model_score(score),
+                None => timing,
+            }
         })
         .ok_or(DegenerateWordTiming {
             start_ms: self.span.start_ms,
@@ -985,10 +1018,51 @@ mod moved_boundary_tests {
     fn word(start_ms: u64, end_ms: u64) -> PendingTiming {
         PendingTiming {
             span: TimeSpan::new(start_ms, end_ms),
+            request_window: None,
             model_score: None,
             start_origin: measured("wav2vec_fa"),
             end_origin: measured("wav2vec_fa"),
         }
+    }
+
+    #[test]
+    fn request_containment_survives_repairs_and_retains_score_and_origins() {
+        use super::super::coordinates::{FaWindow, Recording};
+        let recording = Recording::of_duration(Ms(5_000)).unwrap();
+        let window = FaWindow::within(&recording, FileMs::new(100), FileMs::new(300)).unwrap();
+        let score = ModelAlignmentScore::try_from_f64(0.73).unwrap();
+        let aligned = WordTiming::new(120, 280, measured("wav2vec_fa"), measured("wav2vec_fa"))
+            .unwrap()
+            .with_model_score(score)
+            .bind_request(window)
+            .unwrap();
+        assert!(
+            WordTiming::new(120, 301, measured("wav2vec_fa"), measured("wav2vec_fa"))
+                .unwrap()
+                .bind_request(window)
+                .is_err(),
+            "out-of-request measurements are refused"
+        );
+        let repaired = PendingTiming::from_aligned(aligned.clone())
+            .remeasured(TimeSpan::new(80, 400), rebalanced_with_neighbour)
+            .settle()
+            .unwrap();
+        assert_eq!((repaired.start_ms, repaired.end_ms), (100, 300));
+        assert_eq!(repaired.model_score(), Some(score));
+        assert_eq!(repaired.request_window, Some(window));
+        assert!(matches!(repaired.start_origin(), Origin::ClampedTo {
+            bound: ClampBound::RequestStart, was, ..
+        } if matches!(was.as_ref(), Origin::RebalancedWithNeighbour { .. })));
+        assert!(matches!(repaired.end_origin(), Origin::ClampedTo {
+            bound: ClampBound::RequestEnd, was, ..
+        } if matches!(was.as_ref(), Origin::RebalancedWithNeighbour { .. })));
+        assert!(
+            PendingTiming::from_aligned(aligned)
+                .remeasured(TimeSpan::new(300, 400), rebalanced_with_neighbour)
+                .settle()
+                .is_err(),
+            "containment must not manufacture positive duration"
+        );
     }
 
     #[test]

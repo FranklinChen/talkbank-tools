@@ -16,7 +16,6 @@
 //! | input admission ([`strip_off_record_timing`]) | loses any bullet, word timing and `%wor` on the working model, so it is no stage's anchor |
 //! | timing recovery census (`utr`) | contributes no words and no anchor |
 //! | untimed-window search, timed/untimed count | is neither timed nor untimed: it needs no timing |
-//! | interpolation (`estimate_untimed_boundaries`) | takes no share of a gap |
 //! | grouping (`group_utterances`) | gets no window and no alignment request |
 //! | incremental reuse | is not given the prior file's `%wor` |
 //! | completion (`fa::completion`) | owes no timing and is listed as an exclusion, never a shortfall, so it does not diagnose the file; any timing on it is a producer fault |

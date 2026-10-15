@@ -33,6 +33,47 @@ fn postprocess_two_words(
     collected
 }
 
+#[test]
+fn explicit_healing_cannot_escape_the_producing_request() {
+    use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Ms, Recording};
+    use crate::chat_ops::fa::origin::Origin;
+    let recording = Recording::of_duration(Ms(5_000)).unwrap();
+    let window = FaWindow::within(&recording, FileMs::new(0), FileMs::new(300)).unwrap();
+    let mut chat = parse_chat(&proof_chat("alpha beta . \u{0015}0_4000\u{0015}"));
+    let utt = get_test_utterance(&mut chat, 0);
+    let timings = vec![
+        Some(
+            WordTiming::fixture(100, 200)
+                .unwrap()
+                .bind_request(window)
+                .unwrap(),
+        ),
+        Some(
+            WordTiming::new(
+                600,
+                800,
+                Origin::FallbackDuration { assumed: Ms(200) },
+                Origin::FallbackDuration { assumed: Ms(200) },
+            )
+            .unwrap()
+            .bind_request(FaWindow::within(&recording, FileMs::new(500), FileMs::new(900)).unwrap())
+            .unwrap(),
+        ),
+    ];
+    let mut offset = 0;
+    let injected = inject_timings_for_utterance(utt, &timings, &mut offset);
+    let result = postprocess_utterance_timings(
+        utt,
+        WordEndPolicy::onset_only(WordGapHealing::Heal),
+        &injected,
+    );
+    assert_eq!(result.dropped, DroppedWordTimings::default());
+    let mut collected = Vec::new();
+    postprocess::collect_word_timings(&utt.main.content.content, &mut collected);
+    assert_eq!(collected[0].as_ref().unwrap().end_ms, 300);
+    assert_eq!(collected[1].as_ref().unwrap().end_ms, 900);
+}
+
 /// A word is never healed backwards into a neighbour that precedes it.
 ///
 /// Gap healing sets a word's end to the NEXT word's start. When a response is

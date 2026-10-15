@@ -1,7 +1,7 @@
 # Dynamic Programming
 
 **Status:** Current
-**Last updated:** 2026-10-13 07:49 EDT
+**Last updated:** 2026-10-15 18:33 EDT
 
 Where dynamic programming is used at runtime across the workspace,
 which uses are intrinsically necessary, and which are
@@ -262,8 +262,9 @@ onset, roughly a 3× reduction in search space.
 - **Final timing policy:** document order and same-speaker constraints are
   reconciled with main/word timing together, while valid cross-speaker overlap
   is preserved by default. See [Bullet and Word-Timing Policies](../../batchalign/reference/bullet-policies.md).
-- **Untimed search windows:** proportional estimates may bound a model request,
-  not certify required-word timing. See
+- **Untimed search windows:** source-bound UTR evidence is required; missing
+  localization produces an explicit refusal without a model request.
+  Proportional placement is removed. Supported requests remain fallible. See
   [Proportional FA Estimation](../alignment/proportional-fa-estimation.md).
 - **Retokenization:** admitted span-owned rebuilds preserve original CHAT
   annotations and refuse invalid mappings; parser recovery is not a substitute

@@ -61,29 +61,17 @@ fn recovery_matches_no_word_of_a_diary_note() {
     assert!(spoken.is_some(), "the spoken utterance takes its own words");
 }
 
-/// Grouping makes no request for a diary note, and interpolation gives it no
-/// share of the gap: the spoken utterance beside it is placed exactly as if
-/// the note were not there.
+/// A diary note is excluded, not refused. Unsupported speech beside it is
+/// refused separately; neither receives a fabricated request window.
 #[test]
-fn grouping_and_interpolation_leave_a_diary_note_out() {
+fn grouping_excludes_a_diary_note_and_refuses_unsupported_speech() {
     let with_note = transcript(
         "*MOT:\tgo there . \u{15}1000_2000\u{15}\n\
          *MOT:\twent to the park with grandma . [+ diary]\n\
          *MOT:\tcome here now .\n\
          *MOT:\tall done . \u{15}9000_10000\u{15}\n",
     );
-    let without_note = transcript(
-        "*MOT:\tgo there . \u{15}1000_2000\u{15}\n\
-         *MOT:\tcome here now .\n\
-         *MOT:\tall done . \u{15}9000_10000\u{15}\n",
-    );
     let recording = test_recording(20_000);
-    let placed_with = estimate_untimed_boundaries(&with_note, &recording).placements;
-    let placed_without = estimate_untimed_boundaries(&without_note, &recording).placements;
-    assert_eq!(
-        placed_with[2], placed_without[1],
-        "the note takes no share of the gap"
-    );
 
     let grouping = group_utterances(
         &with_note,
@@ -96,15 +84,18 @@ fn grouping_and_interpolation_leave_a_diary_note_out() {
         .iter()
         .flat_map(|group| group.utterance_indices().iter().map(|index| index.raw()))
         .collect();
+    assert_eq!(requested, [0, 3], "only localized speech, and not the note");
     assert_eq!(
-        requested,
-        [0, 2, 3],
-        "every spoken utterance, and not the note"
+        grouping.decisions.len(),
+        1,
+        "only unsupported speech is refused"
     );
-    assert!(
-        grouping.decisions.is_empty(),
-        "leaving the note out is not a refusal"
-    );
+    assert!(matches!(
+        grouping.decisions[0].strategy,
+        batchalign_transform::decisions::DecisionStrategy::Fa(
+            batchalign_transform::decisions::FaStrategy::LocalizationUnavailable
+        )
+    ));
 }
 
 /// A diary note needs no timing: a file whose only untimed utterance is one

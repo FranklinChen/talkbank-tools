@@ -2648,6 +2648,21 @@
             "type": "object"
           },
           {
+            "description": "No supplied timing or source-bound UTR search evidence; no request.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "localization_unavailable"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "No refusal names it, and no positive interval resulted for these\nwords: the aligner returned none, or they could not be sent to it.",
             "properties": {
               "kind": {

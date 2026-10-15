@@ -40,6 +40,7 @@ fn align_roundtrip() {
         },
         pauses: true,
         boundaries: AlignBoundaryOptions {
+            word_gaps: crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
             existing_wor_boundaries: Default::default(),
             end_overlap_policy: crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY,
             main_bullets: crate::chat_ops::fa::MainBulletPolicy::KeepGiven,

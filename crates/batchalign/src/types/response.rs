@@ -795,6 +795,8 @@ pub enum UntimedCauseRecord {
     /// It was placed in no request: the audio left for a run of untimed
     /// utterances could not contain their words.
     NotPlaced,
+    /// No supplied timing or source-bound UTR search evidence; no request.
+    LocalizationUnavailable,
     /// No refusal names it, and no positive interval resulted for these
     /// words: the aligner returned none, or they could not be sent to it.
     NoUsableTiming,
@@ -957,6 +959,9 @@ impl std::fmt::Display for UntimedCauseRecord {
             }
             Self::NotPlaced => f.write_str(
                 "no alignment request, the audio left for it could not contain its words",
+            ),
+            Self::LocalizationUnavailable => f.write_str(
+                "no alignment request, no supplied timing or source-bound UTR search evidence",
             ),
             Self::NoUsableTiming => f.write_str("no usable timing"),
             Self::NotInRecording { postcode } => write!(f, "not in the recording: {postcode}"),

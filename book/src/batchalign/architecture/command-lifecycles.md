@@ -127,7 +127,7 @@ sequenceDiagram
                 Server->>Server: inject_utr_timing(): exact subsequence fast path, else global DP
                 Note over Server: Untimed utterances get<br/>utterance-level bullets from ASR
             else All utterances timed OR no utr_engine
-                Note over Server: Skip UTR (use existing bullets<br/>or interpolation fallback)
+                Note over Server: Skip UTR (use existing bullets;<br/>refuse unsupported localization)
             end
 
             Server->>Server: pre-validate (MainTierValid)
@@ -193,7 +193,9 @@ sequenceDiagram
    For worker-backed engines such as
    Whisper, the server still uses the worker ASR task. If all utterances are
    already timed, UTR is skipped entirely. If no UTR engine is configured
-   (`--no-utr`), untimed utterances fall back to proportional interpolation.
+   (`--no-utr`), untimed utterances without source-bound search evidence
+   receive no request and are reported as `localization_unavailable`. See the
+   [current FA decision contract](../reference/forced-alignment.md#current-decision-contract-and-evidence-limits).
    The updated CHAT text (with recovered bullets) is then used for FA grouping.
 5c. The server **groups** utterances into time windows (max 20s for Whisper,
    15s for Wave2Vec).

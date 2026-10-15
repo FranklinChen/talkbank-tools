@@ -197,6 +197,41 @@ mod tests {
         assert_eq!(timings[1].as_ref().expect("timing").start_ms, 1_350);
     }
 
+    /// Worker-wire boundary: an assumed end is bounded by the actual request,
+    /// even though the recording has plenty of audio after that request.
+    #[test]
+    fn request_context_bounds_the_terminal_assumption() {
+        let (recording, _) = window_at(2_000);
+        let window = FaWindow::within(&recording, FileMs::new(2_000), FileMs::new(2_100))
+            .expect("short request inside a longer recording");
+        let response = ExecuteResponseV2::success(
+            WorkerRequestIdV2::from("request-context-bound"),
+            TaskResultV2::WhisperTokenTimingResult(WhisperTokenTimingResultV2 {
+                attention_capture: None,
+                tokens: vec![WhisperTokenTimingV2 {
+                    text: "finish".into(),
+                    time_s: AudioPositionSeconds::try_from(0.04).expect("onset"),
+                }],
+            }),
+            NonNegativeSeconds::try_from(0.01).expect("elapsed"),
+        );
+        let timings = parse_forced_alignment_result_v2(
+            &response,
+            &make_words(&["finish"]),
+            &window,
+            &adapter_engine(),
+        )
+        .expect("response");
+        let timing = timings[0].as_ref().expect("positive bounded timing");
+        assert_eq!((timing.start_ms, timing.end_ms), (2_040, 2_100));
+        let origin =
+            serde_json::to_value(crate::types::traces::OriginTrace::from(timing.end_origin()))
+                .expect("origin wire");
+        assert_eq!(origin["bound"], "request_end");
+        assert_eq!(origin["was"]["kind"], "fallback_duration");
+        assert_eq!(origin["overshoot_ms"], 440);
+    }
+
     #[test]
     fn parses_indexed_timing_result_into_established_alignment_domain() {
         let response = ExecuteResponseV2::success(

@@ -41,6 +41,15 @@ when no word could be timed. Existing valid word timing counts as timing.
 Complete timing coverage is not a guarantee of acoustic accuracy; assumptions
 and review evidence remain visible.
 
+**Missing localization:** speech without supplied timing or source-bound UTR
+search evidence receives no alignment request and is reported as
+`localization_unavailable`. Grouping no longer guesses positions from word
+counts. Supplied timing and ASR correspondence can still select the wrong
+speech, so do not treat additional timed words as an accuracy improvement
+without checking their location against the recording. The
+[decision contract](../../reference/forced-alignment.md#current-decision-contract-and-evidence-limits)
+documents the request boundary and its evidence limits.
+
 An utterance that is not in the recording at all is different: an utterance
 marked `[+ diary]`, a written diary note, is never looked for in the audio and
 gets no word timing, and no bullet unless `--main-bullets keep` or `exact`
@@ -162,9 +171,9 @@ flowchart TD
     wav2vec_fa --> pause_check
     qwen3_fa --> pause_check
 
-    pause_check{--pauses?}
-    pause_check -->|Yes| preserve[WordGapHealing::PreserveMeasured\nkeep each word's own end]
-    pause_check -->|No| heal[WordGapHealing::Heal\nbridge small plausible gaps]
+    pause_check{--word-gaps?}
+    pause_check -->|preserve-measured default| preserve[WordGapHealing::PreserveMeasured\nkeep each word's own end]
+    pause_check -->|heal explicit| heal[WordGapHealing::Heal\nbridge small plausible gaps]
 
     preserve --> cache_check
     heal --> cache_check
@@ -319,10 +328,10 @@ back into the output:
    - the last `%wor` word already overruns the utterance boundary or other
      reuse-shape invariants fail
 
-2. **Gap healing only bridges small gaps by default.** Under
-   `WordGapHealing::Heal`, the default, Batchalign may extend a word to the
-   next word's start to remove tiny pauses; pass `--pauses` to keep each
-   word's own end instead. Ordinary smoothing only applies to
+2. **Measured word ends are preserved by default.** Pass `--word-gaps heal`
+   to explicitly enable heuristic smoothing: Batchalign may extend a word
+   to the next word's start. The choice does not change model inputs or
+   invalidate compatible raw evidence caches. Smoothing only applies to
    plausibly small internal gaps (currently `<= 1000 ms`). Larger gaps are
    treated as real pauses or mistracks and are left visible unless a more
    specific rerun-healing rule applies.
@@ -509,7 +518,8 @@ the same cached alignment evidence.
 | `--fa-engine {wav2vec,whisper,cantonese,qwen3_fa}` | `wav2vec` (reports word start and end; see §"Forced alignment reference") | Forced-alignment model. `cantonese` is the jyutping-preprocessing engine, formerly reachable only as `wav2vec_fa_canto` through the flag below. `qwen3_fa` (also spelled `qwen3-fa` or `qwen3`) is `Qwen/Qwen3-ForcedAligner-0.6B-hf`, the SAME aligner the Qwen3-ASR engine uses for its own word timestamps, run here against a transcript you already have; it reports word start and end, and it supports only `yue`, `zho`, `cmn` and `eng`, refusing any file that DECLARES another language in `@Languages:`, primary or secondary, by name at admission rather than falling back to another engine. |
 | `--fa-engine-custom NAME` |: | **Deprecated alias for `--fa-engine`**, still honoured, hidden from `--help`. |
 | `--wor` / `--nowor` | `--wor` | Include or suppress the `%wor` word-timing tier |
-| `--pauses` | off | Preserve each engine-reported word end instead of healing small plausible gaps. For Whisper, it also selects the historical character-spaced text mode. |
+| `--word-gaps {preserve-measured,heal}` | `preserve-measured` | Preserve measured word ends; opt into bounded heuristic healing with `heal`. Does not change raw inference or cache identity. |
+| `--pauses` | off | Select legacy character-spaced Whisper input independently of gap policy. No effect on interval-model input. |
 | `--existing-wor-boundaries {preserve,rebuild-from-evidence}` | `preserve` | v0.4.0 option controlling how a rerun projects fresh FA evidence when the input already has `%wor`. `preserve` keeps compatibility; the experimental rebuild mode keeps fresh word extents and reconstructs the main bullet from their hull. It is a local projection only and does not change raw-evidence cache identity. |
 | `--end-overlap-policy {clamp-all-adjacent,preserve-cross-speaker}` | `preserve-cross-speaker` | Controls the same-speaker/cross-speaker resolution described above. The default leaves cross-speaker overlap alone; `clamp-all-adjacent` resolves it the same way as a same-speaker pair. It does not change raw-evidence cache identity. |
 | `--main-bullets {derive,keep,exact}` | `derive` | Whether utterance bullets already on the input may change. `derive` recomputes each bullet from its aligned words (it may be widened, cut or stripped). `keep` leaves every bullet the input carried exactly as given and fits the `%wor` word timings inside it; `exact` also leaves every utterance without a bullet without one; see [Keeping the input's utterance bullets](#keeping-the-inputs-utterance-bullets). A local projection only: it does not change raw-evidence cache identity or what is sent for inference. |

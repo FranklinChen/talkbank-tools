@@ -450,7 +450,9 @@ impl AnchorIndex {
     }
 
     /// Preserve all candidate occurrences and verify the exact source census.
-    /// This grants only an FA search window, never a timing hint or cut point.
+    /// An order corridor may use an admitted endpoint on that side only;
+    /// missing endpoints retain the full search obligation. This grants only
+    /// an FA search window, never a timing hint or output word timing.
     pub(in crate::chat_ops::fa) fn search_window(
         &self,
         utterance: UtteranceIdx,
@@ -463,9 +465,28 @@ impl AnchorIndex {
         }) {
             return None;
         }
-        self.search_envelopes
-            .get(&utterance)?
-            .within(words, corridor, recording.duration().get())
+        let envelope = self.search_envelopes.get(&utterance)?;
+        let mut window = envelope.within(words, corridor, recording.duration().get())?;
+        if matches!(envelope, super::search::FaSearchEnvelope::OrderCorridor(_))
+            && let AnchorLookup::Anchored(anchors) = self.lookup(utterance)
+            && anchors.alignable_words() == AlignableWords::of(words)
+        {
+            // These are source-bound, ordered single-word correspondences,
+            // not the selected path or a diagnostic reconstructed as proof.
+            // Interior anchors cannot stand in for an absent endpoint. Keep
+            // contradictory bounds contradictory for GroupWindow admission.
+            if let Some(first) = anchors.anchors().first()
+                && first.word() == WordIdx::new(0)
+            {
+                window.start_ms = window.start_ms.max(first.start().get());
+            }
+            if let Some(last) = anchors.anchors().last()
+                && anchors.alignable_words().is_last(last.word())
+            {
+                window.end_ms = window.end_ms.min(last.end().get());
+            }
+        }
+        Some(window)
     }
 
     /// How many utterances have admitted anchors, for logging.

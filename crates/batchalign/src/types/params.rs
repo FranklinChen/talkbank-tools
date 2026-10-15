@@ -479,13 +479,14 @@ impl AudioContext<'_> {
 
 /// Forced alignment processing parameters.
 ///
-/// Groups the 5 FA-specific parameters that are always passed together
+/// Groups the independent FA policies that are passed together
 /// through `run_fa_from_ast` and `process_fa_incremental`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaParams {
-    /// Whether post-processing heals small gaps between words (`--pauses`
-    /// selects `PreserveMeasured`).
+    /// Whether post-processing heals small gaps between words (explicit opt-in).
     pub gap_healing: WordGapHealing,
+    /// Whisper input shaping, independent of downstream gap healing.
+    pub whisper_text: crate::chat_ops::fa::WhisperTextMode,
     /// How admitted word evidence treats boundaries inherited from prior `%wor`.
     pub existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy,
     /// How adjacent utterance end overlap is projected.

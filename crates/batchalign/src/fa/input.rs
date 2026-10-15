@@ -624,7 +624,7 @@ mod tests {
 @End\n";
 
     #[test]
-    fn pending_timing_reports_the_actual_refused_window_without_write_authority() {
+    fn pending_timing_reports_missing_localization_without_write_authority() {
         use crate::chat_ops::fa::coordinates::{Ms, Recording};
         use crate::chat_ops::fa::{AnchorIndex, group_utterances};
         let word_only = SOURCE.replace(" . \u{15}0_500\u{15}", " .");
@@ -651,10 +651,10 @@ mod tests {
             crate::scheduling::FailureCategory::EvidenceUnavailable
         );
         let message = error.to_string();
-        // The first utterance's estimated window (two of the three words in a
-        // 20 s recording) and the budget it exceeds, as measured.
-        assert!(message.contains("15333ms"), "{message}");
-        assert!(message.contains("1000ms"), "{message}");
+        assert!(
+            message.contains("no supplied timing or source-bound UTR search evidence"),
+            "{message}"
+        );
         assert!(message.contains("no output was written"), "{message}");
         assert!(!message.contains("internal error"), "{message}");
 
@@ -667,20 +667,13 @@ mod tests {
             &recording,
             &AnchorIndex::not_observed(),
         );
-        assert!(!grouping.groups.is_empty());
-        let (admission, _) = active
-            .admission
-            .admit_grouping(grouping, &active.chat_file)
-            .expect("in-budget request can proceed");
-        let output = crate::types::results::FaResult::without_groups(
-            active.chat_file,
-            crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
-            "test",
-            &crate::engine_reports::FaCacheNamespace::for_test("test"),
-        );
+        assert!(grouping.groups.is_empty());
         assert!(
-            admission.finish(output).is_err(),
-            "a request plan is not complete timing evidence"
+            active
+                .admission
+                .admit_grouping(grouping, &active.chat_file)
+                .is_err(),
+            "a larger budget does not supply localization"
         );
 
         // A pending source can acquire timing before grouping, from UTR or a

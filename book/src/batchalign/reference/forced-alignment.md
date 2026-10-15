@@ -26,8 +26,31 @@ remain usable for ordinary inference but cannot claim a hub capture identity.
 For a consolidated statement of current defaults, validity, and policy
 precedence, see [Bullet and Word-Timing Policies](bullet-policies.md).
 
-The `align` command adds word-level timestamps to CHAT files. Given a transcript
-and an audio file, it determines exactly where each word appears in the recording.
+The `align` command estimates word-level timestamps from a transcript and an
+audio file. A valid output interval is not proof that the word occurs there.
+The former proportional-window fallback has been removed;
+see the [decision contract below](#current-decision-contract-and-evidence-limits).
+
+## Current decision contract and evidence limits
+
+These are implemented choices, not guarantees of acoustic accuracy.
+
+| Decision | Current behavior | Evidence limit |
+|---|---|---|
+| Existing word timing | Reuse admitted complete or per-utterance `%wor` timing under the configured policy | Structural admission does not independently verify earlier timing against audio |
+| Missing utterance timing | Attempt configured UTR recovery; retain its matches and refusals | A finite-work refusal means recovery did not establish a match, not that the speech is absent |
+| Untimed FA placement | Require source-bound UTR search evidence; otherwise report `localization_unavailable` without a request | Lexical correspondence and supplied timing remain fallible; no word-count fallback |
+| Request admission | Enforce recording, label and window constraints; split oversized windows where supported anchors permit it, otherwise refuse | Resource feasibility and evidence provenance do not certify acoustic fit |
+| Model result | Reconcile returned labels and admit intervals under the engine contract | A forced model can fit supplied text to the wrong speech; positive duration is insufficient evidence of correctness |
+| Timing postprocessing | Apply configured gap, main-bullet and overlap policies, recording applicable changes | Clamping, monotonicity and consistency cannot repair an incorrectly localized request |
+| Output construction | Construct and validate CHAT; count required timing from its durable output projection | Serialization and coverage describe the written artifact, not timing accuracy |
+| Incomplete work | Report missing required timings as `timing_incomplete`; unavailable required replacement evidence can prevent writing | Even complete coverage does not mean acoustic acceptance; missing coverage alone does not detect false placements |
+
+See [Proportional FA Estimation](../../architecture/alignment/proportional-fa-estimation.md)
+for the former failure mechanism and repaired request boundary, and
+[Bullet and Word-Timing Policies](bullet-policies.md) for policy precedence.
+
+## Processing overview
 
 ```mermaid
 flowchart TD
@@ -84,7 +107,7 @@ Before alignment can begin, three steps must succeed:
 2. **Media conversion**: If the audio is in a container format that
    `soundfile` cannot read (MP4, M4A, WebM, WMA), it is automatically
    converted to 16 kHz mono WAV via ffmpeg and cached at
-   `~/.batchalign3/media_cache/`. See [ensure_wav](media-conversion.md#ensure_wav--conversion-cache).
+   `~/.batchalign3/media_cache/`. See [ensure_wav](media-conversion.md#ensure_wav-conversion-cache).
 
 All three happen in the Rust server before any Python worker is invoked.
 
@@ -644,6 +667,13 @@ timing out of token order give no corridor, and the utterance keeps the
 ordinary unhinted path. Interleaved regions derive their corridors from the
 joint producer instead.
 
+At grouping, an admitted single-word anchor for the actual first or last
+alignable word bounds that side of the order-corridor search. A missing
+endpoint keeps the wider obligation; an interior anchor cannot replace it.
+This avoids searching past a known ending merely because the beginning is
+unresolved. Ordinary bounded request padding remains separate. The narrower
+window is not a final timing and does not certify acoustic correctness.
+
 Complete lexical coverage does not by itself establish word-boundary accuracy,
 and partial or unmatched states require an explicit abstention or fallback in
 downstream research code.
@@ -833,7 +863,8 @@ interpolated timing caused FA failure. The `utr_fallback_attempted` flag ensures
 at most one extra ASR call across all retries.
 
 **No engine fallback:** When no UTR engine is configured (`--no-utr`), untimed
-utterances fall back to proportional interpolation (see
+utterances without source-bound search evidence receive no FA request and are
+reported as `localization_unavailable` (see
 [Proportional FA Estimation](../../architecture/alignment/proportional-fa-estimation.md)).
 
 UTR injects **utterance-level bullets only**: it does not set word-level
@@ -875,7 +906,7 @@ seconds. Both crashed Whisper FA.
 
 ```mermaid
 flowchart TD
-    utt(["Next utterance<br/>(with timing bullet or estimate)"])
+    utt(["Next utterance<br/>(requires timing bullet or UTR search evidence)"])
     extract["collect_fa_words()<br/>Extract words → count UTF-8 bytes<br/>(utt_bytes)"]
     over_time{"(current duration +<br/>new duration) > max_group_ms<br/>or time went backwards?"}
     over_chars{"current_bytes +<br/>utt_bytes > 448?"}
@@ -1053,7 +1084,7 @@ flowchart TD
     parse["Parse CHAT → ChatFile AST<br/>(single parse, fa/mod.rs)"]
     utr_check{"Untimed<br/>utterances?"}
     utr_run["UTR pre-pass<br/>run_utr_pass()<br/>(crates/batchalign/src/chat_ops/fa/utr.rs)"]
-    utr_warn["WARN: untimed utterances,<br/>no UTR engine, proportional<br/>interpolation only"]
+    utr_warn["No UTR engine:<br/>unsupported utterances receive<br/>no alignment request"]
     incremental{"--before PATH<br/>provided?"}
     fa_full["run_fa_from_ast()<br/>(fa/mod.rs)"]
     fa_inc["process_fa_incremental()<br/>(fa/incremental.rs)"]
@@ -1716,7 +1747,7 @@ flowchart TD
     partial --> inject["inject_utr_timing()<br/>Common endpoint hints only"]
     full --> inject
 
-    engine -->|No| interp["Proportional grouping estimates<br/>Search proposals, not timings<br/>Containment / feasibility admission"]
+    engine -->|No| interp["Require source-bound localization<br/>Otherwise refuse without a request"]
 
     inject -->|"unmatched > 0"| interp
     inject -->|"all matched"| done2([Proceed to FA])
@@ -1737,17 +1768,16 @@ flowchart TD
 2. **UTR full-file (default, mostly-untimed files):** ASR runs on the full
    audio. Cached ASR evidence avoids repeated inference, not correspondence
    search or final FA work.
-3. **Proportional grouping estimates:** When UTR is disabled (`--no-utr`) or when
-   UTR's ASR inference fails, the grouping algorithm interpolates untimed
-   utterances between neighboring timed utterances by word count, with a
-   2-second buffer and feasibility checks. These are search proposals, not
-   observed word timestamps or UTR hints; admission can refuse them. No fixed
-   coverage percentage is promised.
+3. **Explicit localization refusal:** When UTR is disabled (`--no-utr`) or
+   unavailable, an untimed utterance without source-bound search evidence
+   receives no request. Word counts and neighbouring bullets do not authorize
+   proportional placement. Supported portions remain processable.
 4. **Fallback UTR:** When FA fails with a retryable error and untimed
    utterances were not recovered, UTR is attempted once before the next retry.
-   This can recover files where bad interpolated timing caused the FA failure.
-5. **Skip:** When `total_audio_ms` is unavailable and no timed neighbors exist,
-   untimed utterances are excluded from FA grouping.
+   A localization refusal itself is not a failed model request and does not
+   trigger that retry.
+5. **Recording admission:** Grouping requires a measured, nonempty recording;
+   absent duration is not an optional route that silently skips words.
 
 BA3 skips UTR when all required utterances are already timed. Retained bullets
 can bound recovery for remaining regions; an unmatched or budget-refused
@@ -2445,9 +2475,11 @@ matcher loses sync entirely and leaves whole blocks of utterances untimed.
 UTR's DP alignment preserves LCS ordering: if CHAT word at reference
 position *i* matches ASR word at payload position *p*, then reference position
 *j > i* can only match payload position *q > p*.  When text and audio order
-diverge, some utterances get no UTR timing.  FA's proportional estimation can
-then assign a correct-but-earlier timestamp to those untimed utterances, breaking
-monotonicity.
+diverge, some utterances get no UTR timing. FA requires a supplied interval or
+source-bound search evidence; it no longer guesses a proportional window.
+Even an evidence-supported earlier timestamp is not independently certified
+by its position relative to transcript order. See the
+[localization boundary](../../architecture/alignment/proportional-fa-estimation.md).
 
 **Post-FA enforcement pass**: After all utterances have been
 force-aligned, `enforce_monotonicity()` (at
@@ -2524,15 +2556,14 @@ unchanged utterances).
 
 ## Known limitations
 
-- **FA cannot recover utterances under about 200 ms of audio.** The Whisper
-  and Wave2Vec FA models need a minimum number of frames to produce reliable
-  timing, so an utterance narrower than that (a single short backchannel, a
-  brief interjection) is left untimed. The proportional-FA-estimation fallback
-  may still place an estimated bullet on it when `total_audio_ms` is
-  available; otherwise it stays untimed. (Restored 2026-09-07: this limit was
-  deleted as collateral of a warning-table cull and then existed nowhere in
-  the book, which left a user whose brief interjections come back untimed with
-  no documented cause.)
+- **Short utterances can lack usable timing.** Frame resolution and engine
+  behavior can leave a brief backchannel or interjection untimed. The earlier
+  claim of a universal 200 ms recovery limit is not established by the checks
+  documented here. Missing localization is reported without a guessed window.
+- **Supplied or recovered placement can still be wrong.** Proportional placement
+  is removed, but supplied bullets and ASR correspondence remain fallible.
+  Positive intervals, CHAT validation and complete timing coverage do not
+  independently establish acoustic accuracy.
 - **Empty audio windows leave words unaligned.** A very short window or one
   outside the recording can produce no PCM frames. The prepared-audio extractor
   returns `EmptyAudioSegment`, and the group is skipped with all-`None` timings.

@@ -202,6 +202,10 @@ pub struct AlignUtrOptions {
 /// Boundary-projection policy persisted with an `align` job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlignBoundaryOptions {
+    /// Measured ends are preserved unless gap healing is explicitly requested.
+    #[serde(default)]
+    pub word_gaps: crate::chat_ops::fa::WordGapHealing,
+
     /// How fresh FA evidence interacts with boundaries from an existing `%wor` run.
     #[serde(default)]
     pub existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy,
@@ -224,6 +228,7 @@ pub struct AlignBoundaryOptions {
 impl Default for AlignBoundaryOptions {
     fn default() -> Self {
         Self {
+            word_gaps: Default::default(),
             existing_wor_boundaries: Default::default(),
             end_overlap_policy: crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY,
             main_bullets: crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,

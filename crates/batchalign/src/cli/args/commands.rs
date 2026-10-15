@@ -171,6 +171,10 @@ pub struct AlignUtrArgs {
 /// Existing- and cross-utterance boundary policies for `align`.
 #[derive(Args, Debug, Clone)]
 pub struct AlignBoundaryArgs {
+    /// Preserve measured word ends (default), or opt in to heuristic gap healing.
+    #[arg(long, value_enum, default_value_t)]
+    pub word_gaps: crate::chat_ops::fa::WordGapHealing,
+
     /// Treatment of boundaries inherited from an existing `%wor` run.
     #[arg(long, value_enum, default_value_t)]
     pub existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy,
@@ -235,7 +239,7 @@ pub struct AlignArgs {
     #[arg(long, value_enum, default_value_t)]
     pub review_level: CliReviewLevel,
 
-    /// Try to add pauses between words by grouping them.
+    /// Use legacy pause-aware Whisper text shaping. Word gaps are controlled separately.
     #[arg(long)]
     pub pauses: bool,
 

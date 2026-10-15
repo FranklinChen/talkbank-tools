@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{DurationMs, WorkerLanguage};
 use crate::chat_ops::fa::origin::EngineId;
-use crate::chat_ops::fa::{FaInferItem, WordGapHealing, WordTiming};
+use crate::chat_ops::fa::{FaInferItem, WhisperTextMode, WordTiming};
 use crate::error::{MissingForcedAlignmentEvidence, MissingRequiredEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::types::engines::SelectableEngine;
@@ -49,8 +49,8 @@ pub(crate) struct FaWorkerBatch<'a> {
     pub worker_lang: WorkerLanguage,
     /// FA backend selected by the Rust control plane.
     pub engine: crate::types::engines::FaEngineName,
-    /// Gap-healing policy for every request in this batch.
-    pub gap_healing: WordGapHealing,
+    /// Whisper input shaping for every request in this batch.
+    pub whisper_text: WhisperTextMode,
 }
 
 /// The only value that permits FA worker inference for cache misses.
@@ -760,7 +760,7 @@ fn build_fa_infer_item(batch: &FaWorkerBatch<'_>, unit: &DispatchUnit<'_>) -> Fa
         // The unit's own window, proof included: nothing is lowered to
         // integers here for the request builder to rebuild.
         window: unit.window(),
-        gap_healing: batch.gap_healing,
+        whisper_text: batch.whisper_text,
     }
 }
 
@@ -871,7 +871,7 @@ mod tests {
             audio_path: Path::new("/tmp/input.wav"),
             worker_lang: WorkerLanguage::from(crate::api::LanguageCode3::eng()),
             engine: crate::types::engines::FaEngineName::Whisper,
-            gap_healing: WordGapHealing::PreserveMeasured,
+            whisper_text: WhisperTextMode::CharSpaced,
         }
     }
 
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(item.audio_path, "/tmp/input.wav");
         assert_eq!(item.window.audio_start().get(), 100);
         assert_eq!(item.window.end().get(), 900);
-        assert_eq!(item.gap_healing, WordGapHealing::PreserveMeasured);
+        assert_eq!(item.whisper_text, WhisperTextMode::CharSpaced);
     }
 
     /// A piece of an anchored group is requested with only its own words

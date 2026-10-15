@@ -67,7 +67,7 @@
 //! WHICH label ended the word was the same guess as which label began it.
 
 use crate::chat_ops::fa::coordinates::{
-    Clamped, FaWindow, Ms, OutsideWindow, RecordedInstant, Recording, WindowMs,
+    Clamped, FaWindow, Ms, OutsideWindow, RecordedInstant, WindowMs,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -257,6 +257,7 @@ impl LabelRun {
 pub(crate) struct LabelTrack {
     norms: Vec<String>,
     onsets: Vec<RecordedInstant>,
+    window: FaWindow,
 }
 
 impl LabelTrack {
@@ -295,7 +296,11 @@ impl LabelTrack {
                 Err(fault) => discarded.record_outside(fault),
             }
         }
-        Self { norms, onsets }
+        Self {
+            norms,
+            onsets,
+            window: *window,
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -324,17 +329,13 @@ impl LabelTrack {
     ///
     /// * a label follows the run -> the end is DERIVED from that label's onset
     /// * none does -> the end is ASSUMED, and may then be CLAMPED
-    fn span_for(
-        &self,
-        run: LabelRun,
-        recording: &Recording,
-    ) -> Result<Clamped<WordSpan>, SpanFault> {
+    fn span_for(&self, run: LabelRun) -> Result<Clamped<WordSpan>, SpanFault> {
         let start = self.onsets[run.first.0].clone();
         match self.onsets.get(run.after().0) {
             Some(next_onset) => {
                 WordSpan::end_from_next_onset(start, next_onset).map(Clamped::AsGiven)
             }
-            None => WordSpan::end_assumed(start, Ms(LAST_WORD_FALLBACK_MS), recording),
+            None => WordSpan::end_assumed(start, Ms(LAST_WORD_FALLBACK_MS), &self.window),
         }
     }
 }
@@ -697,12 +698,9 @@ pub(crate) fn map_labels_to_words(
         unplaced = refusal;
     }
 
-    let recording = window.recording();
     let outcomes = attributions
         .into_iter()
-        .map(|attribution| {
-            lower_to_outcome(attribution, &unplaced, &labels, &recording, &mut discarded)
-        })
+        .map(|attribution| lower_to_outcome(attribution, &unplaced, &labels, &mut discarded))
         .collect();
 
     LabelMapping {
@@ -779,7 +777,6 @@ fn lower_to_outcome(
     attribution: Option<Attribution>,
     unplaced: &UntimedReason,
     labels: &LabelTrack,
-    recording: &Recording,
     discarded: &mut DiscardedTimings,
 ) -> WordTimingOutcome {
     let Some(attribution) = attribution else {
@@ -787,7 +784,7 @@ fn lower_to_outcome(
             reason: unplaced.clone(),
         };
     };
-    match labels.span_for(attribution.run, recording) {
+    match labels.span_for(attribution.run) {
         Ok(outcome) => {
             discarded.note_clamp(&outcome);
             let span = outcome.value();

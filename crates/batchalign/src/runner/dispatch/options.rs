@@ -18,7 +18,12 @@
 // carried forward for future pipeline wiring even when today's orchestrator
 // does not yet consume them.
 
+#[cfg(test)]
 use crate::chat_ops::fa::WordGapHealing;
+
+#[cfg(test)]
+#[path = "gap_policy_tests.rs"]
+mod gap_policy_tests;
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, TokenizationMode};
 #[allow(unused_imports)]
 use crate::options::{
@@ -72,24 +77,18 @@ pub(crate) fn extract_fa_dispatch_params(
         return None;
     };
 
-    // `--pauses` asks for silence between words to survive, which is exactly
-    // "do not heal the gaps". It reads the same for every engine now: it used
-    // to be reachable only on the onset-only branch, so passing it alongside
-    // the default engine silently did nothing.
-    //
-    // Written as an `if` because that is what it is. A match on
-    // `(timing_resolution, pauses)` reads as though the engine's resolution
-    // participates, and it does not: post-processing takes the resolution
-    // separately and decides what the policy MEANS for that engine.
-    let gap_healing = if align.pauses {
-        WordGapHealing::PreserveMeasured
+    // Preserve the legacy model-input choice without deriving it from an
+    // output policy. Ordinary alignment now preserves measured word ends.
+    let whisper_text = if align.pauses {
+        crate::chat_ops::fa::WhisperTextMode::CharSpaced
     } else {
-        WordGapHealing::Heal
+        crate::chat_ops::fa::WhisperTextMode::SpaceJoined
     };
 
     Some(FaDispatchParams {
         fa_params: FaParams {
-            gap_healing,
+            gap_healing: align.boundaries.word_gaps,
+            whisper_text,
             existing_wor_boundaries: align.boundaries.existing_wor_boundaries,
             end_overlap_policy: align.boundaries.end_overlap_policy,
             main_bullets: align.boundaries.main_bullets,
@@ -304,13 +303,7 @@ mod tests {
         })
     }
 
-    /// `--pauses` must reach the DEFAULT engine, not only the onset-only one.
-    ///
-    /// Behaviour change, 2026-08-14, deliberate and user-visible. The flag was
-    /// previously consulted on the Whisper branch alone, so passing it with
-    /// the default engine parsed, dispatched and silently did nothing: a user
-    /// asking for silence between words to survive got it healed away anyway.
-    /// A flag that cannot affect the default is not a flag.
+    /// Legacy --pauses and an omitted policy both preserve measured ends.
     #[test]
     fn pauses_reaches_the_default_engine() {
         let with_pauses = extract_fa_dispatch_params(
@@ -331,8 +324,8 @@ mod tests {
         .expect("wav2vec align must produce dispatch params");
         assert_eq!(
             without.fa_params.gap_healing,
-            WordGapHealing::Heal,
-            "the default is unchanged: gaps are healed unless asked otherwise"
+            WordGapHealing::PreserveMeasured,
+            "omitting --pauses preserves measured gaps too"
         );
     }
 
@@ -373,7 +366,7 @@ mod tests {
             CachePolicy::UseCache,
         )
         .unwrap();
-        assert_eq!(p2.fa_params.gap_healing, WordGapHealing::Heal);
+        assert_eq!(p2.fa_params.gap_healing, WordGapHealing::PreserveMeasured);
     }
 
     #[test]

@@ -8,9 +8,9 @@
 //!
 //! ## FA grouping stability
 //!
-//! Two-pass UTR can change anchor points for `estimate_untimed_boundaries`,
-//! which alters FA group boundaries. Fewer, wider groups cause worse FA
-//! alignment and lower final coverage, observed on German and Welsh files.
+//! Two-pass UTR can change supplied timing and source-bound search evidence,
+//! which alters FA group boundaries. The group-count comparison below is a
+//! legacy policy heuristic, not a measurement of acoustic accuracy.
 //!
 //! When [`GroupingContext`] is provided, the best-of-both comparison uses FA
 //! group counts as the primary signal: if two-pass creates fewer groups than
@@ -405,10 +405,10 @@ impl TwoPassOverlapUtr {
         });
 
         let prefer_two_pass = if let Some((two_pass_groups, global_groups)) = group_counts {
-            // Primary signal: FA group count. Fewer groups means wider FA
-            // windows, which causes worse alignment on non-English files.
+            // Legacy primary signal: FA group count. It is not a measurement
+            // of word placement or accuracy; refusals also change the count.
             if two_pass_groups != global_groups {
-                // Prefer whichever creates more groups (more precise FA windows).
+                // Preserve the existing policy of preferring more groups.
                 two_pass_groups >= global_groups
             } else {
                 // Equal groups: fall back to timed utterance count.

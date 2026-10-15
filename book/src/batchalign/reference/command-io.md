@@ -104,7 +104,7 @@ not a declaration that the submitted CHAT was invalid.
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with `%wor` timing line, word `time` fields populated | Same `.cha` returned to the client, which writes it to the requested output path |
 | **Mutation** | If `OUT_DIR = IN_DIR`: overwrites original `.cha` in place. Media files untouched. | Same |
-| **Key options** | `--utr-engine`, `--utr-strategy`, `--fa-engine`, `--pauses`, `--wor/--nowor`, `--override-media-cache` | All passed through typed command options |
+| **Key options** | `--utr-engine`, `--utr-strategy`, `--fa-engine`, `--word-gaps`, `--pauses`, `--wor/--nowor`, `--override-media-cache` | All passed through typed command options |
 
 **What changes in the `.cha`:** `%wor` tier added/updated with word-level
 timestamps. Utterance-level bullet times (`\x15start_end\x15`) updated.

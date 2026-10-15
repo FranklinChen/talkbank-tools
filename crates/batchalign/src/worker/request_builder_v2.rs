@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use crate::chat_ops::fa::{FaInferItem, WordGapHealing};
+use crate::chat_ops::fa::{FaInferItem, WhisperTextMode};
 use crate::types::engines::FaEngineName;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -181,7 +181,7 @@ pub async fn build_forced_alignment_request_v2(
             backend,
             payload_ref_id: payload_attachment.id.clone(),
             audio_ref_id: audio_attachment.id.clone(),
-            text_mode: text_mode_for(backend, input.infer_item.gap_healing),
+            text_mode: text_mode_for(backend, input.infer_item.whisper_text),
         }),
         attachments: vec![
             ArtifactRefV2::PreparedText(payload_attachment),
@@ -203,20 +203,14 @@ pub(crate) fn fa_backend_for_engine(engine: FaEngineName) -> FaBackendV2 {
 
 /// The text shaping one V2 FA backend needs, for what the user asked for.
 ///
-/// The single place text shaping is decided. It used to be split: this
-/// function chose a mode from the backend, and the caller separately set a
-/// `pauses` boolean from the healing policy, which the Python host then
-/// applied as a further reshaping of the result.
-///
-/// `--pauses` reaches here because finer tokens are the mechanism by which a
-/// silence becomes visible: one token per character puts onsets inside words
-/// instead of only at their starts. It is the same user intent that stops gap
-/// healing, expressed against a different stage.
-pub(crate) fn text_mode_for(backend: FaBackendV2, gap_healing: WordGapHealing) -> FaTextModeV2 {
-    match (backend, gap_healing) {
+/// Only the input-shaping choice reaches this boundary. Gap healing is a
+/// downstream output policy and cannot select a different model request.
+/// Legacy `--pauses` still selects character-spaced Whisper input.
+pub(crate) fn text_mode_for(backend: FaBackendV2, whisper_text: WhisperTextMode) -> FaTextModeV2 {
+    match (backend, whisper_text) {
         // Only the onset-only decoder benefits: the wave2vec models align
         // against their own label set and never see this text.
-        (FaBackendV2::Whisper, WordGapHealing::PreserveMeasured) => FaTextModeV2::CharSpaced,
+        (FaBackendV2::Whisper, WhisperTextMode::CharSpaced) => FaTextModeV2::CharSpaced,
         // Qwen3 is handed the word LIST, like wave2vec, and rebuilds its own
         // transcript from it, so this mode never reaches its model. It is
         // space-joined rather than char-joined because that is what the
@@ -276,7 +270,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use crate::chat_ops::fa::WordGapHealing;
+    use crate::chat_ops::fa::WhisperTextMode;
     use crate::chat_ops::fa::coordinates::{FaWindow, Ms, Recording};
     use crate::time::FileMs;
 
@@ -309,7 +303,7 @@ mod tests {
             word_utterance_word_indices: vec![0, 1],
             audio_path: audio_path.to_string_lossy().into_owned(),
             window: test_window(),
-            gap_healing: WordGapHealing::PreserveMeasured,
+            whisper_text: WhisperTextMode::CharSpaced,
         }
     }
 
@@ -346,7 +340,7 @@ mod tests {
             word_utterance_word_indices: vec![0, 1],
             audio_path: "fixture.wav".into(),
             window: test_window(),
-            gap_healing: WordGapHealing::Heal,
+            whisper_text: WhisperTextMode::SpaceJoined,
         })
         .expect_err("mismatched arrays should fail");
 
@@ -375,28 +369,28 @@ mod tests {
             FaBackendV2::Wav2vecCanto
         );
         assert_eq!(
-            text_mode_for(FaBackendV2::Whisper, WordGapHealing::Heal),
+            text_mode_for(FaBackendV2::Whisper, WhisperTextMode::SpaceJoined),
             FaTextModeV2::SpaceJoined
         );
         assert_eq!(
-            text_mode_for(FaBackendV2::Wav2vecCanto, WordGapHealing::Heal),
+            text_mode_for(FaBackendV2::Wav2vecCanto, WhisperTextMode::SpaceJoined),
             FaTextModeV2::CharJoined
         );
         // `--pauses` on the onset-only decoder is the whole point of the mode:
         // one token per character, so onsets land inside words and a real
         // silence shows up as a gap.
         assert_eq!(
-            text_mode_for(FaBackendV2::Whisper, WordGapHealing::PreserveMeasured),
+            text_mode_for(FaBackendV2::Whisper, WhisperTextMode::CharSpaced),
             FaTextModeV2::CharSpaced
         );
         // The wave2vec models never see this text, so the request asks for
         // nothing different.
         assert_eq!(
-            text_mode_for(FaBackendV2::Wave2vec, WordGapHealing::PreserveMeasured),
+            text_mode_for(FaBackendV2::Wave2vec, WhisperTextMode::CharSpaced),
             FaTextModeV2::SpaceJoined
         );
         assert_eq!(
-            text_mode_for(FaBackendV2::Wav2vecCanto, WordGapHealing::PreserveMeasured),
+            text_mode_for(FaBackendV2::Wav2vecCanto, WhisperTextMode::CharSpaced),
             FaTextModeV2::CharJoined
         );
     }

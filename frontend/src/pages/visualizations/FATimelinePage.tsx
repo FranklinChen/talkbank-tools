@@ -25,7 +25,7 @@ export function FATimelinePage() {
           <p className="font-medium text-gray-700 mb-2">Coming in Phase 4</p>
           <p>
             This visualization will show a DAW-style SVG timeline with utterance grouping,
-            forced alignment timing injection, and post-processing (continuous vs with-pauses
+            forced alignment timing injection, and post-processing (preserve-measured vs opt-in healing
             modes, E362/E704 violation highlighting).
           </p>
         </div>

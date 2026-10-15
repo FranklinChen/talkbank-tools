@@ -403,21 +403,9 @@ fn test_group_utterances_does_not_split_one_oversized_utterance() {
     );
 }
 
-/// Untimed utterances are ESTIMATED into the grouping, not dropped from it.
-///
-/// This test was `test_group_utterances_skips_untimed` and asserted the
-/// opposite: that "hello", having no bullet, contributed no word to any FA
-/// group and was therefore never aligned. That was not a policy, it was the
-/// `Option<u64>` audio length showing through. Grouping skipped untimed
-/// utterances whenever the duration was absent, and the duration was absent
-/// whenever nobody had probed it, so whether a word got aligned depended on a
-/// fact unrelated to the word.
-///
-/// Requiring a `Recording` deleted that state, so an estimate always exists and
-/// both words are grouped. The old assertion is not weakened here; it is gone,
-/// because the behaviour it described cannot occur.
+/// Supplied timing authorizes a request; an unsupported neighbour stays untimed.
 #[test]
-fn test_group_utterances_estimates_untimed_rather_than_dropping_them() {
+fn test_group_utterances_requests_only_localized_words() {
     let input = include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed.cha");
     let chat = parse_chat(input);
     let groups = group_utterances(
@@ -428,7 +416,10 @@ fn test_group_utterances_estimates_untimed_rather_than_dropping_them() {
     )
     .groups;
     let grouped_words: usize = groups.iter().map(|g| g.word_count()).sum();
-    assert_eq!(grouped_words, 2, "both 'hello' and 'world' reach FA");
+    assert_eq!(
+        grouped_words, 1,
+        "only supplied timing authorizes a request"
+    );
 }
 
 #[test]
@@ -536,7 +527,7 @@ fn rebuild_policy_reconstructs_reused_utterance_bullet_from_wor_hull() {
 }
 
 #[test]
-fn test_group_utterances_includes_untimed_with_interpolation() {
+fn test_group_utterances_does_not_interpolate_missing_localization() {
     let input =
         include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed_interleaved.cha");
     let chat = parse_chat(input);
@@ -548,7 +539,7 @@ fn test_group_utterances_includes_untimed_with_interpolation() {
     )
     .groups;
 
-    // All 6 utterances should be included (none skipped)
+    // The three untimed utterances have no source-bound search evidence.
     let total_utts: usize = groups.iter().map(|g| g.utterance_indices().len()).sum();
-    assert_eq!(total_utts, 6);
+    assert_eq!(total_utts, 3);
 }

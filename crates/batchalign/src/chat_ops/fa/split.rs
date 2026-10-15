@@ -2,10 +2,9 @@
 //!
 //! # The problem
 //!
-//! An aligner engine accepts windows up to a fixed budget (15 s for wav2vec:
-//! one model forward pass covers the whole window). An utterance whose own
-//! window exceeds it cannot be aligned in ONE request; most such utterances
-//! are not too long to align, only too long for one request.
+//! Orchestration limits requests to a configured audio budget. This is a
+//! resource policy, not an intrinsic model limit. An utterance exceeding it
+//! needs several requests under that policy.
 //!
 //! # The cure
 //!
@@ -14,10 +13,12 @@
 //! [`AnchoredSplit::plan`] first cuts at the END of anchored words so
 //! each admissible piece is aligned as its own request. Over-budget pieces
 //! retain their words and refusal, without discarding their neighbours.
-//! An unavailable piece's fully anchored last word can then be separated at
-//! its observed start, only if the preceding words stay unavailable.
-//! Every cut point is therefore an acoustic observation; there is no path that
-//! cuts at a time nobody heard.
+//! An unavailable piece's fully anchored last word can join a following
+//! request, only if the preceding words stay unavailable. It is not dispatched
+//! alone merely because its anchor has positive duration. Requests then borrow
+//! surrounding words and audio within the same budget and supported run.
+//! Anchors are source-bound lexical correspondences, not acoustic cut proofs.
+//! Ownership stays disjoint even when model context overlaps.
 //!
 //! ```text
 //!  window   |--------------------------- 40 s ---------------------------|
@@ -46,7 +47,8 @@
 //! * Each piece OWNS its words ([`NonEmptyWords`]), split off the utterance's
 //!   list in order, and its window, split off the utterance window in order
 //!   ([`FaWindow::split_at`]). Neither split can leave an empty side, so the
-//!   pieces partition both the words and the window by construction.
+//!   pieces partition both the owned words and nominal window by construction.
+//!   Their actual request windows may overlap after context expansion.
 //! * Only anchors whose end lies strictly inside the window, on a word that
 //!   is not the utterance's last, can be cuts.
 //! * Equal cut instants (zero-length tokens) collapse to the later word, so
@@ -59,6 +61,7 @@ use super::FaWord;
 use super::coordinates::{FaWindow, FileMs, Ms};
 use super::utr::{AlignableWords, AnchorDisorder, AnchorLookup};
 
+mod context;
 mod partition;
 pub use partition::{AnchoredPart, UnavailablePiece};
 
@@ -176,24 +179,53 @@ impl NonEmptyWords {
 /// are aligned against. Constructible only by [`AnchoredSplit::plan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchoredPiece {
+    /// All words supplied to the model, including borrowed context.
     words: NonEmptyWords,
+    /// The nonempty subrange whose answer this piece owns.
+    owned: std::ops::Range<usize>,
+    ownership_window: FaWindow,
     window: FaWindow,
 }
 
 impl AnchoredPiece {
-    /// The piece's words, in order.
+    fn new(words: NonEmptyWords, window: FaWindow) -> Self {
+        let owned = 0..words.as_slice().len();
+        Self {
+            words,
+            owned,
+            ownership_window: window,
+            window,
+        }
+    }
+
+    /// The piece's owned words, not its borrowed model context.
     pub fn words(&self) -> &[FaWord] {
+        &self.words.as_slice()[self.owned.clone()]
+    }
+
+    /// The complete lexical context supplied to the model and cache key.
+    pub fn request_words(&self) -> &[FaWord] {
         self.words.as_slice()
+    }
+
+    /// Owned positions within the model response. Only the planner constructs it.
+    pub(crate) fn owned_range(&self) -> std::ops::Range<usize> {
+        self.owned.clone()
+    }
+
+    /// The original partition's nominal span; not a hard acoustic boundary.
+    pub fn ownership_window(&self) -> FaWindow {
+        self.ownership_window
     }
 
     /// The piece's first word, as its index among the utterance's words.
     pub fn first_word(&self) -> WordIdx {
-        self.words.first
+        WordIdx::new(self.words.first.raw() + self.owned.start)
     }
 
     /// The piece's last word, likewise.
     pub fn last_word(&self) -> WordIdx {
-        self.words.last
+        WordIdx::new(self.words.first.raw() + self.owned.end - 1)
     }
 
     /// The piece's audio window: within the engine budget, inside the
@@ -324,19 +356,18 @@ impl AnchoredSplit {
             };
             match rest_words.split_after(cut.word) {
                 Ok((piece_words, after_words)) => {
-                    let (prefix, tail) = AnchoredPart::admit(piece_words, piece_window, budget)
-                        .retain_anchored_tail(anchors);
-                    earlier.extend(prefix);
-                    earlier.push(tail);
+                    earlier.push(AnchoredPart::admit(piece_words, piece_window, budget));
                     rest_window = after_window;
                     rest_words = after_words;
                 }
                 Err(unsplit) => rest_words = unsplit,
             }
         }
-        let (prefix, last) =
-            AnchoredPart::admit(rest_words, rest_window, budget).retain_anchored_tail(anchors);
-        earlier.extend(prefix);
+        earlier.push(AnchoredPart::admit(rest_words, rest_window, budget));
+        let mut earlier = context::plan(earlier, anchors, budget);
+        let Some(last) = earlier.pop() else {
+            return Err(SplitRefusal::NoInteriorCut);
+        };
 
         Ok(Self {
             utterance,
@@ -395,6 +426,7 @@ impl AnchoredSplit {
         let headroom = self.budget.0.saturating_sub(last.window.len().0);
         let extension = Ms((gap.0 / 2).min(max_extension.0).min(headroom));
         last.window = last.window.extend_by(extension);
+        last.ownership_window = last.ownership_window.extend_by(extension);
         self.window = self.window.extend_by(extension);
     }
 
@@ -671,10 +703,16 @@ mod tests {
         let anchors = anchored(4, &[(1, 9_000, 10_000)]);
         let mut split = plan(over(0, 24_000), words(4), AnchorLookup::Anchored(&anchors))
             .expect("one cut at 10 s");
-        // Last piece is 14 s: one second of headroom, though the gap allows 2.
+        // Ownership is 14 s, but the request borrows one second before it.
+        // Context already fills the budget, so padding has no headroom.
         split.extend_into_trailing_gap(FileMs::new(28_000), Ms(1_500));
-        assert_eq!(shape(&split), vec![(2, 0, 10_000), (2, 10_000, 25_000)]);
-        assert_eq!(split.window().end(), FileMs::new(25_000));
+        assert_eq!(shape(&split), vec![(2, 0, 10_000), (2, 10_000, 24_000)]);
+        assert_eq!(split.window().end(), FileMs::new(24_000));
+        let AnchoredPart::Request(last) = &split.last else {
+            panic!("last request")
+        };
+        assert_eq!(last.window().len(), Ms(15_000));
+        assert_eq!(last.window().audio_start(), FileMs::new(9_000));
     }
 
     #[test]
@@ -702,15 +740,12 @@ mod tests {
         );
         let split =
             plan(over(0, 20_250), words(6), AnchorLookup::Anchored(&anchors)).expect("partition");
-        assert_eq!(
-            shape(&split),
-            vec![(3, 0, 15_750), (1, 15_750, 16_500), (2, 16_500, 20_250)]
-        );
+        assert_eq!(shape(&split), vec![(3, 0, 15_750), (3, 15_750, 20_250)]);
         let parts: Vec<_> = split.pieces().collect();
         assert!(matches!(parts[0], AnchoredPart::Unavailable(_)));
         assert!(matches!(parts[1], AnchoredPart::Request(_)));
-        assert!(matches!(parts[2], AnchoredPart::Request(_)));
         assert_eq!(parts[1].first_word().raw(), 3);
+        assert_eq!(parts[1].last_word().raw(), 5);
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub struct AlignOptions {
     #[serde(flatten)]
     pub utr: AlignUtrOptions,
 
-    /// Include pause durations in forced alignment.
+    /// Select legacy pause-aware Whisper text shaping, independently of word gaps.
     #[serde(default)]
     pub pauses: bool,
 

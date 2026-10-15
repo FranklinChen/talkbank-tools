@@ -28,7 +28,7 @@ impl AnchoredPart {
     /// consumes the words, so both outcomes retain exactly the same population.
     pub(super) fn admit(words: NonEmptyWords, window: FaWindow, budget: Ms) -> Self {
         if window.len() <= budget {
-            Self::Request(AnchoredPiece { words, window })
+            Self::Request(AnchoredPiece::new(words, window))
         } else {
             Self::Unavailable(UnavailablePiece {
                 words,
@@ -36,49 +36,6 @@ impl AnchoredPart {
                 budget,
             })
         }
-    }
-
-    /// Rescue only a fully anchored final word from an unavailable part.
-    /// The preceding words must remain over budget and unrequested: this is
-    /// not permission to crop a request for words whose timing is unknown.
-    /// Existing requests and their cache identities are unchanged.
-    pub(super) fn retain_anchored_tail(self, anchors: &UtteranceAnchors) -> (Option<Self>, Self) {
-        let Self::Unavailable(piece) = self else {
-            return (None, self);
-        };
-        let anchor = anchors.anchors().iter().find(|anchor| {
-            anchor.word() == piece.words.last
-                && anchor.end() == piece.window.end()
-                && anchor.start() < anchor.end()
-        });
-        let Some(anchor) = anchor else {
-            return (None, Self::Unavailable(piece));
-        };
-        let Some(previous) = piece.words.as_slice().iter().rev().nth(1) else {
-            return (None, Self::Unavailable(piece));
-        };
-        let previous = previous.utterance_word_index;
-        let Ok((prefix_window, tail_window)) = piece.window.split_at(anchor.start()) else {
-            return (None, Self::Unavailable(piece));
-        };
-        if prefix_window.len() <= piece.budget || tail_window.len() > piece.budget {
-            return (None, Self::Unavailable(piece));
-        }
-        let (prefix_words, tail_words) = match piece.words.split_after(previous) {
-            Ok(parts) => parts,
-            Err(words) => return (None, Self::Unavailable(UnavailablePiece { words, ..piece })),
-        };
-        (
-            Some(Self::Unavailable(UnavailablePiece {
-                words: prefix_words,
-                window: prefix_window,
-                budget: piece.budget,
-            })),
-            Self::Request(AnchoredPiece {
-                words: tail_words,
-                window: tail_window,
-            }),
-        )
     }
 
     /// All words of this part, whether or not it can be requested.
@@ -92,7 +49,7 @@ impl AnchoredPart {
     /// Its position in the original window partition, not dispatch permission.
     pub fn window(&self) -> FaWindow {
         match self {
-            Self::Request(piece) => piece.window(),
+            Self::Request(piece) => piece.ownership_window(),
             Self::Unavailable(piece) => piece.window(),
         }
     }
@@ -115,6 +72,57 @@ impl AnchoredPart {
 }
 
 impl UnavailablePiece {
+    /// A recovered final word may join the FOLLOWING supported request. It
+    /// never becomes an isolated request over just its ASR token interval.
+    /// The unknown prefix remains unavailable, with its original words.
+    pub(super) fn recover_into(
+        self,
+        next: AnchoredPiece,
+        anchors: &UtteranceAnchors,
+    ) -> (Self, AnchoredPiece) {
+        if self.window.end() != next.ownership_window.audio_start()
+            || self.words.last.raw() + 1 != next.first_word().raw()
+        {
+            return (self, next);
+        }
+        let Some(anchor) = anchors.anchors().iter().find(|anchor| {
+            anchor.word() == self.words.last
+                && anchor.end() == self.window.end()
+                && anchor.start() < anchor.end()
+        }) else {
+            return (self, next);
+        };
+        let Some(previous) = self.words.as_slice().iter().rev().nth(1) else {
+            return (self, next);
+        };
+        let previous = previous.utterance_word_index;
+        let Ok((prefix_window, _)) = self.window.split_at(anchor.start()) else {
+            return (self, next);
+        };
+        let Ok(joined_window) =
+            FaWindow::within(&self.window.recording(), anchor.start(), next.window.end())
+        else {
+            return (self, next);
+        };
+        if prefix_window.len() <= self.budget || joined_window.len() > self.budget {
+            return (self, next);
+        }
+        let (prefix, mut tail) = match self.words.split_after(previous) {
+            Ok(parts) => parts,
+            Err(words) => return (Self { words, ..self }, next),
+        };
+        tail.last = next.words.last;
+        tail.words.extend(next.words.into_vec());
+        (
+            Self {
+                words: prefix,
+                window: prefix_window,
+                budget: self.budget,
+            },
+            AnchoredPiece::new(tail, joined_window),
+        )
+    }
+
     /// The original consecutive words, with original utterance word indices.
     pub fn words(&self) -> &[FaWord] {
         self.words.as_slice()

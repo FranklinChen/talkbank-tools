@@ -82,6 +82,17 @@ struct NamedStructInfo {
 /// into the sealed ASR plan).
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
+        path: "crates/batchalign/src/types/params.rs",
+        struct_name: "FaParams",
+        max_fields: 10,
+        max_bool_fields: 1,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "one run's independent FA policies; Whisper text shaping must remain \
+                 independent of output gap healing, while word-end policy and window size \
+                 are derived from the engine rather than stored as disagreeing fields; \
+                 AdmittedFaParams separately binds these parameters to checked languages",
+    },
+    WideStructAllowance {
         path: "crates/batchalign/src/revai/evidence_cache/inspection.rs",
         struct_name: "RetainedRequestTrace",
         max_fields: 12,

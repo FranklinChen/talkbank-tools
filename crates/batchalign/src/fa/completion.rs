@@ -173,6 +173,8 @@ pub(crate) enum UntimedCause {
     /// Grouping placed it in no request: the audio left for a run of untimed
     /// utterances could not physically contain their words.
     NotPlaced,
+    /// No supplied timing or source-bound UTR search evidence; no request.
+    LocalizationUnavailable,
     /// No refusal names it, and the final document has no positive interval
     /// for these words: the aligner returned none, or the words could not be
     /// sent to it.
@@ -283,6 +285,9 @@ impl UntimedUtterance {
                     }
                 }
                 UntimedCause::NotPlaced => crate::api::UntimedCauseRecord::NotPlaced,
+                UntimedCause::LocalizationUnavailable => {
+                    crate::api::UntimedCauseRecord::LocalizationUnavailable
+                }
                 UntimedCause::NoUsableTiming => crate::api::UntimedCauseRecord::NoUsableTiming,
             },
         }
@@ -306,6 +311,9 @@ impl std::fmt::Display for UntimedAccount {
             match &utterance.cause {
                 UntimedCause::WindowRefused(_) => f.write_str(" (window refused)")?,
                 UntimedCause::NotPlaced => f.write_str(" (not placed)")?,
+                UntimedCause::LocalizationUnavailable => {
+                    f.write_str(" (localization unavailable)")?
+                }
                 UntimedCause::NoUsableTiming => f.write_str(" (no usable timing)")?,
             }
         }
@@ -493,6 +501,8 @@ impl RequiredFaTiming {
         // later step adds or removes a line). Indexed once: decisions and
         // untimed utterances can each number in the thousands.
         let unplaceable = batchalign_transform::decisions::FaStrategy::UnplaceableRun.as_str();
+        let unlocalized =
+            batchalign_transform::decisions::FaStrategy::LocalizationUnavailable.as_str();
         let causes: BTreeMap<usize, UntimedCause> = result
             .result
             .decisions
@@ -502,8 +512,13 @@ impl RequiredFaTiming {
                     decision.line_idx,
                     UntimedCause::WindowRefused(window.clone()),
                 )),
-                None => (decision.strategy == unplaceable)
-                    .then_some((decision.line_idx, UntimedCause::NotPlaced)),
+                None if decision.strategy == unplaceable => {
+                    Some((decision.line_idx, UntimedCause::NotPlaced))
+                }
+                None if decision.strategy == unlocalized => {
+                    Some((decision.line_idx, UntimedCause::LocalizationUnavailable))
+                }
+                None => None,
             })
             .collect();
         let mut utterances = result
