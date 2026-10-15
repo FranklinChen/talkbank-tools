@@ -3,8 +3,6 @@
 //! [`build_typed_options()`] converts parsed CLI args into a [`CommandOptions`]
 //! enum variant for type-safe job submission.
 
-use crate::chat_ops::CacheTaskName;
-use crate::chat_ops::cache_key::CacheOverrideTaskName;
 use crate::chat_ops::fa::CaMarkerPolicy as AppCaMarkerPolicy;
 use crate::chat_ops::speaker_identity::InvalidEnrollmentSet;
 use crate::options::{AbsoluteMediaRoot, MediaRootRefusal};
@@ -114,47 +112,6 @@ fn resolve_review_level(
     }
 }
 
-/// Parse a wire name into a [`CacheTaskName`].
-///
-/// Only audio tasks are cached. Text-task names are accepted for
-/// backward-compatible CLI scripting but resolve to `None` with a
-/// warning.
-fn parse_cache_task(name: &str) -> Option<CacheTaskName> {
-    match CacheTaskName::classify_override_name(name) {
-        CacheOverrideTaskName::Cacheable(task) => Some(task),
-        CacheOverrideTaskName::TextNlpUnsupported => {
-            eprintln!(
-                "warning: --override-media-cache-tasks {name} ignored \
-                 (batchalign3 does not cache text NLP)"
-            );
-            None
-        }
-        CacheOverrideTaskName::Unknown => {
-            eprintln!("warning: unknown cache task name '{name}', ignoring");
-            None
-        }
-    }
-}
-
-/// Resolve the cache override policy from CLI flags.
-pub fn resolve_cache_overrides(global: &GlobalOpts) -> CacheOverrides {
-    if global.media_cache.require_media_cache {
-        CacheOverrides::RequireAll
-    } else if !global.media_cache.override_media_cache_tasks.is_empty() {
-        let tasks = global
-            .media_cache
-            .override_media_cache_tasks
-            .iter()
-            .filter_map(|s| parse_cache_task(s))
-            .collect();
-        CacheOverrides::Tasks(tasks)
-    } else if global.media_cache.override_media_cache {
-        CacheOverrides::All
-    } else {
-        CacheOverrides::None
-    }
-}
-
 /// Resolve a `--debug-dir` path to absolute form for transmission to the
 /// server. The server interprets `CommonOptions::debug_dir` against its own
 /// working directory, which on a remote daemon is opaque to the user and on
@@ -202,6 +159,9 @@ pub enum InvalidCommandOptions {
     /// A relative CLI root requires a readable submission working directory.
     #[error("cannot resolve --media-dir against the submission working directory: {0}")]
     WorkingDirectory(#[source] std::io::Error),
+    /// Cache requirements and refreshes must be admitted together.
+    #[error(transparent)]
+    CachePolicy(#[from] crate::params::InvalidCachePolicy),
 }
 
 /// Resolve parsed options, checking enrollment and anchoring explicit CLI
@@ -221,6 +181,7 @@ fn build_typed_options_with_cwd(
     let common = CommonOptions {
         override_media_cache: global.media_cache.override_media_cache,
         require_media_cache: global.media_cache.require_media_cache,
+        require_media_cache_tasks: global.media_cache.require_media_cache_tasks.clone(),
         // Nothing is parsed here: the flag's value parser already produced the
         // typed value, and an absent flag means no overrides, which is what an
         // empty `EngineOverrides` says.
@@ -230,6 +191,7 @@ fn build_typed_options_with_cwd(
         ..Default::default()
     };
 
+    CacheOverrides::from_common(&common)?;
     Ok(match cmd {
         Commands::Convert(a) => Some(CommandOptions::Convert(crate::options::ConvertOptions {
             common,

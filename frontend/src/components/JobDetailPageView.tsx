@@ -85,6 +85,9 @@ const OPTION_LABELS: Record<string, string> = {
   feature_set: "Feature set",
   text_cache: "Text cache",
   override_media_cache: "Override media cache",
+  require_media_cache: "Require media cache",
+  require_media_cache_tasks: "Required cache tasks",
+  override_media_cache_tasks: "Refreshed cache tasks",
   media_dir: "Media directory",
 };
 
@@ -95,7 +98,6 @@ const SKIP_FIELDS = new Set([
   "engine_overrides",
   "mwt",
   "debug_dir",
-  "override_media_cache_tasks",
   "utr_two_pass",
 ]);
 

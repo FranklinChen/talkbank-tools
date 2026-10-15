@@ -219,9 +219,69 @@ service where that backend uses one. OpenSMILE and AVQI are outside the
 analysis cache. The guarantee is specifically that a
 missing entry at a cache-backed boundary cannot authorize inference.
 
-`--require-media-cache` is mutually exclusive with
-`--override-media-cache` and `--override-media-cache-tasks`: one run cannot
-both require existing evidence and request fresh evidence.
+`--require-media-cache` is mutually exclusive with both refresh forms and
+`--require-media-cache-tasks`. For mixed experiments, select disjoint tasks:
+
+```bash
+batchalign3 --require-media-cache-tasks utr_asr \
+  --override-media-cache-tasks forced_alignment \
+  align corpus/ -o output/ --utr --utr-engine rev
+```
+
+This permits fresh FA while forbidding fresh UTR ASR. On Rev-backed UTR, a
+derived miss may be rebuilt from compatible raw Rev evidence, but a raw miss
+cannot authorize a provider call. Other UTR backends refuse a derived miss.
+Required tasks are `forced_alignment`, `utr_asr`, `rev_asr_evidence`, and
+`speaker_diarization_raw_evidence`. Unknown names and uncached text tasks are
+errors, not ignored requirements. One task cannot be both required and
+refreshed; requiring UTR ASR also forbids refreshing raw Rev evidence. Requiring
+raw Rev evidence while refreshing the derived UTR projection is allowed.
+Unselected tasks retain normal cache behavior. These controls apply at
+cache-backed stages, not to every possible inference path of every command.
+
+## Read-only retained Rev cache inspection
+
+```bash
+batchalign3 cache inspect-rev --trace retained_rev_evidence.json \
+  --db existing_cache.db
+```
+
+The inspector validates the retained trace against the current request identity,
+including provider presentation, language and speaker policy; it recomputes the
+raw key rather than trusting a recorded key. It checks the existing row's
+namespace and uses production raw-evidence schema, fingerprint and semantic
+validation. Output is a JSON inspection response. Exit 0 means raw evidence was
+admitted; exit 1 means inspection completed but it was missing, incompatible or
+refused. Invalid trace arguments or database/I/O failures are nonzero errors,
+not cache misses. Historical typed projections retain their lower fidelity;
+they are not relabelled exact provider JSON.
+
+Optional `--utr-audio-path original/audio.wav` also inspects the current derived
+Rev UTR metadata key and pinned namespace. It reads path/size/mtime only, never
+recording bytes. Its derived status is separate from raw admission and does not
+change the command's raw-admission exit status. Neither lookup certifies the
+path's content binding to the retained trace: preserve that independent media
+provenance. Normalized token sidecars are not substitutes for provider traces.
+
+Inspection opens an existing SQLite database read-only, without creating it,
+migrating schemas, writing cache rows, loading models or contacting a provider.
+It does not authorize later execution or guarantee a future cache hit. Keep an
+appropriate required-cache policy on the eventual job too.
+
+A compatible derived UTR response can be inspected independently, even when
+no raw provider trace was retained:
+
+```bash
+batchalign3 cache inspect-utr --audio-path original/audio.wav \
+  --lang eng --engine rev --db existing_cache.db
+```
+
+This reports the canonical path/mtime/size identity, exact derived key, pinned
+namespace and payload admission. Exit 0 means that derived response is
+replayable, not that raw provider evidence exists or the recording content was
+rehash-verified. Exit 1 means this specific derived lookup was not admitted;
+it is not a global absence claim. The command reads metadata only and has no
+provider or inference capability.
 
 ## What invalidates the cache
 

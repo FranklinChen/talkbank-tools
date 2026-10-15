@@ -2027,6 +2027,56 @@ fn build_options_require_media_cache_global() {
 }
 
 #[test]
+fn required_asr_cli_policy_roundtrips_and_rejects_conflicts() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "--require-media-cache-tasks",
+        "utr_asr",
+        "--override-media-cache-tasks",
+        "forced_alignment",
+        "align",
+        "corpus/",
+    ]);
+    let options = build_typed_options(&cli.command, &cli.global)
+        .unwrap()
+        .unwrap();
+    assert_eq!(options.common().require_media_cache_tasks, ["utr_asr"]);
+    for required in ["utr_asr", "not_a_task", "translation"] {
+        let cli = Cli::parse_from([
+            "batchalign3",
+            "--require-media-cache-tasks",
+            required,
+            "--override-media-cache-tasks",
+            "utr_asr",
+            "align",
+            "corpus/",
+        ]);
+        assert!(build_typed_options(&cli.command, &cli.global).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "batchalign3",
+            "--require-media-cache",
+            "--require-media-cache-tasks",
+            "utr_asr",
+            "align",
+            "corpus/"
+        ])
+        .is_err()
+    );
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "cache",
+        "inspect-rev",
+        "--trace",
+        "trace.json",
+        "--db",
+        "cache.db",
+    ]);
+    assert!(matches!(cli.command, Commands::Cache(_)));
+}
+
+#[test]
 fn standalone_diarize_defaults_to_local_pyannote_without_paid_inference() {
     let cli = Cli::parse_from(["batchalign3", "diarize", "audio/"]);
     let opts = build_typed_options(&cli.command, &cli.global)

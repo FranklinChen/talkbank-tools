@@ -43,7 +43,7 @@ pub(in crate::runner) struct UtrPassContext<'a> {
     /// Audio identity used to key UTR cache entries.
     pub audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
     /// Cache policy selected for the current job.
-    pub cache_policy: CachePolicy,
+    pub cache_policy: crate::params::UtrCachePolicies,
     /// How long the audio runs, when the pipeline already probed it.
     pub audio_duration: Option<AudioDuration>,
     /// Maximum FA group duration in milliseconds. Used by the two-pass UTR
@@ -235,7 +235,7 @@ pub(in crate::runner) async fn run_utr_pass(
                     context.services.cache,
                     &seg_cache_key,
                     &cache_namespace,
-                    context.cache_policy,
+                    context.cache_policy.response(),
                 )
                 .await?;
 
@@ -377,7 +377,7 @@ async fn run_utr_pass_full(
         context.services.cache,
         &cache_key,
         &cache_namespace,
-        context.cache_policy,
+        context.cache_policy.response(),
     )
     .await?
     {
@@ -491,7 +491,7 @@ async fn infer_utr_asr_response(
             resolve_rev_utr_asr_response(
                 &request,
                 context.services.cache,
-                context.cache_policy,
+                context.cache_policy.rev_evidence(),
                 &service,
                 context.dumper,
                 &evidence_identity,
@@ -567,7 +567,7 @@ impl UtrAsrCacheMiss {
         decode_budget: Option<DecodeBudgetSeconds>,
         context: UtrPassContext<'_>,
     ) -> Result<UtrAsrInferred, crate::error::ServerError> {
-        match (context.cache_policy, context.engine) {
+        match (context.cache_policy.response(), context.engine) {
             (CachePolicy::RequireCache, UtrEngine::Whisper | UtrEngine::HkTencent) => {
                 Err(crate::error::ServerError::Persistence(
                     "required UTR ASR evidence is missing for the selected ASR backend".to_owned(),
@@ -1313,6 +1313,54 @@ mod utr_evidence_cache_tests {
         assert_eq!(
             trace["projection_revision"],
             "rev-transcript-to-utr-asr-response-v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_scoped_required_asr_cold_miss_never_calls_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let audio = root.path().join("audio.wav");
+        tokio::fs::write(&audio, b"synthetic media").await.unwrap();
+        let request = RevAsrEvidenceRequest::from_audio(
+            &audio,
+            &crate::types::revai_language::RevLanguage::admit(
+                &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
+            )
+            .unwrap(),
+            NumSpeakers(1),
+            &RevAsrModelRevision::current(),
+        )
+        .await
+        .unwrap();
+        let overrides =
+            crate::params::CacheOverrides::from_common(&crate::options::CommonOptions {
+                require_media_cache_tasks: vec!["utr_asr".into()],
+                override_media_cache_tasks: vec!["forced_alignment".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        let policies = crate::params::UtrCachePolicies::from_overrides(&overrides);
+        let cache = UtteranceCache::sqlite(Some(root.path().join("cache")))
+            .await
+            .unwrap();
+        let service = CountingRevService {
+            calls: AtomicUsize::new(0),
+        };
+        let dumper = DebugDumper::new(None);
+        let result = resolve_rev_utr_asr_response(
+            &request,
+            &cache,
+            policies.rev_evidence(),
+            &service,
+            &dumper,
+            "synthetic",
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(service.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            overrides.policy_for(crate::chat_ops::CacheTaskName::ForcedAlignment),
+            CachePolicy::SkipCache
         );
     }
 

@@ -286,6 +286,9 @@ pub enum CliError {
     /// Exit code: [`EXIT_GENERAL`](Self::EXIT_GENERAL) (1).
     #[error("{0}")]
     ReplayDiffers(crate::cli::eval_cmd::utseg_replay::UtsegReproductionDifference),
+    /// Read-only inspection completed but selected ASR evidence was not admitted. Exit 1.
+    #[error("ASR cache evidence was not admitted; see the inspection report")]
+    CacheEvidenceUnavailable,
 }
 
 /// What a server's `/health` said about its build identity when it is not this
@@ -387,7 +390,7 @@ impl CliError {
             }
             // Nothing failed: the replay ran and its answer was "this does not
             // reproduce". That is neither a usage error nor a broken machine.
-            Self::ReplayDiffers(_) => Self::EXIT_GENERAL,
+            Self::ReplayDiffers(_) | Self::CacheEvidenceUnavailable => Self::EXIT_GENERAL,
             // Nothing failed either, but the output is not certified.
             Self::WrittenWithDiagnostics { .. } => Self::EXIT_DIAGNOSED,
             Self::Io(err) => match err.kind() {

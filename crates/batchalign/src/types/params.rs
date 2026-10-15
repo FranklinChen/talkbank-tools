@@ -184,15 +184,134 @@ pub enum CacheOverrides {
     /// Require reusable evidence for every cache-backed task
     /// (`--require-media-cache`).
     RequireAll,
+    /// Disjoint task-scoped requirements and refreshes, admitted together.
+    Selected(SelectedCachePolicies),
+}
+
+/// A selected policy can only be produced after cross-task conflict validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedCachePolicies {
+    required: BTreeSet<CacheTaskName>,
+    refreshed: BTreeSet<CacheTaskName>,
+}
+
+/// Wire options failed cache-policy admission and cannot produce a plan.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid media-cache policy: {0}")]
+pub struct InvalidCachePolicy(String);
+
+/// UTR's locally derived response and retained provider evidence are distinct
+/// stages. Construction preserves the no-new-ASR promise across both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UtrCachePolicies {
+    response: CachePolicy,
+    rev_evidence: CachePolicy,
+}
+
+impl UtrCachePolicies {
+    pub(crate) fn from_overrides(overrides: &CacheOverrides) -> Self {
+        let response = overrides.policy_for(CacheTaskName::UtrAsr);
+        let raw = overrides.policy_for(CacheTaskName::RevAsrEvidence);
+        let rev_evidence = match (response, raw) {
+            (CachePolicy::RequireCache, _) | (_, CachePolicy::RequireCache) => {
+                CachePolicy::RequireCache
+            }
+            (CachePolicy::SkipCache, _) => CachePolicy::SkipCache,
+            (_, policy) => policy,
+        };
+        Self {
+            response,
+            rev_evidence,
+        }
+    }
+
+    pub(crate) fn response(self) -> CachePolicy {
+        self.response
+    }
+    pub(crate) fn rev_evidence(self) -> CachePolicy {
+        self.rev_evidence
+    }
 }
 
 impl CacheOverrides {
+    /// Admit the wire options once, for CLI, HTTP and persisted-job consumers.
+    pub fn from_common(common: &crate::options::CommonOptions) -> Result<Self, InvalidCachePolicy> {
+        use crate::chat_ops::cache_key::CacheOverrideTaskName;
+        let refresh = &common.override_media_cache_tasks;
+        let require = &common.require_media_cache_tasks;
+        if (common.require_media_cache
+            && (common.override_media_cache || !refresh.is_empty() || !require.is_empty()))
+            || (common.override_media_cache && (!refresh.is_empty() || !require.is_empty()))
+        {
+            return Err(InvalidCachePolicy(
+                "global policies are mutually exclusive with task-scoped policies and each other"
+                    .into(),
+            ));
+        }
+        let parse = |names: &[String],
+                     required: bool|
+         -> Result<BTreeSet<CacheTaskName>, InvalidCachePolicy> {
+            let mut tasks = BTreeSet::new();
+            for name in names {
+                match CacheTaskName::classify_override_name(name) {
+                    CacheOverrideTaskName::Cacheable(task) => {
+                        tasks.insert(task);
+                    }
+                    CacheOverrideTaskName::TextNlpUnsupported if !required => {}
+                    _ => {
+                        return Err(InvalidCachePolicy(format!(
+                            "unknown or uncached media-cache task {name:?}"
+                        )));
+                    }
+                }
+            }
+            Ok(tasks)
+        };
+        let refreshed = parse(refresh, false)?;
+        let required = parse(require, true)?;
+        if let Some(task) = required.intersection(&refreshed).next() {
+            return Err(InvalidCachePolicy(format!(
+                "{task} cannot be both required and refreshed"
+            )));
+        }
+        if required.contains(&CacheTaskName::UtrAsr)
+            && refreshed.contains(&CacheTaskName::RevAsrEvidence)
+        {
+            return Err(InvalidCachePolicy(
+                "required UTR ASR cannot refresh raw Rev evidence".into(),
+            ));
+        }
+        Ok(if common.require_media_cache {
+            Self::RequireAll
+        } else if common.override_media_cache {
+            Self::All
+        } else if !required.is_empty() {
+            Self::Selected(SelectedCachePolicies {
+                required,
+                refreshed,
+            })
+        } else if !refreshed.is_empty() {
+            Self::Tasks(refreshed)
+        } else {
+            Self::None
+        })
+    }
+
     /// Resolve the effective cache policy for a specific task.
     pub fn policy_for(&self, task: CacheTaskName) -> CachePolicy {
         match self {
             Self::None => CachePolicy::UseCache,
             Self::All => CachePolicy::SkipCache,
             Self::RequireAll => CachePolicy::RequireCache,
+            Self::Selected(policies) => {
+                if policies.required.contains(&task) {
+                    CachePolicy::RequireCache
+                } else if policies.refreshed.contains(&task) {
+                    CachePolicy::SkipCache
+                } else {
+                    CachePolicy::UseCache
+                }
+            }
             Self::Tasks(set) => {
                 if set.contains(&task) {
                     CachePolicy::SkipCache
@@ -417,6 +536,10 @@ impl FaParams {
         self.engine.max_group_ms()
     }
 }
+
+#[cfg(test)]
+#[path = "params/cache_policy_tests.rs"]
+mod cache_policy_tests;
 
 #[cfg(test)]
 mod tests {

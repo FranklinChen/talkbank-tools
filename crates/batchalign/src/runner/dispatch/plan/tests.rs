@@ -464,7 +464,41 @@ fn align_plan_keeps_fa_and_utr_cache_policies_distinct() {
         plan.options.fa_params.cache_policy,
         crate::params::CachePolicy::UseCache
     );
-    assert_eq!(plan.utr_cache_policy, crate::params::CachePolicy::SkipCache);
+    assert_eq!(
+        plan.utr_cache_policy.response(),
+        crate::params::CachePolicy::SkipCache
+    );
+}
+
+#[test]
+fn required_asr_http_policy_reaches_utr_without_forbidding_fresh_fa() {
+    let mut snapshot = make_snapshot(
+        ReleasedCommand::Align,
+        CommandOptions::Align(AlignOptions {
+            common: serde_json::from_value(json!({
+                "require_media_cache_tasks": ["utr_asr"],
+                "override_media_cache_tasks": ["forced_alignment"]
+            }))
+            .unwrap(),
+            ..Default::default()
+        }),
+        BTreeMap::new(),
+    );
+    let plan = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()).unwrap();
+    assert_eq!(plan.utr_cache_policy.response(), CachePolicy::RequireCache);
+    assert_eq!(
+        plan.utr_cache_policy.rev_evidence(),
+        CachePolicy::RequireCache
+    );
+    assert_eq!(plan.options.fa_params.cache_policy, CachePolicy::SkipCache);
+    let CommandOptions::Align(options) = &mut snapshot.dispatch.options else {
+        unreachable!()
+    };
+    options.common.override_media_cache_tasks = vec!["utr_asr".into()];
+    assert!(matches!(
+        FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()),
+        Err(DispatchPlanRefusal::CachePolicy(_))
+    ));
 }
 
 #[test]

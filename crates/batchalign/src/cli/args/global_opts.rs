@@ -128,7 +128,7 @@ pub struct MediaCacheOpts {
     #[arg(
         long,
         global = true,
-        conflicts_with_all = ["require_media_cache", "override_media_cache_tasks"]
+        conflicts_with_all = ["require_media_cache", "override_media_cache_tasks", "require_media_cache_tasks"]
     )]
     pub override_media_cache: bool,
 
@@ -138,9 +138,15 @@ pub struct MediaCacheOpts {
     #[arg(
         long,
         global = true,
-        conflicts_with_all = ["override_media_cache", "override_media_cache_tasks"]
+        conflicts_with_all = ["override_media_cache", "override_media_cache_tasks", "require_media_cache_tasks"]
     )]
     pub require_media_cache: bool,
+
+    /// Require existing evidence only for listed cache-backed tasks. Other
+    /// tasks retain their own policy; e.g. require utr_asr while refreshing FA.
+    #[arg(long, global = true, value_name = "TASKS", value_delimiter = ',',
+        conflicts_with_all = ["override_media_cache", "require_media_cache"])]
+    pub require_media_cache_tasks: Vec<String>,
 
     /// Bypass cache only for specific tasks (comma-separated).
     /// Honored for audio tasks: `forced_alignment`, `utr_asr`.

@@ -5,6 +5,18 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Task-scoped cache requirements and read-only admission
+
+- Add `--require-media-cache-tasks` for disjoint required/refresh policies,
+  including ASR-cache-only recovery with independently permitted fresh FA.
+  CLI, HTTP and persisted dispatch share validating policy construction.
+- Keep raw Rev evidence requirements separate from derived UTR refreshes;
+  a local projection miss cannot erase the no-new-ASR constraint.
+- Add `cache inspect-rev` and independent `cache inspect-utr`: current
+  request/presentation, namespace and payload admission through read-only
+  SQLite, without migrations, recording hashing or inference. Inspection
+  does not certify media provenance or authorize later processing.
+
 ### Dependency refresh
 
 - Pin Chatter 0.30.0's updated generated traversal and source-bound consumers

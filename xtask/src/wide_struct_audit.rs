@@ -82,6 +82,16 @@ struct NamedStructInfo {
 /// into the sealed ASR plan).
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
+        path: "crates/batchalign/src/revai/evidence_cache/inspection.rs",
+        struct_name: "RetainedRequestTrace",
+        max_fields: 12,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::TransportRecord,
+        reason: "private deserialization of the existing retained Rev trace wire format; \
+                 all presentation and request fields are validated together before producing \
+                 the two-field AdmittedRevReplayRequest, with no upload or inference capability",
+    },
+    WideStructAllowance {
         path: "crates/batchalign-transform/src/dp_align/interleaving/episodes/packed/kernel/cost.rs",
         struct_name: "PackedSearchCost",
         max_fields: 11,

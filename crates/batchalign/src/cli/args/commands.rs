@@ -6,6 +6,7 @@
 //! their own structs and sub-enums here as well.
 
 use clap::{Args, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 use crate::chat_ops::fa::{UtrFuzzyThreshold, UtrOverlapDensityThreshold};
 use crate::types::engines::{
@@ -1518,6 +1519,43 @@ pub enum CacheAction {
     Stats,
     /// Clear cached data.
     Clear(CacheClearArgs),
+    /// Inspect retained Rev request compatibility and raw cache admission,
+    /// without media hashing, cache writes, migrations or provider calls.
+    InspectRev(InspectRevCacheArgs),
+    /// Inspect an existing derived UTR response without a raw provider trace.
+    InspectUtr(InspectUtrCacheArgs),
+}
+
+/// Metadata-only inspection, independent of raw provider evidence.
+#[derive(Args, Debug, Clone)]
+pub struct InspectUtrCacheArgs {
+    /// Original audio location; only canonical path, size and mtime are read.
+    #[arg(long)]
+    pub audio_path: PathBuf,
+    /// One explicit ISO 639-3 language.
+    #[arg(long)]
+    pub lang: String,
+    /// UTR backend whose current pinned namespace must match.
+    #[arg(long, value_parser = engine_selection_parser::<AppUtrEngine>())]
+    pub engine: AppUtrEngine,
+    /// Existing analysis cache database, otherwise this account's default.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+}
+
+/// Existing evidence only; this command never submits an inference job.
+#[derive(Args, Debug, Clone)]
+pub struct InspectRevCacheArgs {
+    /// Retained Rev evidence trace (not normalized UTR tokens).
+    #[arg(long)]
+    pub trace: PathBuf,
+    /// Existing analysis cache database; defaults to this account's cache.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+    /// Optional original audio location for derived UTR metadata-key lookup.
+    /// Reads filesystem metadata only; does not verify media content identity.
+    #[arg(long)]
+    pub utr_audio_path: Option<PathBuf>,
 }
 
 /// Arguments for `cache clear`.

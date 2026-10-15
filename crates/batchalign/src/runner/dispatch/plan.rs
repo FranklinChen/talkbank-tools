@@ -114,7 +114,7 @@ pub(crate) struct FaDispatchPlan {
     /// UTR and forced alignment are independently addressable cache tasks.
     /// Keeping this policy out of `FaParams` prevents an FA refresh request
     /// from changing UTR behavior, or vice versa.
-    pub utr_cache_policy: CachePolicy,
+    pub utr_cache_policy: crate::params::UtrCachePolicies,
     /// Producer-admitted root; historical request declarations cannot enter I/O.
     pub media_dir: Option<crate::options::AbsoluteMediaRoot>,
 }
@@ -131,9 +131,9 @@ impl FaDispatchPlan {
         job: &RunnerJobSnapshot,
         config: &ServerConfig,
     ) -> Result<Self, DispatchPlanRefusal> {
-        let overrides = resolve_cache_overrides(job);
+        let overrides = resolve_cache_overrides(job)?;
         let fa_cache_policy = overrides.policy_for(CacheTaskName::ForcedAlignment);
-        let utr_cache_policy = overrides.policy_for(CacheTaskName::UtrAsr);
+        let utr_cache_policy = crate::params::UtrCachePolicies::from_overrides(&overrides);
         let options = extract_fa_dispatch_params(&job.dispatch.options, fa_cache_policy)
             .ok_or(DispatchPlanRefusal::Options)?;
         let media_dir = match &job.dispatch.options {
@@ -171,6 +171,8 @@ pub(crate) enum DispatchPlanRefusal {
     /// The persisted options could not be read into a plan at all.
     #[error("command plan could not be built from job options")]
     Options,
+    #[error(transparent)]
+    CachePolicy(#[from] crate::params::InvalidCachePolicy),
     /// Benchmark scores a recording against a gold transcript in one language.
     #[error(
         "benchmark requires one resolved `--lang <iso3>` to score against its gold transcript; got '{0}'"
@@ -214,7 +216,7 @@ impl TranscribeDispatchPlan {
         job: &RunnerJobSnapshot,
         config: &ServerConfig,
     ) -> Result<Self, DispatchPlanRefusal> {
-        let overrides = resolve_cache_overrides(job);
+        let overrides = resolve_cache_overrides(job)?;
         let cache_policies = TranscribeCachePolicies {
             rev_asr: overrides.policy_for(CacheTaskName::RevAsrEvidence),
             speaker: overrides.policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
@@ -313,7 +315,7 @@ impl BenchmarkDispatchPlan {
                 ));
             }
         };
-        let cache_policy = resolve_cache_overrides(job).policy_for(CacheTaskName::RevAsrEvidence);
+        let cache_policy = resolve_cache_overrides(job)?.policy_for(CacheTaskName::RevAsrEvidence);
         let BenchmarkDispatchParams {
             asr_engine,
             wor_tier,
@@ -429,7 +431,7 @@ impl MediaAnalysisDispatchPlan {
                     expected_speakers: options
                         .expected_speakers
                         .map(|count| crate::api::NumSpeakers(count.get())),
-                    cache_policy: resolve_cache_overrides(job)
+                    cache_policy: resolve_cache_overrides(job)?
                         .policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
                     output_mode: options.output_mode.clone(),
                 })
@@ -443,22 +445,10 @@ impl MediaAnalysisDispatchPlan {
 ///
 /// Reads `override_media_cache_tasks` (per-task) and `override_media_cache` (all-or-nothing)
 /// from `CommonOptions` and produces a typed `CacheOverrides` value.
-fn resolve_cache_overrides(job: &RunnerJobSnapshot) -> CacheOverrides {
-    let common = job.dispatch.options.common();
-    if common.require_media_cache {
-        CacheOverrides::RequireAll
-    } else if !common.override_media_cache_tasks.is_empty() {
-        let tasks = common
-            .override_media_cache_tasks
-            .iter()
-            .filter_map(|s| parse_cache_task_name(s))
-            .collect();
-        CacheOverrides::Tasks(tasks)
-    } else if common.override_media_cache {
-        CacheOverrides::All
-    } else {
-        CacheOverrides::None
-    }
+fn resolve_cache_overrides(
+    job: &RunnerJobSnapshot,
+) -> Result<CacheOverrides, crate::params::InvalidCachePolicy> {
+    CacheOverrides::from_common(job.dispatch.options.common())
 }
 
 fn kernel_plan_for_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> CommandKernelPlan {
@@ -468,27 +458,6 @@ fn kernel_plan_for_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> Comman
         job.pending_files.len(),
         &host_policy,
     )
-}
-
-/// Parse a wire name into a [`CacheTaskName`].
-///
-/// Only audio tasks are cached, so text-task names resolve to `None`
-/// with a single warning. Unrecognized names also resolve to `None`,
-/// silently (CLI clap validation already rejects truly unknown input).
-fn parse_cache_task_name(name: &str) -> Option<CacheTaskName> {
-    use crate::chat_ops::cache_key::CacheOverrideTaskName;
-
-    match CacheTaskName::classify_override_name(name) {
-        CacheOverrideTaskName::Cacheable(task) => Some(task),
-        CacheOverrideTaskName::TextNlpUnsupported => {
-            tracing::warn!(
-                task = name,
-                "--override-media-cache-tasks ignored for text-NLP task (batchalign3 does not cache text NLP)"
-            );
-            None
-        }
-        CacheOverrideTaskName::Unknown => None,
-    }
 }
 
 /// Resolve one runtime-only flag with its documented default.

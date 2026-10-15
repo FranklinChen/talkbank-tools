@@ -302,6 +302,35 @@ pub async fn run(args: &CacheArgs) -> Result<(), CliError> {
             CacheAction::Clear(clear) => {
                 clear_cache(&db_path, &media_dir, clear.all, clear.yes).await
             }
+            CacheAction::InspectRev(inspect) => {
+                let report = crate::revai::inspect_retained_rev_cache(
+                    &inspect.trace,
+                    inspect.db.as_deref().unwrap_or(&db_path),
+                    inspect.utr_audio_path.as_deref(),
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                if report.raw_is_replayable() {
+                    Ok(())
+                } else {
+                    Err(CliError::CacheEvidenceUnavailable)
+                }
+            }
+            CacheAction::InspectUtr(inspect) => {
+                let report = crate::revai::inspect_retained_utr_cache(
+                    &inspect.audio_path,
+                    inspect.db.as_deref().unwrap_or(&db_path),
+                    &inspect.lang,
+                    &inspect.engine,
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                if report.is_replayable() {
+                    Ok(())
+                } else {
+                    Err(CliError::CacheEvidenceUnavailable)
+                }
+            }
         };
     }
 

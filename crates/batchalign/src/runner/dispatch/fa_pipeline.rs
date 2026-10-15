@@ -8,7 +8,7 @@ use crate::cache::UtteranceCache;
 use crate::engine_reports::FaCacheNamespace;
 use crate::fa::{AdmittedFaResult, FaServices};
 use crate::options::EngineBackend as _;
-use crate::params::{AudioContext, CachePolicy, FaParams};
+use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::provenance::UtrRecovery;
 use crate::runner::DispatchHostContext;
@@ -126,7 +126,7 @@ struct FaFileContext<'a> {
     /// Typed FA parameter bundle.
     fa_params: FaParams,
     /// Independently resolved policy for UTR ASR evidence.
-    utr_cache_policy: CachePolicy,
+    utr_cache_policy: crate::params::UtrCachePolicies,
     /// Whether merge-abbrev should run before writing the result.
     should_merge_abbrev: bool,
     /// Optional before-file path for incremental align reruns.
@@ -189,7 +189,7 @@ struct AlignAudioTask<'a> {
     /// could be assembled from an engine and a language that had never been
     /// compared. The only way to obtain this value is to pass the check.
     admitted: AdmittedFaParams,
-    utr_cache_policy: CachePolicy,
+    utr_cache_policy: crate::params::UtrCachePolicies,
     before: Option<crate::fa::RetainedFaPrior>,
     audio_path: PathBuf,
     audio_identity: crate::chat_ops::fa::AudioIdentity,

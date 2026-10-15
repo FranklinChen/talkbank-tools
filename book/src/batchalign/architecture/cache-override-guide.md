@@ -88,7 +88,8 @@ raw Rev hit; the raw resolver still refuses a provider call on a miss.
 
 An `align` run resolves FA and UTR independently. `FaParams` carries only the
 `forced_alignment` policy, while `FaDispatchPlan::utr_cache_policy` carries the
-`utr_asr` policy into both the initial UTR pass and retry fallback. This split
+`utr_asr` response policy and the raw Rev evidence policy into both the initial
+UTR pass and retry fallback. This split
 is load-bearing: a selective UTR refresh must not refresh FA, and a selective
 FA refresh must not change UTR evidence reuse.
 
@@ -99,8 +100,8 @@ FA refresh must not change UTR evidence reuse.
 | Post-processing logic (injection, bullet computation, %wor generation, retokenization after cache, terminator patching) | **No** | Runs after cache retrieval, cached value is still correct |
 | Cache key computation | **No** | Old entries become orphans (different key = automatic miss). New keys miss and re-infer. |
 | Word extraction logic (changes which words are sent to the model) | **Yes** | Cached result was computed from different input words |
-| ML model/engine code (Python worker) | **Automatic** for FA if the reported FA engine identity changes; **Yes** if the identity string is unchanged, and for a UTR model change within one UTR engine | FA rows are namespaced by the reported FA engine (`FaCacheNamespace`); UTR ASR rows by the UTR engine, which does not yet distinguish model revisions |
-| Serialization format of legacy FA/UTR derived values | **Usually no** | Normal mode may treat an unreadable derived value as work to recompute; required mode refuses the unresolved group. |
+| ML model/engine code (Python worker) | **Automatic** when its admitted namespace changes; **Yes** for a behavior change not reflected there | FA rows use reported FA identity (`FaCacheNamespace`); UTR ASR rows include the selected engine and pinned model plan. Floating plans cannot reuse UTR rows. |
+| Serialization format of legacy FA/UTR derived values | **Review the affected decoder** | Corrupt normalized UTR responses fail closed. Required mode never authorizes inference from an unresolved group. |
 | Serialization format of raw Rev/speaker evidence | **No automatic refresh** | Corruption fails closed so local damage cannot authorize a paid call. Change the schema/revision deliberately. |
 | Parse logic (changes how CHAT is parsed before extraction) | **Depends** | If extraction produces different words → yes (different key). If same words → no. |
 | Pre-cache text normalization (e.g., the script rendering in `TranslationSource::render`) | **Yes** | Key is computed from normalized text; same key now maps to wrong cached result |

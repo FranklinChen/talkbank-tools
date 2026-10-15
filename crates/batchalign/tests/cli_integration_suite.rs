@@ -9,6 +9,8 @@
     clippy::unimplemented
 )]
 
+#[path = "cache_admission.rs"]
+mod cache_admission;
 mod cli_common;
 mod common;
 mod live_deadline;

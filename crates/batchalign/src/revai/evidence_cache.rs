@@ -14,6 +14,10 @@ use crate::types::revai_language::RevLanguage;
 use super::Transcript;
 use super::types::{RevTranscriptEvidence, RevTranscriptFidelity};
 
+mod inspection;
+use inspection::AdmittedRevReplayRequest;
+pub(crate) use inspection::{inspect_retained_rev_cache, inspect_retained_utr_cache};
+
 const REV_ASR_EVIDENCE_STORAGE_SCHEMA_VERSION: u32 = 3;
 const REV_ASR_REQUEST_IDENTITY_REVISION: u32 = 2;
 const REV_ASR_REQUEST_POLICY_REVISION: &str = "langid-skip-itn-v1";
@@ -420,6 +424,13 @@ impl StoredRevAsrEvidence {
         value: serde_json::Value,
         request: &RevAsrEvidenceRequest,
     ) -> Result<CompletedRevAsrEvidence, RevAsrEvidenceCacheError> {
+        Self::decode_for_replay(value, &AdmittedRevReplayRequest::from_production(request))
+    }
+
+    fn decode_for_replay(
+        value: serde_json::Value,
+        request: &AdmittedRevReplayRequest,
+    ) -> Result<CompletedRevAsrEvidence, RevAsrEvidenceCacheError> {
         let schema_version = value
             .get("schema_version")
             .and_then(serde_json::Value::as_u64)
@@ -433,7 +444,7 @@ impl StoredRevAsrEvidence {
                 let envelope: Self = serde_json::from_value(value).map_err(|error| {
                     RevAsrEvidenceCacheError::InvalidEvidence(error.to_string())
                 })?;
-                validate_request_fingerprint(&envelope.request_fingerprint, request)?;
+                validate_request_fingerprint(&envelope.request_fingerprint, &request.key)?;
                 envelope.evidence
             }
             2 => {
@@ -441,7 +452,7 @@ impl StoredRevAsrEvidence {
                     serde_json::from_value(value).map_err(|error| {
                         RevAsrEvidenceCacheError::InvalidEvidence(error.to_string())
                     })?;
-                validate_request_fingerprint(&envelope.request_fingerprint, request)?;
+                validate_request_fingerprint(&envelope.request_fingerprint, &request.key)?;
                 FetchedRevAsrEvidence {
                     transcript_evidence: RevTranscriptEvidence::from_legacy_transcript(
                         envelope.evidence.transcript,
@@ -456,7 +467,7 @@ impl StoredRevAsrEvidence {
                 )));
             }
         };
-        CompletedRevAsrEvidence::admit(evidence, &request.requested_language)
+        CompletedRevAsrEvidence::admit(evidence, &request.language)
     }
 }
 
@@ -474,9 +485,9 @@ struct CompletedRevAsrEvidenceV2 {
 
 fn validate_request_fingerprint(
     request_fingerprint: &str,
-    request: &RevAsrEvidenceRequest,
+    request_key: &CacheKey,
 ) -> Result<(), RevAsrEvidenceCacheError> {
-    if request_fingerprint != request.cache_key.as_str() {
+    if request_fingerprint != request_key.as_str() {
         return Err(RevAsrEvidenceCacheError::InvalidEvidence(
             "request fingerprint does not match cache key".to_owned(),
         ));

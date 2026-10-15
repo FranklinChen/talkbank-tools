@@ -38,6 +38,7 @@ Global options go before the command name.
 | `--server URL` | Server to submit to. Env fallback: `BATCHALIGN_SERVER`. A loopback URL reads inputs by path; another host receives transcript text only, so commands whose inputs are recordings are refused for it. See [Server Mode](server-mode.md). |
 | `--override-media-cache` | Bypass the media analysis cache (audio tasks only; text NLP tasks are not cached at all) |
 | `--require-media-cache` | Require reusable evidence at cache-backed media stages; a miss fails instead of authorizing inference. Conflicts with both cache-override forms. |
+| `--require-media-cache-tasks TASKS` | Require evidence only for named cache-backed tasks; may combine with disjoint task refreshes, e.g. require `utr_asr` while refreshing `forced_alignment`. Conflicts with global require/refresh. |
 | `--override-media-cache-tasks TASKS` | Bypass only named audio-evidence caches (comma-separated: `forced_alignment`, `utr_asr`, `rev_asr_evidence`, `speaker_diarization_raw_evidence`) |
 | `--debug-dir PATH` | Directory for pipeline debug artifacts (CHAT/JSON fixtures for offline replay). Env fallback: `BATCHALIGN_DEBUG_DIR` |
 | `--memory-tier {small,medium,large,fleet}` | Override the auto-detected memory tier (forces worker bootstrap and memory budgets for that tier regardless of actual system RAM) |
@@ -312,11 +313,22 @@ cancel that job."
 batchalign3 cache stats
 batchalign3 cache clear --yes
 batchalign3 cache clear --all --yes
+batchalign3 cache inspect-rev --trace retained_rev_evidence.json --db existing_cache.db
+batchalign3 cache inspect-utr --audio-path original/audio.wav --lang eng --engine rev --db existing_cache.db
 ```
 
 `BATCHALIGN_ANALYSIS_CACHE_DIR` and `BATCHALIGN_MEDIA_CACHE_DIR` relocate
 the underlying caches for isolated runs. BA2-compatible flag forms
 `cache --stats` and `cache --clear` are still accepted.
+
+`inspect-rev` is read-only and never hashes recording bytes or authorizes
+inference. It validates current request compatibility before raw row admission;
+optional `--utr-audio-path` adds a separate metadata-only derived lookup.
+See [caching](caching.md#read-only-retained-rev-cache-inspection) for statuses,
+exit codes and the independent media-provenance requirement.
+`inspect-utr` independently admits a derived full-file UTR response from the
+original metadata identity and current pinned namespace, without needing a raw
+trace. Its exit status describes derived admission, never raw-provider presence.
 
 ### `openapi`
 

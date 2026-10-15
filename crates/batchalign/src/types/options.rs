@@ -114,6 +114,10 @@ pub struct CommonOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub require_media_cache: bool,
 
+    /// Cache-backed tasks whose misses must never authorize inference.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_media_cache_tasks: Vec<String>,
+
     /// Engine overrides selected for this job (e.g., ASR=tencent, FA=cantonese_fa).
     /// Typed struct with `Option<AsrEngineName>` and `Option<FaEngineName>`.
     #[serde(default, skip_serializing_if = "EngineOverrides::is_empty")]

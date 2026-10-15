@@ -439,6 +439,36 @@ authorization, and unresolved FA groups cannot construct
 it intentionally refreshes and replaces evidence. The CLI and HTTP admission
 reject a job that asks for both.
 
+Task-scoped `require_media_cache_tasks` is admitted together with refresh
+options by `CacheOverrides::from_common()`. Its private-field
+`SelectedCachePolicies` cannot be constructed with overlapping require/refresh
+sets. CLI building, HTTP submission and persisted-job planning share this
+admission; persisted jobs do not silently drop unknown task names. Legacy
+absent fields preserve normal behavior, and legacy text-task refresh names
+remain no-ops; text-task requirements are refused.
+
+`UtrCachePolicies` keeps response-cache and raw-Rev policy separate across the
+initial pass and retry fallback. Required UTR evidence propagates to the raw
+resolver, while requiring raw evidence survives a derived refresh. A raw miss
+therefore cannot produce paid-call authority merely because the derived stage
+needs recomputation. FA retains its independent policy and existing consuming
+`FaInferenceAuthorization` boundary.
+
+`cache inspect-rev` admits an `AdmittedRevReplayRequest` from a retained trace
+using this build's request material and presentation rules. The replay-only
+type has no prepared media or upload capability. Production and inspection
+share `StoredRevAsrEvidence::decode_for_replay`, preserving storage-schema
+migration, language/semantic checks and exact-versus-legacy fidelity. The
+inspector owns only a read-only SQLite connection; it never opens the ordinary
+cache constructor that creates directories and runs migrations. Optional
+derived lookup uses production metadata-key and pinned-model namespace
+producers. The result explicitly says recording bytes were not revalidated;
+matching cache/request evidence is not fresh content/provenance attestation.
+`cache inspect-utr` exposes that derived lookup independently, since a production
+derived hit does not require a raw provider trace to exist. Its report retains
+the exact metadata identity, derived key and pinned namespace. This keeps a
+missing trace distinct from an uninspected or unavailable derived response.
+
 ## Test strategy
 
 ### Unit tests (no network, no models)

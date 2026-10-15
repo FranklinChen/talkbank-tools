@@ -285,35 +285,9 @@ impl JobSubmission {
     /// and replace evidence. CLI parsing already prevents these shapes; this
     /// check protects direct HTTP clients at the same admission boundary.
     fn validate_cache_policy(&self) -> Result<(), ValidationError> {
-        use crate::chat_ops::CacheTaskName;
-        use crate::chat_ops::cache_key::CacheOverrideTaskName;
-
-        let common = self.options.common();
-        if common.require_media_cache
-            && (common.override_media_cache || !common.override_media_cache_tasks.is_empty())
-        {
-            return Err(ValidationError(
-                "require_media_cache is mutually exclusive with media-cache refresh options"
-                    .to_owned(),
-            ));
-        }
-        if common.override_media_cache && !common.override_media_cache_tasks.is_empty() {
-            return Err(ValidationError(
-                "override_media_cache is mutually exclusive with override_media_cache_tasks"
-                    .to_owned(),
-            ));
-        }
-        if let Some(unknown) = common.override_media_cache_tasks.iter().find(|name| {
-            matches!(
-                CacheTaskName::classify_override_name(name),
-                CacheOverrideTaskName::Unknown
-            )
-        }) {
-            return Err(ValidationError(format!(
-                "unknown media-cache override task {unknown:?}"
-            )));
-        }
-        Ok(())
+        crate::params::CacheOverrides::from_common(self.options.common())
+            .map(|_| ())
+            .map_err(|error| ValidationError(error.to_string()))
     }
 
     /// Check that the job's language is supported by all engines the command
