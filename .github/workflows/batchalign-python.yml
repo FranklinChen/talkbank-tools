@@ -106,10 +106,12 @@ jobs:
           path: dist/
       - name: Install from pre-built wheel
         run: |
-          uv sync --group dev --no-install-project
+          uv sync --frozen --group dev --no-install-project
           uv pip install --no-deps dist/*.whl
       - name: Run tests
-        run: uv run --no-sync pytest batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
+        run: |
+          uv run --no-sync python -m pytest batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
+          make batchalign-dev-workflow-test
 
   smoke-test:
     name: Wheel Smoke Test
@@ -155,7 +157,7 @@ jobs:
           path: frontend/dist/
       - name: Install from pre-built wheel
         run: |
-          uv sync --group dev --no-install-project
+          uv sync --frozen --group dev --no-install-project
           uv pip install --no-deps dist/*.whl
       - name: Verify retirement gates
         run: |
@@ -251,7 +253,7 @@ jobs:
           path: target/debug
       - name: Install batchalign
         run: |
-          uv sync --group dev --no-install-project
+          uv sync --frozen --group dev --no-install-project
           uv pip install --no-deps dist/*.whl
       - name: Server startup smoke test
         # Uses build-cli's development binary instead of rebuilding in-job.
@@ -325,7 +327,7 @@ jobs:
           path: dist/
       - name: Install from pre-built wheel
         run: |
-          uv sync --group dev --no-install-project
+          uv sync --frozen --group dev --no-install-project
           uv pip install --no-deps dist/*.whl
       - name: Python coverage
         run: uv run --no-sync pytest --cov=batchalign --cov-report=lcov:lcov-python.info batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
@@ -394,7 +396,7 @@ jobs:
           path: target/debug
       - name: Install from pre-built wheel
         run: |
-          uv sync --group dev --no-install-project
+          uv sync --frozen --group dev --no-install-project
           uv pip install --no-deps dist/*.whl
       - uses: actions/setup-node@v6
         with:

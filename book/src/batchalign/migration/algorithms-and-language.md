@@ -1,7 +1,7 @@
 # Algorithms, Language, and Alignment Migration
 
 **Status:** Current
-**Last updated:** 2026-10-06 20:55 EDT
+**Last modified:** {{git-dates:page}}
 
 Comparison anchors:
 
@@ -238,15 +238,16 @@ description of current default behavior.
 
 #### `@Options: CA` handling
 
-BA3 detects `@Options: CA` at FA entry and **suppresses `%wor`
-generation** for that file, see `crates/batchalign/src/fa/mod.rs::run`
-where the option is consulted and `info!("@Options: CA detected
-suppressing %wor generation")` fires. The motivation is that CA
-transcripts use prosodic notation (`⌈⌉⌊⌋`, arrows, lengthening marks)
-that `%wor` cannot represent, so generating it adds noise that CA
-researchers have to manually remove. CA terminator resolution itself
-lives in the parser layer (the parser correctly promotes CA-style
-terminators), not in an FA-side validation skip.
+Current BA3 runs FA on CA-declared transcripts but suppresses `%wor` generation.
+This inherited output policy is not an alignment improvement or evidence that
+CA notation cannot coexist with word timing. There is no automatic durable
+inline timing fallback to assume when the word tier is omitted. See the
+[Options reference](../reference/chat-options.md) for current command behavior,
+unsupported historical assumptions and the serialization boundary.
+
+CA arrows and TCU markers remain parser separators or linkers; the parser does
+not promote them into ordinary utterance terminators. CA's terminator waiver
+and its processing policies are separate from that symbol classification.
 
 #### `--media-dir` flag (new in BA3)
 
@@ -263,7 +264,7 @@ is stored separately from transcripts (common in corpus archives).
 | Overlap awareness | None | `TwoPassOverlapUtr` with index-aware onset matching, currently reachable only via explicit `--utr-strategy two-pass` |
 | Dense overlap handling | None (all words treated equally) | Density detection inside two-pass (`max_exclusion_density = 0.30`, falls back to global when exceeded) |
 | Language-aware UTR | None (same strategy for all langs) | Mechanism implemented but auto-routing disabled 2026-03-30; default `--utr-strategy auto` returns `GlobalUtr` for all languages |
-| CA handling in FA | None | `@Options: CA` suppresses `%wor` generation in `fa/mod.rs::run` |
+| Legacy CA output policy (not an established improvement) | None | CA currently suppresses `%wor`; review the effective output contract |
 | Custom media directory | Not supported | `--media-dir` flag |
 | FA orchestration | Python string surgery | Rust typed payloads + deterministic transfer |
 

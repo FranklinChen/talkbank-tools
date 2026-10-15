@@ -837,6 +837,8 @@ impl OutputFindings {
 enum Judgement {
     /// Applied analysis must satisfy the command's completion checks.
     Admitted,
+    /// Completion's projection must survive every later output transition.
+    Aligned(crate::fa::DurableFaTimingCensus),
     /// Declined analysis performs only its declared tier removal.
     Declined,
     /// Comparison must also retain the input's utterance structure.
@@ -844,6 +846,13 @@ enum Judgement {
 }
 
 impl Judgement {
+    fn applied(file: &ChatFile, command: ReleasedCommand) -> Self {
+        match command {
+            ReleasedCommand::Align => Self::Aligned(crate::fa::DurableFaTimingCensus::of(file)),
+            _ => Self::Admitted,
+        }
+    }
+
     /// The bar a refusal reports.
     ///
     /// A projection rather than a second copy: a failure message needs to say
@@ -852,7 +861,7 @@ impl Judgement {
     /// how it renders.
     fn bar(&self) -> JudgementBar {
         match self {
-            Self::Admitted | Self::Declined => JudgementBar::Construction,
+            Self::Admitted | Self::Aligned(_) | Self::Declined => JudgementBar::Construction,
             Self::Preserved(_) => JudgementBar::Preservation,
         }
     }
@@ -1189,7 +1198,8 @@ impl PostValidated {
         file: ChatFile,
         command: ReleasedCommand,
     ) -> Result<Self, PostValidationFailure> {
-        Self::judge(file, Judgement::Admitted, command)
+        let judgement = Judgement::applied(&file, command);
+        Self::judge(file, judgement, command)
     }
 
     /// Judge output our OWN producer generated, and keep it either way.
@@ -1205,7 +1215,7 @@ impl PostValidated {
     /// and again on its final document. Nothing that reads CHAT a user
     /// submitted may, because there a refusal is the right answer.
     pub(crate) fn produced(file: ChatFile, command: ReleasedCommand) -> ProducedOutput {
-        let judgement = Judgement::Admitted;
+        let judgement = Judgement::applied(&file, command);
         match Self::assess(file, &judgement, command) {
             Assessment::Admitted(file) => ProducedOutput::Admitted(Self {
                 command,
@@ -1244,7 +1254,7 @@ impl PostValidated {
         held_out: &HeldOutInOutput,
         command: ReleasedCommand,
     ) -> Result<ProducedOutput, PostValidationFailure> {
-        let judgement = Judgement::Admitted;
+        let judgement = Judgement::applied(&file, command);
         let (document, findings) = match Self::assess(file, &judgement, command) {
             Assessment::Admitted(file) => {
                 return Ok(ProducedOutput::Admitted(Self {
@@ -1337,11 +1347,19 @@ impl PostValidated {
     /// way it went. The single judgement every transition runs.
     fn assess(file: ChatFile, judgement: &Judgement, command: ReleasedCommand) -> Assessment {
         let gate_errors: Vec<ValidationError> = match &judgement {
-            Judgement::Admitted => {
+            Judgement::Admitted | Judgement::Aligned(_) => {
                 let mut errors = Vec::new();
                 // Additional command-specific completion checks.
                 if let Err(output_errors) = validate_output(&file, command.as_str()) {
                     errors.extend(output_errors);
+                }
+                if let Judgement::Aligned(census) = judgement
+                    && !census.is_preserved_in(&file)
+                {
+                    errors.push(ValidationError {
+                        message: "After align: a later transform changed the admitted lexical/timing projection; its completion account no longer applies".to_owned(),
+                        level: ValidityLevel::MainTierValid,
+                    });
                 }
                 errors
             }

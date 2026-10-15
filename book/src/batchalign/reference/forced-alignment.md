@@ -1,7 +1,7 @@
 # Forced Alignment Design
 
 **Status:** Current
-**Last updated:** 2026-10-14 14:09 EDT
+**Last modified:** {{git-dates:page}}
 
 ## Overview
 
@@ -739,13 +739,20 @@ The two-pass defaults were tuned on SBCSAE, Jefferson NB, TaiwanHakka, and
 APROCSA corpora but have not been broadly validated. Use `--utr-strategy
 two-pass` to opt in for experimentation.
 
-#### %wor Suppression for CA Transcripts
+#### Legacy CA suppression of word-tier output
 
-When `@Options: CA` is set, `align` automatically suppresses `%wor` tier
-generation. Conversation Analysis transcripts use prosodic notation
-(`⌈⌉⌊⌋`, arrows, lengthening marks) that `%wor` cannot represent, so
-generating it adds noise that CA researchers must manually remove. The
-`--nowor` flag achieves the same effect for non-CA files.
+Current `align` runs on `@Options: CA` files but suppresses `%wor` even when
+word-tier output was requested. `NoAlign`, a separate option, is the actual
+alignment opt-out. This legacy CA rule is not evidence that CA notation makes
+alignment or word-tier output unsuitable; do not add the header merely because
+an older edition carried it.
+
+Do not assume generated word intervals survive inline when `%wor` is absent.
+Injection into an in-memory `Word.inline_bullet` field and a serialized main-tier
+`InternalBullet` are different representations. Completion counts assessed in
+memory do not establish coverage in the written CHAT file. See
+[`@Options`: format exceptions and legacy processing policy](chat-options.md)
+for the effective-policy table, serialization boundary and reassessment.
 
 #### End-Time Overlap Clamping
 

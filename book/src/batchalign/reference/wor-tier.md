@@ -1,9 +1,14 @@
 # %wor Tier Specification
 
 **Status:** Current
-**Last updated:** 2026-10-05 10:54 EDT
+**Last modified:** {{git-dates:page}}
 
 How main tier words map to the %wor (word-level timing) dependent tier.
+
+`@Options: CA` currently suppresses word-tier generation during BA3 alignment,
+even when requested. That is an inherited application policy, not a requirement
+of CA notation. Do not infer saved word timing from in-memory counts when the
+word tier is absent; see the [Options reference](chat-options.md).
 
 ## Overview
 

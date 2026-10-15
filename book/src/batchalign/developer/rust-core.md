@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-10-01 15:39 EDT
+**Last updated:** 2026-10-15 13:28 EDT
 
 For new contributors, start with:
 
@@ -143,14 +143,35 @@ make batchalign-python-prepare
 This depends on `batchalign-build-wheel`, which rebuilds the native
 `batchalign3` binary in release mode, copies it into
 `batchalign/_bin/`, and produces a maturin-built wheel via `uv
-build --wheel`. The prepare target then runs `uv sync --group dev
+run --frozen --only-dev maturin build --release`. The prepare target then runs
+`uv sync --frozen --group dev
 --no-install-project` and `uv pip install --reinstall --no-deps
-dist/*.whl` to install the freshly built wheel into the active
-`uv` environment.
+dist/*.whl` to install the freshly built wheel into the active `uv` environment.
+Before clearing shadowing in-tree `.so`/`.pyd` copies, it requires an installed
+wheel manifest naming an existing extension. An editable install cannot grant
+that cleanup authority. Import readback then verifies which extension will run.
 
-For day-to-day editable iteration on the PyO3 layer, plain
-`uv run <anything>` will trigger an incremental rebuild against
-`pyproject.toml`'s maturin backend (`profile = "dev"`).
+## Development installs
+
+For day-to-day iteration, use `make batchalign-develop`: uv provisions the
+frozen dev/runtime graph and reinstalls the local editable project without
+build isolation. Maturin is the build backend (`profile = "dev"`), not a second
+dependency installer. The explicit reinstall covers Rust edits that Python
+metadata caching alone cannot detect. The dev group contains tools, not a
+registry dependency on this unpublished project itself.
+
+Use `make batchalign-test-python-dev BATCHALIGN_PYTEST_ARGS="PATH -n 0"` for
+focused development tests. It prepares once, checks the actual import, then runs
+`uv run --no-sync python -m pytest`. Further compatible selections may reuse
+`_batchalign-test-python`, which never builds. `make batchalign-test-python`
+remains wheel-based qualification.
+
+The portable freshness check follows Cargo's local normal/build dependency
+closure, including shared crates and new untracked files, rather than unrelated
+server code. It is a timestamp-based stale-code diagnostic, not an exact-source
+attestation or release qualification. Changes to Maturin features/profile or
+Python ABI require preparing the intended mode afresh; packaging-only metadata
+edits do not make an unchanged Rust library stale.
 
 If you also plan to run the standalone Rust CLI directly after a
 shared-crate change, rebuild that binary too:

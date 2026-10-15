@@ -1,7 +1,7 @@
 # Command Lifecycles
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last modified:** {{git-dates:page}}
 
 End-to-end sequence diagrams showing how jobs flow through the system,
 from CLI invocation to output files. Every batchalign command now fits one
@@ -270,10 +270,12 @@ sequenceDiagram
    prevents the BA2 over-parallelism crash mode while maximizing throughput
    on multi-core hosts.
 4. For each file, the server **parses** the transcript. If the parsed
-   header declares `@Options: CA`, the file is serialized back as-is,
-   no `%mor` / `%gra` tiers are added or removed, and no provenance
-   comment is injected (mirroring `align`'s `@Options: NoAlign`
-   pass-through). Otherwise the server clears any stale morphology and
+   header declares `@Options: CA` under the default `--ca-policy honor`,
+   the file takes validated pass-through without regenerating morphology or
+   adding processing provenance. `--ca-policy analyze` explicitly selects
+   analysis while preserving the header. This is a legacy application policy,
+   not a limitation of CA notation; see the [Options reference](../reference/chat-options.md).
+   On the analysis path the server clears any stale morphology and
    **collects payloads** (word lists + language metadata).
 5. **Cache lookup** checks all utterances in the file at once. BLAKE3 keys
    include (words + language + terminator + special forms + engine version).

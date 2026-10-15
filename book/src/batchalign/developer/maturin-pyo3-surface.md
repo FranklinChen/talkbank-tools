@@ -1,7 +1,7 @@
 # Maturin Build and PyO3 Dependency Surface
 
 **Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last updated:** 2026-10-15 13:28 EDT
 
 ## Overview
 
@@ -72,10 +72,8 @@ handoffs into the Rust binary:
 
 ```bash
 # Development rebuild (debug, fast, incremental)
-uv run maturin develop -m crates/batchalign-pyo3/Cargo.toml \
-    -F pyo3/extension-module
+make batchalign-develop
 # Or via the Makefile target chain (build wheel + install into the dev env):
-make batchalign-build-wheel
 make batchalign-python-prepare
 
 # Release wheel for deployment
@@ -110,12 +108,15 @@ cargo check --manifest-path crates/batchalign-pyo3/Cargo.toml
 
 ## Verification checklist
 
+Development and wheel qualification are different modes. See the
+[development install procedure](rust-core.md#development-installs).
+A bare `uv run` is not evidence that edited Rust was rebuilt.
+
 After any dependency change to `crates/batchalign-pyo3/Cargo.toml`:
 
 ```bash
 cargo check --manifest-path crates/batchalign-pyo3/Cargo.toml
 cargo test --manifest-path crates/batchalign-pyo3/Cargo.toml
-uv run maturin develop -m crates/batchalign-pyo3/Cargo.toml -F pyo3/extension-module
-uv run batchalign3 --help
-uv run pytest
+make batchalign-develop
+make _batchalign-test-python BATCHALIGN_PYTEST_ARGS="batchalign/tests/test_worker_fa_v2.py -n 0"
 ```

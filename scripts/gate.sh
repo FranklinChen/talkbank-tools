@@ -11,6 +11,7 @@ make lint-actionlint
 make gate-receipts-test
 make batchalign-ci-rust
 make batchalign-lint-python-source
+make batchalign-dev-workflow-test
 make batchalign-ipc-schema-check
 # Reuse the exact binary whose currency the preceding target established.
 BATCHALIGN_BIN="$PWD/target/debug/batchalign3" make batchalign-dashboard-schema-check

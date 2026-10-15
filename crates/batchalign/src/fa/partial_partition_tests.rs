@@ -157,7 +157,7 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
                 .await
                 .expect("store fixture evidence");
         }
-        let params = FaParams {
+        let mut params = FaParams {
             gap_healing: WordGapHealing::PreserveMeasured,
             existing_wor_boundaries: ExistingWorBoundaryPolicy::Preserve,
             end_overlap_policy: EndOverlapPolicy::PreserveCrossSpeaker,
@@ -260,6 +260,48 @@ async fn partial_partitions_reach_valid_output_with_exact_untimed_words() {
             ),
             "partial alignment is never clean success"
         );
+        if label == "prefix" {
+            // Real explicit --nowor path over the same synthetic cache-only
+            // evidence. No provider/model work or compensating tier creation.
+            params.wor_tier = WorTierPolicy::Omit;
+            let omitted = run_fa_from_ast(
+                working.attempt(),
+                &audio,
+                &crate::api::LanguageCode3::eng(),
+                FaServices {
+                    pipeline: PipelineServices::new(&pool, &cache),
+                    cache_namespace: &namespace,
+                    attention_capture_dir: None,
+                },
+                &params,
+                None,
+            )
+            .await
+            .expect("cache-only omitted-tier control")
+            .into_document();
+            let (parsed, errors) = batchalign_transform::parse::parse_lenient(
+                &crate::chat_parser(),
+                omitted.document.as_str(),
+            );
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(
+                parsed
+                    .utterances()
+                    .all(|utterance| utterance.wor_tier().is_none())
+            );
+            assert!(
+                matches!(
+                    omitted.shortfalls.as_slice(),
+                    [OutputShortfallRecord::TimingIncomplete {
+                        required_words: 5,
+                        untimed_words: 5,
+                        ..
+                    }]
+                ),
+                "no durable word timing: {:?}",
+                omitted.shortfalls
+            );
+        }
         summaries.push((label, missing, plan.units().count()));
     }
     insta::assert_debug_snapshot!(summaries, @r#"

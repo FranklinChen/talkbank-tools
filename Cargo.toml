@@ -79,7 +79,7 @@ predicates = "3.1"
 proptest = "1.12.0"
 # pyo3 moves in lockstep with the numpy crate (pyo3-ffi's `links = "python"`
 # forbids two pyo3 versions in one graph); see crates/batchalign-pyo3/Cargo.toml.
-pyo3 = "0.29"
+pyo3 = "0.30"
 rand = "0.10"
 ratatui = { version = "0.30", features = ["serde"] }
 regex = "1.13"

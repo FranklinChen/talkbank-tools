@@ -1,7 +1,7 @@
 # Morphosyntax Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-12 22:31 EDT
+**Last modified:** {{git-dates:page}}
 
 ## 1. Overview
 
@@ -100,21 +100,16 @@ policy.
 
 ### Per-file scoping via `@Options`
 
-`morphotag` reads two CHAT-level directives, both with narrow,
-command-specific semantics:
+The current default `--ca-policy honor` passes valid `@Options: CA` transcripts
+through without regenerating `%mor` / `%gra`. `--ca-policy analyze` explicitly
+runs morphology while preserving that header. `NoAlign` governs forced
+alignment and does not independently disable morphology.
 
-- **`@Options: CA`**: "the morphotag command is not to be run on
-  this file." CA transcripts are pass-through: existing %mor /
-  %gra is preserved unchanged, no Stanza inference, no provenance
-  comment.
-- **`@Options: NoAlign`**: scoped to the `align` command, NOT
-  morphotag. NoAlign files run morphotag normally. (Pre-2026-05-07
-  the pipeline incorrectly conflated NoAlign with a global skip,
-  leaving NoAlign files with stale morphotag and no rerun path;
-  fixed.)
-
-Full semantics + worked examples: [`@Options` and Per-File Command
-Scoping](./chat-options.md).
+These are application policies, not empirical evidence that CA-originated
+notation cannot benefit from analysis. Do not add CA simply because a transcript
+contains that notation or inherits an older corpus convention. See
+[`@Options`: format exceptions and legacy processing policy](chat-options.md)
+for the actual behavior, unsupported historical assumptions and removal criteria.
 
 ## 2. Architecture
 

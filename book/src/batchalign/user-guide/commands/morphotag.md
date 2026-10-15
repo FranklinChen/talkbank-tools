@@ -1,7 +1,7 @@
 # morphotag
 
 **Status:** Current
-**Last updated:** 2026-10-08 09:51 EDT
+**Last modified:** {{git-dates:page}}
 
 Add morphosyntactic analysis (`%mor` POS/lemma tiers and `%gra` dependency
 tiers) to existing CHAT transcripts. Text-only, no audio involved.
@@ -158,20 +158,18 @@ clap parse error, the CLI surface deliberately rejects it. See the
 
 ## `@Options: CA` files pass through by default
 
-Files whose header declares `@Options: CA` (Conversation Analysis mode)
-are passed through morphotag unchanged. The pipeline parses the file,
-detects the option, and serializes it back as-is, no `%mor` / `%gra`
-tiers are added, and any pre-existing `%mor` / `%gra` tiers are
-preserved verbatim. Provenance comments are not injected for these
-files.
+Under the default `--ca-policy honor`, a valid transcript declaring
+`@Options: CA` passes through without regenerating `%mor` / `%gra` or adding
+processing provenance. The parsed header and submitted policy make this
+choice; per-utterance CA notation does not independently disable morphology.
+`--ca-policy analyze` selects normal analysis while retaining the header.
 
-This mirrors how `align` skips files with `@Options: NoAlign`. The mechanism
-is the option header plus the submitted typed CA policy; per-utterance content
-(CA prosody markers, pauses, `&=` events, etc.) does not influence the
-decision. `--ca-policy analyze` explicitly selects the normal morphotag
-pipeline for these files and retains the `@Options: CA` line in the result.
-This makes a historical corpus reconstruction reproducible without silently
-deleting or editing the source declaration.
+This is current compatibility behavior, not a claim that CA-marked speech
+cannot benefit from morphology. CA notation alone does not require this option.
+For a reconstruction that does not need its format exceptions, do not add it
+merely because an older edition did. Preserve meaning and validate any removal.
+See the [Options reference](../../reference/chat-options.md) for the separate
+`NoAlign` behavior, historical assumptions and current align-side `%wor` effect.
 
 ---
 

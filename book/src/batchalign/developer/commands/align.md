@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-07 09:56 EDT
+**Last updated:** 2026-10-15 13:28 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -720,6 +720,24 @@ re-reading bullets and falsely labeling them observations.
 ---
 
 ## Post-FA validation
+
+Completion consumes `WritableFaResult`, which owns the construction-admitted
+document and its run evidence together. A raw working `FaResult` cannot certify
+word coverage. The census reads the admitted document's durable `%wor` projection;
+it never treats main-tier `Word.inline_bullet` working fields as written timing.
+No tier means no certified word coverage, including omitted-tier projections.
+This reports actual behavior; it does not justify the inherited CA exclusion.
+Source-word obligations and off-record exclusions remain separate from internal
+timeline evidence. Synthetic tests inject timings, serialize/reparse exact CHAT,
+and compare word identities and endpoints, including partial and omitted tiers.
+
+Output admission also retains `DurableFaTimingCensus` in its alignment
+judgement: utterance/speaker order, lexical units, off-record status, main
+bullets and exact `%wor` labels/intervals. Provenance and abbreviation
+transitions re-run that same judgement. A later transform that changes this
+projection is refused rather than publishing an obsolete completion account.
+In particular, post-FA abbreviation collapsing cannot silently invalidate word
+counts or dependent timing, even if ordinary construction checking accepts it.
 
 Every FA path builds a draft, `FaResult<ChatFile>`, and hands it to
 `FaAdmission::finish`, which takes it through Chatter's

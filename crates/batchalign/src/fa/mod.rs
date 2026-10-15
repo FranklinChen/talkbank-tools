@@ -35,6 +35,7 @@
 //!   and each piece of an anchored group keys its own words and window.
 
 mod completion;
+pub(crate) use completion::DurableFaTimingCensus;
 mod input;
 mod raw_evidence;
 mod transport;
@@ -112,17 +113,19 @@ impl FaAdmission {
             // Written out rather than hidden behind a `FaResult::pass_through`
             // constructor: that constructor was the hole this type exists to
             // close, and there is nothing left for it to be reused by.
-            evidence: AdmittedFaEvidence::Preserved(FaResult {
-                output: FaOutput::PassThrough(chat_file),
-                group_evidence: Vec::new(),
-                engine: engine.to_owned(),
-                cache_namespace: cache_namespace.clone(),
-                decisions: Vec::new(),
-                timing_decisions: Vec::new(),
-                gap_healing,
-                fallback_events: Vec::new(),
-            }),
-            document,
+            evidence: AdmittedFaEvidence::Preserved {
+                result: FaResult {
+                    output: FaOutput::PassThrough(chat_file),
+                    group_evidence: Vec::new(),
+                    engine: engine.to_owned(),
+                    cache_namespace: cache_namespace.clone(),
+                    decisions: Vec::new(),
+                    timing_decisions: Vec::new(),
+                    gap_healing,
+                    fallback_events: Vec::new(),
+                },
+                document,
+            },
         }
     }
 
@@ -161,11 +164,7 @@ impl FaAdmission {
     ) -> Result<AdmittedFaResult, ServerError> {
         let result = self.reconcile_output(draft)?;
         self.require_output_timing(result.output.as_chat_file())?;
-        let document = PostValidated::gate(
-            result.output.as_chat_file(),
-            crate::api::ReleasedCommand::Align,
-        )
-        .map_err(|failure| explain_gate_refusal(result.output.as_chat_file(), failure))?;
+        let result = completion::WritableFaResult::gate(result)?;
         let evidence = match self.complete_result(result)? {
             completion::FaCompletion::Complete(complete) => AdmittedFaEvidence::Complete(complete),
             completion::FaCompletion::Partial(partial) => {
@@ -178,8 +177,8 @@ impl FaAdmission {
             // The complete account, once; the record keeps a bounded copy.
             tracing::info!(%exclusions, "forced alignment left utterances out by design");
         }
-        let document = self.discharge(document);
-        Ok(AdmittedFaResult { evidence, document })
+        self.discharge();
+        Ok(AdmittedFaResult { evidence })
     }
 }
 
@@ -231,8 +230,6 @@ fn explain_gate_refusal(
 pub(crate) struct AdmittedFaResult {
     /// The run's evidence, for the dashboard timeline.
     evidence: AdmittedFaEvidence,
-    /// The bytes the writer may persist, and the proof that it may.
-    document: PostValidated,
 }
 
 /// An admitted alignment's output, with everything the writer must report
@@ -251,18 +248,30 @@ pub(crate) struct AlignedOutput {
 /// Declined alignment retains source evidence; actual timing work must retain
 /// its producer-issued completion payload, not a caller-selected success flag.
 enum AdmittedFaEvidence {
-    Preserved(FaResult),
+    Preserved {
+        result: FaResult,
+        document: PostValidated,
+    },
     Complete(completion::CompleteFaResult),
     /// Written with the timing it has; the account is the file's shortfall.
     Partial(completion::PartialFaResult),
 }
 
 impl AdmittedFaEvidence {
-    fn into_timeline_trace(self) -> crate::types::traces::FaTimelineTrace {
+    fn into_output(self) -> completion::FinalFaOutput {
+        let shortfalls = self.shortfalls();
+        let exclusions = self.exclusion_records();
         match self {
-            Self::Preserved(result) => result.into_timeline_trace(),
-            Self::Complete(complete) => complete.into_timeline_trace(),
-            Self::Partial(partial) => partial.into_timeline_trace(),
+            Self::Preserved { result, document } => completion::FinalFaOutput {
+                output: AlignedOutput {
+                    document,
+                    shortfalls,
+                    exclusions,
+                },
+                evidence: result,
+            },
+            Self::Complete(complete) => complete.into_result().into_output(shortfalls, exclusions),
+            Self::Partial(partial) => partial.into_result().into_output(shortfalls, exclusions),
         }
     }
 }
@@ -272,7 +281,7 @@ impl AdmittedFaEvidence {
     /// words of a partial result, bounded.
     fn shortfalls(&self) -> Vec<crate::pipeline::post_validate::Shortfall> {
         match self {
-            Self::Preserved(_) | Self::Complete(_) => Vec::new(),
+            Self::Preserved { .. } | Self::Complete(_) => Vec::new(),
             Self::Partial(partial) => vec![partial.account().record()],
         }
     }
@@ -282,7 +291,7 @@ impl AdmittedFaEvidence {
     /// account its admission made.
     fn exclusions(&self) -> Option<&completion::ExclusionAccount> {
         match self {
-            Self::Preserved(_) => None,
+            Self::Preserved { .. } => None,
             Self::Complete(complete) => complete.exclusions(),
             Self::Partial(partial) => partial.exclusions(),
         }
@@ -303,11 +312,7 @@ impl AdmittedFaResult {
     /// cannot reach the writer without saying what it lacks, nor an
     /// exclusion without being listed.
     pub(crate) fn into_document(self) -> AlignedOutput {
-        AlignedOutput {
-            shortfalls: self.evidence.shortfalls(),
-            exclusions: self.evidence.exclusion_records(),
-            document: self.document,
-        }
+        self.evidence.into_output().output
     }
 
     /// Split the proven bytes and their reports from the evidence timeline.
@@ -318,12 +323,8 @@ impl AdmittedFaResult {
     pub(crate) fn into_document_and_timeline(
         self,
     ) -> (AlignedOutput, crate::types::traces::FaTimelineTrace) {
-        let output = AlignedOutput {
-            shortfalls: self.evidence.shortfalls(),
-            exclusions: self.evidence.exclusion_records(),
-            document: self.document,
-        };
-        (output, self.evidence.into_timeline_trace())
+        let finalized = self.evidence.into_output();
+        (finalized.output, finalized.evidence.into_timeline_trace())
     }
 }
 

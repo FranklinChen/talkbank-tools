@@ -17,6 +17,9 @@ help:
 	@echo "  make batchalign-test-rust          Imported Batchalign Rust library suites"
 	@echo "  make batchalign-test-integration   Imported Batchalign focused integration gates"
 	@echo "  make batchalign-build-pyo3         Imported standalone PyO3 crate"
+	@echo "  make batchalign-develop            Locked editable Python development install"
+	@echo "  make batchalign-test-python-dev    Focused tests against the development install"
+	@echo "  make batchalign-dev-workflow-test  Build/install/freshness workflow regression tests"
 	@echo "  make batchalign-build-wheel        Imported Batchalign wheel"
 	@echo "  make batchalign-build-ci-wheel     Development-profile ABI3 wheel for push CI"
 	@echo "  make batchalign-test-python        Imported Batchalign Python pytest gate"
@@ -149,6 +152,21 @@ batchalign-build-pyo3:
 	@echo "==> Building imported standalone PyO3 crate..."
 	cargo build --manifest-path crates/batchalign-pyo3/Cargo.toml -q
 
+.PHONY: batchalign-develop batchalign-test-python-dev batchalign-dev-workflow-test
+batchalign-develop:
+	@echo "==> Provisioning locked tools and rebuilding the editable development install..."
+	uv sync --frozen --group dev --no-install-project
+	@# uv owns dependency selection; Maturin only builds. Force the editable
+	@# package rebuild because Python metadata alone does not track Rust edits.
+	uv sync --frozen --group dev --no-build-isolation --reinstall-package batchalign3
+
+batchalign-test-python-dev: batchalign-develop
+	$(MAKE) _batchalign-test-python
+
+batchalign-dev-workflow-test:
+	uv run --no-sync python -m pytest tests/test_python_dev_workflow.py tests/test_extension_freshness.py tests/test_wheel_build_profile.py -n 0 --maxfail=0
+	uv run --no-sync mypy --strict --explicit-package-bases scripts/check_extension_freshness.py tests/test_extension_freshness.py tests/test_python_dev_workflow.py
+
 BATCHALIGN_BUILD_PROFILE ?= release
 
 batchalign-build-wheel:
@@ -212,35 +230,12 @@ batchalign-build-ci-wheel:
 
 batchalign-python-prepare: batchalign-build-wheel
 	@echo "==> Syncing imported Batchalign dev dependencies..."
-	uv sync --group dev --no-install-project
+	uv sync --frozen --group dev --no-install-project
 	@echo "==> Installing imported Batchalign wheel into the dev environment..."
 	uv pip install --reinstall --no-deps dist/*.whl
-	@# THE INVARIANT: after this target, exactly one compiled extension is
-	@# importable, and it is the one this target just built.
-	@#
-	@# `uv run maturin develop` writes batchalign_core/batchalign_core.abi3.so
-	@# into the working tree, and because python-source is "." the repo-root
-	@# batchalign_core package shadows site-packages for anything run from here.
-	@# Leaving that file behind means this target installs a wheel that nothing
-	@# imports, and the suite silently reports on whatever develop last built.
-	@# That is not hypothetical: it happened on 2026-08-21 and made a session of
-	@# PyO3 verification meaningless.
-	@#
-	@# Removing it is not extra damage. `uv pip install` above has already
-	@# replaced the editable install that file belonged to, so it is orphaned
-	@# either way. Verified the same day: with it gone, the shim's extend_path
-	@# resolves to the wheel's extension in site-packages.
-	@# Globbed rather than naming one file: the invariant is "no in-tree
-	@# extension shadows the wheel", not "this filename does not". The tree also
-	@# accumulates fossils under other ABI tags, e.g. a cpython-312 build left
-	@# from before the move to 3.13, which a filename-specific rm would miss.
-	@count=$$(ls batchalign_core/*.so 2>/dev/null | wc -l | tr -d ' '); \
-	if [ "$$count" != "0" ]; then \
-	  echo "==> Cleared $$count in-tree extension(s); the wheel is what runs"; \
-	  rm -f batchalign_core/*.so; \
-	else \
-	  echo "==> No in-tree extension present; the wheel is what runs"; \
-	fi
+	@# Admit the wheel's installed extension before removing older in-tree
+	@# copies (.so or .pyd); then verify what Python will actually import.
+	uv run --no-sync python scripts/check_extension_freshness.py --prepare-wheel
 
 _batchalign-test-python:
 	@# Proves the invariant rather than assuming it: resolves the extension
@@ -251,7 +246,7 @@ _batchalign-test-python:
 	@echo "==> Checking the extension Python will import is current..."
 	bash scripts/check_extension_freshness.sh
 	@echo "==> Running imported Batchalign Python tests..."
-	uv run --no-sync pytest $(BATCHALIGN_PYTEST_ARGS)
+	uv run --no-sync python -m pytest $(BATCHALIGN_PYTEST_ARGS)
 
 batchalign-test-python: batchalign-python-prepare
 	@$(MAKE) _batchalign-test-python

@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-15 13:28 EDT
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -480,14 +480,13 @@ The CLI/server workspace and the PyO3 extension are separate build targets:
 - **Root workspace** (`crates/`): operational control plane (CLI + server)
 - **`crates/batchalign-pyo3/`**: Python extension module (`batchalign_core`)
 
-Both share CHAT operations through `batchalign`. The PyO3 crate
-also depends on `batchalign` (for `run_command()`) and `batchalign`
-(for OpenAPI types), but it now does so with `default-features = false` so the
-extension path does not compile the standalone binary's OTLP stack.
+The extension does not depend on the CLI/server crate. It shares typed IPC
+through `batchalign-types`, pure FA helpers through `batchalign-fa-core`, and
+Batchalign transforms through `batchalign-transform`. Generic CHAT primitives
+come transitively from the pinned Chatter crates. Building the extension does
+not establish that the standalone CLI/server was rebuilt.
 
 See [Building & Development](building.md) for the recommended fast
 local loop (one `cargo build -p batchalign` for the source-checkout
-fallback; `uv run maturin develop -m crates/batchalign-pyo3/Cargo.toml
--F pyo3/extension-module` or the
-`make batchalign-build-wheel` → `make batchalign-python-prepare`
-chain when you need the PyO3 extension installed into the dev env).
+fallback; `make batchalign-develop` for an explicit locked editable extension
+install, or `make batchalign-python-prepare` for wheel qualification).

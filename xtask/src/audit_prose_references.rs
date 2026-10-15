@@ -6,9 +6,10 @@
 //! 1. High-severity patterns from `audit_docs::FLAG_PATTERNS` over every
 //!    markdown file. Catalog-independent: it does not touch the `audit.db`
 //!    that lives outside this repo, so it runs cleanly in CI.
-//! 2. Every markdown path named in prose, under either doc root, must
-//!    RESOLVE. This one reads Rust doc comments as well as markdown, which
-//!    check 1 does not.
+//! 2. Every local markdown path named in prose, under either doc root, must
+//!    RESOLVE. HTTP(S) URL paths are external link targets, not references to
+//!    this checkout. A URL does not exempt other paths on its line. This check
+//!    reads Rust doc comments as well as markdown, which check 1 does not.
 //!
 //! Why check 2 reads Rust. On 2026-07-30 this repository carried 38 doc-comment
 //! references to documents that exist only in the maintainer's private
@@ -72,7 +73,31 @@ struct DocReference {
     /// 1-based line it sits on.
     line: usize,
     /// The repo-relative document path the prose names.
-    target: String,
+    target: LocalDocPath,
+}
+
+/// A document reference admitted to this repository's resolution domain.
+/// Web URLs belong to link checking, not local filesystem resolution.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalDocPath(String);
+
+impl LocalDocPath {
+    fn from_match(line: &str, matched: regex::Match<'_>) -> Option<Self> {
+        let prefix = line[..matched.start()]
+            .rsplit(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        '`' | '(' | ')' | '<' | '>' | '[' | ']' | '\'' | '"' | '|'
+                    )
+            })
+            .next()
+            .unwrap_or("");
+        if prefix.starts_with("https://") || prefix.starts_with("http://") {
+            return None;
+        }
+        Some(Self(matched.as_str().to_owned()))
+    }
 }
 
 /// Doc paths named in prose, in both markdown and Rust doc comments.
@@ -116,10 +141,13 @@ fn collect_doc_references(repo_root: &Path) -> Vec<DocReference> {
                 continue;
             }
             for m in pattern.find_iter(line) {
+                let Some(target) = LocalDocPath::from_match(line, m) else {
+                    continue;
+                };
                 found.push(DocReference {
                     source: source.clone(),
                     line: index + 1,
-                    target: m.as_str().to_string(),
+                    target,
                 });
             }
         }
@@ -133,7 +161,7 @@ fn collect_doc_references(repo_root: &Path) -> Vec<DocReference> {
 fn unresolvable_doc_references(repo_root: &Path) -> Vec<DocReference> {
     collect_doc_references(repo_root)
         .into_iter()
-        .filter(|reference| !repo_root.join(&reference.target).is_file())
+        .filter(|reference| !repo_root.join(&reference.target.0).is_file())
         .collect()
 }
 
@@ -154,7 +182,7 @@ pub fn run(repo_root: &Path) -> crate::Result<()> {
         for reference in &dangling {
             eprintln!(
                 "  {}:{}: {}",
-                reference.source, reference.line, reference.target
+                reference.source, reference.line, reference.target.0
             );
         }
         return Err("prose references a document that does not exist here".into());
@@ -164,7 +192,7 @@ pub fn run(repo_root: &Path) -> crate::Result<()> {
         println!(
             "xtask audit-prose-references: 0 violations across {} markdown files \
              ({} allow-listed historical surfaces respected); every doc path in \
-             markdown and Rust doc comments resolves",
+             markdown and Rust doc comments resolves locally (external URLs excluded)",
             total_files,
             ALLOW_LIST.len()
         );
@@ -273,7 +301,39 @@ fn is_excluded(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Violation, scan_docs};
+    use super::{LocalDocPath, Violation, scan_docs};
+
+    #[test]
+    fn external_web_paths_are_not_local_documents() -> Result<(), Box<dyn std::error::Error>> {
+        let pattern = regex::Regex::new(r"(?:docs|book/src)/[A-Za-z0-9._/-]+\.md")?;
+        for line in [
+            "[header](https://example.org/project/blob/main/book/src/headers.md)",
+            "<http://example.org/docs/guide.md>",
+            "//! See https://example.org/docs/guide.md for details.",
+            "[source]: https://example.org/book/src/guide.md",
+        ] {
+            let targets: Vec<_> = pattern
+                .find_iter(line)
+                .filter_map(|matched| LocalDocPath::from_match(line, matched))
+                .collect();
+            assert!(targets.is_empty(), "external URL became local: {line}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn external_link_does_not_hide_local_references() -> Result<(), Box<dyn std::error::Error>> {
+        let pattern = regex::Regex::new(r"(?:docs|book/src)/[A-Za-z0-9._/-]+\.md")?;
+        let line =
+            "[docs/missing.md](https://example.org/docs/remote.md), then `book/src/missing.md`";
+        let targets: Vec<_> = pattern
+            .find_iter(line)
+            .filter_map(|matched| LocalDocPath::from_match(line, matched))
+            .map(|target| target.0)
+            .collect();
+        assert_eq!(targets, ["docs/missing.md", "book/src/missing.md"]);
+        Ok(())
+    }
 
     fn doc(path: &str, body: &str) -> (String, String) {
         (path.to_owned(), body.to_owned())

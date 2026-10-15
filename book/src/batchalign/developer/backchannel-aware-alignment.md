@@ -1,7 +1,7 @@
 # Overlap-Aware Alignment Improvements
 
 **Status:** Current
-**Last updated:** 2026-10-14 11:51 EDT
+**Last modified:** {{git-dates:page}}
 
 This page documents overlap-aware alignment improvements: what is shipped
 and known limitations.
@@ -492,8 +492,11 @@ cross-speaker overlap; the explicit clamp-all policy additionally resolves
 file-adjacent cross-speaker overlap. Original kept bullets remain read-only;
 conflicting kept bullets are recorded rather than silently changed.
 
-**CA %wor suppression:** `@Options: CA` files automatically skip %wor
-generation, CA prosodic notation cannot be represented in %wor.
+**Legacy CA word-tier policy:** current code suppresses `%wor` on
+`@Options: CA` files. The header is not required for CA notation, and this
+policy does not establish that word timing is unsuitable. In-memory intervals
+are not automatically serialized inline when the tier is omitted. See the
+[Options reference](../reference/chat-options.md) before assessing saved coverage.
 
 ---
 

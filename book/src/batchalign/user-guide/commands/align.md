@@ -1,7 +1,7 @@
 # align
 
 **Status:** Current
-**Last updated:** 2026-10-07 00:19 EDT
+**Last modified:** {{git-dates:page}}
 
 Add word-level and utterance-level timestamps to an existing CHAT transcript
 by running forced alignment against the corresponding audio file.
@@ -20,6 +20,13 @@ not waive validation: a defective retained header, main tier or dependent tier
 must be repaired before the file can be returned successfully. Produced output
 that fails complete construction is refused rather than written as partial
 CHAT. See the [command contract](../../architecture/command-contracts.md).
+
+`CA` is different from `NoAlign`: current code still runs alignment on CA
+files but suppresses requested `%wor` output. CA notation does not require the
+header, and that inherited suppression is not evidence of an alignment
+limitation. Internal word-timing counts do not prove those timings survived
+serialization. Read the [Options reference](../../reference/chat-options.md)
+before interpreting coverage or carrying a legacy CA declaration into new data.
 
 Alignment aims to time every alignable lexical word. When some words cannot
 be timed (their audio window was refused, the audio left for them could not

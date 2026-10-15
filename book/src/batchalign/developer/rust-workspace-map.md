@@ -1,12 +1,12 @@
 # Rust Workspace Map
 
 **Status:** Current
-**Last updated:** 2026-09-05 03:20 EDT
+**Last updated:** 2026-10-15 13:28 EDT
 
 The Batchalign code lives inside the `talkbank-tools` Cargo workspace
-as sibling crates under `crates/`. There are no cross-repo path
-dependencies: parser, model, transform, and Batchalign all build from
-the same workspace.
+as sibling crates under `crates/`. Generic CHAT parser/model/transform crates
+come from the pinned published Chatter dependency; Batchalign-owned crates
+build in this workspace. Do not replace those pins with local path overrides.
 
 ```mermaid
 flowchart TD
@@ -66,7 +66,7 @@ cargo test -p batchalign --test cli_integration_suite integration::
 cargo xtask affected-rust packages
 
 # Python extension build
-uv run maturin develop -m crates/batchalign-pyo3/Cargo.toml -F pyo3/extension-module
+make batchalign-develop
 # or, for a full wheel install into the dev env:
 #   make batchalign-build-wheel && make batchalign-python-prepare
 cargo test --manifest-path crates/batchalign-pyo3/Cargo.toml

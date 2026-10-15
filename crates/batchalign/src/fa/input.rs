@@ -222,7 +222,7 @@ impl FaAdmission {
     /// success: the result is complete or partial as the census finds it.
     pub(super) fn complete_result(
         &self,
-        result: FaResult,
+        result: super::completion::WritableFaResult,
     ) -> Result<super::completion::FaCompletion, ServerError> {
         self.required_timing.admit(result)
     }
@@ -278,16 +278,12 @@ impl FaAdmission {
 
     /// Called only after complete checked output admission has succeeded.
     /// That admission includes E544: no outstanding linkage can reach writing.
-    pub(super) fn discharge(
-        self,
-        output: crate::pipeline::post_validate::PostValidated,
-    ) -> crate::pipeline::post_validate::PostValidated {
+    pub(super) fn discharge(self) {
         if let Some(outstanding) = self.pending_timing {
             tracing::debug!(header_span = ?outstanding.header_span,
                 origin = ?outstanding.origin,
                 "source timing obligation fulfilled by complete output admission");
         }
-        output
     }
 }
 

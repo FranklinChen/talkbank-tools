@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-10-04 08:44 EDT
+**Last updated:** 2026-10-15 13:28 EDT
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -83,6 +83,18 @@ when a fresh submission can transiently get `Connection refused`.
 
 **Purpose:** Add word-level and utterance-level time alignment to existing
 CHAT transcripts by running forced alignment against the corresponding audio.
+
+Word-timing completion describes durable `%wor` intervals, not working
+main-tier `Word.inline_bullet` fields. Without `%wor`, those fields do not
+certify word coverage: the output is diagnosed with its untimed-word account
+even if internal alignment evidence contains timings. Utterance bullets are
+not individual word intervals. This does not override `--nowor` or change the
+inherited `Options CA` suppression; see [CHAT options](chat-options.md).
+
+Later cosmetic transforms must preserve the admitted lexical/timing projection.
+An abbreviation merge that changes it is refused before writing, rather than
+publishing stale completion diagnostics. This is a tool-side output refusal,
+not a declaration that the submitted CHAT was invalid.
 
 | Aspect | Local CLI | Explicit remote `--server` |
 |--------|-----------|---------------------|
