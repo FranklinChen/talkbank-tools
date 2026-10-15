@@ -1,6 +1,5 @@
 """Freshness follows extension inputs, not unrelated server activity."""
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from scripts.check_extension_freshness import (
     assess,
     local_crate_directories,
 )
+from scripts.extension_build_evidence import CompletedBuild, artifact_digest
 
 
 def package(
@@ -63,17 +63,15 @@ def test_exact_boundary_and_missing_artifact_are_distinct(tmp_path: Path) -> Non
     source = tmp_path / "source.rs"
     artifact = tmp_path / "extension.so"
     source.touch()
-    inputs = ExtensionInputs((source,))
+    inputs = ExtensionInputs(tmp_path, (source,))
     with pytest.raises(FreshnessError):
         assess(artifact, inputs)
     artifact.touch()
-    for source_time, artifact_time, expected in [
-        (2, 1, StaleExtension),
-        (1, 1, CurrentExtension),
-    ]:
-        os.utime(source, ns=(source_time, source_time))
-        os.utime(artifact, ns=(artifact_time, artifact_time))
-        assert isinstance(assess(artifact, inputs), expected)
+    assert isinstance(assess(artifact, inputs), StaleExtension)
+    CompletedBuild.run(inputs.fingerprint, lambda: (artifact_digest(artifact),)).record(
+        tmp_path
+    )
+    assert isinstance(assess(artifact, inputs), CurrentExtension)
 
 
 def test_wheel_cleanup_is_cross_platform_and_keeps_non_extensions(
@@ -84,6 +82,12 @@ def test_wheel_cleanup_is_cross_platform_and_keeps_non_extensions(
     installed = tmp_path / "site-packages" / "batchalign_core.abi3.so"
     installed.parent.mkdir()
     installed.touch()
+    source = tmp_path / "source.rs"
+    source.touch()
+    inputs = ExtensionInputs(tmp_path, (source,))
+    CompletedBuild.run(
+        inputs.fingerprint, lambda: (artifact_digest(installed),)
+    ).record(tmp_path)
     for name in (
         "batchalign_core.abi3.so",
         "batchalign_core.cp313-win_amd64.pyd",
@@ -91,9 +95,7 @@ def test_wheel_cleanup_is_cross_platform_and_keeps_non_extensions(
     ):
         (directory / name).touch()
     removed = (
-        InstalledWheel(installed)
-        .require_current(ExtensionInputs((installed,)))
-        .clear_shadowing_extensions(tmp_path)
+        InstalledWheel(installed).require_current(inputs).clear_shadowing_extensions()
     )
     assert {path.suffix for path in removed} == {".so", ".pyd"}
     assert (directory / "__init__.py").exists()
@@ -105,10 +107,12 @@ def test_stale_wheel_has_no_cleanup_transition(tmp_path: Path) -> None:
     source = tmp_path / "changed.rs"
     artifact.touch()
     source.touch()
-    os.utime(artifact, ns=(1, 1))
-    os.utime(source, ns=(2, 2))
+    shadow = tmp_path / "batchalign_core" / "batchalign_core.abi3.so"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b"development copy")
     with pytest.raises(FreshnessError, match="no in-tree extensions removed"):
-        InstalledWheel(artifact).require_current(ExtensionInputs((source,)))
+        InstalledWheel(artifact).require_current(ExtensionInputs(tmp_path, (source,)))
+    assert shadow.read_bytes() == b"development copy"
 
 
 def test_development_install_cannot_authorize_wheel_cleanup(

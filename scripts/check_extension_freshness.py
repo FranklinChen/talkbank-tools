@@ -7,13 +7,21 @@ first admits an installed wheel, then removes only shadowing in-tree extensions.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
+import os
+import platform
+import sqlite3
 import subprocess
 import sys
+import sysconfig
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+
+from scripts.extension_build_evidence import InputFingerprint, has_build_evidence
 
 
 class FreshnessError(Exception):
@@ -47,22 +55,27 @@ class InstalledWheel:
         return cls(candidates[0])
 
     def require_current(self, inputs: ExtensionInputs) -> CurrentInstalledWheel:
-        verdict = assess(self.extension, inputs)
-        if isinstance(verdict, StaleExtension):
-            raise FreshnessError(
-                f"installed wheel is older than {verdict.newer_input}; no in-tree extensions removed"
-            )
-        return CurrentInstalledWheel(verdict.artifact)
+        return CurrentInstalledWheel(self, inputs)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CurrentInstalledWheel:
-    """Only a current wheel authorizes removal of shadowing development copies."""
+    """Cleanup is paired with the checkout whose inputs admitted the wheel."""
 
     extension: Path
+    root: Path
 
-    def clear_shadowing_extensions(self, root: Path) -> tuple[Path, ...]:
-        directory = root / "batchalign_core"
+    def __init__(self, wheel: InstalledWheel, inputs: ExtensionInputs) -> None:
+        verdict = assess(wheel.extension, inputs)
+        if isinstance(verdict, StaleExtension):
+            raise FreshnessError(
+                "installed wheel has no matching build evidence; no in-tree extensions removed"
+            )
+        object.__setattr__(self, "extension", verdict.artifact)
+        object.__setattr__(self, "root", inputs.root)
+
+    def clear_shadowing_extensions(self) -> tuple[Path, ...]:
+        directory = self.root / "batchalign_core"
         removed: list[Path] = []
         for path in directory.iterdir():
             if path.name.startswith("batchalign_core.") and path.suffix in (
@@ -158,6 +171,7 @@ def _run(root: Path, *argv: str) -> str:
 class ExtensionInputs:
     """A nonempty input selection issued from Cargo's local package graph."""
 
+    root: Path
     files: tuple[Path, ...]
 
     def __post_init__(self) -> None:
@@ -206,7 +220,53 @@ class ExtensionInputs:
                 files.add(path)
         if not files:
             raise FreshnessError("the extension has no inspectable inputs")
-        return cls(tuple(sorted(files)))
+        return cls(root, tuple(sorted(files)))
+
+    def fingerprint(self) -> InputFingerprint:
+        digest = hashlib.sha256()
+
+        def include(value: bytes) -> None:
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+
+        include(b"extension-build-evidence-v1")
+        for path in sorted(self.files):
+            include(path.relative_to(self.root).as_posix().encode())
+            # Retain deleted tracked inputs in the inventory, not a stat error.
+            include(b"file" if path.is_file() else b"missing")
+            if path.is_file():
+                include(path.read_bytes())
+        project = self.root / "pyproject.toml"
+        metadata = tomllib.loads(project.read_text()) if project.exists() else {}
+        build_settings = {
+            "backend": metadata.get("build-system"),
+            "maturin": metadata.get("tool", {}).get("maturin"),
+            "maturin_version": importlib.metadata.version("maturin"),
+            "python_abi": sysconfig.get_config_var("SOABI"),
+            "machine": platform.machine(),
+            "platform": sys.platform,
+            "rustc": _run(self.root, "rustc", "-vV"),
+            "environment": {
+                key: os.environ.get(key)
+                for key in (
+                    "RUSTFLAGS",
+                    "CARGO_ENCODED_RUSTFLAGS",
+                    "CARGO_BUILD_TARGET",
+                    "CARGO_TARGET_DIR",
+                    "RUSTUP_TOOLCHAIN",
+                    "PYO3_PYTHON",
+                    "PYO3_CONFIG_FILE",
+                    "MACOSX_DEPLOYMENT_TARGET",
+                    "CC",
+                    "CXX",
+                    "CFLAGS",
+                    "CXXFLAGS",
+                    "LDFLAGS",
+                )
+            },
+        }
+        include(json.dumps(build_settings, sort_keys=True).encode())
+        return InputFingerprint(digest.hexdigest())
 
 
 @dataclass(frozen=True)
@@ -217,7 +277,6 @@ class CurrentExtension:
 @dataclass(frozen=True)
 class StaleExtension:
     artifact: Path
-    newer_input: Path
 
 
 def assess(
@@ -225,10 +284,21 @@ def assess(
 ) -> CurrentExtension | StaleExtension:
     if not artifact.is_file():
         raise FreshnessError(f"the imported extension does not exist: {artifact}")
-    newest = max(inputs.files, key=lambda path: path.stat().st_mtime_ns)
-    if artifact.stat().st_mtime_ns < newest.stat().st_mtime_ns:
-        return StaleExtension(artifact, newest)
-    return CurrentExtension(artifact)
+    if has_build_evidence(inputs.root, inputs.fingerprint(), artifact):
+        return CurrentExtension(artifact)
+    return StaleExtension(artifact)
+
+
+def imported_extension(root: Path) -> Path:
+    resolved = _run(
+        root,
+        sys.executable,
+        "-c",
+        "import batchalign_core.batchalign_core as ext; print(ext.__file__)",
+    ).strip()
+    if not resolved:
+        raise FreshnessError("Python did not identify its imported extension")
+    return Path(resolved)
 
 
 def main() -> int:
@@ -237,27 +307,19 @@ def main() -> int:
         inputs = ExtensionInputs.inspect(root)
         if sys.argv[1:] == ["--prepare-wheel"]:
             wheel = InstalledWheel.inspect(root).require_current(inputs)
-            removed = wheel.clear_shadowing_extensions(root)
+            removed = wheel.clear_shadowing_extensions()
             print(
                 f"Removed {len(removed)} shadowing in-tree extension(s); wheel owns {wheel.extension}"
             )
         elif sys.argv[1:]:
             raise FreshnessError("only --prepare-wheel or no arguments are supported")
-        resolved = _run(
-            root,
-            sys.executable,
-            "-c",
-            "import batchalign_core.batchalign_core as ext; print(ext.__file__)",
-        ).strip()
-        if not resolved:
-            raise FreshnessError("Python did not identify its imported extension")
-        result = assess(Path(resolved), inputs)
+        result = assess(imported_extension(root), inputs)
         if isinstance(result, CurrentExtension):
             print(f"Current imported extension: {result.artifact}")
             return 0
         print(
-            f"ERROR: imported extension is older than its inputs:\n"
-            f"  artifact: {result.artifact}\n  newer input: {result.newer_input}",
+            "ERROR: imported extension has no successful build matching its "
+            f"content and current source/build inputs:\n  artifact: {result.artifact}",
             file=sys.stderr,
         )
     except (
@@ -266,6 +328,7 @@ def main() -> int:
         ValueError,
         OSError,
         importlib.metadata.PackageNotFoundError,
+        sqlite3.Error,
     ) as error:
         print(f"ERROR: cannot establish extension freshness: {error}", file=sys.stderr)
     print(

@@ -109,8 +109,8 @@ manifest-path = "crates/batchalign-pyo3/Cargo.toml"
 python-source = "."
 python-packages = ["batchalign"]
 features = ["pyo3/extension-module", "pyo3/abi3-py313"]
-# Use the debug profile for editable installs so `uv run <anything>` rebuilds
-# the extension in seconds rather than minutes. Release wheels for distribution
+# Use the debug profile for the explicit `make batchalign-develop` rebuild.
+# Bare `uv run` does not reliably notice Rust source edits. Distribution wheels
 # are built explicitly via `maturin build --release` in the GitHub Release
 # workflow (and the local release-wheel Make target), which overrides this
 # setting.

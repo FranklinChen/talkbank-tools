@@ -34,10 +34,11 @@ class HookExemption:
 
 @dataclass(frozen=True)
 class RecipeInvariantExemption:
-    """A skipped target whose recipe must retain a promised property."""
+    """A delegated build needs both its recipe and reached contract tests."""
 
     reason: str
     required_recipe_prefix: str
+    required_gate_target: str
 
 
 Exemption = HookExemption | RecipeInvariantExemption
@@ -77,8 +78,11 @@ EXEMPT: dict[str, Exemption] = {
     "batchalign-test-python": HookExemption("needs a built wheel"),
     "batchalign-python-prepare": HookExemption("builds the wheel these depend on"),
     "batchalign-build-wheel": RecipeInvariantExemption(
-        "maturin release build",
-        required_recipe_prefix="uv run --frozen --only-dev maturin build --release",
+        "producer-owned release build, exercised by the workflow contract deck",
+        required_recipe_prefix=(
+            "uv run --frozen --only-dev python -m scripts.build_python_extension wheel-release"
+        ),
+        required_gate_target="batchalign-dev-workflow-test",
     ),
     "batchalign-build-ci-wheel": HookExemption(
         "CI-only wheel requires the same-commit binary artifact"
@@ -205,12 +209,16 @@ def reachable(roots: set[str], recipes: dict[str, Recipe]) -> set[str]:
     return seen
 
 
-def invalid_exemption_invariants(recipes: dict[str, Recipe]) -> list[str]:
+def invalid_exemption_invariants(
+    recipes: dict[str, Recipe], gate_targets: set[str]
+) -> list[str]:
     """Return exemptions whose executable recipe no longer earns its reason.
 
     Whole-line comments are deliberately excluded and a real recipe line must
     start with the promised command. Otherwise a comment or `echo` can keep
     this gate green after the actual build regresses to a debug PEP 517 profile.
+    A producer wrapper also needs its real default-profile/backend contract
+    tests reached by the gate, not merely a plausible command in the recipe.
     """
     invalid: list[str] = []
     for target, exemption in EXEMPT.items():
@@ -225,6 +233,11 @@ def invalid_exemption_invariants(recipes: dict[str, Recipe]) -> list[str]:
             invalid.append(
                 f"make {target}: exemption requires executable recipe prefix "
                 f"{required!r}"
+            )
+        if exemption.required_gate_target not in gate_targets:
+            invalid.append(
+                f"make {target}: exemption requires gate coverage of "
+                f"{exemption.required_gate_target!r}"
             )
     return invalid
 
@@ -248,13 +261,6 @@ def main() -> int:
         return 2
 
     recipes = makefile_recipes()
-    invalid_invariants = invalid_exemption_invariants(recipes)
-    if invalid_invariants:
-        print("CI exemption invariants are false:", file=sys.stderr)
-        for invalid in invalid_invariants:
-            print(f"  {invalid}", file=sys.stderr)
-        return 1
-
     hook_roots = make_targets(GATE.read_text(encoding="utf-8")) & recipes.keys()
     if not hook_roots:
         print(
@@ -265,6 +271,13 @@ def main() -> int:
         )
         return 1
     hook_targets = reachable(hook_roots, recipes)
+
+    invalid_invariants = invalid_exemption_invariants(recipes, hook_targets)
+    if invalid_invariants:
+        print("CI exemption invariants are false:", file=sys.stderr)
+        for invalid in invalid_invariants:
+            print(f"  {invalid}", file=sys.stderr)
+        return 1
 
     missing: list[Uncovered] = []
     for workflow in sorted(WORKFLOWS.glob("*.yml")):

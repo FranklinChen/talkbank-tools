@@ -1,7 +1,7 @@
 # Maturin Build and PyO3 Dependency Surface
 
 **Status:** Current
-**Last updated:** 2026-10-15 13:28 EDT
+**Last updated:** 2026-10-15 15:25 EDT
 
 ## Overview
 
@@ -77,11 +77,7 @@ make batchalign-develop
 make batchalign-python-prepare
 
 # Release wheel for deployment
-cargo build --release -p batchalign --bin batchalign3
-cp target/release/batchalign3 batchalign/_bin/batchalign3
-uv run maturin build --release \
-    -m crates/batchalign-pyo3/Cargo.toml \
-    -F pyo3/extension-module --out dist/
+make batchalign-build-wheel
 
 # Check compilation without building wheel
 cargo check --manifest-path crates/batchalign-pyo3/Cargo.toml
@@ -111,6 +107,12 @@ cargo check --manifest-path crates/batchalign-pyo3/Cargo.toml
 Development and wheel qualification are different modes. See the
 [development install procedure](rust-core.md#development-installs).
 A bare `uv run` is not evidence that edited Rust was rebuilt.
+The supported recipes record extension hashes paired with unchanged build
+inputs; the read-only freshness check consumes that evidence. Cached Cargo
+output is valid even when its timestamp predates a checkout. A manual backend
+invocation does not issue this local evidence; prepare through the recipe before
+using the guarded Python test entry point. See
+[build ownership and freshness](building.md#rebuilding-the-rust-extension).
 
 After any dependency change to `crates/batchalign-pyo3/Cargo.toml`:
 

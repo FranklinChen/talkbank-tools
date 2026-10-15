@@ -59,5 +59,5 @@ def test_develop_recipe_provisions_before_building(
         assert result.returncode == 0, result.stderr
         assert (
             calls[1]
-            == "sync --frozen --group dev --no-build-isolation --reinstall-package batchalign3"
+            == "run --no-sync python -m scripts.build_python_extension editable"
         )

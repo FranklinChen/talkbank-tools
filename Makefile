@@ -156,16 +156,16 @@ batchalign-build-pyo3:
 batchalign-develop:
 	@echo "==> Provisioning locked tools and rebuilding the editable development install..."
 	uv sync --frozen --group dev --no-install-project
-	@# uv owns dependency selection; Maturin only builds. Force the editable
-	@# package rebuild because Python metadata alone does not track Rust edits.
-	uv sync --frozen --group dev --no-build-isolation --reinstall-package batchalign3
+	@# Explicit local-directory installation invokes the backend while retaining
+	@# Cargo's cache. Only that producer may record input/artifact build evidence.
+	uv run --no-sync python -m scripts.build_python_extension editable
 
 batchalign-test-python-dev: batchalign-develop
 	$(MAKE) _batchalign-test-python
 
 batchalign-dev-workflow-test:
-	uv run --no-sync python -m pytest tests/test_python_dev_workflow.py tests/test_extension_freshness.py tests/test_wheel_build_profile.py -n 0 --maxfail=0
-	uv run --no-sync mypy --strict --explicit-package-bases scripts/check_extension_freshness.py tests/test_extension_freshness.py tests/test_python_dev_workflow.py
+	uv run --no-sync python -m pytest tests/test_python_dev_workflow.py tests/test_extension_freshness.py tests/test_extension_build_evidence.py tests/test_build_python_extension.py tests/test_wheel_build_profile.py -n 0 --maxfail=0
+	uv run --no-sync mypy --strict --explicit-package-bases scripts/check_extension_freshness.py scripts/extension_build_evidence.py scripts/build_python_extension.py tests/test_extension_freshness.py tests/test_extension_build_evidence.py tests/test_build_python_extension.py tests/test_python_dev_workflow.py tests/test_wheel_build_profile.py
 
 BATCHALIGN_BUILD_PROFILE ?= release
 
@@ -202,15 +202,15 @@ batchalign-build-wheel:
 	rm -rf dist
 	mkdir -p dist
 	@# `pyproject.toml` deliberately keeps Maturin's dev profile for the fast
-	@# `maturin develop` loop. Optimized wheels must override it explicitly;
+	@# editable loop. Optimized wheels must override it explicitly;
 	@# PEP 517's `uv build` used that dev profile and shipped an unoptimized
 	@# batchalign_core extension even though the bundled CLI above was release.
 	@# `--only-dev` provisions Maturin from the frozen lock even in a fresh CI
 	@# checkout; `--no-sync` is invalid there because no tool exists to spawn.
 	@if [ "$(BATCHALIGN_BUILD_PROFILE)" = "dev" ]; then \
-	  uv run --frozen --only-dev maturin build --profile dev --out dist/; \
+	  uv run --frozen --only-dev python -m scripts.build_python_extension wheel-dev; \
 	else \
-	  uv run --frozen --only-dev maturin build --release --out dist/; \
+	  uv run --frozen --only-dev python -m scripts.build_python_extension wheel-release; \
 	fi
 
 # Push CI proves packaging and behavior with a development-profile extension.
@@ -226,7 +226,7 @@ batchalign-build-ci-wheel:
 	fi
 	rm -rf dist
 	mkdir -p dist
-	uv run --frozen --only-dev maturin build --out dist/
+	uv run --frozen --only-dev python -m scripts.build_python_extension wheel-dev
 
 batchalign-python-prepare: batchalign-build-wheel
 	@echo "==> Syncing imported Batchalign dev dependencies..."
@@ -235,14 +235,14 @@ batchalign-python-prepare: batchalign-build-wheel
 	uv pip install --reinstall --no-deps dist/*.whl
 	@# Admit the wheel's installed extension before removing older in-tree
 	@# copies (.so or .pyd); then verify what Python will actually import.
-	uv run --no-sync python scripts/check_extension_freshness.py --prepare-wheel
+	uv run --no-sync python -m scripts.check_extension_freshness --prepare-wheel
 
 _batchalign-test-python:
-	@# Proves the invariant rather than assuming it: resolves the extension
-	@# Python will actually import and refuses if it is older than the Rust it
-	@# is built from. Covers both install modes and the no-extension case, so
-	@# it holds whether you came via batchalign-python-prepare or maturin
-	@# develop. Fails closed.
+	@# Resolves the extension Python will actually import and requires a
+	@# successful build pairing its bytes with the current source/build inputs.
+	@# Both install modes consume producer-recorded content
+	@# evidence; timestamps, a missing extension or an unrecorded manual build
+	@# cannot certify freshness. This check never builds or installs.
 	@echo "==> Checking the extension Python will import is current..."
 	bash scripts/check_extension_freshness.sh
 	@echo "==> Running imported Batchalign Python tests..."

@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-10-15 13:28 EDT
+**Last updated:** 2026-10-15 15:25 EDT
 
 For new contributors, start with:
 
@@ -143,13 +143,17 @@ make batchalign-python-prepare
 This depends on `batchalign-build-wheel`, which rebuilds the native
 `batchalign3` binary in release mode, copies it into
 `batchalign/_bin/`, and produces a maturin-built wheel via `uv
-run --frozen --only-dev maturin build --release`. The prepare target then runs
+run --frozen --only-dev python -m scripts.build_python_extension wheel-release`,
+whose producer invokes Maturin and records the extension content. The prepare
+target then runs
 `uv sync --frozen --group dev
 --no-install-project` and `uv pip install --reinstall --no-deps
 dist/*.whl` to install the freshly built wheel into the active `uv` environment.
 Before clearing shadowing in-tree `.so`/`.pyd` copies, it requires an installed
-wheel manifest naming an existing extension. An editable install cannot grant
-that cleanup authority. Import readback then verifies which extension will run.
+wheel manifest naming an existing extension with matching source/build-input
+and artifact-content evidence. An editable or unrecorded install cannot grant
+that checkout-bound cleanup authority. Import readback then verifies which
+extension will run.
 
 ## Development installs
 
@@ -168,10 +172,15 @@ remains wheel-based qualification.
 
 The portable freshness check follows Cargo's local normal/build dependency
 closure, including shared crates and new untracked files, rather than unrelated
-server code. It is a timestamp-based stale-code diagnostic, not an exact-source
-attestation or release qualification. Changes to Maturin features/profile or
-Python ABI require preparing the intended mode afresh; packaging-only metadata
-edits do not make an unchanged Rust library stale.
+server code. A successful producer over unchanged inputs records content hashes
+in ignored `target/python-extension-builds.sqlite3`; the check only consumes
+them. Cached output remains current after checkout mtime changes, while changed
+source or substituted extension bytes are refused regardless of timestamps.
+Maturin settings/version, Python ABI, compiler identity and selected build
+environment also contribute to the fingerprint. This is local build freshness,
+not release qualification or installed-runtime attestation. Missing evidence
+requires preparing the intended mode; packaging-only metadata outside build
+settings does not make an unchanged Rust library stale.
 
 If you also plan to run the standalone Rust CLI directly after a
 shared-crate change, rebuild that binary too:

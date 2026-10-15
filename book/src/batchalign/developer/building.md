@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-10-03 18:35 EDT
+**Last updated:** 2026-10-15 15:45 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -41,9 +41,15 @@ make build
 ```
 
 `make build` rebuilds the embedded dashboard, then runs `cargo build
---workspace --release`, which compiles every Rust crate (including the
-PyO3 bridge `batchalign-pyo3`). For PyO3-specific work, the dedicated
-target is:
+--workspace --release`. Compiling the PyO3 crate does not install the extension
+Python will import. For day-to-day Python/Rust work, use:
+
+```bash
+make batchalign-develop           # frozen dependencies + editable backend build
+make batchalign-test-python-dev BATCHALIGN_PYTEST_ARGS="PATH -n 0"
+```
+
+For installed-wheel qualification instead:
 
 ```bash
 make batchalign-build-wheel       # build the maturin wheel
@@ -64,6 +70,12 @@ A failed native compilation stops packaging before an older binary can be
 copied into the wheel. The development profile is not suitable for performance
 benchmarks or release distribution; source/runtime identity checks remain
 necessary in either profile.
+
+The publication coverage audit admits the delegated wheel recipe only when it
+calls the release producer and the local gate reaches the workflow contract
+deck. That deck checks the default release selection, explicit profiles and
+the backend's actual Maturin arguments without compiling a release wheel.
+It is not optimized-artifact or installed-runtime qualification.
 
 `uv run batchalign3` then uses the installed wheel. Most contributors
 skip the wheel step and rely on the dev fallback in
@@ -111,16 +123,17 @@ sync:
 | --- | --- |
 | Python code only (`batchalign/`) | Nothing; the next worker process picks up the change |
 | Rust CLI / server (`crates/batchalign/`) | `cargo build -p batchalign` |
-| Shared chat logic (any `crates/`) or PyO3 bridge (`crates/batchalign-pyo3/`) | `make batchalign-python-prepare` (rebuilds the maturin wheel and reinstalls it into the dev env). For the fastest CLI loop, also build the CLI once (`cargo build -p batchalign`) so the wrapper can fall back to `target/debug/batchalign3`. |
+| Shared logic feeding the PyO3 bridge, or the bridge itself (`crates/batchalign-pyo3/`) | `make batchalign-develop` for editable iteration; `make batchalign-python-prepare` for wheel qualification. Also rebuild the CLI if you will run it after a shared-crate change. |
 | Command/orchestrator changes (`crates/batchalign/src/commands/`, `compare.rs`, `benchmark.rs`, `transcribe/`, `fa/`, `morphosyntax/`, `command_family.rs`, `text_batch.rs`) | `cargo build -p batchalign`, and `make batchalign-python-prepare` if the PyO3 bridge surface changed |
 | Cross-cutting or dashboard changes | `make build` (requires Node.js + npm because it rebuilds the embedded dashboard, then runs `cargo build --workspace --release`) |
 
 ## Rebuilding the Rust Extension
 
 The `batchalign_core` Python package is a PyO3 Rust extension built by
-maturin. The repo-native rebuild path is:
+maturin. Use the producer-owned paths:
 
 ```bash
+make batchalign-develop           # fast editable development mode
 make batchalign-build-wheel       # build the maturin wheel
 make batchalign-python-prepare    # depends on batchalign-build-wheel; reinstalls into the dev env
 ```
@@ -135,6 +148,25 @@ during iteration.
 To exercise the installed-package experience locally, use the wheel or prepare
 target with an explicit profile. The recipe builds and stages the matching
 CLI itself; manually copying a separate binary is unnecessary.
+
+`uv run` alone does not reliably detect Rust source changes. The editable
+recipe explicitly reinstalls the local project through uv/Maturin while
+preserving Cargo's incremental cache. After a successful build with unchanged
+inputs, the producer records source/build-input and extension-content hashes
+in ignored `target/python-extension-builds.sqlite3`.
+
+The read-only `bash scripts/check_extension_freshness.sh` resolves the actual
+import and requires that pairing. It follows Cargo's local normal/build
+dependency closure, new untracked inputs, workspace configuration, Maturin
+settings/version, Python ABI and selected compiler environment. Unrelated
+server edits do not invalidate the bridge. Mtime churn alone does not make
+cached output stale; changed content does, even with backdated timestamps.
+
+Missing evidence is not proof of bad bytes, but requires preparing the intended
+mode. A check cannot manufacture evidence. Wheel preparation admits the
+installed wheel's exact extension before removing shadowing in-tree `.so` or
+`.pyd` copies. The evidence is local developer freshness, not a security
+attestation, optimized-profile qualification or installed-server identity.
 
 ## CLI Binary Packaging (`batchalign/_bin/`)
 
@@ -161,10 +193,10 @@ binary. It searches three locations in order:
 The binary is a 50+ MB platform-specific build artifact, it must not be
 tracked in git. Instead:
 
-- **Locally:** copy `target/release/batchalign3` (or `target/debug/batchalign3`)
-  into `batchalign/_bin/` before running `make batchalign-python-prepare`
-  if you need the installed-package experience. Most developers skip this and
-  rely on the dev-checkout fallback (`target/debug/batchalign3`).
+- **Locally:** `make batchalign-python-prepare` builds and stages the matching
+  binary itself; do not copy a separate one manually. Editable development can
+  use the dev-checkout fallback when no packaged binary is present. If a
+  packaged binary exists, it takes precedence over that fallback.
 - **CI:** A dedicated `build-cli` job compiles a development-profile CLI
   once and uploads it as an artifact. One development ABI3 wheel packages
   that binary, and the Python-version matrix installs the same wheel.

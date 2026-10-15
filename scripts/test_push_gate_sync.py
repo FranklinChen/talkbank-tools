@@ -12,6 +12,32 @@ from check_push_gate_sync import make_targets, makefile_recipes, reachable
 
 
 class CoverageEvidenceTests(unittest.TestCase):
+    def test_delegated_release_needs_command_and_reached_contract_tests(self):
+        command = (
+            "uv run --frozen --only-dev python -m "
+            "scripts.build_python_extension wheel-release"
+        )
+        exemption = checker.RecipeInvariantExemption(
+            "delegated optimized build", command, "workflow-contract"
+        )
+        for recipe, gate_targets, valid in [
+            (command, {"workflow-contract"}, True),
+            (command, set(), False),
+            (f"# {command}", {"workflow-contract"}, False),
+            (f'echo "{command}"', {"workflow-contract"}, False),
+            (
+                command.replace("wheel-release", "wheel-dev"),
+                {"workflow-contract"},
+                False,
+            ),
+            ("uv build", {"workflow-contract"}, False),
+        ]:
+            with self.subTest(recipe=recipe, gate_targets=gate_targets):
+                recipes = makefile_recipes(f"wheel:\n\t{recipe}\n")
+                with patch.object(checker, "EXEMPT", {"wheel": exemption}):
+                    errors = checker.invalid_exemption_invariants(recipes, gate_targets)
+                self.assertEqual(not errors, valid)
+
     def test_checker_refuses_ci_target_mentioned_only_in_prose(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

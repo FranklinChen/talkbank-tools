@@ -9,7 +9,7 @@ import pytest
 
 
 def wheel_recipe(
-    tmp_path: Path, profile: str, *, cargo_code: int = 0
+    tmp_path: Path, profile: str | None, *, cargo_code: int = 0
 ) -> subprocess.CompletedProcess[str]:
     tools = tmp_path / "tools"
     tools.mkdir()
@@ -48,7 +48,7 @@ printf '%s\\n' "$*" >> uv.log
             "-f",
             str(Path(__file__).resolve().parents[1] / "Makefile"),
             "batchalign-build-wheel",
-            f"BATCHALIGN_BUILD_PROFILE={profile}",
+            *([f"BATCHALIGN_BUILD_PROFILE={profile}"] if profile is not None else []),
         ],
         cwd=tmp_path,
         env=environment,
@@ -58,22 +58,25 @@ printf '%s\\n' "$*" >> uv.log
     )
 
 
-@pytest.mark.parametrize("profile", ["release", "dev"])
+@pytest.mark.parametrize(
+    ("profile", "expected"), [(None, "release"), ("release", "release"), ("dev", "dev")]
+)
 def test_native_binary_and_extension_use_the_same_profile(
-    tmp_path: Path, profile: str
+    tmp_path: Path, profile: str | None, expected: str
 ) -> None:
     result = wheel_recipe(tmp_path, profile)
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "batchalign/_bin/batchalign3").read_text() == f"native-{profile}"
     assert (
-        f"build --profile {profile} -p batchalign"
+        tmp_path / "batchalign/_bin/batchalign3"
+    ).read_text() == f"native-{expected}"
+    assert (
+        f"build --profile {expected} -p batchalign"
         in (tmp_path / "cargo.log").read_text()
     )
     wheel_args = (tmp_path / "uv.log").read_text()
     assert (
-        "maturin build --profile dev" in wheel_args
-        if profile == "dev"
-        else "maturin build --release" in wheel_args
+        f"run --frozen --only-dev python -m scripts.build_python_extension wheel-{expected}"
+        in wheel_args
     )
 
 

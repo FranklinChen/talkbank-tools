@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-10-06 21:07 EDT
+**Last updated:** 2026-10-15 15:25 EDT
 
 ## Philosophy
 
@@ -612,15 +612,34 @@ uv run pytest batchalign/tests/test_batch_infer_dispatch.py -v  # Specific file
 ```
 
 If you changed `crates/batchalign-pyo3/` or shared Rust crates that feed `batchalign_core`,
-rebuild the extension before running Python tests that import it. The
-maturin build backend declared in `pyproject.toml` (`build-backend =
-"maturin"`, `[tool.maturin]` block) means `uv run <anything>` does an
-incremental rebuild on demand. For a clean wheel install of the freshly
-built extension into the dev environment:
+prepare the intended install mode before running Python tests that import it.
+Maturin is the build backend, but bare `uv run` does not reliably notice Rust
+edits. Editable iteration explicitly invokes the backend through uv, preserving
+Cargo's cache:
+
+```bash
+make batchalign-test-python-dev BATCHALIGN_PYTEST_ARGS="PATH -n 0"
+# Further selections can reuse that preparation while inputs remain unchanged:
+make _batchalign-test-python BATCHALIGN_PYTEST_ARGS="OTHER_PATH -n 0"
+```
+
+For wheel qualification:
 
 ```bash
 make batchalign-python-prepare
+make _batchalign-test-python BATCHALIGN_PYTEST_ARGS="PATH -n 0"
 ```
+
+Both test entry points verify the actual imported extension against content-bound
+evidence from a successful producer. The check is read-only: it neither builds
+nor certifies arbitrary installed bytes. File timestamps do not establish
+freshness. Source/build configuration changes require preparation again; the
+local receipt is not runtime/deployment acceptance. See
+[building](building.md#rebuilding-the-rust-extension).
+
+`make batchalign-dev-workflow-test` exercises the editable/wheel recipe,
+subprocess, producer-failure, input-race and cleanup boundaries without model
+execution, then type-checks the workflow modules and their tests.
 
 ### Test doubles
 
