@@ -67,18 +67,20 @@ def test_qwen_recognizer_transcribe_produces_word_timestamps() -> None:
     audio = _integration_audio()
     assert audio is not None  # narrows for type checker; skipif already guards
 
-    from batchalign.inference.languages.cantonese._qwen_common import QwenRecognizer
+    from batchalign.inference.languages.cantonese._qwen_common import (
+        QwenRecognizerConfig,
+    )
 
-    recognizer = QwenRecognizer(
+    config = QwenRecognizerConfig(
         lang="yue",
         model_id="Qwen/Qwen3-ASR-0.6B-hf",
         device="cpu",
     )
-    recognizer.warm()
+    recognizer = config.load()
     _payload, timed_words = recognizer.transcribe(str(audio))
 
     assert timed_words, (
-        "QwenRecognizer.transcribe returned zero timed words on real "
+        "ReadyQwenRecognizer.transcribe returned zero timed words on real "
         "Cantonese audio. Either the aligner produced nothing or the audio "
         "is silent. Inspect the raw output before changing this assertion."
     )

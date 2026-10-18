@@ -1,4 +1,4 @@
-"""`QwenRecognizer._run_model` must classify a chunk's decode outcome BEFORE
+"""`ReadyQwenRecognizer._run_model` must classify a chunk's decode outcome BEFORE
 deciding whether its text counts as "no speech".
 
 Origin: `_run_model` used to check `if not text.strip(): continue` before
@@ -10,7 +10,7 @@ never reached `refused`, `QwenTranscription`, or the log line downstream of
 it. `detect_runaway` must run first; only a `Completed` outcome with empty
 text is legitimate silence.
 
-No model: `_get_model`, `_transcribe_chunk`, and the audio load are stubbed,
+No model: The loaded models, `_transcribe_chunk`, and the audio load are stubbed,
 so this exercises the loop's control flow alone.
 """
 
@@ -31,8 +31,11 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
 
 
 def _stub_recognizer(monkeypatch: pytest.MonkeyPatch, chunk_seconds: float = 1.0):
-    recognizer = qwen_common.QwenRecognizer(
-        lang="yue", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
+    recognizer = qwen_common.ReadyQwenRecognizer(
+        qwen_common.QwenRecognizerConfig(
+            lang="yue", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
+        ),
+        qwen_common.LoadedQwen(processor=object(), model=object(), aligner=object()),
     )
     fake_chunk = AudioChunk(
         samples=np.zeros(int(chunk_seconds * SAMPLE_RATE), dtype=np.float32), offset=0.0
@@ -40,7 +43,6 @@ def _stub_recognizer(monkeypatch: pytest.MonkeyPatch, chunk_seconds: float = 1.0
     monkeypatch.setattr(
         qwen_common, "split_audio_into_chunks", lambda wav: [fake_chunk]
     )
-    monkeypatch.setattr(recognizer, "_get_model", lambda: object())
 
     import librosa
 
@@ -60,9 +62,9 @@ def test_a_bounded_deadline_chunk_with_no_text_still_lands_in_refused(
 ) -> None:
     recognizer = _stub_recognizer(monkeypatch)
     monkeypatch.setattr(
-        recognizer,
+        qwen_common.ReadyQwenRecognizer,
         "_transcribe_chunk",
-        lambda loaded, chunk, budget: Bounded(reason=BoundReason.DEADLINE, text=""),
+        lambda self, chunk, budget: Bounded(reason=BoundReason.DEADLINE, text=""),
     )
 
     result = recognizer._run_model("fake.wav")
@@ -79,9 +81,9 @@ def test_a_completed_outcome_with_no_text_is_ordinary_silence_not_a_refusal(
     stopped on its own and simply had nothing to say."""
     recognizer = _stub_recognizer(monkeypatch)
     monkeypatch.setattr(
-        recognizer,
+        qwen_common.ReadyQwenRecognizer,
         "_transcribe_chunk",
-        lambda loaded, chunk, budget: Completed(text="   "),
+        lambda self, chunk, budget: Completed(text="   "),
     )
 
     result = recognizer._run_model("fake.wav")

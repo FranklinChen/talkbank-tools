@@ -15,6 +15,11 @@ backend covers it. Whisper emits digits, the validator rejects them,
 the postprocess pipeline silently passes them through. This page
 exists to prevent that class of mistake.
 
+The [Qwen Taiwanese route](qwen-recognition.md) illustrates separate recognition,
+alignment and segmentation admission. Preserve the requested language even
+when a model needs a broader label; support in one command does not imply
+support in the others.
+
 ## Pre-flight: capability matrix
 
 For every new language, fill in this table **before writing any code**.

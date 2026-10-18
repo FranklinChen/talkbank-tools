@@ -429,7 +429,7 @@ def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> Non
 
 
 def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
-    """If ``QwenRecognizer.warm()`` hangs (model download/load stuck
+    """If ``QwenRecognizerConfig.load()`` hangs (model download/load stuck
     in the qwen-asr package's ``from_pretrained`` call), the loader
     must raise ``TimeoutError`` within the configured timeout, not
     sit silently at 0% CPU for hours.
@@ -452,7 +452,7 @@ def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
     hang_invocations: list[int] = []
 
     def hang_warm(self) -> None:
-        """Simulate the production hang: ``warm()`` never returns."""
+        """Simulate the production hang: ``load()`` never returns."""
         hang_invocations.append(1)
         # Sleep longer than the configured timeout. If the loader
         # honours the timeout, the test takes ~1 second; if it
@@ -461,7 +461,7 @@ def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
         time.sleep(10)
 
     monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._qwen_common.QwenRecognizer.warm",
+        "batchalign.inference.languages.cantonese._qwen_common.QwenRecognizerConfig.load",
         hang_warm,
     )
 
@@ -470,12 +470,12 @@ def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
         _qwen_asr.load_qwen_asr("yue", {"qwen_model": "Qwen/Qwen3-ASR-0.6B-hf"})
     elapsed = time.monotonic() - start
 
-    assert hang_invocations == [1], "warm() should have been entered exactly once"
+    assert hang_invocations == [1], "load() should have been entered exactly once"
     # The timeout must fire fast (1 s configured + a small handler
     # delivery slack). If we took anywhere near the 10 s sleep the
     # interrupt mechanism is broken.
     assert elapsed < 5.0, (
         f"Qwen loader did not honour the {_qwen_asr._QWEN_LOAD_TIMEOUT_SECONDS}s "
         f"timeout: elapsed {elapsed:.2f}s; expected <5s. The signal-based "
-        f"alarm is not interrupting ``warm()`` as designed."
+        f"alarm is not interrupting ``load()`` as designed."
     )

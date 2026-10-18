@@ -24,12 +24,12 @@ from batchalign.worker._types import (
 
 from ._asr_types import admit_provider_monologues
 from ._common import EngineOverrides, ProviderNotLoaded, answer_asr_batch
-from ._qwen_common import QwenRecognizer
+from ._qwen_common import QwenRecognizerConfig, ReadyQwenRecognizer
 
 L = logging.getLogger("batchalign.hk.qwen_asr")
 
 
-# Wall-clock timeout for ``QwenRecognizer.warm()``, the call that
+# Wall-clock timeout for ``QwenRecognizerConfig.load()``, the call that
 # resolves into ``Qwen3ASRModel.from_pretrained(...)`` in the
 # ``qwen-asr`` package. That call is a single blocking import-and-load
 # with no upstream progress callbacks; on 2026-05-27 it was observed to
@@ -48,9 +48,9 @@ _QWEN_LOAD_TIMEOUT_SECONDS: int = int(
 
 
 def _raise_qwen_load_timeout(_signum: int, _frame: object) -> NoReturn:
-    """SIGALRM handler installed during ``QwenRecognizer.warm()``.
+    """SIGALRM handler installed during ``QwenRecognizerConfig.load()``.
 
-    Raises a typed ``TimeoutError`` that propagates out of ``warm()``
+    Raises a typed ``TimeoutError`` that propagates out of ``load()``
     naturally: Python signal handlers run between bytecodes, so
     ``Qwen3ASRModel.from_pretrained``'s pure-Python sections will
     surface the exception promptly. C-extension blocks (libtorch,
@@ -74,7 +74,7 @@ def _raise_qwen_load_timeout(_signum: int, _frame: object) -> NoReturn:
 # Module-level state
 # ---------------------------------------------------------------------------
 
-_recognizer: QwenRecognizer | None = None
+_recognizer: ReadyQwenRecognizer | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,11 @@ def load_qwen_asr(
       unusable for this model: measured 2026-08-20 to be SIGKILLed on
       long audio and to segfault at load in float16).
 
-    Eager-warms the model at the end of bootstrap so the first
+    - ``qwen_context``: optional recognizer context/hotwords. An empty string
+      explicitly supplies no context, matching the default. The exact
+      value remains in the submitted job options; it does not relabel language.
+
+    Eager-loads the model at the end of bootstrap so the first
     inference request sees a warm cache. The worker bootstrap
     already selected this engine; requests will come.
     """
@@ -120,12 +124,13 @@ def load_qwen_asr(
     # materialized at the revisions the control plane pinned. The ids stay for
     # the checkpoint check and the log line; the paths are what actually load,
     # so a hub repository that moved cannot change what this worker runs.
-    recognizer = QwenRecognizer(
+    config = QwenRecognizerConfig(
         lang=lang,
         model_id=model_id,
         device=device,
         model_path=model_path,
         aligner_path=aligner_path,
+        context_override=(engine_overrides or {}).get("qwen_context"),
     )
 
     # Surface the model-load event to every UI channel per the
@@ -141,7 +146,7 @@ def load_qwen_asr(
         ),
     )
 
-    # Bracket ``warm()`` with a SIGALRM-based timeout. See
+    # Bracket the loading transition with a SIGALRM-based timeout. See
     # ``_raise_qwen_load_timeout`` for the rationale; the short version
     # is that the qwen-asr package's first-use code path is known to
     # hang silently, and the worker MUST exit loudly on that hang so
@@ -149,7 +154,7 @@ def load_qwen_asr(
     old_handler = signal.signal(signal.SIGALRM, _raise_qwen_load_timeout)
     signal.alarm(_QWEN_LOAD_TIMEOUT_SECONDS)
     try:
-        recognizer.warm()
+        recognizer = config.load()
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)

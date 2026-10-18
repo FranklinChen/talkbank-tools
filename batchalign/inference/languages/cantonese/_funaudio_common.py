@@ -104,7 +104,7 @@ class FunAudioRecognizer:
         another download is happening.
 
         Per AGENTS.md §11 time-transparency rule; mirrors the eager
-        ``warm()`` pattern in ``_qwen_common.QwenRecognizer`` but
+        eager-loading pattern in ``_qwen_common.QwenRecognizerConfig`` but
         without the eager-call-at-bootstrap shape because FunASR's
         worker bootstrap is deliberately lazy. Late binding of
         ``emit_download_event`` (import inside the function) keeps the

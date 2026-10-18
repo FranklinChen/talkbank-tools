@@ -1,4 +1,4 @@
-"""`QwenRecognizer._transcribe_chunk` classifies its own decode outcome.
+"""`ReadyQwenRecognizer._transcribe_chunk` classifies its own decode outcome.
 
 No real model: `loaded.processor` and `loaded.model` are fakes, so
 `generate` never runs actual inference. What is under test is the
@@ -44,10 +44,18 @@ def _has_torch() -> bool:
 pytestmark = pytest.mark.skipif(not _has_torch(), reason="torch not installed")
 
 
-def _recognizer():
-    from batchalign.inference.languages.cantonese._qwen_common import QwenRecognizer
+def _recognizer(loaded):
+    from batchalign.inference.languages.cantonese._qwen_common import (
+        QwenRecognizerConfig,
+        ReadyQwenRecognizer,
+    )
 
-    return QwenRecognizer(lang="yue", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu")
+    return ReadyQwenRecognizer(
+        QwenRecognizerConfig(
+            lang="yue", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
+        ),
+        loaded,
+    )
 
 
 def _budget_for(chunk: AudioChunk) -> ChunkDecodeBudget:
@@ -145,7 +153,7 @@ def test_a_generate_that_fills_its_token_budget_is_bounded_by_the_token_cap() ->
         processor=_FakeProcessor(prompt_len),
     )
 
-    outcome = _recognizer()._transcribe_chunk(loaded, chunk, budget)
+    outcome = _recognizer(loaded)._transcribe_chunk(chunk, budget)
 
     assert isinstance(outcome, Bounded)
     assert outcome.reason is BoundReason.TOKEN_CAP
@@ -174,7 +182,7 @@ def test_a_generate_whose_deadline_criterion_fires_is_bounded_by_the_deadline() 
         processor=_FakeProcessor(prompt_len),
     )
 
-    outcome = _recognizer()._transcribe_chunk(loaded, chunk, budget)
+    outcome = _recognizer(loaded)._transcribe_chunk(chunk, budget)
 
     assert isinstance(outcome, Bounded)
     assert outcome.reason is BoundReason.DEADLINE
@@ -194,7 +202,7 @@ def test_a_generate_that_stops_early_within_budget_is_completed() -> None:
         processor=_FakeProcessor(prompt_len),
     )
 
-    outcome = _recognizer()._transcribe_chunk(loaded, chunk, budget)
+    outcome = _recognizer(loaded)._transcribe_chunk(chunk, budget)
 
     assert isinstance(outcome, Completed)
     assert outcome.text == "x" * (budget.max_new_tokens - 1)

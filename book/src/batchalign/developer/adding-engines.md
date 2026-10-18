@@ -15,6 +15,9 @@ algorithmic or orchestration logic in the owning Rust module. Engine work should
 support that Rust-owned command flow; it should not define the command shape on
 its own. See [Adding a New Command](./adding-commands.md).
 
+For a concrete implementation of configuration-to-ready loading and validated
+alignment, see [Qwen Recognition States and Timing](qwen-recognition.md).
+
 ## Choose the layer first
 
 There are two different things you might be adding:

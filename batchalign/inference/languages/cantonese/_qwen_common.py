@@ -1,9 +1,9 @@
 """Qwen3-ASR helpers for the built-in Cantonese engine.
 
-Drives ``transformers``' native ``qwen3_asr`` module directly. Mirrors the
-``_funaudio_common.FunAudioRecognizer`` shape so the worker bootstrap can swap
-engines uniformly. The actual model load is deferred until first inference
-call, which keeps worker startup bounded when no Qwen jobs are dispatched.
+Drives ``transformers``' native ``qwen3_asr`` module directly. Worker loading
+transitions validated ``QwenRecognizerConfig`` into ``ReadyQwenRecognizer``
+before publishing the inference capability. Both recognition and alignment
+models are loaded before the first inference call.
 
 Engine selection rationale: Qwen3-ASR is an open-weight Cantonese-capable ASR
 model from Alibaba. It is wired here as one engine option among several.
@@ -35,14 +35,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from batchalign.inference._domain_types import LanguageCode
+from batchalign.inference.qwen_asr_profile import QwenAsrProfile
 from batchalign.inference.qwen_forced_alignment import (
     QWEN_FORCED_ALIGNER_MODEL_ID,
     ForcedAligner,
     QwenForcedAligner,
-    QwenLanguageLabel,
     SpokenWindowWords,
-    resolve_qwen_language,
 )
+from batchalign.inference.qwen_punctuation import PunctuatedAlignment
 
 from ._asr_types import (
     AsrElement,
@@ -178,7 +178,7 @@ class _RecordingMaxTimeCriteria:
     ``StoppingCriteriaList`` ORs together every criterion's per-row bool
     tensor and hands the caller only the combined result, so nothing in that
     protocol tells a caller afterward WHICH criterion fired. Recording it
-    here is what lets ``QwenRecognizer._transcribe_chunk`` classify a
+    here is what lets ``ReadyQwenRecognizer._transcribe_chunk`` classify a
     ``Bounded`` decode from the criterion's OWN fact, rather than
     re-deriving "did the deadline fire" from a wall-clock measurement taken
     outside ``generate`` that could, in principle, disagree with what the
@@ -213,57 +213,32 @@ class _RecordingMaxTimeCriteria:
         return is_done
 
 
-class QwenRecognizer:
-    """Wrapper around Qwen3-ASR model invocation.
+@dataclass(frozen=True, slots=True)
+class QwenRecognizerConfig:
+    """Validated configuration; it has no inference operation or partial model.
 
-    The transcribe API returns a typed ``AsrGenerationPayload`` +
-    timed-words list, matching the contract the BA3 worker protocol
-    expects. Projection from per-utterance results to speaker-tagged
-    monologues is done locally in Python (single-speaker for now;
-    Qwen3-ASR doesn't emit speaker diarization).
-
-    For multi-speaker audio, the downstream BA3 pipeline applies
-    diarization separately: Qwen3-ASR's role here is the
-    speech-to-character transcription only. This matches how
-    BA3 currently uses other diarization-free ASR engines.
+    Loading returns a different type that owns both models and this exact
+    language profile. A failed load cannot leave a half-ready recognizer.
     """
 
-    def __init__(
-        self,
-        lang: LanguageCode = "yue",
-        model_id: str = "Qwen/Qwen3-ASR-1.7B-hf",
-        device: str = "cpu",
-        *,
-        model_path: str | None = None,
-        aligner_path: str | None = None,
-    ) -> None:
-        self.lang = lang
-        self.model_id = model_id
-        self.device = device
-        # Where the weights actually come from. ``None`` means "resolve the id
-        # yourself", which is the direct-caller path; the worker passes
-        # snapshots it already materialized at the pinned revisions. Kept
-        # separate from ``model_id`` so the checkpoint check and the log line
-        # still name the model rather than a cache path.
-        self.model_path = model_path
-        self.aligner_path = aligner_path
-        self._model: LoadedQwen | None = None
-        # Both resolved at construction so an unsupported language or a
-        # stale checkpoint id surfaces at worker startup rather than on the
-        # first inference request, minutes into a job.
-        _check_native_checkpoint(model_id)
-        self._qwen_language: QwenLanguageLabel = resolve_qwen_language(lang)
+    lang: LanguageCode = "yue"
+    model_id: str = "Qwen/Qwen3-ASR-1.7B-hf"
+    device: str = "cpu"
+    model_path: str | None = None
+    aligner_path: str | None = None
+    context_override: str | None = None
+    profile: QwenAsrProfile = field(init=False)
 
-    def warm(self) -> None:
-        """Force the lazy model load. Call at worker bootstrap so the
-        first inference request sees a warm cache, not a ~3.4 GB
-        download + load delay."""
-        self._get_model()
+    def __post_init__(self) -> None:
+        _check_native_checkpoint(self.model_id)
+        object.__setattr__(
+            self,
+            "profile",
+            QwenAsrProfile.for_language(self.lang, self.context_override),
+        )
 
-    def _get_model(self) -> LoadedQwen:
-        if self._model is not None:
-            return self._model
-
+    def load(self) -> ReadyQwenRecognizer:
+        """Transition from validated configuration to inference-ready state."""
         try:
             import torch  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -289,7 +264,7 @@ class QwenRecognizer:
         else:
             dtype = torch.float32
 
-        self._model = LoadedQwen.load(
+        models = LoadedQwen.load(
             model_id=self.model_path or self.model_id,
             aligner_id=self.aligner_path or QWEN_FORCED_ALIGNER_MODEL_ID,
             device=self.device,
@@ -300,14 +275,26 @@ class QwenRecognizer:
             self.model_id,
             QWEN_FORCED_ALIGNER_MODEL_ID,
             self.lang,
-            self._qwen_language,
+            self.profile.recognition_language,
             self.device,
             dtype,
         )
-        return self._model
+        return ReadyQwenRecognizer(config=self, models=models)
+
+
+@dataclass(frozen=True, slots=True)
+class ReadyQwenRecognizer:
+    """Inference capability containing a validated profile and both models.
+
+    Only this state can transcribe. No lazy model, mutable language alias, or
+    caller-supplied per-call model can diverge from the loaded configuration.
+    """
+
+    config: QwenRecognizerConfig
+    models: LoadedQwen
 
     def _transcribe_chunk(
-        self, loaded: LoadedQwen, chunk: AudioChunk, budget: ChunkDecodeBudget
+        self, chunk: AudioChunk, budget: ChunkDecodeBudget
     ) -> ChunkDecodeOutcome:
         """ASR one chunk against an already-built budget.
 
@@ -332,25 +319,30 @@ class QwenRecognizer:
         deadline_criterion = _RecordingMaxTimeCriteria(max_time=budget.deadline_seconds)
         stopping_criteria = StoppingCriteriaList([deadline_criterion])
 
-        inputs = loaded.processor.apply_transcription_request(
+        inputs = self.models.processor.apply_transcription_request(
             audio=chunk.samples,
             # The model accepts full language names as well as ISO codes, so
             # the existing label mapping carries over unchanged. We pass an
             # explicit label rather than letting it auto-detect: the caller
             # has already established the session language via ``@Languages``,
             # and auto-detect on short or low-energy audio mis-classifies.
-            language=self._qwen_language,
-        ).to(loaded.model.device, loaded.model.dtype)
+            language=self.config.profile.recognition_language,
+            **(
+                {"prompt": self.config.profile.prompt}
+                if self.config.profile.prompt is not None
+                else {}
+            ),
+        ).to(self.models.model.device, self.models.model.dtype)
 
         with torch.inference_mode():
-            output_ids = loaded.model.generate(
+            output_ids = self.models.model.generate(
                 **inputs,
                 max_new_tokens=budget.max_new_tokens,
                 stopping_criteria=stopping_criteria,
             )
 
         generated = output_ids[:, inputs["input_ids"].shape[1] :]
-        parsed = loaded.processor.decode(generated, return_format="parsed")[0]
+        parsed = self.models.processor.decode(generated, return_format="parsed")[0]
         text = str(parsed.get("transcription", "") or "")
 
         hit_token_cap = generated.shape[1] >= budget.max_new_tokens
@@ -363,7 +355,7 @@ class QwenRecognizer:
                 return Completed(text=text)
 
     def _align_chunk(
-        self, loaded: LoadedQwen, chunk: AudioChunk, text: str
+        self, chunk: AudioChunk, text: str
     ) -> list[tuple[float, float, str]]:
         """Word timings for one chunk, converted into recording-relative time.
 
@@ -380,10 +372,20 @@ class QwenRecognizer:
         answers. The FA fold must keep every unit in position, which is why the
         filter cannot live in `align`.
         """
-        alignment = loaded.aligner.align(chunk.samples, text, self._qwen_language)
+        alignment = self.models.aligner.align(
+            chunk.samples, text, self.config.profile.alignment_language
+        )
+        spoken = SpokenWindowWords.of_units(alignment.words)
+        # The validated transition carries text and time together. The caller
+        # never zips a separate spelling list onto timestamp evidence.
+        words = (
+            PunctuatedAlignment(text, spoken).words
+            if self.config.lang == "nan"
+            else spoken.words
+        )
         return [
             (chunk.to_file(word.start_s), chunk.to_file(word.end_s), word.text)
-            for word in SpokenWindowWords.of_units(alignment.words).words
+            for word in words
         ]
 
     def _run_model(
@@ -404,7 +406,6 @@ class QwenRecognizer:
         """
         import librosa  # type: ignore[import-not-found]
 
-        loaded = self._get_model()
         # A second audio-decode path in this repo, which already has one
         # (`inference.audio.load_audio`, soundfile-backed, used by the Aliyun
         # engine). Deliberate for now: `load_audio` does not resample, so
@@ -413,7 +414,13 @@ class QwenRecognizer:
         # than the one the engine's CER was measured under. Unify when
         # somebody re-measures, not before.
         wav, _sr = librosa.load(source_path, sr=SAMPLE_RATE, mono=True)
-        chunks = split_audio_into_chunks(wav)
+        chunks = (
+            split_audio_into_chunks(
+                wav, max_chunk_sec=self.config.profile.chunk_seconds
+            )
+            if self.config.lang == "nan"
+            else split_audio_into_chunks(wav)
+        )
 
         remaining_budget = (
             DecodeBudget(seconds=decode_budget_seconds)
@@ -425,7 +432,7 @@ class QwenRecognizer:
         refused: list[RunawayOutput] = []
         for chunk in chunks:
             chunk_budget = ChunkDecodeBudget.for_chunk(chunk, remaining_budget)
-            outcome = self._transcribe_chunk(loaded, chunk, chunk_budget)
+            outcome = self._transcribe_chunk(chunk, chunk_budget)
             remaining_budget = remaining_budget.remaining_after(
                 chunk_budget.deadline_seconds
             )
@@ -451,7 +458,7 @@ class QwenRecognizer:
             segments.append(
                 QwenAsrSegment(
                     text=text,
-                    word_timestamps=self._align_chunk(loaded, chunk, text),
+                    word_timestamps=self._align_chunk(chunk, text),
                 )
             )
         return QwenTranscription(segments=segments, refused=refused)

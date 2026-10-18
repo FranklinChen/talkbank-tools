@@ -38,6 +38,33 @@ batchalign3 uses **3-letter ISO 639-3 codes** everywhere internally:
 The 3-letter code is the source of truth. Conversion to other formats happens
 only at external boundaries.
 
+## Taiwanese transcription (`nan`)
+
+Select `--lang nan --asr-engine qwen` for Taiwanese (Minnan) recognition.
+The request and CHAT header retain `nan`. Qwen receives its documented
+`Chinese` recognition label without an injected context prompt.
+The recognizer uses approximately 30-second audio windows and retains its
+sentence punctuation through the word-timestamp step.
+
+Qwen's Chinese forced aligner supplies timestamps; this is not a separately
+trained Taiwanese aligner. Punctuation is restored only when its lexical text
+matches the aligner's units exactly. Changed or missing words cause an explicit
+error instead of transferring timestamps to different text.
+
+Transcription uses this recognition punctuation and speaker boundaries rather
+than applying a Mandarin boundary model or Stanza model to Taiwanese. This
+route does not add Taiwanese support to standalone `utseg`, `align` or
+morphology. Recognition accuracy, overlap and timestamp accuracy still require
+audio review; language admission is not a quality guarantee.
+
+Optional Qwen context can be supplied through the existing engine-options
+boundary, for example `--engine-overrides '{"qwen_context":"hotword"}'`.
+Use `{"qwen_context":""}` to disable context explicitly. The override is
+validated before loading and becomes part of the immutable ready recognizer;
+the exact value is retained in the submitted job options. Context/hotwords are
+recognition hints, not verified transcript text. Context may itself appear as
+invented speech in recognition output; the default therefore supplies none.
+
 ## ISO 639-3 → ISO 639-1 (Stanza)
 
 Stanza uses ISO 639-1 alpha-2 codes (with a few non-standard variants

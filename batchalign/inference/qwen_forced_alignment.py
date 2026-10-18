@@ -2,7 +2,7 @@
 
 Two callers, one aligner:
 
-- ``inference.languages.cantonese._qwen_common.QwenRecognizer`` loads it as the
+- ``inference.languages.cantonese._qwen_common.ReadyQwenRecognizer`` loads it as the
   timestamp companion of the Qwen3-ASR model. Word-level timestamps are
   load-bearing there (the FA pipeline injects them into ``%wor``), which is why
   ``LoadedQwen`` has a single constructor that produces the ASR model AND the

@@ -212,7 +212,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     let route = ctx.state.segmentation.as_ref().ok_or_else(|| {
         ServerError::Validation("pre-CHAT segmentation requested from a disabled plan".into())
     })?;
-    if !route.uses_boundary_model() {
+    let Some(route) = route.model().filter(|model| model.uses_boundary_model()) else {
         let ProjectedSpeechChunks {
             chunks,
             speaker_assignments,
@@ -230,7 +230,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
             utterances,
             speaker_assignments,
         });
-    }
+    };
 
     let ProjectedSpeechChunks {
         chunks: prepared_chunks,

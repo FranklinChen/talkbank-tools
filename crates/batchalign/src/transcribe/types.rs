@@ -723,7 +723,7 @@ pub(crate) struct AdmittedTranscribePlan<P> {
 #[derive(Clone)]
 enum SegmentationAdmission {
     Disabled,
-    Known(crate::utseg_route::UtsegRoute),
+    Known(crate::transcribe::segmentation::TranscribeSegmentation),
     Detect(crate::params::UtsegFallbackPolicy),
 }
 
@@ -746,17 +746,17 @@ impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
         enabled: bool,
         fallback: crate::params::UtsegFallbackPolicy,
     ) -> Result<Self, crate::utseg_route::UtsegUnavailable> {
-        use crate::utseg_route::UtsegRoute;
+        use crate::transcribe::segmentation::TranscribeSegmentation;
         let segmentation = if !enabled {
             SegmentationAdmission::Disabled
         } else {
             match asr.language() {
                 AsrLanguageRequest::One(code) => {
-                    SegmentationAdmission::Known(UtsegRoute::resolve(&code, fallback)?)
+                    SegmentationAdmission::Known(TranscribeSegmentation::resolve(&code, fallback)?)
                 }
-                AsrLanguageRequest::Pair(pair) => {
-                    SegmentationAdmission::Known(UtsegRoute::resolve(pair.primary(), fallback)?)
-                }
+                AsrLanguageRequest::Pair(pair) => SegmentationAdmission::Known(
+                    TranscribeSegmentation::resolve(pair.primary(), fallback)?,
+                ),
                 AsrLanguageRequest::Detect => SegmentationAdmission::Detect(fallback),
             }
         };
@@ -776,7 +776,10 @@ impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
     pub(crate) fn resolve_segmentation(
         &self,
         language: &crate::api::TranscriptLanguage,
-    ) -> Result<Option<crate::utseg_route::UtsegRoute>, SegmentationResolutionError> {
+    ) -> Result<
+        Option<crate::transcribe::segmentation::TranscribeSegmentation>,
+        SegmentationResolutionError,
+    > {
         match &self.segmentation {
             SegmentationAdmission::Disabled => Ok(None),
             SegmentationAdmission::Known(route) if route.language() == language.primary() => {
@@ -789,7 +792,10 @@ impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
                 })
             }
             SegmentationAdmission::Detect(fallback) => Ok(Some(
-                crate::utseg_route::UtsegRoute::resolve(language.primary(), *fallback)?,
+                crate::transcribe::segmentation::TranscribeSegmentation::resolve(
+                    language.primary(),
+                    *fallback,
+                )?,
             )),
         }
     }
@@ -865,8 +871,8 @@ mod transcribe_segmentation_tests {
             .unwrap()
             .unwrap();
         assert_eq!(route.language(), &LanguageCode3::spa());
-        assert_eq!(route.fallback(), AllowStanza);
-        assert!(!route.uses_boundary_model());
+        assert_eq!(route.model().unwrap().fallback(), AllowStanza);
+        assert!(!route.model().unwrap().uses_boundary_model());
         assert!(matches!(
             plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())),
             Err(SegmentationResolutionError::ChangedLanguage { .. })
@@ -892,6 +898,8 @@ mod transcribe_segmentation_tests {
                 .resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng()))
                 .unwrap()
                 .unwrap()
+                .model()
+                .unwrap()
                 .uses_boundary_model()
         );
         assert!(matches!(
@@ -904,6 +912,8 @@ mod transcribe_segmentation_tests {
             allowed
                 .resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa()))
                 .unwrap()
+                .unwrap()
+                .model()
                 .unwrap()
                 .fallback(),
             AllowStanza

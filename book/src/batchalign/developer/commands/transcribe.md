@@ -36,6 +36,16 @@ documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe
 
 ---
 
+## Taiwanese Qwen route
+
+For `nan`, transcription retains ASR punctuation and speaker boundaries through
+the private `SegmentationRoute::AsrBoundaries` variant inside
+`TranscribeSegmentation`.
+It does not run a Mandarin boundary model. The diagram below shows the general
+model-backed path; the native route bypasses text-model utterance segmentation.
+See [Qwen Recognition States and Timing](../qwen-recognition.md) for the worker
+loading transition, exact punctuation/alignment pairing and regression map.
+
 ## Current evidence-to-CHAT topology
 
 This diagram is the whole transcribe path after the v0.3 evidence work. It

@@ -54,7 +54,7 @@ struct PendingAsr;
 struct Recognized {
     response: AsrResponse,
     language: TranscriptLanguage,
-    segmentation: Option<crate::utseg_route::UtsegRoute>,
+    segmentation: Option<crate::transcribe::segmentation::TranscribeSegmentation>,
     identity: crate::transcribe::types::AsrIdentity,
 }
 
@@ -780,6 +780,14 @@ async fn stage_run_utseg<'a, P: TranscribePlan>(
     let route = asr.segmentation.as_ref().ok_or_else(|| {
         ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
     })?;
+    let Some(route) = route.model() else {
+        return Ok(ctx.map_state(|()| ChatReady {
+            asr,
+            document,
+            speaker_assignments,
+            shortfalls,
+        }));
+    };
     let filename = ctx
         .audio_path
         .file_name()
@@ -842,6 +850,14 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
     let route = asr.segmentation.as_ref().ok_or_else(|| {
         ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
     })?;
+    let Some(route) = route.model() else {
+        let held_out =
+            held_out_shortfall(OptionalStage::UtteranceSegmentation, localized.held_out());
+        return Ok((
+            ProducedOutput::Diagnosed(localized.into_diagnosed()),
+            held_out,
+        ));
+    };
     let filename = ctx
         .audio_path
         .file_name()

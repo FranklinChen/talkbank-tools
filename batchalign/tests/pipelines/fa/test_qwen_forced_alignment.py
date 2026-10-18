@@ -72,6 +72,15 @@ def _loaded_qwen(aligner: _RecordingAligner) -> qwen_common.LoadedQwen:
     return qwen_common.LoadedQwen(processor=object(), model=object(), aligner=aligner)
 
 
+def _ready_qwen(aligner):
+    return qwen_common.ReadyQwenRecognizer(
+        qwen_common.QwenRecognizerConfig(
+            lang="eng", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
+        ),
+        _loaded_qwen(aligner),
+    )
+
+
 def test_both_callers_reach_the_aligner_through_the_same_seam() -> None:
     aligner = _RecordingAligner(
         [
@@ -80,11 +89,9 @@ def test_both_callers_reach_the_aligner_through_the_same_seam() -> None:
         ]
     )
 
-    recognizer = qwen_common.QwenRecognizer(
-        lang="eng", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
-    )
+    recognizer = _ready_qwen(aligner)
     chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE, dtype=np.float32), offset=0.0)
-    recognizer._align_chunk(_loaded_qwen(aligner), chunk, "hello world")
+    recognizer._align_chunk(chunk, "hello world")
 
     host = QwenFaHost(aligner=aligner, language=resolve_qwen_language("eng"))
     host.align_words(np.zeros(SAMPLE_RATE, dtype=np.float32), ["hello", "world"])
@@ -98,13 +105,9 @@ def test_both_callers_reach_the_aligner_through_the_same_seam() -> None:
 def test_only_the_asr_chunk_path_converts_window_time_to_file_time() -> None:
     aligned = [WindowAlignedWord(text="hello", start_s=0.10, end_s=0.40)]
 
-    recognizer = qwen_common.QwenRecognizer(
-        lang="eng", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
-    )
+    recognizer = _ready_qwen(_RecordingAligner(aligned))
     chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE, dtype=np.float32), offset=12.0)
-    asr_timings = recognizer._align_chunk(
-        _loaded_qwen(_RecordingAligner(aligned)), chunk, "hello"
-    )
+    asr_timings = recognizer._align_chunk(chunk, "hello")
     assert asr_timings == [(12.10, 12.40, "hello")]
 
     host = QwenFaHost(
@@ -318,13 +321,9 @@ def test_a_blank_unit_never_enters_the_asr_word_timings() -> None:
     transition to `SpokenWindowWords`, which is the only thing the ASR path
     reads.
     """
-    recognizer = qwen_common.QwenRecognizer(
-        lang="eng", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
-    )
+    recognizer = _ready_qwen(_BlankUnitAligner())
     chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE, dtype=np.float32), offset=0.0)
-    timings = recognizer._align_chunk(
-        _loaded_qwen(_BlankUnitAligner()), chunk, "hello world"
-    )
+    timings = recognizer._align_chunk(chunk, "hello world")
     assert timings == [(0.10, 0.40, "hello"), (0.50, 0.90, "world")]
 
 

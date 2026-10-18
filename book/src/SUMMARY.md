@@ -172,6 +172,7 @@
 - [Model Downloads and Caching](batchalign/developer/model-downloads-and-caching.md)
 - [API Stability](batchalign/developer/api-stability.md)
 - [Adding New Engines](batchalign/developer/adding-engines.md)
+- [Qwen Recognition States and Timing](batchalign/developer/qwen-recognition.md)
 - [Adding Language Support](batchalign/developer/adding-language-support.md)
 - [Command Developer Reference](batchalign/developer/adding-commands.md)
   - [align](batchalign/developer/commands/align.md)

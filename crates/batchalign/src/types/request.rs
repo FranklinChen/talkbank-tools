@@ -434,16 +434,10 @@ impl JobSubmission {
         Ok(())
     }
 
-    /// Transcribe segments every transcript, and whether a language can be
-    /// segmented is a property of the language and the fallback policy alone
-    /// ([`crate::utseg_route::UtsegRoute::resolve`], the one table). The plan
-    /// already refused it before any ASR request; a job accepted at POST and
-    /// refused per file at plan time still reads as a failed job rather than a
-    /// rejected request, and the operator learns it one file at a time. So the
-    /// same resolution runs here, at submission, and a request that cannot run
-    /// is a 400 with the route's own message. Under `auto` the language is not
-    /// known until ASR returns, so that case is decided later, as the plan and
-    /// pipeline already do.
+    /// Resolve the transcription segmentation policy before accepting a job.
+    /// Taiwanese preserves ASR punctuation; other languages use the declared
+    /// boundary model or an explicitly authorized fallback. Auto-detection
+    /// defers this same resolution until the recognized language is known.
     fn validate_utseg_route(&self, language: &PairedLanguage<'_>) -> Result<(), ValidationError> {
         let fallback = match &self.options {
             CommandOptions::Transcribe(opts) | CommandOptions::TranscribeS(opts) => {
@@ -455,7 +449,7 @@ impl JobSubmission {
             PairedLanguage::Resolved(code) => *code,
             PairedLanguage::Auto | PairedLanguage::PerFile => return Ok(()),
         };
-        crate::utseg_route::UtsegRoute::resolve(lang, fallback)
+        crate::transcribe::segmentation::TranscribeSegmentation::resolve(lang, fallback)
             .map(|_| ())
             .map_err(|refusal| ValidationError(refusal.to_string()))
     }
@@ -1132,6 +1126,18 @@ mod tests {
         transcribe_submission("eng", AsrEngineName::RevAi)
             .validate()
             .expect("English has a boundary model");
+    }
+
+    #[test]
+    fn transcribe_taiwanese_qwen_preserves_its_language() {
+        transcribe_submission("nan", AsrEngineName::HkQwen)
+            .validate()
+            .expect("Taiwanese Qwen transcription uses native ASR boundaries");
+        let error = transcribe_submission("nan", AsrEngineName::RevAi)
+            .validate()
+            .expect_err("native boundaries do not add Rev language support");
+        assert!(error.to_string().contains("Rev.AI"), "{error}");
+        assert!(utseg_submission("nan").validate().is_err());
     }
 
     fn utseg_submission(lang: &str) -> JobSubmission {

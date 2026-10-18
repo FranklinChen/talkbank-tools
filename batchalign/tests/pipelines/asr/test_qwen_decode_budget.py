@@ -121,7 +121,7 @@ def test_a_chunks_deadline_is_capped_by_what_remains_of_the_file_budget() -> Non
 
 def test_the_sum_of_chunk_deadlines_never_exceeds_the_file_budget() -> None:
     """Threads a `DecodeBudget` across many chunks exactly the way
-    `QwenRecognizer._run_model` does, and checks the invariant `for_chunk`
+    `ReadyQwenRecognizer._run_model` does, and checks the invariant `for_chunk`
     exists to guarantee: no matter how the audio is sliced, the running
     total of every chunk's own deadline never exceeds what the request
     started with."""

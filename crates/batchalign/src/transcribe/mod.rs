@@ -13,6 +13,7 @@ mod asr_output;
 mod evidence_cache;
 mod infer;
 pub(crate) mod replay;
+pub(crate) mod segmentation;
 pub mod types;
 
 // Re-export the public API so callers don't need to know about the split.
