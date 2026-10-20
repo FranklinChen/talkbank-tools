@@ -98,10 +98,13 @@ flowchart LR
     check -->|no| refuse
 ```
 
-Implementation: `crates/batchalign-transform/src/asr_postprocess/cantonese.rs`.
+Implementation: `crates/batchalign-transform/src/asr_postprocess/han_script.rs`.
 
-- **`AlignedNormalization` is the only route to normalized Cantonese text.**
-  `normalize_cantonese` itself is private. The type takes a RUN of units, not a
+- **`HanScriptNormalization::admit` is the only route to normalized text.**
+  `HanScriptNormalization::for_language` picks the variant (`yue` to Hong Kong
+  traditional plus the domain table, `nan` to Taiwan traditional with `s2tw`,
+  never `s2twp`, which would substitute Taiwan Mandarin vocabulary). The
+  conversions themselves are private. The type takes a RUN of units, not a
   string, because the engines report one unit per Han character and a
   two-character replacement (`真系` to `真係`) cannot match inside a single
   character. It normalizes the concatenation once and hands each unit back
@@ -132,12 +135,15 @@ Implementation: `crates/batchalign-transform/src/asr_postprocess/cantonese.rs`.
 ### Can the refusal actually fire?
 
 Not with the tables this build embeds, on any input measured so far.
-`cargo run -p batchalign-transform --example s2hk_length_audit -- <dictionaries>`
+`cargo run -p batchalign-transform --example han_script_length_audit -- <dictionaries>`
 normalizes every Han code point the pipeline recognizes (81,520 of them) plus
-every key and value of OpenCC's own `s2hk` dictionaries (`STPhrases`,
-`STCharacters`, `HKVariantsPhrases`, `HKVariants`,
-`CJK_Compatibility_Ideographs`: 109,605 further strings) and reports how many
-changed length. On 2026-09-16, with `ferrous-opencc` 0.4.0: none of 191,125.
+every key and value of the OpenCC dictionaries the `s2hk` and `s2tw` chains
+use, each under every normalization, and reports how many changed length. The
+dictionaries ship with `ferrous-opencc` in `assets/dictionaries`. On 2026-10-20,
+with `ferrous-opencc` 0.4.0 (`STPhrases`, `STCharacters`, `HKVariants`,
+`TWVariants`): none of 376,834. The earlier 2026-09-16 run, Cantonese only and
+including `HKVariantsPhrases` and `CJK_Compatibility_Ideographs`, found none of
+191,125.
 The refusal stays because a table update is a data change, and the constructor
 is what makes such a change fail loudly instead of silently moving timings.
 
@@ -314,8 +320,9 @@ that handles POS and depparse jointly.
 ```text
 crates/batchalign-transform/src/asr_postprocess/
 ├── mod.rs: Pipeline: process_raw_asr()
-├── prepare.rs: stage 2d, one Cantonese run per monologue
-├── cantonese.rs: AlignedNormalization (the one owner), cantonese_char_tokens()
+├── prepare.rs: stage 2d, one Han-script run per monologue
+├── han_script.rs: HanScriptNormalization and AlignedNormalization (the one owner)
+├── cantonese.rs: cantonese_char_tokens(), is_cjk_punctuation()
 ├── compounds.rs: Compound word merging
 └── num2text.rs: Number expansion (Portuguese ordinals; delegates CJK/cardinal numerals to chatter's `talkbank_transform::num_words`)
 

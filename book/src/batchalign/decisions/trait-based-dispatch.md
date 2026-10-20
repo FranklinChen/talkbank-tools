@@ -154,9 +154,9 @@ their scale:
 **1. Single conditional (ASR post-processing)**
 
 ```text
-// crates/batchalign-transform/src/asr_postprocess/prepare.rs: one branch for Cantonese
-if lang == "yue" {
-    words = normalize_cantonese_words(words)?;
+// crates/batchalign-transform/src/asr_postprocess/prepare.rs: one closed-set lookup
+if let Some(normalization) = HanScriptNormalization::for_language(lang) {
+    words = normalize_han_script_words(words, normalization)?;
 }
 ```
 

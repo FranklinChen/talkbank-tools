@@ -1,6 +1,6 @@
 # Batchalign agent guidance
 
-**Last modified:** 2026-09-22 17:57 EDT
+**Last modified:** 2026-10-20 17:02 EDT
 
 Canonical guidance for all coding agents. Read
 applicable nested guidance in the affected crates and frontend, plus the
@@ -59,6 +59,7 @@ Shell scripts must pass default-severity shellcheck. Preserve release gates.
 | Builds, releases and debugging | [Development](docs/agent-reference/development.md), `book/src/batchalign/developer/` |
 | Pipeline/runtime/worker/cache work | `crates/batchalign/AGENTS.md` |
 | Python bridge or dashboard | `crates/batchalign-pyo3/AGENTS.md`, `frontend/AGENTS.md` |
+| Engine choice and provider keys (ASR, speaker diarization, `~/.batchalign.ini`) | `book/src/batchalign/user-guide/commands/diarize.md`, `book/src/batchalign/reference/command-io.md` |
 
 This entry point resolves workflow conflicts in the references. Historical
 examples are not current dependency versions or live runtime evidence. Generic

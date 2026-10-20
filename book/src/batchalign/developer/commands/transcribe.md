@@ -169,13 +169,13 @@ All ASR post-processing runs in Rust (`crates/batchalign-transform/src/asr_postp
    - Language-specific: English phrasal verbs, CJK terms, etc.
    - Implemented: `compounds::merge_compounds()`
 
-2. **Cantonese normalization** (yue only), simplified→HK traditional + domain replacements
+2. **Han-script normalization** (`yue`: simplified→HK traditional + domain replacements; `nan`: simplified→Taiwan traditional)
    - One pass over the whole monologue, before anything splits it: the engines
      report one word per Han character, so a two-character replacement has to
      see both, and each word then gets back exactly its own characters
    - Uses the `ferrous-opencc` crate + the 31-entry replacement table
-   - Implemented: `cantonese::AlignedNormalization`, the only route to
-     normalized Cantonese text, applied by `prepare_words_pre_expansion()`
+   - Implemented: `han_script::HanScriptNormalization::admit`, the only route
+     to normalized text, applied by `prepare_words_pre_expansion()`
    - A conversion that changed the character count refuses the file rather than
      re-cutting words away from their timings
 

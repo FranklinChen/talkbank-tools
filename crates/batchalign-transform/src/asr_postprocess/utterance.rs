@@ -1,4 +1,4 @@
-use super::cantonese::NormalizationChangedLength;
+use super::han_script::NormalizationChangedLength;
 use super::{
     AsrNormalizedText, AsrOutput, AsrTextLanguage, AsrWord, ENDING_PUNCT, MOR_PUNCT, RTL_PUNCT,
     SpeakerIndex, Utterance, cleanup, finalize_words_to_chunks, prepare_words_pre_expansion,
@@ -7,13 +7,13 @@ use super::{
 
 /// Run the full ASR post-processing pipeline on raw ASR output.
 ///
-/// Applies compound merging, timing conversion, Cantonese normalization,
+/// Applies compound merging, timing conversion, Han-script normalization,
 /// multi-word splitting, number expansion, long turn splitting,
 /// punctuation-based retokenization, disfluency replacement, and n-gram retrace
 /// detection. Returns speaker-attributed utterances ready for CHAT assembly via
 /// `build_chat()`.
 ///
-/// Fails only when Cantonese normalization changed a monologue's character
+/// Fails only when Han-script normalization changed a monologue's character
 /// count; see [`super::AlignedNormalization`].
 pub fn process_raw_asr<'a>(
     output: &AsrOutput,

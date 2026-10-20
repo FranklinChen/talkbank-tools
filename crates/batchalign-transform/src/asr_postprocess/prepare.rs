@@ -1,21 +1,21 @@
 use batchalign_types::domain::AudioPositionSeconds;
 
-use super::cantonese::{AlignedNormalization, NormalizationChangedLength};
+use super::han_script::{HanScriptNormalization, NormalizationChangedLength};
 use super::{
     AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, cleanup,
     merge_compounds, num2text,
 };
 
 /// Stages 1-3: compound merging, timed word extraction with separator strip,
-/// Cantonese normalization, and multi-word token splitting.
+/// Han-script normalization, and multi-word token splitting.
 ///
 /// Returns words ready for number expansion. The caller is responsible for
 /// expanding numbers (either via the Rust fallback tables or Python IPC)
 /// before passing the words to [`super::finalize_words_to_chunks`].
 ///
-/// Fallible for one reason: Cantonese normalization hands each word back its
+/// Fallible for one reason: Han-script normalization hands each word back its
 /// own characters, and a conversion that changed the character count is refused
-/// rather than re-cut (see [`AlignedNormalization`]).
+/// rather than re-cut (see [`super::han_script::AlignedNormalization`]).
 pub fn prepare_words_pre_expansion<'a>(
     elements: &[AsrElement],
     language: impl Into<AsrTextLanguage<'a>>,
@@ -26,7 +26,7 @@ pub fn prepare_words_pre_expansion<'a>(
 /// Snapshot-aware variant of [`prepare_words_pre_expansion`].
 ///
 /// When `snapshot` is `Some`, intermediate stage outputs
-/// (`after_compound_merge`, `after_timing_extract`, `after_cantonese_norm`,
+/// (`after_compound_merge`, `after_timing_extract`, `after_han_script_norm`,
 /// `after_multiword_split`) are populated for downstream trace
 /// rendering. When `None`, behavior is identical to the bare variant
 /// at zero capture cost.
@@ -73,21 +73,23 @@ pub fn prepare_words_pre_expansion_with_snapshot<'a>(
     // annotation: pure orthographic noise, no information lost.
     words = cleanup::strip_boundary_quotes(words);
 
-    // Stage 2d: Cantonese normalization, once over the whole monologue.
-    // CANTONESE-SPECIFIC BOUNDARY: only applied when lang == "yue".
+    // Stage 2d: Han-script normalization, once over the whole monologue, for
+    // the languages that have one (Cantonese and Taiwanese; see
+    // `HanScriptNormalization::for_language`).
     //
     // It runs HERE, before stage 3, for two reasons. The split interpolates
     // timestamps across a token's characters, so it must see final text; and
     // running after the split would normalize one character at a time, which
     // is what used to lose every multi-character replacement.
-    let words = if lang == "yue" {
-        let normalized = normalize_cantonese_words(words)?;
-        if let Some(ref mut s) = snapshot {
-            s.after_cantonese_norm = Some(normalized.clone());
+    let words = match HanScriptNormalization::for_language(lang) {
+        Some(normalization) => {
+            let normalized = normalize_han_script_words(words, normalization)?;
+            if let Some(ref mut s) = snapshot {
+                s.after_han_script_norm = Some(normalized.clone());
+            }
+            normalized
         }
-        normalized
-    } else {
-        words
+        None => words,
     };
 
     // Stage 3: split multi-word tokens with timestamp interpolation
@@ -120,18 +122,19 @@ pub fn prepare_words_pre_expansion_with_snapshot<'a>(
     Ok(result)
 }
 
-/// Stage 2d: normalize one monologue's words as a single Cantonese run.
+/// Stage 2d: normalize one monologue's words as a single run.
 ///
 /// One conversion per monologue, not one per word. The providers hand us one
 /// word per Han character, and a two-character replacement (`真系` to `真係`)
 /// cannot match inside a single character; normalizing the run and handing each
 /// word back its own characters keeps both the replacement and the per-word
-/// timing. [`AlignedNormalization`] owns that proof, so the only thing left
+/// timing. [`super::han_script::AlignedNormalization`] owns that proof, so the only thing left
 /// here is to put the characters back on the words they came from.
-fn normalize_cantonese_words(
+fn normalize_han_script_words(
     words: Vec<AsrWord>,
+    normalization: HanScriptNormalization,
 ) -> Result<Vec<AsrWord>, NormalizationChangedLength> {
-    let aligned = AlignedNormalization::admit(words.iter().map(|word| word.text.as_str()))?;
+    let aligned = normalization.admit(words.iter().map(|word| word.text.as_str()))?;
     // Total: `admit` returns exactly one surface per unit it was given, in the
     // same order, so this zip drops nothing.
     Ok(words

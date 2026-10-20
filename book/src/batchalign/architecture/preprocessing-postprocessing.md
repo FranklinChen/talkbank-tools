@@ -102,7 +102,7 @@ ASR preprocessing is the most complex because raw ASR output needs extensive nor
 |-------|--------|-------------|
 | 1. Compound merging | `compounds.rs` | Join split compounds: `ice` + `cream` → `ice+cream` (3,584 pairs, O(1) HashSet) |
 | 2. Timed word extraction | `mod.rs` | Convert seconds → milliseconds, extract ASR tokens, strip MOR_PUNCT, lowercase |
-| 2d. Cantonese normalization | `cantonese.rs` | Simplified → traditional + domain replacements (31 entries, Aho-Corasick), applied once to the whole monologue through `AlignedNormalization`, which proves the character count did not change |
+| 2d. Han-script normalization | `han_script.rs` | `yue`: simplified → HK traditional + domain replacements (31 entries, Aho-Corasick); `nan`: simplified → Taiwan traditional; applied once to the whole monologue through `AlignedNormalization`, which proves the character count did not change |
 | 3. Multi-word splitting | `mod.rs` | Split space-separated tokens with timestamp interpolation |
 | 4. **Number expansion** | `num2text.rs` (Batchalign) + chatter's `talkbank_transform::num_words` | Single Rust per-word pass: Batchalign's Portuguese ordinal check runs first; chatter's generator owns per-language cardinal tables (47 langs), CJK numerals, currency, and English ordinals/years/decades. No Python `num2words` IPC. See [Number Expansion](../reference/number-expansion.md). |
 | 5. Long turn splitting | `mod.rs` | Break turns > 300 words into separate utterances |

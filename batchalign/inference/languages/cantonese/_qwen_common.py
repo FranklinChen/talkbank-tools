@@ -32,10 +32,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, assert_never
 
 from batchalign.inference._domain_types import LanguageCode
-from batchalign.inference.qwen_asr_profile import QwenAsrProfile
+from batchalign.inference.qwen_asr_profile import (
+    QwenAsrProfile,
+    RecognitionPunctuation,
+)
 from batchalign.inference.qwen_forced_alignment import (
     QWEN_FORCED_ALIGNER_MODEL_ID,
     ForcedAligner,
@@ -378,11 +381,13 @@ class ReadyQwenRecognizer:
         spoken = SpokenWindowWords.of_units(alignment.words)
         # The validated transition carries text and time together. The caller
         # never zips a separate spelling list onto timestamp evidence.
-        words = (
-            PunctuatedAlignment(text, spoken).words
-            if self.config.lang == "nan"
-            else spoken.words
-        )
+        match self.config.profile.punctuation:
+            case RecognitionPunctuation.RESTORE:
+                words = PunctuatedAlignment(text, spoken).words
+            case RecognitionPunctuation.DISCARD:
+                words = spoken.words
+            case unreachable:
+                assert_never(unreachable)
         return [
             (chunk.to_file(word.start_s), chunk.to_file(word.end_s), word.text)
             for word in words
@@ -414,12 +419,8 @@ class ReadyQwenRecognizer:
         # than the one the engine's CER was measured under. Unify when
         # somebody re-measures, not before.
         wav, _sr = librosa.load(source_path, sr=SAMPLE_RATE, mono=True)
-        chunks = (
-            split_audio_into_chunks(
-                wav, max_chunk_sec=self.config.profile.chunk_seconds
-            )
-            if self.config.lang == "nan"
-            else split_audio_into_chunks(wav)
+        chunks = split_audio_into_chunks(
+            wav, max_chunk_sec=self.config.profile.chunk_seconds
         )
 
         remaining_budget = (

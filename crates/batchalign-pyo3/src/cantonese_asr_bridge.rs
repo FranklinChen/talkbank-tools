@@ -24,8 +24,9 @@
 //! normalization depend on which engine ran (Qwen and Whisper never reached
 //! this module) and put a second owner on a transformation that is not
 //! idempotent. Surfaces now leave here exactly as the provider wrote them, and
-//! `batchalign_transform::asr_postprocess::AlignedNormalization` normalizes each
-//! monologue once, in the server.
+//! `batchalign_transform::asr_postprocess::HanScriptNormalization` normalizes
+//! each monologue once, in the server, for every language that has a
+//! normalization (Cantonese and Taiwanese).
 //!
 //! # Absent provider fields are states, not zeros
 //!
@@ -169,9 +170,10 @@ struct HkTimedWord {
 /// Python boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderLanguage {
-    /// `yue`: Cantonese normalization (s2hk plus the domain replacement table).
+    /// `yue`: sentence-only provider text is split one character per token.
+    /// Script normalization is not decided here: see `HanScriptNormalization`.
     Cantonese,
-    /// Every other language: provider tokens are used as they are.
+    /// Every other language: provider tokens are split on whitespace only.
     Other,
 }
 

@@ -40,9 +40,14 @@ def _stub_recognizer(monkeypatch: pytest.MonkeyPatch, chunk_seconds: float = 1.0
     fake_chunk = AudioChunk(
         samples=np.zeros(int(chunk_seconds * SAMPLE_RATE), dtype=np.float32), offset=0.0
     )
-    monkeypatch.setattr(
-        qwen_common, "split_audio_into_chunks", lambda wav: [fake_chunk]
-    )
+
+    # The profile states every language's window, so the recognizer always
+    # passes one; the stub asserts it arrived as the profile's own value.
+    def split(wav, *, max_chunk_sec):
+        assert max_chunk_sec == recognizer.config.profile.chunk_seconds
+        return [fake_chunk]
+
+    monkeypatch.setattr(qwen_common, "split_audio_into_chunks", split)
 
     import librosa
 

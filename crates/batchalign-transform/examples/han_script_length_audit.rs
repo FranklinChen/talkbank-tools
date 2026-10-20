@@ -1,10 +1,11 @@
-//! Measure whether Cantonese normalization can ever change a character count.
+//! Measure whether any Han-script normalization can ever change a character count.
 //!
 //! `AlignedNormalization` hands each ASR unit back exactly the characters it
 //! contributed, which is only sound while the normalization preserves the
 //! character count of the run. Its constructor refuses otherwise. This audit
 //! answers the other half of that question: is the refusal reachable at all
-//! with the tables this build embeds?
+//! with the tables this build embeds? Every input is measured under every
+//! normalization (`HanScriptNormalization::ALL`).
 //!
 //! Two input classes are measured:
 //!
@@ -12,17 +13,19 @@
 //!    one at a time. This settles the single-character dictionaries
 //!    exhaustively, with no external data.
 //! 2. **Every key and every value of the OpenCC dictionaries that the `s2hk`
-//!    chain uses**, when their text files are passed as arguments. This is how
+//!    and `s2tw` chains use**, when their text files are passed as arguments. This is how
 //!    the multi-character (phrase) entries get measured, because the embedded
 //!    tables are not enumerable through `ferrous-opencc`'s public API.
 //!
 //! The dictionary files are OpenCC's own, in its `data/dictionary` directory
-//! (`STPhrases.txt`, `STCharacters.txt`, `HKVariantsPhrases.txt`,
-//! `HKVariants.txt`, `CJK_Compatibility_Ideographs.txt`). Each line is
+//! (`STPhrases.txt`, `STCharacters.txt`, `HKVariants.txt`, `TWVariants.txt`,
+//! and `HKVariantsPhrases.txt` or `CJK_Compatibility_Ideographs.txt` where an
+//! OpenCC release has them). The `ferrous-opencc` crate ships these files in
+//! its `assets/dictionaries` directory. Each line is
 //! `key<TAB>value[ value...]`, and `#` starts a comment.
 //!
 //! ```text
-//! cargo run -p batchalign-transform --example s2hk_length_audit -- <dictionary>.txt ...
+//! cargo run -p batchalign-transform --example han_script_length_audit -- <dictionary>.txt ...
 //! ```
 //!
 //! Exit status is non-zero when any input normalized to a different character
@@ -30,7 +33,7 @@
 
 use std::time::Instant;
 
-use batchalign_transform::asr_postprocess::cantonese::AlignedNormalization;
+use batchalign_transform::asr_postprocess::HanScriptNormalization;
 use batchalign_transform::asr_postprocess::is_cjk_ideograph;
 
 /// How many offending strings to print before summarizing the rest.
@@ -39,7 +42,7 @@ const REPORTED_OFFENDERS: usize = 20;
 /// What one input class measured.
 #[derive(Default)]
 struct Audit {
-    /// Strings normalized.
+    /// (string, normalization) pairs measured.
     checked: usize,
     /// Strings whose normalization changed the character count.
     changed: Vec<String>,
@@ -51,12 +54,14 @@ impl Audit {
         if source.is_empty() {
             return;
         }
-        self.checked += 1;
-        if let Err(refusal) = AlignedNormalization::admit([source]) {
-            self.changed.push(format!(
-                "{source} ({} to {})",
-                refusal.before, refusal.after
-            ));
+        for normalization in HanScriptNormalization::ALL {
+            self.checked += 1;
+            if let Err(refusal) = normalization.admit([source]) {
+                self.changed.push(format!(
+                    "{normalization}: {source} ({} to {})",
+                    refusal.before, refusal.after
+                ));
+            }
         }
     }
 

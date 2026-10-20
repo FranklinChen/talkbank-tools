@@ -292,7 +292,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
 
 /// Prepare ASR chunks fully in Rust.
 ///
-/// Stages 1-3 (compound merge, timed-word extraction, Cantonese normalization,
+/// Stages 1-3 (compound merge, timed-word extraction, Han-script normalization,
 /// multi-word split) run per monologue. Number expansion is then applied per
 /// word via `asr_postprocess::expand_number`. After expansion a whitespace-split
 /// pass widens multi-word expansions into separate tokens. Stages 5-5b
@@ -309,14 +309,14 @@ pub(crate) fn prepare_asr_chunks<'a>(
     prepare_asr_chunks_with_snapshot(asr_output, language.into(), None)
 }
 
-/// A Cantonese normalization that changed a monologue's character count refuses
+/// A Han-script normalization that changed a monologue's character count refuses
 /// the file.
 ///
 /// The alternative would be re-cutting the words around the new characters,
 /// after which each word's timing would belong to characters it no longer
 /// holds. A transcript mistimed that way looks right and reads wrong, which is
 /// worse than a named failure.
-fn cantonese_normalization_refused(
+fn han_script_normalization_refused(
     refusal: batchalign_transform::asr_postprocess::NormalizationChangedLength,
 ) -> ServerError {
     ServerError::Validation(format!("ASR post-processing refused this file: {refusal}"))
@@ -327,7 +327,7 @@ fn cantonese_normalization_refused(
 /// When `snapshot` is `Some`, populates per-stage trace fields:
 /// `raw_elements`, `after_compound_merge`, `after_timing_extract`,
 /// `after_multiword_split`, `after_number_expand`,
-/// `after_cantonese_norm` (yue only), `after_long_turn_split`. The
+/// `after_han_script_norm` (`yue` and `nan` only), `after_long_turn_split`. The
 /// `final_utterances` field is filled by the caller after `retokenize`.
 ///
 /// Multi-monologue inputs concatenate their stage outputs into the
@@ -347,7 +347,7 @@ pub(super) fn prepare_asr_chunks_with_snapshot(
         // separate only because it must record each stage as it goes;
         // `snapshot_and_plain_preparation_agree` holds the two to one answer.
         return asr_postprocess::prepare_asr_chunks(asr_output, language)
-            .map_err(cantonese_normalization_refused);
+            .map_err(han_script_normalization_refused);
     };
 
     if let Some(ref mut s) = snapshot {
@@ -363,16 +363,16 @@ pub(super) fn prepare_asr_chunks_with_snapshot(
         let cap = snapshot.is_some().then_some(&mut sub);
         let words =
             asr_postprocess::prepare_words_pre_expansion_with_snapshot(&m.elements, language, cap)
-                .map_err(cantonese_normalization_refused)?;
+                .map_err(han_script_normalization_refused)?;
         if let Some(ref mut s) = snapshot {
             s.after_compound_merge.extend(sub.after_compound_merge);
             s.after_timing_extract.extend(sub.after_timing_extract);
-            // Cantonese normalization is captured here now: it runs inside
+            // Han-script normalization is captured here now: it runs inside
             // preparation, before the multi-word split, not after expansion.
-            if let Some(yue) = sub.after_cantonese_norm {
-                s.after_cantonese_norm
+            if let Some(normalized) = sub.after_han_script_norm {
+                s.after_han_script_norm
                     .get_or_insert_with(Vec::new)
-                    .extend(yue);
+                    .extend(normalized);
             }
             s.after_multiword_split.extend(sub.after_multiword_split);
         }

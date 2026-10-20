@@ -5,13 +5,19 @@ from dataclasses import FrozenInstanceError
 import numpy as np
 import pytest
 
-from batchalign.inference.languages.cantonese._qwen_chunking import AudioChunk
+from batchalign.inference.languages.cantonese._qwen_chunking import (
+    MAX_FORCE_ALIGN_INPUT_SECONDS,
+    AudioChunk,
+)
 from batchalign.inference.languages.cantonese._qwen_common import (
     LoadedQwen,
     QwenRecognizerConfig,
     ReadyQwenRecognizer,
 )
-from batchalign.inference.qwen_asr_profile import QwenAsrProfile
+from batchalign.inference.qwen_asr_profile import (
+    QwenAsrProfile,
+    RecognitionPunctuation,
+)
 from batchalign.inference.qwen_forced_alignment import (
     SpokenWindowWords,
     WindowAlignedWord,
@@ -33,13 +39,17 @@ def test_taiwanese_recognition_does_not_widen_standalone_alignment_support():
     assert profile.alignment_language == "Chinese"
     assert profile.prompt is None
     assert profile.chunk_seconds == 30
+    assert profile.punctuation is RecognitionPunctuation.RESTORE
     with pytest.raises(ValueError):
         resolve_qwen_language("nan")
     for code, label in [("eng", "English"), ("yue", "Cantonese"), ("zho", "Chinese")]:
         other = QwenAsrProfile.for_language(code)
         assert other.recognition_language == label
         assert other.prompt is None
-        assert other.chunk_seconds == 180
+        # Other languages keep the chunker's own default window and leave
+        # utterance boundaries to the segmentation model.
+        assert other.chunk_seconds == MAX_FORCE_ALIGN_INPUT_SECONDS
+        assert other.punctuation is RecognitionPunctuation.DISCARD
 
 
 @pytest.mark.parametrize(
@@ -83,6 +93,29 @@ def test_recognizer_retains_punctuation_and_exact_file_relative_times():
     chunk = AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0)
     words = recognizer._align_chunk(chunk, "你好。")
     assert words == [(30.1, 30.4, "你"), (30.5, 30.9, "好。")]
+
+
+def test_a_discarding_profile_keeps_only_the_aligned_units():
+    """Cantonese leaves boundaries to segmentation: the same text and alignment
+    yield the bare units, with the recognizer's punctuation dropped."""
+
+    class Aligner:
+        def align(self, audio, text, language):
+            assert language == "Cantonese"
+            return WindowAlignment.of(
+                ["你", "好"],
+                [WindowAlignedWord("你", 0.1, 0.4), WindowAlignedWord("好", 0.5, 0.9)],
+            )
+
+    recognizer = ReadyQwenRecognizer(
+        QwenRecognizerConfig(
+            lang="yue", model_id="Qwen/Qwen3-ASR-1.7B-hf", device="cpu"
+        ),
+        LoadedQwen(processor=object(), model=object(), aligner=Aligner()),
+    )
+    chunk = AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0)
+    words = recognizer._align_chunk(chunk, "你好。")
+    assert words == [(30.1, 30.4, "你"), (30.5, 30.9, "好")]
 
 
 def test_config_load_transitions_to_a_ready_recognizer(monkeypatch):

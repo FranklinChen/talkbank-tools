@@ -14,7 +14,7 @@ Paths below are relative to the repository root.
 
 | Owner | Responsibility |
 | --- | --- |
-| `batchalign/inference/qwen_asr_profile.py` | Resolve recognition label, companion alignment label, optional context and decoding-window policy. |
+| `batchalign/inference/qwen_asr_profile.py` | Resolve recognition label, companion alignment label, optional context, decoding window and `RecognitionPunctuation`: every language-dependent decision, once. |
 | `batchalign/inference/languages/cantonese/_qwen_common.py` | Validate configuration, load both models, decode bounded chunks and convert aligned times to recording coordinates. |
 | `batchalign/inference/languages/cantonese/_qwen_asr.py` | Resolve worker options, enforce the loading timeout and publish the ready recognizer. |
 | `batchalign/inference/qwen_forced_alignment.py` | Shared aligner adapter and window-relative alignment types; standalone FA language admission. |
@@ -58,8 +58,12 @@ model labels do not change the recording's language and do not qualify a
 separate Taiwanese forced aligner.
 
 The Taiwanese route uses approximately 30-second recognition windows and
-restores recognition punctuation. Other current Qwen profiles retain their
-existing chunking behavior. `qwen_context` is optional text admitted into the
+restores recognition punctuation (`RecognitionPunctuation.RESTORE`). Other
+current Qwen profiles use the chunker's default window and discard recognition
+punctuation, because a segmentation model supplies their boundaries. The
+recognizer reads these profile fields with an exhaustive `match` and never
+compares the language code itself, so a new profile is one entry in
+`QwenAsrProfile.for_language`. `qwen_context` is optional text admitted into the
 configuration before loading; absent or empty context supplies no prompt.
 The worker passes a nonempty context through the processor's `prompt` argument.
 Context can be emitted as invented speech, so dialect instructions are not
@@ -94,7 +98,7 @@ that difference through this sequence:
 ```text
 WindowAlignment (window-relative units)
   -> SpokenWindowWords (spoken units for ASR)
-  -> PunctuatedAlignment (nan only; validated lexical correspondence)
+  -> PunctuatedAlignment (profile RESTORE only; validated lexical correspondence)
   -> AudioChunk.to_file (add this chunk's offset once)
   -> recording-relative ASR word tuples
 ```
@@ -132,7 +136,7 @@ Keep the following regression boundaries:
 
 | Boundary | Existing coverage |
 | --- | --- |
-| Default/explicit context, failed load, publication of a ready recognizer, frozen configuration | `batchalign/tests/pipelines/asr/test_qwen_taiwanese.py` |
+| Default/explicit context, failed load, publication of a ready recognizer, frozen configuration, restore versus discard punctuation | `batchalign/tests/pipelines/asr/test_qwen_taiwanese.py` |
 | Exact punctuation pairing, lexical drift, combining marks, nonzero chunk offset | `batchalign/tests/pipelines/asr/test_qwen_taiwanese.py` |
 | Checkpoint spelling and explicit model choice | `batchalign/tests/pipelines/asr/test_qwen_checkpoint_ids.py` |
 | Bounded decoding and classification before blank-text handling | `batchalign/tests/pipelines/asr/test_qwen_transcribe_chunk_bounds.py`, `test_qwen_run_model_ordering.py` in the same directory |

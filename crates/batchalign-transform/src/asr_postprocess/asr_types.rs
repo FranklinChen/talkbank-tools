@@ -114,7 +114,7 @@ impl PartialEq<&str> for AsrRawText {
 ///
 /// **Contains**: Compound-merged, number-expanded, disfluency-marked text.
 /// Filled pauses are in `&-um` form, orthographic replacements applied
-/// (`'cause` → `(be)cause`), Cantonese normalization done (for `yue`).
+/// (`'cause` → `(be)cause`), Han-script normalization done (for `yue` and `nan`).
 ///
 /// **NOT yet CHAT syntax**, still needs `TreeSitterParser` to become AST nodes.
 /// The next step is conversion to [`ChatWordText`] at the boundary between

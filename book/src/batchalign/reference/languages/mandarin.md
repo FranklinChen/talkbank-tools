@@ -11,7 +11,7 @@ expansion system with Cantonese, but has distinct word segmentation behavior.
 | Pipeline Stage | Mandarin-Specific Behavior |
 |---------------|---------------------------|
 | ASR | Rev.AI by default; `paraformer` (FunASR) is the common Mandarin choice, and every other engine works too. See [ASR engines](#asr-engines). |
-| Text normalization | None (Cantonese normalization is `yue`-only) |
+| Text normalization | None (Han-script normalization covers only `yue` and `nan`) |
 | Number expansion | Chinese number system (chatter's simplified-script CJK numerals for both `cmn` and `zho`) |
 | Utterance segmentation | `talkbank/CHATUtterance-zh_CN` for `cmn` / `zho` in standalone `utseg` and transcribe pre-CHAT segmentation |
 | Word segmentation | Stanza neural tokenizer via `--retokenize` |

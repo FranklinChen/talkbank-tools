@@ -73,8 +73,9 @@ through a multi-stage Rust pipeline before becoming CHAT:
 
 1. Compound merging (3,584 known compound pairs after dedup; see
    `crates/batchalign-transform/src/asr_postprocess/compounds.rs`)
-2. Cantonese normalization (simplified to traditional + domain replacements,
-   `lang=yue` only), once per monologue, before any splitting
+2. Han-script normalization (simplified to Hong Kong traditional + domain
+   replacements for `yue`; simplified to Taiwan traditional for `nan`), once per
+   monologue, before any splitting
 3. Multi-word splitting (space-separated tokens get timestamp interpolation)
 4. Number expansion via chatter's `talkbank_transform::num_words`
    (cardinal tables plus CJK numerals); Batchalign's `num2text.rs`
@@ -400,7 +401,7 @@ to Rust. Rust then applies the standard ASR post-processing pipeline
 
 **Cantonese normalization:** Tencent returns simplified Chinese characters.
 They cross the provider bridge unchanged; the server's post-processing
-normalizes the whole monologue once, in `cantonese.rs`:
+normalizes the whole monologue once, in `han_script.rs`:
 1. `ferrous-opencc` crate: simplified to traditional Chinese conversion
 2. 31-entry Aho-Corasick domain replacement table for Cantonese-specific
    character corrections
@@ -408,7 +409,7 @@ normalizes the whole monologue once, in `cantonese.rs`:
 **Source files:**
 - `batchalign/inference/languages/cantonese/_tencent_asr.py` (Python: transport)
 - `batchalign/inference/languages/cantonese/_tencent_api.py` (Python: Tencent SDK wrapper)
-- `crates/batchalign-transform/src/asr_postprocess/cantonese.rs` (Rust: normalization)
+- `crates/batchalign-transform/src/asr_postprocess/han_script.rs` (Rust: normalization)
 
 ---
 

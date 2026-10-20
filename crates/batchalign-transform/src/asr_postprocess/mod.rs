@@ -9,8 +9,9 @@
 //! # Pipeline stages
 //!
 //! 1. **Compound merging**: merge adjacent words that form known compounds
-//! 2. **Cantonese normalization**: simplified→HK traditional + domain
-//!    replacements (lang=yue only), once per monologue, before any splitting
+//! 2. **Han-script normalization**: simplified to Hong Kong traditional plus
+//!    the Cantonese domain table (`yue`), or to Taiwan traditional (`nan`),
+//!    once per monologue, before any splitting
 //! 3. **Multi-word splitting**: split tokens containing spaces, interpolate timestamps
 //! 4. **Word forms**: spell digits as number words, link letter-led
 //!    alphanumerics (`b2` to `b_two`), mark reserved-marker spellings as letter
@@ -31,6 +32,7 @@ mod cleanup;
 mod compounds;
 mod english_caps;
 mod expand;
+pub mod han_script;
 pub mod lang_detect;
 mod num2text;
 #[cfg(test)]
@@ -48,13 +50,13 @@ use batchalign_types::domain::AudioPositionSeconds;
 use serde::{Deserialize, Serialize};
 
 pub use asr_types::{AsrNormalizedText, AsrRawText, ChatWordText, SpeakerIndex};
-pub use cantonese::{AlignedNormalization, NormalizationChangedLength};
 pub use chunking::{
     finalize_words_to_chunks, finalize_words_to_chunks_with_snapshot,
     split_prepared_chunk_by_assignments,
 };
 pub use compounds::merge_compounds;
 pub use expand::write_word_forms;
+pub use han_script::{AlignedNormalization, HanScriptNormalization, NormalizationChangedLength};
 pub use num2text::expand_number;
 pub use snapshot::AsrPipelineSnapshot;
 pub use timing::{

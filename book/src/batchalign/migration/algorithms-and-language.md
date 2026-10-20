@@ -380,7 +380,8 @@ be called out explicitly.
 Current `batchalign3` now handles this in the Rust-owned ASR post-process path:
 
 - Cantonese text is normalized to HK traditional form once per monologue,
-  through `AlignedNormalization`, before anything splits it,
+  through `HanScriptNormalization::admit`, before anything splits it
+  (Taiwanese `nan` text is likewise converted to Taiwan traditional),
 - Han-script `yue` ASR chunks are then split with the shared
   `cantonese_char_tokens()` helper, which splits and strips punctuation and
   normalizes nothing,

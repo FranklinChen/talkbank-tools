@@ -362,7 +362,7 @@ ASR post-processing needs. Today they're scattered:
 - `PERCENT_WORD_BY_LANG` (per-lang percent word)
 - `CURRENCY_PREFIXES`/`SUFFIXES` (currency words, but English-only output)
 - Compound word handling (`compounds.rs`)
-- Cantonese normalization (`cantonese.rs`, separate module)
+- Han-script normalization (`han_script.rs`, separate module)
 - Per-lang reconciler logic in `nlp/lang_<code>.rs` modules
 
 The principled architecture is **one `LinguisticNormalizer` per

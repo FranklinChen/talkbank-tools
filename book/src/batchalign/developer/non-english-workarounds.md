@@ -268,7 +268,7 @@ For each workaround, the recommended verification test is:
 
 | | |
 |---|---|
-| **File** | `crates/batchalign-transform/src/asr_postprocess/cantonese.rs` |
+| **File** | `crates/batchalign-transform/src/asr_postprocess/han_script.rs` |
 | **Size** | `ferrous-opencc` `s2hk` conversion + a domain replacement table (see the file for the active entries) |
 | **What** | Two-stage normalization: Simplified→Traditional via `ferrous-opencc`, then a domain replacement table (multi-char first to prevent partial matches). |
 | **Why** | Cantonese ASR output uses simplified or colloquial forms that need normalization to standard written Cantonese. |

@@ -46,6 +46,14 @@ The request and CHAT header retain `nan`. Qwen receives its documented
 The recognizer uses approximately 30-second audio windows and retains its
 sentence punctuation through the word-timestamp step.
 
+Transcripts are written in Taiwan-standard traditional characters, the script
+of TalkBank's Taiwanese corpora. Recognition labelled as Chinese arrives in
+simplified characters, so ASR post-processing converts it character for
+character with OpenCC `s2tw` (not `s2twp`, which would substitute Taiwan
+Mandarin vocabulary for what was said). Each word keeps its timing, and the
+same conversion applies to every engine admitted for `nan` and to provider
+tokens when UTR matches them against a Taiwanese transcript.
+
 Qwen's Chinese forced aligner supplies timestamps; this is not a separately
 trained Taiwanese aligner. Punctuation is restored only when its lexical text
 matches the aligner's units exactly. Changed or missing words cause an explicit
@@ -185,7 +193,7 @@ flowchart TD
     lang["lang code (3-letter)"]
     asr["ASR model\nresolution"]
     num["Number expansion\n(zho/cmn → simplified,\nyue/jpn → traditional,\n12 table langs,\nothers → passthrough)"]
-    canto["Cantonese norm\n(yue only)"]
+    canto["Han-script norm\n(yue, nan)"]
     rtl["RTL punct\n(ara, heb, fas, urd)"]
     retok["Retokenize\n(jpn: 。→.)"]
     stanza["Stanza\n(3→2 letter mapping)"]

@@ -438,7 +438,7 @@ sequenceDiagram
 
     Server->>Server: 1. Compound merging (adjacent subword tokens)
     Server->>Server: 2. Timed word extraction (seconds to ms)
-    Server->>Server: 2d. Cantonese normalization, once per monologue (lang=yue only)
+    Server->>Server: 2d. Han-script normalization, once per monologue (yue, nan)
     Server->>Server: 3. Multi-word splitting (timestamp interpolation)
     Server->>Server: 4. Number expansion (digits to words)
     Server->>Server: 5. Long-turn splitting (chunk at >300 words)
@@ -515,8 +515,9 @@ sequenceDiagram
    The normalization stages in `prepare_asr_chunks()` are:
    1. *Compound merging*, joins adjacent subword tokens
    2. *Timed word extraction*, seconds to milliseconds, filter pauses
-   2d. *Cantonese normalization* (lang=yue only), simplified to traditional via
-       `ferrous-opencc` + domain replacements (pure Rust), run once over the
+   2d. *Han-script normalization* (`yue`: simplified to HK traditional plus domain
+       replacements; `nan`: simplified to Taiwan traditional), via `ferrous-opencc`
+       (pure Rust), run once over the
        whole monologue before anything splits it
    3. *Multi-word splitting*, split space-separated tokens, interpolate timestamps
    4. *Number expansion*, digits to spelled-out words (language-aware)

@@ -110,7 +110,7 @@ Morphology-patching tables were fully ported from BA2 to BA3:
 | `morphosyntax/fr/case.py` | Nominative/accusative pronoun lists | `talkbank-transform/morphosyntax/lang_fr.rs::{PRON_NOM, PRON_ACC}` |
 | `morphosyntax/fr/apm.py` + `fr/apmn.py` (158) | Auditory plural marking | `talkbank-transform/morphosyntax/lang_fr.rs::APM_NOUNS` |
 | `morphosyntax/ja/verbforms.py` (50+ patterns) | Verb-form POS/lemma patches | `talkbank-transform/morphosyntax/lang_ja.rs` |
-| Cantonese normalization (Python OpenCC) | OpenCC `s2hk` + 31 domain replacements | `talkbank-transform/asr_postprocess/cantonese.rs` (Rust `ferrous-opencc` + domain table) |
+| Cantonese normalization (Python OpenCC) | OpenCC `s2hk` + 31 domain replacements (`yue`); OpenCC `s2tw` (`nan`) | `batchalign-transform/asr_postprocess/han_script.rs` (Rust `ferrous-opencc` + domain table) |
 
 These ports were faithful; the underlying semantics carry over.
 

@@ -542,6 +542,39 @@ fn test_process_raw_asr_golden_cantonese() {
     assert_eq!(tokens, vec!["你", "真", "係", "好", "嘈", "啊", "."]);
 }
 
+/// Taiwanese recognition arrives in simplified characters; the pipeline
+/// writes Taiwan traditional, the script of TalkBank's Taiwanese corpora,
+/// with each word keeping its timing and no Cantonese table applied.
+#[test]
+fn test_process_raw_asr_taiwanese_becomes_taiwan_traditional() {
+    let output = AsrOutput {
+        monologues: vec![AsrMonologue {
+            speaker: SpeakerIndex(0),
+            elements: vec![
+                elem("这个", 0.0, 0.4),
+                elem("来", 0.4, 0.6),
+                elem("系", 0.6, 0.8),
+            ],
+        }],
+    };
+    let utts = process_raw_asr(&output, "nan")
+        .expect("test: ASR post-processing must not refuse this input");
+    let words: Vec<(&str, Option<i64>)> = utts[0]
+        .words
+        .iter()
+        .map(|word| (word.text.as_str(), word.start_ms))
+        .collect();
+    assert_eq!(
+        words,
+        vec![
+            ("這個", Some(0)),
+            ("來", Some(400)),
+            ("系", Some(600)),
+            (".", None)
+        ]
+    );
+}
+
 /// Cantonese normalization should NOT activate for non-yue languages.
 #[test]
 fn test_process_raw_asr_no_cantonese_for_eng() {

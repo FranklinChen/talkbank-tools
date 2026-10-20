@@ -66,7 +66,7 @@ flowchart TD
 
     subgraph PostProc["ASR Post-Processing"]
         num_exp["Number Expansion\n12 language tables"]
-        canto["Cantonese Normalization\nyue only"]
+        canto["Han-script normalization\nyue: HK traditional\nnan: Taiwan traditional"]
     end
 
     payload -->|lang| num_exp & canto

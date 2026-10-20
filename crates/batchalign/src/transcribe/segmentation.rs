@@ -21,6 +21,11 @@ impl TranscribeSegmentation {
         language: &LanguageCode3,
         fallback: UtsegFallbackPolicy,
     ) -> Result<Self, UtsegUnavailable> {
+        // Taiwanese has no boundary model; its boundaries are the recognizer's
+        // own punctuation, which the Qwen profile restores for `nan`
+        // (`RecognitionPunctuation.RESTORE` in `qwen_asr_profile.py`). The two
+        // sides must agree: a profile that stopped restoring would leave this
+        // route with speaker changes as its only boundaries.
         if language.as_ref() == "nan" {
             Ok(Self(SegmentationRoute::AsrBoundaries {
                 language: language.clone(),

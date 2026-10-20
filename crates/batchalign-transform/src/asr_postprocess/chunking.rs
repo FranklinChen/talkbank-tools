@@ -8,8 +8,8 @@ use super::{
 /// Takes words that have already been through number expansion and
 /// produces speaker-attributed chunks ready for retokenization.
 ///
-/// Cantonese normalization used to run here, as stage 4b, per word. It now runs
-/// once per monologue in [`super::prepare_words_pre_expansion`], before the
+/// Cantonese normalization used to run here, as stage 4b, per word. Han-script
+/// normalization now runs once per monologue in [`super::prepare_words_pre_expansion`], before the
 /// multi-word split.
 pub fn finalize_words_to_chunks(
     words: Vec<AsrWord>,

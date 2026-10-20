@@ -19,7 +19,7 @@ flowchart TD
     asr["ASR Transcription"]
     compound["Compound Merging"]
     numexp["Number Expansion\n(12 table langs + Chinese/Japanese)"]
-    cantonorm["Cantonese Normalization\n(lang=yue only)"]
+    cantonorm["Han-script Normalization\n(yue, nan)"]
     rtlpunct["RTL Punctuation\nNormalization"]
     retok["Retokenization\n(punctuation-based)"]
     utseg["Utterance Segmentation\n(3 dedicated models)"]
@@ -81,9 +81,12 @@ here.
 See [Number Expansion](number-expansion.md) for details on the CJK
 numeral conversion and the table-based approach.
 
-### Stage 3: Cantonese Text Normalization (yue only)
+### Stage 3: Han-script Text Normalization (yue and nan only)
 
-This stage **only activates when lang=yue**. It applies two transformations:
+This stage activates only for the languages
+`HanScriptNormalization::for_language` names. For Taiwanese (`nan`) it converts
+simplified characters to Taiwan-standard traditional (`s2tw`) and nothing else.
+For Cantonese (`yue`) it applies two transformations:
 
 1. **Simplified → Traditional Chinese** via `ferrous-opencc` (embedded OpenCC
    `s2hk` conversion tables)
@@ -190,8 +193,9 @@ it as a shared ASR post-processing stage, so every ASR engine benefits from
 the same normalization contract.
 
 Since 2026-09-16 "once" is literal: `AlignedNormalization`
-(`crates/batchalign-transform/src/asr_postprocess/cantonese.rs`) is the only
-route to normalized Cantonese text, and the server applies it a single time per
+(now reached through `HanScriptNormalization::admit` in
+`crates/batchalign-transform/src/asr_postprocess/han_script.rs`) is the only
+route to normalized text, and the server applies it a single time per
 monologue, before any stage splits the words. The provider bridges and the
 character tokenizer used to normalize as well, which mattered because the
 transformation is not idempotent: `聯繫` normalized twice becomes `聯係`.

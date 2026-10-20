@@ -5,6 +5,24 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Taiwanese transcripts in Taiwan traditional script
+
+- Write `nan` transcription output in Taiwan-standard traditional characters,
+  the script of TalkBank's Taiwanese corpora. Qwen recognition labelled as
+  Chinese emitted simplified characters. Conversion uses OpenCC `s2tw`
+  character for character (not `s2twp`, which substitutes vocabulary), keeps
+  each word's timing, and applies to every engine admitted for `nan`.
+- UTR now converts provider tokens to Taiwan traditional before matching them
+  against a Taiwanese transcript, as it already did for Cantonese.
+- One owner for Han-script normalization: `HanScriptNormalization`
+  (`yue`, `nan`) replaces the two `lang == "yue"` gates, and its length proof
+  stays the only route to normalized text. The length audit example is now
+  `han_script_length_audit` and measures both tables; none of 376,834 inputs
+  changed length. The debug-trace field `after_cantonese_norm` is renamed
+  `after_han_script_norm`.
+- The Qwen language profile now owns punctuation restoration and the decoding
+  window for every language; the recognizer no longer compares language codes.
+
 ### Preserve observed endpoints in partial alignment searches
 
 - Bound each side of a partial-order FA search by its admitted endpoint when

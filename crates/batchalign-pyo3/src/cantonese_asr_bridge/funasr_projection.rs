@@ -35,7 +35,7 @@
 //!
 //! Surfaces leave this module exactly as FunASR wrote them. Cantonese
 //! normalization used to run here as well, over the joined segment; it now has
-//! one owner, `batchalign_transform::asr_postprocess::AlignedNormalization`,
+//! one owner, `batchalign_transform::asr_postprocess::HanScriptNormalization`,
 //! which the server applies once per monologue.
 
 use batchalign_transform::asr_postprocess::cantonese as cantonese_ops;

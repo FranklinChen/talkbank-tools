@@ -916,7 +916,7 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
 
     let asr_output = crate::transcribe::convert_asr_response(&response);
     // Transcribe's own preparation, not a second implementation of it. Its one
-    // refusal (Cantonese normalization changing a character count) is carried
+    // refusal (Han-script normalization changing a character count) is carried
     // through rather than unwrapped: a replay that cannot prepare its input has
     // not reproduced anything.
     let chunks = crate::pipeline::transcribe::prepare_asr_chunks(&asr_output, lang.as_ref())

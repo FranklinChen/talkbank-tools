@@ -913,8 +913,8 @@ fn asr_response_to_utr_tokens(
 /// run.
 ///
 /// UTR matches ASR text against the transcript's OWN words, so a Cantonese
-/// transcript (HK traditional) and a provider's simplified output would miss
-/// each other word for word. This used to be done inside the provider bridges,
+/// transcript (HK traditional) or a Taiwanese one (Taiwan traditional) and a
+/// provider's simplified output would miss each other word for word. This used to be done inside the provider bridges,
 /// which meant whether it happened at all depended on which engine ran: Tencent
 /// normalized, Whisper and Qwen did not. It now happens here, once, for every
 /// engine, through the pipeline's one owner, and a normalization that changed
@@ -924,17 +924,18 @@ fn normalize_utr_tokens(
     tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
     lang: &LanguageCode3,
 ) -> Result<Vec<crate::chat_ops::fa::utr::AsrTimingToken>, crate::error::ServerError> {
-    if lang.as_ref() != "yue" {
+    let Some(normalization) =
+        batchalign_transform::asr_postprocess::HanScriptNormalization::for_language(lang.as_ref())
+    else {
         return Ok(tokens);
-    }
-    let aligned = batchalign_transform::asr_postprocess::AlignedNormalization::admit(
-        tokens.iter().map(|token| token.text.as_str()),
-    )
-    .map_err(|refusal| {
-        crate::error::ServerError::Validation(format!(
-            "UTR could not normalize its Cantonese tokens: {refusal}"
-        ))
-    })?;
+    };
+    let aligned = normalization
+        .admit(tokens.iter().map(|token| token.text.as_str()))
+        .map_err(|refusal| {
+            crate::error::ServerError::Validation(format!(
+                "UTR could not normalize its tokens: {refusal}"
+            ))
+        })?;
     // One surface per token, in order, by construction.
     Ok(tokens
         .into_iter()
@@ -957,6 +958,31 @@ mod utr_token_conversion_tests {
             model: None,
             source_monologues: None,
         }
+    }
+
+    /// Taiwanese provider tokens arrive simplified; UTR compares them with a
+    /// traditional-script transcript, so they are converted, each token
+    /// keeping its own interval. A language without a normalization is left
+    /// exactly as recognized.
+    #[test]
+    fn utr_tokens_take_the_transcript_script_and_keep_their_timing() {
+        let timed = |text: &str, start_ms: u64| crate::chat_ops::fa::utr::AsrTimingToken {
+            text: text.to_owned(),
+            start_ms,
+            end_ms: start_ms + 100,
+        };
+        let nan = LanguageCode3::try_new("nan").expect("nan is a language code");
+        let converted = normalize_utr_tokens(vec![timed("这个", 0), timed("来", 200)], &nan)
+            .expect("conversion preserves character counts");
+        let summary: Vec<_> = converted
+            .iter()
+            .map(|t| (t.text.as_str(), t.start_ms, t.end_ms))
+            .collect();
+        assert_eq!(summary, [("這個", 0, 100), ("來", 200, 300)]);
+
+        let untouched = normalize_utr_tokens(vec![timed("这个", 0)], &LanguageCode3::eng())
+            .expect("no normalization to refuse");
+        assert_eq!(untouched[0].text, "这个");
     }
 
     fn token(text: &str, start_s: Option<f64>, end_s: Option<f64>) -> AsrToken {
