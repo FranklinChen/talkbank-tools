@@ -250,6 +250,29 @@ class TestWorkerV2Conformance:
             variant.value for variant in MorphosyntaxPipelineV2
         }
 
+    def test_qwen_recognition_policy(self) -> None:
+        """The policy a Qwen worker receives at spawn reads the same on both sides.
+
+        Rust decides it once per language; a field, punctuation fate or window
+        kind known to one side only would be refused by the other at load.
+        """
+        from batchalign.worker._types_v2 import (
+            DecodeWindowV2,
+            QwenRecognitionV2,
+            RecognitionPunctuationV2,
+        )
+
+        _assert_fields_match(
+            _load_schema("worker_v2", "QwenRecognitionV2"), QwenRecognitionV2
+        )
+        punctuation = _load_schema("worker_v2", "RecognitionPunctuationV2")
+        assert _schema_enum_values(punctuation) == {
+            variant.value for variant in RecognitionPunctuationV2
+        }
+        _assert_tagged_union_matches(
+            _load_schema("worker_v2", "DecodeWindowV2"), DecodeWindowV2
+        )
+
     def test_ud_relation_repair(self) -> None:
         """The repair an analyzed item carries must read the same on both sides.
 

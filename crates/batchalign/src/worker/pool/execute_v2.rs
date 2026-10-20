@@ -252,6 +252,60 @@ mod tests {
     }
 
     #[test]
+    fn a_qwen_worker_spawns_with_its_language_recognition_policy() {
+        use crate::transcribe::segmentation::qwen_recognition;
+        use crate::types::worker_v2::{QWEN_RECOGNITION_KEY, QwenRecognitionV2};
+        let spawn_policy = |code: &str| -> QwenRecognitionV2 {
+            let language = LanguageCode3::try_new(code).expect("language code");
+            let extras = std::collections::BTreeMap::new();
+            let request = request_with_payload(
+                InferenceTaskV2::Asr,
+                TaskRequestV2::Asr(AsrRequestV2 {
+                    lang: WorkerLanguage::from(language.clone()),
+                    backend: AsrBackendV2::HkQwen,
+                    models: crate::model_manifest::resolve_asr_models(
+                        AsrBackendV2::HkQwen,
+                        Some(&language),
+                        &extras,
+                    )
+                    .expect("the manifest resolves a Qwen composition"),
+                    input: AsrInputV2::ProviderMedia(
+                        crate::types::worker_v2::ProviderMediaInputV2 {
+                            media_path: "/dev/null".into(),
+                            diarization:
+                                crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
+                        },
+                    ),
+                    extras,
+                    decode_budget_seconds: None,
+                }),
+            );
+            let key = execute_v2_worker_key(
+                WorkerLanguage::from(language),
+                &request,
+                WorkerBootstrapMode::LazyProfile,
+            )
+            .expect("worker key");
+            let json = super::super::lifecycle::spawn_engine_overrides(&key).expect("spawn");
+            let map: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&json).expect("spawn overrides are a JSON map");
+            serde_json::from_str(map.get(QWEN_RECOGNITION_KEY).expect("policy key"))
+                .expect("policy parses")
+        };
+        // The wiring under test: each worker receives exactly what the table
+        // decides for its language (the values are pinned by the table's own
+        // tests in `transcribe::segmentation`).
+        for code in ["nan", "yue"] {
+            let language = LanguageCode3::try_new(code).expect("language code");
+            assert_eq!(
+                spawn_policy(code),
+                qwen_recognition(Some(&language)),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn execute_v2_engine_overrides_preserves_asr_extras_through_dispatch() {
         // Regression pin for the 2026-05-27 root-cause bug: prior to
         // adding ``extras`` to ``AsrRequestV2`` and threading them

@@ -11,6 +11,7 @@ import pytest
 
 from batchalign.device import DevicePolicy
 from batchalign.inference._domain_types import WhisperCpuPrecision
+from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
 from batchalign.worker._model_loading import asr as asr_loading
 from batchalign.worker._model_loading.asr import (
     PINNED_ASR_MODELS_KEY,
@@ -467,7 +468,11 @@ def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
 
     start = time.monotonic()
     with pytest.raises(TimeoutError, match=r"Qwen3-ASR.*timed out after 1 second"):
-        _qwen_asr.load_qwen_asr("yue", {"qwen_model": "Qwen/Qwen3-ASR-0.6B-hf"})
+        _qwen_asr.load_qwen_asr(
+            "yue",
+            {"qwen_model": "Qwen/Qwen3-ASR-0.6B-hf"},
+            recognition=SEGMENTATION_MODEL_POLICY,
+        )
     elapsed = time.monotonic() - start
 
     assert hang_invocations == [1], "load() should have been entered exactly once"

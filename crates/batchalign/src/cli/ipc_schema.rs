@@ -113,6 +113,12 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             LoadedModelV2,
             RequestedRevisionV2,
             ObservedRevisionV2,
+            // The Qwen recognition policy a worker receives at spawn under
+            // `QWEN_RECOGNITION_KEY`. Not part of any request body, so it has
+            // no other schema file for the Python conformance test to read.
+            QwenRecognitionV2,
+            DecodeWindowV2,
+            RecognitionPunctuationV2,
             UtsegResultV2,
             UtsegItemResultV2,
             TranslationResultV2,

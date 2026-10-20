@@ -30,6 +30,7 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
     Completed,
     DecodeBudget,
 )
+from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
 
 
 def _has_torch() -> bool:
@@ -52,7 +53,10 @@ def _recognizer(loaded):
 
     return ReadyQwenRecognizer(
         QwenRecognizerConfig(
-            lang="yue", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
+            lang="yue",
+            model_id="Qwen/Qwen3-ASR-0.6B-hf",
+            device="cpu",
+            recognition=SEGMENTATION_MODEL_POLICY,
         ),
         loaded,
     )

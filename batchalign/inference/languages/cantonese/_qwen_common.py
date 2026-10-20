@@ -35,10 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, assert_never
 
 from batchalign.inference._domain_types import LanguageCode
-from batchalign.inference.qwen_asr_profile import (
-    QwenAsrProfile,
-    RecognitionPunctuation,
-)
+from batchalign.inference.qwen_asr_profile import QwenAsrProfile
 from batchalign.inference.qwen_forced_alignment import (
     QWEN_FORCED_ALIGNER_MODEL_ID,
     ForcedAligner,
@@ -46,6 +43,7 @@ from batchalign.inference.qwen_forced_alignment import (
     SpokenWindowWords,
 )
 from batchalign.inference.qwen_punctuation import PunctuatedAlignment
+from batchalign.worker._types_v2 import QwenRecognitionV2, RecognitionPunctuationV2
 
 from ._asr_types import (
     AsrElement,
@@ -230,6 +228,8 @@ class QwenRecognizerConfig:
     model_path: str | None = None
     aligner_path: str | None = None
     context_override: str | None = None
+    # Decided by the control plane for this language; required, never defaulted.
+    recognition: QwenRecognitionV2 = field(kw_only=True)
     profile: QwenAsrProfile = field(init=False)
 
     def __post_init__(self) -> None:
@@ -237,7 +237,9 @@ class QwenRecognizerConfig:
         object.__setattr__(
             self,
             "profile",
-            QwenAsrProfile.for_language(self.lang, self.context_override),
+            QwenAsrProfile.for_language(
+                self.lang, self.recognition, self.context_override
+            ),
         )
 
     def load(self) -> ReadyQwenRecognizer:
@@ -382,9 +384,9 @@ class ReadyQwenRecognizer:
         # The validated transition carries text and time together. The caller
         # never zips a separate spelling list onto timestamp evidence.
         match self.config.profile.punctuation:
-            case RecognitionPunctuation.RESTORE:
+            case RecognitionPunctuationV2.RESTORE:
                 words = PunctuatedAlignment(text, spoken).words
-            case RecognitionPunctuation.DISCARD:
+            case RecognitionPunctuationV2.DISCARD:
                 words = spoken.words
             case unreachable:
                 assert_never(unreachable)

@@ -439,7 +439,7 @@ fn worker_config_for_key(
 /// only if it loads the utseg task. The alternative, deciding here which tasks
 /// a target will load, would put a second copy of the target's task set in this
 /// function.
-fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerError> {
+pub(super) fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerError> {
     let overrides = key.engine_selection.overrides();
     // Only a worker that will actually load an ASR engine needs an ASR pin.
     // `EngineSelection` has already dropped the engines with no Python loader,
@@ -468,22 +468,43 @@ fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerError> {
             &overrides.extras,
         )
         .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
-        let pinned = serde_json::to_string(&models)
-            .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
-        map.insert(
-            crate::model_manifest::PINNED_ASR_MODELS_KEY.to_owned(),
-            pinned,
-        );
+        insert_spawn_json(
+            &mut map,
+            crate::model_manifest::PINNED_ASR_MODELS_KEY,
+            &models,
+        )?;
+        // Qwen loads only when named, which is exactly this branch, so every
+        // Qwen worker receives the recognition policy for its language from
+        // the same table that routes segmentation. The worker never decides it.
+        if backend == crate::types::worker_v2::AsrBackendV2::HkQwen {
+            insert_spawn_json(
+                &mut map,
+                crate::types::worker_v2::QWEN_RECOGNITION_KEY,
+                &crate::transcribe::segmentation::qwen_recognition(key.language.as_resolved()),
+            )?;
+        }
     }
     if let Some(model) = boundary_model {
-        let pinned = serde_json::to_string(&model)
-            .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
-        map.insert(
-            crate::model_manifest::PINNED_UTSEG_MODEL_KEY.to_owned(),
-            pinned,
-        );
+        insert_spawn_json(
+            &mut map,
+            crate::model_manifest::PINNED_UTSEG_MODEL_KEY,
+            &model,
+        )?;
     }
     serde_json::to_string(&map).map_err(|error| WorkerError::SpawnFailed(error.to_string()))
+}
+
+/// Put one typed value into the spawn overrides as JSON under `key`; the
+/// worker parses it back at its boundary.
+fn insert_spawn_json<T: serde::Serialize>(
+    map: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &T,
+) -> Result<(), WorkerError> {
+    let json = serde_json::to_string(value)
+        .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
+    map.insert(key.to_owned(), json);
+    Ok(())
 }
 
 /// Run a single round of pressure-driven eviction + health checks.

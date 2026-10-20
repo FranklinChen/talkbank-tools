@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecognitionPunctuationV2",
+  "description": "What becomes of the punctuation in a recognizer's text.\n\nThe forced aligner returns lexical units only, so recognized punctuation\nsurvives only when deliberately restored.",
+  "oneOf": [
+    {
+      "description": "Attach recognized sentence and clause punctuation to the preceding\naligned unit, after proving exact lexical correspondence. Used where the\nrecognizer's punctuation is the utterance-boundary evidence.",
+      "type": "string",
+      "const": "restore"
+    },
+    {
+      "description": "Keep only the aligned units; a segmentation model supplies boundaries.",
+      "type": "string",
+      "const": "discard"
+    }
+  ]
+}

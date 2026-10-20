@@ -14,10 +14,7 @@ from batchalign.inference.languages.cantonese._qwen_common import (
     QwenRecognizerConfig,
     ReadyQwenRecognizer,
 )
-from batchalign.inference.qwen_asr_profile import (
-    QwenAsrProfile,
-    RecognitionPunctuation,
-)
+from batchalign.inference.qwen_asr_profile import QwenAsrProfile
 from batchalign.inference.qwen_forced_alignment import (
     SpokenWindowWords,
     WindowAlignedWord,
@@ -25,6 +22,12 @@ from batchalign.inference.qwen_forced_alignment import (
     resolve_qwen_language,
 )
 from batchalign.inference.qwen_punctuation import PunctuatedAlignment
+from batchalign.tests._qwen_recognition import (
+    SEGMENTATION_MODEL_POLICY,
+    TAIWANESE_POLICY,
+)
+from batchalign.worker._model_loading.asr import QWEN_RECOGNITION_KEY, qwen_recognition
+from batchalign.worker._types_v2 import RecognitionPunctuationV2
 
 
 def _spoken(words):
@@ -34,22 +37,21 @@ def _spoken(words):
 
 
 def test_taiwanese_recognition_does_not_widen_standalone_alignment_support():
-    profile = QwenAsrProfile.for_language("nan")
+    profile = QwenAsrProfile.for_language("nan", TAIWANESE_POLICY)
     assert profile.recognition_language == "Chinese"
     assert profile.alignment_language == "Chinese"
     assert profile.prompt is None
     assert profile.chunk_seconds == 30
-    assert profile.punctuation is RecognitionPunctuation.RESTORE
+    assert profile.punctuation is RecognitionPunctuationV2.RESTORE
     with pytest.raises(ValueError):
         resolve_qwen_language("nan")
     for code, label in [("eng", "English"), ("yue", "Cantonese"), ("zho", "Chinese")]:
-        other = QwenAsrProfile.for_language(code)
+        other = QwenAsrProfile.for_language(code, SEGMENTATION_MODEL_POLICY)
         assert other.recognition_language == label
         assert other.prompt is None
-        # Other languages keep the chunker's own default window and leave
-        # utterance boundaries to the segmentation model.
+        # The window and punctuation are the policy's, not the language's.
         assert other.chunk_seconds == MAX_FORCE_ALIGN_INPUT_SECONDS
-        assert other.punctuation is RecognitionPunctuation.DISCARD
+        assert other.punctuation is RecognitionPunctuationV2.DISCARD
 
 
 @pytest.mark.parametrize(
@@ -86,7 +88,10 @@ def test_recognizer_retains_punctuation_and_exact_file_relative_times():
 
     recognizer = ReadyQwenRecognizer(
         QwenRecognizerConfig(
-            lang="nan", model_id="Qwen/Qwen3-ASR-1.7B-hf", device="cpu"
+            lang="nan",
+            model_id="Qwen/Qwen3-ASR-1.7B-hf",
+            device="cpu",
+            recognition=TAIWANESE_POLICY,
         ),
         LoadedQwen(processor=object(), model=object(), aligner=Aligner()),
     )
@@ -109,7 +114,10 @@ def test_a_discarding_profile_keeps_only_the_aligned_units():
 
     recognizer = ReadyQwenRecognizer(
         QwenRecognizerConfig(
-            lang="yue", model_id="Qwen/Qwen3-ASR-1.7B-hf", device="cpu"
+            lang="yue",
+            model_id="Qwen/Qwen3-ASR-1.7B-hf",
+            device="cpu",
+            recognition=SEGMENTATION_MODEL_POLICY,
         ),
         LoadedQwen(processor=object(), model=object(), aligner=Aligner()),
     )
@@ -124,11 +132,14 @@ def test_config_load_transitions_to_a_ready_recognizer(monkeypatch):
     loaded = LoadedQwen(processor=object(), model=object(), aligner=object())
     monkeypatch.setattr(LoadedQwen, "load", classmethod(lambda cls, **kwargs: loaded))
     monkeypatch.setattr(_qwen_asr, "_recognizer", None)
-    _qwen_asr.load_qwen_asr("nan", {"qwen_model": "Qwen/Qwen3-ASR-1.7B-hf"})
+    _qwen_asr.load_qwen_asr(
+        "nan", {"qwen_model": "Qwen/Qwen3-ASR-1.7B-hf"}, recognition=TAIWANESE_POLICY
+    )
     ready = _qwen_asr._recognizer
     assert isinstance(ready, ReadyQwenRecognizer)
     assert ready.models is loaded
     assert ready.config.profile.recognition_language == "Chinese"
+    assert ready.config.profile.punctuation is RecognitionPunctuationV2.RESTORE
     assert not hasattr(ready.config, "transcribe")
     with pytest.raises(FrozenInstanceError):
         ready.config.lang = "eng"
@@ -143,8 +154,26 @@ def test_a_failed_load_publishes_no_ready_recognizer(monkeypatch):
     monkeypatch.setattr(LoadedQwen, "load", classmethod(fail))
     monkeypatch.setattr(_qwen_asr, "_recognizer", None)
     with pytest.raises(RuntimeError, match="model load failed"):
-        _qwen_asr.load_qwen_asr("nan", None)
+        _qwen_asr.load_qwen_asr("nan", None, recognition=TAIWANESE_POLICY)
     assert _qwen_asr._recognizer is None
+
+
+def test_the_worker_boundary_requires_the_control_plane_policy():
+    """The worker never decides the policy from the language code itself: a
+    spawn without it, or with a field only the other side knows, is refused."""
+    spawn = {QWEN_RECOGNITION_KEY: TAIWANESE_POLICY.model_dump_json()}
+    assert qwen_recognition(spawn) == TAIWANESE_POLICY
+    with pytest.raises(ValueError, match=QWEN_RECOGNITION_KEY):
+        qwen_recognition({"qwen_model": "Qwen/Qwen3-ASR-1.7B-hf"})
+    with pytest.raises(ValueError):
+        qwen_recognition(
+            {
+                QWEN_RECOGNITION_KEY: (
+                    '{"window":{"kind":"chunker_default"},'
+                    '"punctuation":"discard","novel":1}'
+                )
+            }
+        )
 
 
 def test_punctuation_does_not_erase_combining_tone_marks():
@@ -162,7 +191,9 @@ def test_worker_context_override_is_part_of_the_ready_profile(monkeypatch, conte
     loaded = LoadedQwen(processor=object(), model=object(), aligner=object())
     monkeypatch.setattr(LoadedQwen, "load", classmethod(lambda cls, **kwargs: loaded))
     monkeypatch.setattr(_qwen_asr, "_recognizer", None)
-    _qwen_asr.load_qwen_asr("nan", {"qwen_context": context})
+    _qwen_asr.load_qwen_asr(
+        "nan", {"qwen_context": context}, recognition=TAIWANESE_POLICY
+    )
     ready = _qwen_asr._recognizer
     assert ready is not None
     assert ready.config.profile.prompt == (context or None)
@@ -171,4 +202,6 @@ def test_worker_context_override_is_part_of_the_ready_profile(monkeypatch, conte
 
 def test_invalid_context_cannot_be_admitted_to_the_ready_configuration():
     with pytest.raises(TypeError, match="qwen_context must be text"):
-        QwenRecognizerConfig(lang="nan", context_override=42)
+        QwenRecognizerConfig(
+            lang="nan", context_override=42, recognition=TAIWANESE_POLICY
+        )

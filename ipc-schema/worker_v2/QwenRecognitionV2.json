@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QwenRecognitionV2",
+  "description": "How a Qwen recognizer turns audio into timed words.",
+  "type": "object",
+  "properties": {
+    "punctuation": {
+      "description": "What becomes of the punctuation in the recognizer's text.",
+      "$ref": "#/$defs/RecognitionPunctuationV2"
+    },
+    "window": {
+      "description": "The decoding window the recording is split into.",
+      "$ref": "#/$defs/DecodeWindowV2"
+    }
+  },
+  "required": [
+    "window",
+    "punctuation"
+  ],
+  "$defs": {
+    "DecodeWindowV2": {
+      "description": "The decoding window a Qwen recognizer splits a recording into.",
+      "oneOf": [
+        {
+          "description": "The chunker's own default (the forced aligner's input ceiling).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "chunker_default"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "At most this many seconds per window, for languages whose spontaneous\nspeech drifts into repetition in long windows.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "bounded_seconds"
+            },
+            "seconds": {
+              "description": "The window ceiling.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "kind",
+            "seconds"
+          ]
+        }
+      ]
+    },
+    "RecognitionPunctuationV2": {
+      "description": "What becomes of the punctuation in a recognizer's text.\n\nThe forced aligner returns lexical units only, so recognized punctuation\nsurvives only when deliberately restored.",
+      "oneOf": [
+        {
+          "description": "Attach recognized sentence and clause punctuation to the preceding\naligned unit, after proving exact lexical correspondence. Used where the\nrecognizer's punctuation is the utterance-boundary evidence.",
+          "type": "string",
+          "const": "restore"
+        },
+        {
+          "description": "Keep only the aligned units; a segmentation model supplies boundaries.",
+          "type": "string",
+          "const": "discard"
+        }
+      ]
+    }
+  }
+}

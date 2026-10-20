@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
+
 
 def _has_torch() -> bool:
     try:
@@ -75,6 +77,7 @@ def test_qwen_recognizer_transcribe_produces_word_timestamps() -> None:
         lang="yue",
         model_id="Qwen/Qwen3-ASR-0.6B-hf",
         device="cpu",
+        recognition=SEGMENTATION_MODEL_POLICY,
     )
     recognizer = config.load()
     _payload, timed_words = recognizer.transcribe(str(audio))

@@ -603,6 +603,51 @@ class WhisperModelsV2(BaseModel):
     asr: RequestedModelV2
 
 
+class ChunkerDefaultWindowV2(BaseModel):
+    """The chunker's own default window (the forced aligner's input ceiling)."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    kind: Literal["chunker_default"] = "chunker_default"
+
+
+class BoundedSecondsWindowV2(BaseModel):
+    """At most this many seconds per decoding window."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    kind: Literal["bounded_seconds"] = "bounded_seconds"
+    seconds: int = Field(gt=0)
+
+
+DecodeWindowV2: TypeAlias = Annotated[
+    ChunkerDefaultWindowV2 | BoundedSecondsWindowV2,
+    Field(discriminator="kind"),
+]
+"""The decoding window a Qwen recognizer splits a recording into."""
+
+
+class RecognitionPunctuationV2(str, Enum):
+    """What becomes of the punctuation in a recognizer's text."""
+
+    RESTORE = "restore"
+    DISCARD = "discard"
+
+
+class QwenRecognitionV2(BaseModel):
+    """How a Qwen recognizer runs, decided by the control plane per language.
+
+    Sent to every Qwen worker at spawn under ``QWEN_RECOGNITION_KEY``. The
+    worker reads it rather than deciding again from the language code. Strict:
+    a field only Rust knows is refused, not silently ignored.
+    """
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    window: DecodeWindowV2
+    punctuation: RecognitionPunctuationV2
+
+
 class QwenModelsV2(BaseModel):
     """Qwen3-ASR and the forced aligner it needs for word timings."""
 

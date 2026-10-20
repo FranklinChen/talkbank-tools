@@ -28,12 +28,16 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
     Completed,
     RunawayReason,
 )
+from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
 
 
 def _stub_recognizer(monkeypatch: pytest.MonkeyPatch, chunk_seconds: float = 1.0):
     recognizer = qwen_common.ReadyQwenRecognizer(
         qwen_common.QwenRecognizerConfig(
-            lang="yue", model_id="Qwen/Qwen3-ASR-0.6B-hf", device="cpu"
+            lang="yue",
+            model_id="Qwen/Qwen3-ASR-0.6B-hf",
+            device="cpu",
+            recognition=SEGMENTATION_MODEL_POLICY,
         ),
         qwen_common.LoadedQwen(processor=object(), model=object(), aligner=object()),
     )

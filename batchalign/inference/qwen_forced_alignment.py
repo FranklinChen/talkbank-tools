@@ -66,6 +66,27 @@ QWEN_LANG_LABELS: Final[dict[LanguageCode, QwenLanguageLabel]] = {
 }
 
 
+# Recognition accepts every aligner language plus Taiwanese, which Qwen
+# recognizes under its Chinese label. Kept apart from `QWEN_LANG_LABELS` on
+# purpose: that table also decides standalone forced-alignment admission, and
+# Taiwanese has no qualified aligner.
+QWEN_RECOGNITION_LABELS: Final[dict[LanguageCode, QwenLanguageLabel]] = {
+    **QWEN_LANG_LABELS,
+    "nan": QwenLanguageLabel("Chinese"),
+}
+
+
+def resolve_qwen_recognition_language(lang: LanguageCode) -> QwenLanguageLabel:
+    """The Qwen recognition label for an ISO-639-3 code, or a named refusal."""
+    label = QWEN_RECOGNITION_LABELS.get(lang)
+    if label is None:
+        raise ValueError(
+            f"Qwen3 has no recognition label for ISO-639-3 {lang!r}; "
+            f"supported: {', '.join(sorted(QWEN_RECOGNITION_LABELS))}."
+        )
+    return label
+
+
 def resolve_qwen_language(lang: LanguageCode) -> QwenLanguageLabel:
     """The Qwen label for an ISO-639-3 code, or a named refusal.
 

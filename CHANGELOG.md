@@ -5,6 +5,17 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### One owner for the Taiwanese recognition policy
+
+- Rust now decides each language's Qwen decoding window and whether recognized
+  punctuation is restored, from the same table that routes Taiwanese
+  transcription to ASR boundaries, and sends the decision to every Qwen worker
+  at spawn (`QwenRecognitionV2`, spawn key `qwen_recognition`). The Python
+  profile no longer decides either from the language code, and a Qwen worker
+  spawned without the policy refuses to load. Output is unchanged: Taiwanese
+  keeps 30-second windows and restored punctuation; other languages keep the
+  chunker default and discard it.
+
 ### Taiwanese transcripts in Taiwan traditional script
 
 - Write `nan` transcription output in Taiwan-standard traditional characters,

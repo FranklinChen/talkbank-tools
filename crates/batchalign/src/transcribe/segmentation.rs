@@ -5,7 +5,56 @@
 //! existing CHAT with a Taiwanese constituency or boundary model.
 use crate::api::LanguageCode3;
 use crate::params::UtsegFallbackPolicy;
+use crate::types::worker_v2::{DecodeWindowV2, QwenRecognitionV2, RecognitionPunctuationV2};
 use crate::utseg_route::{UtsegRoute, UtsegUnavailable};
+
+/// A language whose transcription keeps the recognizer's own utterance
+/// boundaries, because no boundary model exists for it.
+///
+/// The ONE table of such languages. The segmentation route
+/// ([`TranscribeSegmentation::resolve`]) and the Qwen recognition policy sent
+/// to the worker ([`qwen_recognition`]) both read it, so the route that relies
+/// on recognizer punctuation and the recognizer that restores it cannot
+/// disagree.
+struct RecognizerBoundaryLanguage {
+    code: &'static str,
+    /// Qwen decoding window: long windows let spontaneous speech in this
+    /// language drift into repetition.
+    qwen_window_seconds: std::num::NonZeroU32,
+}
+
+const RECOGNIZER_BOUNDARY_LANGUAGES: [RecognizerBoundaryLanguage; 1] =
+    [RecognizerBoundaryLanguage {
+        code: "nan",
+        qwen_window_seconds: std::num::NonZeroU32::new(30).expect("nonzero"),
+    }];
+
+fn recognizer_boundary_language(
+    language: &LanguageCode3,
+) -> Option<&'static RecognizerBoundaryLanguage> {
+    RECOGNIZER_BOUNDARY_LANGUAGES
+        .iter()
+        .find(|entry| entry.code == language.as_ref())
+}
+
+/// How a Qwen recognizer runs for `language`: restored punctuation and a
+/// bounded window where the language keeps recognizer boundaries, otherwise
+/// the chunker default with punctuation left to segmentation. An auto-detect
+/// request (`None`) has no recognizer-boundary language.
+pub(crate) fn qwen_recognition(language: Option<&LanguageCode3>) -> QwenRecognitionV2 {
+    match language.and_then(recognizer_boundary_language) {
+        Some(entry) => QwenRecognitionV2 {
+            window: DecodeWindowV2::BoundedSeconds {
+                seconds: entry.qwen_window_seconds,
+            },
+            punctuation: RecognitionPunctuationV2::Restore,
+        },
+        None => QwenRecognitionV2 {
+            window: DecodeWindowV2::ChunkerDefault,
+            punctuation: RecognitionPunctuationV2::Discard,
+        },
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct TranscribeSegmentation(SegmentationRoute);
@@ -21,12 +70,10 @@ impl TranscribeSegmentation {
         language: &LanguageCode3,
         fallback: UtsegFallbackPolicy,
     ) -> Result<Self, UtsegUnavailable> {
-        // Taiwanese has no boundary model; its boundaries are the recognizer's
-        // own punctuation, which the Qwen profile restores for `nan`
-        // (`RecognitionPunctuation.RESTORE` in `qwen_asr_profile.py`). The two
-        // sides must agree: a profile that stopped restoring would leave this
-        // route with speaker changes as its only boundaries.
-        if language.as_ref() == "nan" {
+        // The same table decides the Qwen policy (`qwen_recognition`), so a
+        // route that relies on recognizer punctuation always gets a recognizer
+        // told to restore it.
+        if recognizer_boundary_language(language).is_some() {
             Ok(Self(SegmentationRoute::AsrBoundaries {
                 language: language.clone(),
             }))
@@ -61,5 +108,39 @@ mod tests {
         assert_eq!(route.language(), &nan);
         assert!(route.model().is_none());
         assert!(UtsegRoute::resolve(&nan, UtsegFallbackPolicy::Refuse).is_err());
+    }
+
+    /// The route and the recognizer policy come from one table: a language
+    /// that keeps recognizer boundaries is told to restore punctuation, and a
+    /// language with a boundary model is told to discard it.
+    #[test]
+    fn the_route_and_the_qwen_policy_agree_for_every_language() {
+        // Every table language plus languages with and without a boundary
+        // model of their own (`spa` falls back to Stanza, not to recognizer
+        // boundaries).
+        let codes = RECOGNIZER_BOUNDARY_LANGUAGES
+            .iter()
+            .map(|entry| entry.code)
+            .chain(["yue", "zho", "eng", "spa"]);
+        for code in codes {
+            let language = LanguageCode3::try_new(code).unwrap();
+            let keeps_boundaries =
+                TranscribeSegmentation::resolve(&language, UtsegFallbackPolicy::AllowStanza)
+                    .map(|route| route.model().is_none())
+                    .unwrap_or(false);
+            let restores =
+                qwen_recognition(Some(&language)).punctuation == RecognitionPunctuationV2::Restore;
+            assert_eq!(keeps_boundaries, restores, "{code}");
+        }
+        assert_eq!(
+            qwen_recognition(Some(&LanguageCode3::try_new("nan").unwrap())).window,
+            DecodeWindowV2::BoundedSeconds {
+                seconds: std::num::NonZeroU32::new(30).unwrap()
+            }
+        );
+        assert_eq!(
+            qwen_recognition(None).window,
+            DecodeWindowV2::ChunkerDefault
+        );
     }
 }

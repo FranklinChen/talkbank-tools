@@ -14,12 +14,14 @@ Paths below are relative to the repository root.
 
 | Owner | Responsibility |
 | --- | --- |
-| `batchalign/inference/qwen_asr_profile.py` | Resolve recognition label, companion alignment label, optional context, decoding window and `RecognitionPunctuation`: every language-dependent decision, once. |
+| `crates/batchalign/src/transcribe/segmentation.rs` (`qwen_recognition`) | Decide each language's recognition policy (decoding window, punctuation fate) from the one table of recognizer-boundary languages. |
+| `batchalign/inference/qwen_asr_profile.py` | Resolve the recognition and companion alignment labels (`QWEN_RECOGNITION_LABELS`), admit optional context, and translate the received policy into recognizer terms. |
+| `batchalign/worker/_model_loading/asr.py` (`qwen_recognition`) | Parse the spawn policy at the worker boundary; refuse a Qwen worker spawned without it. |
 | `batchalign/inference/languages/cantonese/_qwen_common.py` | Validate configuration, load both models, decode bounded chunks and convert aligned times to recording coordinates. |
 | `batchalign/inference/languages/cantonese/_qwen_asr.py` | Resolve worker options, enforce the loading timeout and publish the ready recognizer. |
 | `batchalign/inference/qwen_forced_alignment.py` | Shared aligner adapter and window-relative alignment types; standalone FA language admission. |
 | `batchalign/inference/qwen_punctuation.py` | Validate lexical correspondence and retain punctuation with the original timed units. |
-| `crates/batchalign/src/transcribe/segmentation.rs` | Admit a transcription route with either a text-model capability or ASR boundaries. |
+| `crates/batchalign/src/transcribe/segmentation.rs` (`TranscribeSegmentation`) | Admit a transcription route with either a text-model capability or ASR boundaries, from the same table. |
 
 ```mermaid
 flowchart LR
@@ -57,13 +59,35 @@ For `nan`, the request and CHAT language remain `nan`. The profile selects
 model labels do not change the recording's language and do not qualify a
 separate Taiwanese forced aligner.
 
-The Taiwanese route uses approximately 30-second recognition windows and
-restores recognition punctuation (`RecognitionPunctuation.RESTORE`). Other
-current Qwen profiles use the chunker's default window and discard recognition
-punctuation, because a segmentation model supplies their boundaries. The
-recognizer reads these profile fields with an exhaustive `match` and never
-compares the language code itself, so a new profile is one entry in
-`QwenAsrProfile.for_language`. `qwen_context` is optional text admitted into the
+The decoding window and the fate of recognized punctuation are decided in
+Rust, once, by `qwen_recognition` in `transcribe/segmentation.rs`. It reads the
+same table of recognizer-boundary languages that `TranscribeSegmentation` reads
+to choose the ASR-boundaries route, so a route that relies on recognizer
+punctuation always gets a recognizer told to restore it. The worker pool sends
+the decision to every Qwen worker at spawn as `QwenRecognitionV2` JSON under
+`QWEN_RECOGNITION_KEY` (`qwen_recognition`). The Python loader refuses to
+load without it and never decides it from the language code.
+
+Today Taiwanese gets 30-second windows and restored punctuation
+(`RecognitionPunctuationV2.RESTORE`); every other language gets the chunker's
+default window and discarded punctuation, because a segmentation model
+supplies their boundaries. The recognizer reads the profile with an
+exhaustive `match`. Adding a recognizer-boundary language is one entry in the
+Rust table, from which the route, the policy and the worker follow, plus a
+Qwen recognition label in `QWEN_RECOGNITION_LABELS`
+(`batchalign/inference/qwen_forced_alignment.py`) if the language is new to
+Qwen. That label table is separate from the aligner's `QWEN_LANG_LABELS`, which
+also decides standalone forced-alignment admission.
+
+```mermaid
+flowchart LR
+    T["RECOGNIZER_BOUNDARY_LANGUAGES<br/>(Rust, one table)"] --> S["TranscribeSegmentation::resolve<br/>AsrBoundaries or Model"]
+    T --> Q["qwen_recognition(language)<br/>QwenRecognitionV2"]
+    Q -->|"spawn key qwen_recognition"| W["Python loader<br/>refuses if absent"]
+    W --> P["QwenAsrProfile<br/>window + punctuation"]
+```
+
+`qwen_context` is optional text admitted into the
 configuration before loading; absent or empty context supplies no prompt.
 The worker passes a nonempty context through the processor's `prompt` argument.
 Context can be emitted as invented speech, so dialect instructions are not
@@ -143,7 +167,9 @@ Keep the following regression boundaries:
 | Loader timeout | `test_load_qwen_asr_times_out_on_hang` in `batchalign/tests/pipelines/asr/test_asr_model_loading.py` |
 | Shared alignment adapter contracts | `batchalign/tests/pipelines/fa/test_qwen_forced_alignment.py` |
 | Real-model word timestamps (golden test; requires weights) | `batchalign/tests/pipelines/asr/test_qwen_asr_forced_aligner.py` |
-| Native boundaries without standalone utseg support | Tests in `crates/batchalign/src/transcribe/segmentation.rs` |
+| Native boundaries without standalone utseg support; route and Qwen policy agree per language | Tests in `crates/batchalign/src/transcribe/segmentation.rs` |
+| Every Qwen worker spawns with its language's policy | `a_qwen_worker_spawns_with_its_language_recognition_policy` in `crates/batchalign/src/worker/pool/execute_v2.rs` |
+| Policy wire shape on both sides; loader refusal without a policy | `crates/batchalign-types/src/worker_v2/qwen_recognition.rs`, `test_qwen_recognition_policy` in `batchalign/tests/test_ipc_type_conformance.py`, `test_qwen_taiwanese.py` |
 | Qwen transcription admission without granting Rev.AI support | `transcribe_taiwanese_qwen_preserves_its_language` in `crates/batchalign/src/types/request.rs` |
 
 A focused profile/worker regression command is:

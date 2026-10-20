@@ -21,6 +21,7 @@ from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
 )
+from batchalign.worker._types_v2 import QwenRecognitionV2
 
 from ._asr_types import admit_provider_monologues
 from ._common import EngineOverrides, ProviderNotLoaded, answer_asr_batch
@@ -86,6 +87,7 @@ def load_qwen_asr(
     lang: LanguageCode,
     engine_overrides: EngineOverrides | None,
     *,
+    recognition: QwenRecognitionV2,
     model_path: str | None = None,
     aligner_path: str | None = None,
 ) -> None:
@@ -131,6 +133,9 @@ def load_qwen_asr(
         model_path=model_path,
         aligner_path=aligner_path,
         context_override=(engine_overrides or {}).get("qwen_context"),
+        # Decided by the control plane for this language and parsed at the
+        # worker boundary (`_model_loading.asr.qwen_recognition`).
+        recognition=recognition,
     )
 
     # Surface the model-load event to every UI channel per the

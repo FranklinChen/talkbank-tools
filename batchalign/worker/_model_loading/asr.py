@@ -32,6 +32,7 @@ from batchalign.worker._types_v2 import (
     ParaformerModelsV2,
     QwenModelIdentityV2,
     QwenModelsV2,
+    QwenRecognitionV2,
     RequestedModelV2,
     RequestedProviderParameterV2,
     RequestedUnpinnedV2,
@@ -52,6 +53,27 @@ PINNED_ASR_MODELS_KEY = "asr_pinned_models"
 _PINNED_ASR_MODELS: TypeAdapter[AsrRequestedModelsV2] = TypeAdapter(
     AsrRequestedModelsV2
 )
+
+# The engine-override key the control plane sends a Qwen worker's recognition
+# policy under. Must equal `QWEN_RECOGNITION_KEY` in the Rust wire types.
+QWEN_RECOGNITION_KEY = "qwen_recognition"
+
+
+def qwen_recognition(engine_overrides: dict[str, str] | None) -> QwenRecognitionV2:
+    """Return the recognition policy Rust decided for this Qwen worker.
+
+    Unlike the pinned models, absence is NOT a state: Qwen loads only when the
+    control plane named it, and that path always sends the policy. A missing
+    or malformed policy means the two sides disagree, and deciding it here
+    from the language code would be the second owner this key removed.
+    """
+    raw = (engine_overrides or {}).get(QWEN_RECOGNITION_KEY)
+    if raw is None:
+        raise ValueError(
+            "the Qwen recognizer needs the recognition policy the control plane "
+            f"sends under {QWEN_RECOGNITION_KEY!r}; none was received"
+        )
+    return QwenRecognitionV2.model_validate_json(raw)
 
 
 def pinned_asr_models(
@@ -371,6 +393,7 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         load_qwen_asr(
             lang,
             engine_overrides,
+            recognition=qwen_recognition(engine_overrides),
             model_path=asr_path,
             aligner_path=aligner_path,
         )

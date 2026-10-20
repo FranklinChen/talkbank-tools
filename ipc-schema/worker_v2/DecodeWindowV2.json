@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DecodeWindowV2",
+  "description": "The decoding window a Qwen recognizer splits a recording into.",
+  "oneOf": [
+    {
+      "description": "The chunker's own default (the forced aligner's input ceiling).",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "chunker_default"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "At most this many seconds per window, for languages whose spontaneous\nspeech drifts into repetition in long windows.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "bounded_seconds"
+        },
+        "seconds": {
+          "description": "The window ceiling.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "kind",
+        "seconds"
+      ]
+    }
+  ]
+}
