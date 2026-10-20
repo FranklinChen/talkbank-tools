@@ -10,7 +10,9 @@ references relevant to the task.
 
 Typestate and type-driven design are a firm mandate for every change, in every
 language and every repository: new code, old code, fixes, refactors, tests and
-test harnesses alike. Nothing below overrides this.
+test harnesses alike. Nothing below overrides this. Every project here is
+long-term, never a one-off: a type is paid for once, while a bug the
+architecture permits recurs for the life of the project.
 
 - Before writing code or a test, ask which type change makes the defect
   unrepresentable, and make it. The compiler is the first test.
