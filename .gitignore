@@ -80,9 +80,6 @@ pipeout*.xls
 pipeout*.cex
 pipeout*.cha
 
-# graft's local graph cache — regenerable, not committed (run `graft build`).
-/graft/
-
 # Trail learnings are a private working diary; they live in the maintainer's
 # private workspace and never in a public tree (ruling of 2026-10-19).
 .trail/
