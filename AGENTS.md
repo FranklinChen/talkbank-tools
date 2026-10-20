@@ -1,10 +1,30 @@
 # Batchalign agent guidance
 
-**Last modified:** 2026-10-20 17:02 EDT
+**Last modified:** 2026-10-20 18:07 EDT
 
 Canonical guidance for all coding agents. Read
 applicable nested guidance in the affected crates and frontend, plus the
 references relevant to the task.
+
+## First principle: typestate
+
+Typestate and type-driven design are a firm mandate for every change, in every
+language and every repository: new code, old code, fixes, refactors, tests and
+test harnesses alike. Nothing below overrides this.
+
+- Before writing code or a test, ask which type change makes the defect
+  unrepresentable, and make it. The compiler is the first test.
+- Give each distinct meaning its own type and each step a transition
+  `fn(Previous) -> Result<Next>` that consumes the earlier state. Put every
+  check on the edge that is the only way to make the next state; consumers
+  never re-check it.
+- No sentinels, bare flags or catch-alls. A closed set is an enum matched
+  exhaustively; a flag that chooses between behaviors is an enum; a field that
+  only some states use belongs to those states.
+- After each type change, count what it removed (checks, branches, panics,
+  tests). If it removed nothing, the defect was moved, not eliminated.
+- Every review checks for typestate opportunities explicitly. A fix that could
+  have been a type is not finished.
 
 ## Scope and safety
 
