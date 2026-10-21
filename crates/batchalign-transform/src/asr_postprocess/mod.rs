@@ -283,6 +283,11 @@ pub(super) const RTL_PUNCT: &[(&str, &str)] = &[("؟", "?"), ("۔", "."), ("،",
 /// Maximum words per turn before splitting.
 pub(super) const MAX_TURN_LEN: usize = 300;
 
+/// Whether an item is punctuation or a sentence terminator rather than a word.
+pub(super) fn is_punct_or_terminator(text: &str) -> bool {
+    ENDING_PUNCT.contains(&text) || MOR_PUNCT.contains(&text)
+}
+
 /// Long silence threshold used as a fallback boundary when ASR omits sentence
 /// punctuation but timing gaps strongly suggest a new utterance.
 pub(super) const LONG_PAUSE_SPLIT_MS: i64 = 800;

@@ -21,6 +21,16 @@ design; this file records how it changed.
   4.0 and is used unmodified from the published package).
 - Other languages are unchanged.
 
+### Long turns are cut at utterance ends, never before punctuation
+
+- `transcribe` cut a turn of more than 300 items into fixed 300-item chunks
+  wherever the count landed. Each cut became an utterance boundary nobody
+  spoke, and a cut that fell between a word and its comma made an utterance
+  beginning with that comma, which Chatter rejects (E259). Each cut now goes
+  right after the last utterance end within the limit, where the transcript
+  divides anyway, or, with none, before the last word within it, so no cut
+  begins a chunk with punctuation. All languages.
+
 ### One GPU worker per job
 
 - An `align` job with a worker-hosted UTR engine (`--utr-engine whisper`,

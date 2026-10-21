@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::han_script::NormalizationChangedLength;
 use super::{
     AsrNormalizedText, AsrOutput, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, ENDING_PUNCT,
@@ -159,6 +161,26 @@ pub fn finalize_utterances(utterances: &mut Vec<Utterance>, lang: &str) {
     cleanup::sanitize_chat_illegal_chars_in_utterances(utterances);
 }
 
+/// Whether retokenization ends an utterance after this word: the word is, or
+/// ends with, a sentence terminator, after the `。` normalization
+/// [`retokenize`] applies. The one statement of that rule for code that must
+/// agree with retokenization, such as where a long turn is cut.
+pub(super) fn ends_utterance(word: &AsrWord) -> bool {
+    let text = retokenize_text(word.text.as_str());
+    is_ending_punct(&text) || ends_with_ending_punct(&text)
+}
+
+/// The text [`retokenize`] judges a word by: Japanese `。` as `.`, and the
+/// inverted Spanish marks as spaces. One function, so [`ends_utterance`]
+/// cannot drift from what retokenization does.
+fn retokenize_text(text: &str) -> Cow<'_, str> {
+    if text.contains(['。', '¿', '¡']) {
+        Cow::Owned(text.replace('。', ".").replace(['¿', '¡'], " "))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// Check if a word is or ends with a sentence-ending punctuation mark.
 fn is_ending_punct(word: &str) -> bool {
     if ENDING_PUNCT.contains(&word) {
@@ -211,9 +233,7 @@ pub(super) fn retokenize(speaker: SpeakerIndex, words: Vec<AsrWord>) -> Vec<Utte
     for word in words {
         // Normalize Japanese period and remove inverted punctuation
         let word = AsrWord {
-            text: word
-                .text
-                .map(|t| t.replace('。', ".").replace(['¿', '¡'], " ")),
+            text: word.text.map(|t| retokenize_text(t).into_owned()),
             ..word
         };
 

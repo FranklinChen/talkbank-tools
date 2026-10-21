@@ -1,6 +1,6 @@
 //! Exact repeated n-gram analysis shared by cleanup and segmentation policy.
 
-use super::{ENDING_PUNCT, MOR_PUNCT};
+use super::is_punct_or_terminator;
 
 /// Proven positions from one exact repeated n-gram analysis.
 ///
@@ -85,10 +85,6 @@ pub fn analyze_exact_retraces(words: &[String], lang: &str) -> ExactRetraceAnaly
         retraced_words,
         protected_splits_before_words,
     }
-}
-
-fn is_punct_or_terminator(text: &str) -> bool {
-    ENDING_PUNCT.contains(&text) || MOR_PUNCT.contains(&text)
 }
 
 #[cfg(test)]

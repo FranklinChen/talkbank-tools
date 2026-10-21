@@ -10,7 +10,10 @@
 //! **N-gram retrace detection:** Detects repeated n-grams within each utterance
 //! and wraps them in CHAT retrace notation (`<word word> [/] word word`).
 
-use super::{AsrNormalizedText, AsrWord, ENDING_PUNCT, MOR_PUNCT, Utterance, WordKind};
+use super::{
+    AsrNormalizedText, AsrWord, ENDING_PUNCT, MOR_PUNCT, Utterance, WordKind,
+    is_punct_or_terminator,
+};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -302,11 +305,6 @@ pub fn apply_retrace_detection(utterances: &mut [Utterance], lang: &str) {
             }
         }
     }
-}
-
-/// Check if a word is punctuation or a sentence terminator.
-fn is_punct_or_terminator(text: &str) -> bool {
-    ENDING_PUNCT.contains(&text) || MOR_PUNCT.contains(&text)
 }
 
 /// Check if a word is a CHAT filler / filled pause.

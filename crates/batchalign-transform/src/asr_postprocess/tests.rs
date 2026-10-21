@@ -1,4 +1,5 @@
 use super::chunking::{split_long_turns, split_on_long_pauses};
+use super::is_punct_or_terminator;
 use super::prepare::{extract_timed_words, split_multiword_tokens};
 use super::utterance::retokenize;
 use super::write_word_forms;
@@ -181,6 +182,63 @@ fn test_split_long_turns() {
     assert_eq!(chunks[0].len(), 300);
     assert_eq!(chunks[1].len(), 300);
     assert_eq!(chunks[2].len(), 50);
+}
+
+/// A long turn is cut right after its last utterance end within the limit,
+/// where retokenization divides anyway, so the cut adds no boundary.
+#[test]
+fn long_turns_are_cut_after_the_last_utterance_end() {
+    let mut words: Vec<AsrWord> = (0..400)
+        .map(|i| AsrWord::new(format!("w{i}"), Some(i as i64), Some(i as i64 + 1)))
+        .collect();
+    words[120] = AsrWord::new(".", None, None);
+    words[250] = AsrWord::new("done?", Some(250), Some(251));
+    let chunks = split_long_turns(words);
+    assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [251, 149]);
+    assert_eq!(chunks[0].last().map(|w| w.text.as_str()), Some("done?"));
+}
+
+/// With no utterance end in reach, the cut keeps punctuation with the word it
+/// follows: a chunk never begins with a comma. The 2026-10-21 Taiwanese file
+/// had a comma at item 300, and the old fixed cut began a chunk, and so an
+/// utterance, with it (E259).
+#[test]
+fn a_chunk_never_begins_with_punctuation() {
+    let mut words: Vec<AsrWord> = (0..450)
+        .map(|i| AsrWord::new(format!("w{i}"), Some(i as i64), Some(i as i64 + 1)))
+        .collect();
+    words[300] = AsrWord::new(",", None, None);
+    words[200] = AsrWord::new("۔", None, None);
+    words[201] = AsrWord::new("w201", Some(201), Some(202));
+    let chunks = split_long_turns(words);
+    // The Urdu full stop at 200 ends an utterance, so the cut goes after it.
+    assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [201, 249]);
+    for chunk in &chunks {
+        assert!(!is_punct_or_terminator(chunk[0].text.as_str()));
+    }
+    let mut no_end = (0..450)
+        .map(|i| AsrWord::new(format!("w{i}"), Some(i as i64), Some(i as i64 + 1)))
+        .collect::<Vec<_>>();
+    no_end[300] = AsrWord::new(",", None, None);
+    let chunks = split_long_turns(no_end);
+    assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [299, 151]);
+    assert_eq!(chunks[0].last().map(|w| w.text.as_str()), Some("w298"));
+    assert_eq!(chunks[1][1].text.as_str(), ",");
+}
+
+/// A window holding no word to start a chunk runs on to the next word, and a
+/// rest of nothing but punctuation is not cut at all.
+#[test]
+fn a_window_without_a_word_runs_on() {
+    let mut words: Vec<AsrWord> = vec![AsrWord::new("w0", Some(0), Some(1))];
+    words.extend((0..320).map(|_| AsrWord::new(",", None, None)));
+    words.push(AsrWord::new("w321", Some(321), Some(322)));
+    let chunks = split_long_turns(words);
+    assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [321, 1]);
+    let only_punctuation: Vec<AsrWord> = std::iter::once(AsrWord::new("w0", Some(0), Some(1)))
+        .chain((0..400).map(|_| AsrWord::new(",", None, None)))
+        .collect();
+    assert_eq!(split_long_turns(only_punctuation).len(), 1);
 }
 
 #[test]

@@ -1,6 +1,7 @@
+use super::utterance::ends_utterance;
 use super::{
     AsrPipelineSnapshot, AsrWord, LONG_PAUSE_SENTENCE_STARTERS, LONG_PAUSE_SPLIT_MS, MAX_TURN_LEN,
-    PreparedMonologueChunk, SpeakerIndex, cleanup,
+    PreparedMonologueChunk, RTL_PUNCT, SpeakerIndex, cleanup, is_punct_or_terminator,
 };
 
 /// Stages 5-5b: long turn splitting and pause-based splitting.
@@ -94,12 +95,59 @@ pub fn split_prepared_chunk_by_assignments(
     }
 }
 
-/// Split a word list into chunks of at most [`MAX_TURN_LEN`].
+/// Split a long turn into chunks of about [`MAX_TURN_LEN`] words.
+///
+/// The limit bounds what a chunk's consumers take in one piece (the pre-CHAT
+/// boundary model's input, speaker projection); it says nothing about where
+/// speech divides. So each cut goes where retokenization divides anyway:
+/// right after the last word within the limit that ends an utterance
+/// ([`ends_utterance`]). With none, it goes before the last word within the
+/// limit, so punctuation stays with the word it follows. Either way no cut
+/// begins a chunk with punctuation; when the limit's window holds no word to
+/// begin one, the chunk runs on past the limit to the next word.
+///
+/// Until 2026-10-21 the cut fell every 300 items wherever that landed. That
+/// added utterance boundaries nobody spoke, and once it fell between a word
+/// and its comma, making an utterance that began with the comma (E259).
 pub(super) fn split_long_turns(words: Vec<AsrWord>) -> Vec<Vec<AsrWord>> {
-    if words.len() <= MAX_TURN_LEN {
-        return vec![words];
+    let mut chunks = Vec::new();
+    let mut rest = words;
+    while let Some(cut) = turn_cut(&rest) {
+        let tail = rest.split_off(cut);
+        chunks.push(rest);
+        rest = tail;
     }
-    words.chunks(MAX_TURN_LEN).map(|c| c.to_vec()).collect()
+    chunks.push(rest);
+    chunks
+}
+
+/// Whether an item is punctuation, including the raw RTL marks and `。` that
+/// retokenization still normalizes; prepare's splitting already turns most
+/// marks into ASCII separators, but not `۔` or `؛`.
+fn is_punctuation_item(text: &str) -> bool {
+    is_punct_or_terminator(text) || text == "。" || RTL_PUNCT.iter().any(|(rtl, _)| *rtl == text)
+}
+
+/// Where the next chunk of `words` ends, or `None` when it needs no cut: it
+/// is within the limit, or nothing after its first item starts a word.
+///
+/// A cut `c` makes `words[..c]` a chunk and `words[c..]` the rest, so it is
+/// admissible only where `words[c]` is a word. Within the limit (`c` at most
+/// [`MAX_TURN_LEN`]) the latest admissible cut after an utterance end is
+/// preferred, then the latest admissible cut. When the window holds no word
+/// to start a chunk, the chunk runs on to the next word rather than begin
+/// the rest with punctuation.
+fn turn_cut(words: &[AsrWord]) -> Option<usize> {
+    if words.len() <= MAX_TURN_LEN {
+        return None;
+    }
+    let starts_word = |c: &usize| !is_punctuation_item(words[*c].text.as_str());
+    let mut within = (1..=MAX_TURN_LEN).rev().filter(starts_word);
+    let latest = within.clone().next();
+    within
+        .find(|&c| ends_utterance(&words[c - 1]))
+        .or(latest)
+        .or_else(|| (MAX_TURN_LEN + 1..words.len()).find(starts_word))
 }
 
 pub(super) fn split_on_long_pauses(chunks: Vec<Vec<AsrWord>>) -> Vec<Vec<AsrWord>> {
