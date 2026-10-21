@@ -16,9 +16,7 @@ use std::sync::atomic::Ordering;
 
 use crate::api::{ReleasedCommand, WorkerLanguage};
 use crate::options::CommandOptions;
-use crate::types::worker_v2::ExecuteRequestV2;
 use crate::worker::WorkerTarget;
-use crate::worker::error::WorkerError;
 use tracing::{info, warn};
 
 use super::{WorkerKey, WorkerPool, lock_recovered};
@@ -26,9 +24,9 @@ use super::{WorkerKey, WorkerPool, lock_recovered};
 impl WorkerPool {
     /// Pre-scale a command with no engine selection.
     ///
-    /// This exists for text-task test fixtures. Production callers with typed
-    /// options use [`Self::pre_scale_for_command_options`], and callers with
-    /// an execute request use [`Self::pre_scale_for_request`].
+    /// This exists for text-task test fixtures. The job runner uses
+    /// [`Self::pre_scale_for_command`], and GPU integration tests use
+    /// [`Self::pre_scale_gpu_for_test`].
     pub async fn pre_scale(
         &self,
         command: ReleasedCommand,
@@ -49,34 +47,46 @@ impl WorkerPool {
         self.pre_scale_key(command, key, target).await;
     }
 
-    /// Pre-scale on the key derived from an execute request.
-    pub async fn pre_scale_for_request(
+    /// Pre-scale the GPU worker `plan` selects for `command`, in
+    /// integration tests. Production pre-scaling goes through
+    /// [`Self::pre_scale_for_command`], which keys from the job's own plan.
+    #[doc(hidden)]
+    pub async fn pre_scale_gpu_for_test(
         &self,
         command: ReleasedCommand,
         lang: impl Into<WorkerLanguage>,
         target: usize,
-        request: &ExecuteRequestV2,
-    ) -> Result<(), WorkerError> {
-        let key = super::execute_v2::execute_v2_worker_key(
+        plan: &super::GpuModelPlan,
+    ) {
+        let Some(task) = crate::command_model::command_spec(command)
+            .capabilities
+            .require_inference()
+            .ok()
+            .and_then(|requirement| super::GpuTask::of(requirement.task()))
+        else {
+            return;
+        };
+        let key = super::GpuRoute::worker_key(
+            plan,
+            task,
             lang.into(),
-            request,
             self.config.runtime.bootstrap_mode,
-        )?;
+        );
         self.pre_scale_key(command, key, target).await;
-        Ok(())
     }
 
-    /// Pre-scale on the key derived from typed command options.
-    ///
-    /// This is the job-runner path. It takes the options rather than JSON so
-    /// the pool key and worker argv are both derived from the same typed
-    /// selection.
-    pub async fn pre_scale_for_command_options(
+    /// Pre-scale the worker a job's command selects
+    /// ([`WorkerKey::for_command`]): its plan's worker for a GPU command, its
+    /// options' worker otherwise. This is the job-runner path, and the same
+    /// key the capability probe uses, so pre-scaled workers are the ones the
+    /// job's requests reach.
+    pub async fn pre_scale_for_command(
         &self,
         command: ReleasedCommand,
         lang: impl Into<WorkerLanguage>,
         target: usize,
         options: &CommandOptions,
+        gpu: &super::GpuModelPlan,
     ) {
         let Ok(requirement) = crate::command_model::command_spec(command)
             .capabilities
@@ -84,10 +94,11 @@ impl WorkerPool {
         else {
             return;
         };
-        let key = WorkerKey::from_command_options(
+        let key = WorkerKey::for_command(
             requirement,
             lang.into(),
             options,
+            gpu,
             self.config.runtime.bootstrap_mode,
         );
         self.pre_scale_key(command, key, target).await;

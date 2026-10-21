@@ -44,14 +44,13 @@ async fn one_request_per_process_gpu_keys_scale_to_the_configured_capacity() {
     let python = require_python!();
     let pool = Arc::new(cpu_only_pool(python, 2));
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         2,
-        &gpu_execute_request("pre-scale-cpu-only"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     let gpu_workers: Vec<_> = pool
         .worker_summary_entries()
@@ -74,8 +73,8 @@ async fn one_request_per_process_gpu_keys_scale_to_the_configured_capacity() {
     let lang = LanguageCode3::eng();
     let (request_a, request_b) = (gpu_execute_request("cpu-a"), gpu_execute_request("cpu-b"));
     let (first, second) = tokio::join!(
-        pool.dispatch_execute_v2(&lang, &request_a),
-        pool.dispatch_execute_v2(&lang, &request_b)
+        pool.dispatch_gpu_for_test(&GPU_PLAN, &lang, &request_a),
+        pool.dispatch_gpu_for_test(&GPU_PLAN, &lang, &request_b)
     );
     assert_eq!(&**first.expect("first dispatch").request_id(), "cpu-a");
     assert_eq!(&**second.expect("second dispatch").request_id(), "cpu-b");

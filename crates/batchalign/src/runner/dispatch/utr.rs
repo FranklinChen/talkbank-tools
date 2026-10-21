@@ -22,7 +22,6 @@ use crate::chat_ops::fa::timing::{SpanRejections, WordSpan};
 use crate::media::probe::AudioDuration;
 use crate::options::UtrEngine;
 use crate::params::CachePolicy;
-use crate::pipeline::PipelineServices;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::types::worker_v2::DecodeBudgetSeconds;
 use batchalign_types::interval::AdmittedInterval;
@@ -38,8 +37,10 @@ pub(in crate::runner) struct UtrPassContext<'a> {
     pub audio_path: &'a Path,
     /// CHAT language for ASR/UTR normalization.
     pub lang: &'a LanguageCode3,
-    /// Shared worker pool/cache handles for the current pipeline stage.
-    pub services: PipelineServices<'a>,
+    /// The align job's services: worker pool and cache, plus the job's GPU
+    /// model plan, by which worker-hosted UTR requests are routed to the
+    /// worker the job's FA requests also reach.
+    pub services: crate::fa::FaServices<'a>,
     /// Audio identity used to key UTR cache entries.
     pub audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
     /// Cache policy selected for the current job.
@@ -232,7 +233,7 @@ pub(in crate::runner) async fn run_utr_pass(
                     context.lang,
                 );
                 let cached_seg = lookup_utr_asr_cache(
-                    context.services.cache,
+                    context.services.pipeline.cache,
                     &seg_cache_key,
                     &cache_namespace,
                     context.cache_policy.response(),
@@ -278,7 +279,7 @@ pub(in crate::runner) async fn run_utr_pass(
                             Ok(inferred) => {
                                 inferred
                                     .commit(
-                                        context.services.cache,
+                                        context.services.pipeline.cache,
                                         &seg_cache_key,
                                         context.filename,
                                     )
@@ -374,7 +375,7 @@ async fn run_utr_pass_full(
     );
     let cache_namespace = utr_cache_eligibility(context);
     let asr_response = match lookup_utr_asr_cache(
-        context.services.cache,
+        context.services.pipeline.cache,
         &cache_key,
         &cache_namespace,
         context.cache_policy.response(),
@@ -402,7 +403,11 @@ async fn run_utr_pass_full(
             {
                 Ok(inferred) => {
                     inferred
-                        .commit(context.services.cache, &cache_key, context.filename)
+                        .commit(
+                            context.services.pipeline.cache,
+                            &cache_key,
+                            context.filename,
+                        )
                         .await
                 }
                 Err(error) => {
@@ -490,7 +495,7 @@ async fn infer_utr_asr_response(
                 rev_utr_evidence_identity(context.filename, request.cache_key());
             resolve_rev_utr_asr_response(
                 &request,
-                context.services.cache,
+                context.services.pipeline.cache,
                 context.cache_policy.rev_evidence(),
                 &service,
                 context.dumper,
@@ -499,20 +504,19 @@ async fn infer_utr_asr_response(
             .await
         }
         Some(backend) => {
-            // UTR uses the default per-engine configuration; there are
-            // no UTR-specific knobs in `EngineOverrides.extras` today.
-            // An empty extras map preserves the current behavior and
-            // gives a stable place to wire UTR-time knobs later if any
-            // engine grows them.
-            let empty_extras = std::collections::BTreeMap::new();
+            // UTR runs each engine's default configuration: no extras.
+            // `GpuModelPlan::alignment` plans the same, and the route check
+            // refuses a UTR request whose extras differ from the plan's.
+            let no_extras = std::collections::BTreeMap::new();
             crate::transcribe::infer_asr(
-                context.services.pool,
+                context.services.pipeline.pool,
                 &crate::transcribe::AsrInferParams {
                     backend,
                     audio_path,
                     lang: &crate::transcribe::SingleAsrLanguage::One(context.lang.clone()),
                     num_speakers: NumSpeakers(1),
-                    extras: &empty_extras,
+                    extras: &no_extras,
+                    gpu: context.services.gpu,
                     decode_budget,
                 },
             )

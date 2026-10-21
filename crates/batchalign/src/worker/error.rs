@@ -306,6 +306,35 @@ pub enum WorkerError {
         lang: crate::api::WorkerLanguage,
     },
 
+    /// A GPU-profile request reached the request-keyed dispatch. GPU requests
+    /// are dispatched only on a route from their job's model plan
+    /// (`WorkerPool::gpu_route`), so that every request of one job reaches the
+    /// worker its plan selected. Keying one by its own task is how one align
+    /// job came to spawn two GPU workers.
+    ///
+    /// **Terminal** (`System`): a deterministic orchestration defect.
+    #[error(
+        "a {task:?} request was dispatched without a route from its job's model plan; \
+         request-keyed dispatch serves only text and IO tasks"
+    )]
+    UnroutedGpuRequest {
+        /// The request's pool task.
+        task: crate::worker::InferTask,
+    },
+
+    /// A request disagreed with the route it was sent on: its builder and its
+    /// job's model plan chose engines separately.
+    ///
+    /// **Terminal** (`System`): a deterministic orchestration defect.
+    #[error(transparent)]
+    PlanMismatch(#[from] crate::worker::pool::PlanMismatch),
+
+    /// A job asked to route a GPU task its model plan did not declare.
+    ///
+    /// **Terminal** (`System`): a deterministic orchestration defect.
+    #[error(transparent)]
+    UndeclaredGpuTask(#[from] crate::worker::pool::GpuRouteRefusal),
+
     /// The pool or shared worker has begun shutting down. Dispatch, health
     /// checks and task loading refuse admission with this lifecycle fact,
     /// rather than claiming that an IPC protocol was violated.
@@ -398,6 +427,9 @@ impl WorkerError {
             | Self::MemoryGuard(_)
             | Self::NoWorker { .. }
             | Self::NativeCommand { .. }
+            | Self::UnroutedGpuRequest { .. }
+            | Self::PlanMismatch(_)
+            | Self::UndeclaredGpuTask(_)
             | Self::PoolShuttingDown
             | Self::PoolAccountingBroken { .. } => WorkerAfterFailure::Reusable,
             Self::SpawnFailed(_)

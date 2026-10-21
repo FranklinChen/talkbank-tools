@@ -369,7 +369,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                         UtrPassContext {
                             audio_path: self.audio_path.as_path(),
                             lang: self.admitted.primary_language(),
-                            services: self.services.pipeline,
+                            services: self.services,
                             audio_identity: &self.audio_identity,
                             cache_policy: self.utr_cache_policy,
                             audio_duration: self.audio_duration,
@@ -412,6 +412,10 @@ pub(crate) async fn dispatch_fa_infer(
     // surfaces a typed error rather than silently inventing English.
     let job_lang_fallback: Option<LanguageCode3> = job.dispatch.lang.as_resolved().cloned();
     let sink = host.sink().clone();
+    // The job's GPU model plan, from the dispatch plan that owns its engines,
+    // before the plan's fields are moved out; every file's FA and UTR
+    // requests are routed by it.
+    let gpu_models = Arc::new(plan.gpu_models());
     let fa_params = plan.options.fa_params;
     let utr_cache_policy = plan.utr_cache_policy;
     let should_merge_abbrev = plan.options.merge_abbrev.should_merge();
@@ -445,6 +449,7 @@ pub(crate) async fn dispatch_fa_infer(
         let job = job.clone();
         let media_dir = media_dir.clone();
         let cache_namespace = runtime.cache_namespace.clone();
+        let gpu_models = gpu_models.clone();
         let file = file.clone();
         let file_index = file.file_index;
         let before_path = job.filesystem.before_path(file_index);
@@ -461,6 +466,7 @@ pub(crate) async fn dispatch_fa_infer(
                 let services = FaServices {
                     pipeline: PipelineServices::new(&pool, &cache),
                     cache_namespace: &cache_namespace,
+                    gpu: &gpu_models,
                     attention_capture_dir: job.dispatch.options.common().debug_dir.as_deref(),
                 };
                 let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
@@ -757,7 +763,7 @@ async fn process_one_fa_file(
                         UtrPassContext {
                             audio_path: utr_audio_path,
                             lang: &file_lang,
-                            services: services.pipeline,
+                            services,
                             audio_identity: &audio_identity,
                             cache_policy: utr_cache_policy,
                             audio_duration,

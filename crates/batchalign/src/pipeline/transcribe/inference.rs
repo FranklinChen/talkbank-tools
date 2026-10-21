@@ -45,6 +45,7 @@ pub(super) async fn stage_asr_infer<'a>(
                     lang: language,
                     num_speakers: NumSpeakers(speakers.get()),
                     extras: &ctx.opts.engine_extras,
+                    gpu: &ctx.opts.gpu_models(),
                     decode_budget,
                 },
             )
@@ -153,6 +154,7 @@ pub(super) async fn stage_speaker_diarization<P: TranscribePlan>(
     let resolution = resolve_speaker_evidence_for_audio(
         ctx.services.pool,
         ctx.services.cache,
+        &ctx.opts.gpu_models(),
         speaker_worker_lang,
         SpeakerEvidenceRunParams {
             audio_path: ctx.audio_path,

@@ -29,6 +29,7 @@ impl WorkerPool {
         command: ReleasedCommand,
         lang: impl Into<WorkerLanguage>,
         options: &CommandOptions,
+        gpu: &super::GpuModelPlan,
     ) -> bool {
         let Ok(requirement) = crate::command_model::command_spec(command)
             .capabilities
@@ -38,10 +39,11 @@ impl WorkerPool {
             // already resident ML worker.
             return false;
         };
-        let key = WorkerKey::from_command_options(
+        let key = WorkerKey::for_command(
             requirement,
             lang.into(),
             options,
+            gpu,
             self.config.runtime.bootstrap_mode,
         );
 

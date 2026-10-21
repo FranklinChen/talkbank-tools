@@ -44,7 +44,14 @@ use batchalign::types::worker_v2::{
     PreparedAudioInputV2, TaskRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
 };
 use batchalign::worker::handle::WorkerRuntimeConfig;
-use batchalign::worker::pool::{PoolConfig, WorkerPool};
+use batchalign::worker::pool::{GpuModelPlan, PoolConfig, WorkerPool};
+
+/// The model plan every GPU request in these tests travels on: stock Whisper,
+/// matching `gpu_execute_request`. Production requests are routed by their
+/// job's own plan; these tests exercise the shared-worker transport beneath
+/// that routing.
+static GPU_PLAN: std::sync::LazyLock<GpuModelPlan> =
+    std::sync::LazyLock::new(GpuModelPlan::local_whisper_for_test);
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::resolve_python;
 use serde_json::json;
@@ -263,14 +270,13 @@ async fn gpu_concurrent_dispatch_all_responses_arrive() {
     let pool = test_pool(python);
 
     // Pre-scale to create the SharedGpuWorker.
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     let n = 8;
     let mut handles = Vec::new();
@@ -284,7 +290,7 @@ async fn gpu_concurrent_dispatch_all_responses_arrive() {
             async move {
                 // SAFETY: pool lives for the duration of the test
                 let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-                pool.dispatch_execute_v2(&lang, &request).await
+                pool.dispatch_gpu_for_test(&GPU_PLAN, &lang, &request).await
             }
         }));
     }
@@ -329,14 +335,13 @@ async fn gpu_concurrent_dispatch_shares_same_pid() {
     let python = require_python!();
     let pool = test_pool(python);
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     // Get the GPU worker info from the pool summary.
     let summary = pool.worker_summary().await;
@@ -359,7 +364,7 @@ async fn gpu_concurrent_dispatch_shares_same_pid() {
         let pool_ptr = &pool as *const WorkerPool as usize;
         handles.push(tokio::spawn(async move {
             let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_execute_v2(&LanguageCode3::eng(), &request)
+            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
         }));
     }
@@ -397,14 +402,13 @@ async fn gpu_sequential_after_concurrent_works() {
     let python = require_python!();
     let pool = test_pool(python);
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     // Phase 1: concurrent dispatch (4 requests).
     let mut handles = Vec::new();
@@ -413,7 +417,7 @@ async fn gpu_sequential_after_concurrent_works() {
         let pool_ptr = &pool as *const WorkerPool as usize;
         handles.push(tokio::spawn(async move {
             let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_execute_v2(&LanguageCode3::eng(), &request)
+            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
         }));
     }
@@ -428,7 +432,7 @@ async fn gpu_sequential_after_concurrent_works() {
     for i in 0..3 {
         let request = gpu_execute_request(&format!("phase2-{i}"));
         let response = pool
-            .dispatch_execute_v2(&LanguageCode3::eng(), &request)
+            .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
             .await
             .expect("phase 2 sequential dispatch failed");
         assert_eq!(
@@ -449,14 +453,13 @@ async fn gpu_health_check_works_after_concurrent_dispatch() {
     let python = require_python!();
     let pool = test_pool(python);
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     // Dispatch 4 concurrent requests.
     let mut handles = Vec::new();
@@ -465,7 +468,7 @@ async fn gpu_health_check_works_after_concurrent_dispatch() {
         let pool_ptr = &pool as *const WorkerPool as usize;
         handles.push(tokio::spawn(async move {
             let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_execute_v2(&LanguageCode3::eng(), &request)
+            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
         }));
     }
@@ -498,14 +501,13 @@ async fn gpu_stdio_shared_worker_drop_reaps_process() {
     let pid = {
         use batchalign::worker::pool::status::WorkerTransport;
         let pool = test_pool(python);
-        pool.pre_scale_for_request(
+        pool.pre_scale_gpu_for_test(
             ReleasedCommand::Transcribe,
             WorkerLanguage::from(LanguageCode3::eng()),
             1,
-            &gpu_execute_request("pre-scale-key"),
+            &GPU_PLAN,
         )
-        .await
-        .expect("ASR is a dispatchable task");
+        .await;
 
         let entry = pool
             .worker_summary_entries()
@@ -537,18 +539,17 @@ async fn gpu_single_execute_v2_through_pool() {
     let python = require_python!();
     let pool = test_pool(python);
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     let request = gpu_execute_request("single-dispatch-test");
     let response = pool
-        .dispatch_execute_v2(&LanguageCode3::eng(), &request)
+        .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
         .await
         .expect("GPU dispatch_execute_v2 failed");
 
@@ -568,19 +569,18 @@ async fn gpu_repeated_execute_v2_through_pool() {
     let python = require_python!();
     let pool = test_pool(python);
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     for i in 0..5 {
         let request = gpu_execute_request(&format!("repeat-{i}"));
         let response = pool
-            .dispatch_execute_v2(&LanguageCode3::eng(), &request)
+            .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
             .await
             .unwrap_or_else(|e| panic!("GPU dispatch_execute_v2 failed on request {i}: {e}"));
 
@@ -627,19 +627,18 @@ async fn gpu_dispatch_after_pre_scale_shutdown_spawns_fallback() {
     let pool = test_pool(python);
 
     // Pre-scale creates the shared GPU worker.
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     // First dispatch should work.
     let request = gpu_execute_request("before-shutdown");
     let response = pool
-        .dispatch_execute_v2(&LanguageCode3::eng(), &request)
+        .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
         .await
         .expect("first dispatch should succeed");
     assert_eq!(&**response.request_id(), "before-shutdown");
@@ -654,7 +653,7 @@ async fn gpu_dispatch_after_pre_scale_shutdown_spawns_fallback() {
     let request = gpu_execute_request("after-shutdown");
     let result = tokio::time::timeout(
         POST_SHUTDOWN_LIVENESS_BOUND,
-        pool.dispatch_execute_v2(&LanguageCode3::eng(), &request),
+        pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request),
     )
     .await;
 
@@ -744,20 +743,19 @@ async fn gpu_request_with_short_timeout_fails_cleanly() {
     // error, not hang.
 
     // Pre-scale without delay (so the worker starts).
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     // The execute_v2 timeout for ASR tasks uses audio_task_timeout_s (2s).
     // The test-echo worker responds instantly, so this should succeed.
     let request = gpu_execute_request("timeout-test");
     let result = pool
-        .dispatch_execute_v2(&LanguageCode3::eng(), &request)
+        .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
         .await;
     assert!(
         result.is_ok(),
@@ -904,14 +902,13 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
         ..Default::default()
     });
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     let n = 16;
     let mut handles = Vec::new();
@@ -921,7 +918,7 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
         handles.push(tokio::spawn(async move {
             // SAFETY: pool lives for the duration of the test.
             let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_execute_v2(&LanguageCode3::eng(), &request)
+            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
         }));
     }
@@ -1038,14 +1035,13 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
         ..Default::default()
     }));
 
-    pool.pre_scale_for_request(
+    pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
         WorkerLanguage::from(LanguageCode3::eng()),
         1,
-        &gpu_execute_request("pre-scale-key"),
+        &GPU_PLAN,
     )
-    .await
-    .expect("ASR is a dispatchable task");
+    .await;
 
     let job_id = JobId::from("kill-in-flight-test".to_string());
     let request = gpu_execute_request("slow-call");
@@ -1071,7 +1067,7 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     let dispatch_handle = tokio::spawn(async move {
         WorkerPool::dispatch_under_job_for_test(dispatch_job_id, async move {
             dispatch_pool
-                .dispatch_execute_v2(&LanguageCode3::eng(), &request)
+                .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
         })
         .await
@@ -1124,10 +1120,10 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     // design.
     //
     // RESOLVED, 2026-07-30: cause (a) was real and is now fixed at its source.
-    // This test pre-scales via `pre_scale_for_request`, which derives the
-    // engine-override key from the request itself rather than from the pool's
-    // empty default, so the pre-spawned worker is the one dispatch resolves to
-    // and there is no spawn to wait on. The binary went green and got faster.
+    // This test pre-scales via `pre_scale_gpu_for_test` and dispatches via
+    // `dispatch_gpu_for_test`, both keyed by the same model plan, so the
+    // pre-spawned worker is the one dispatch resolves to and there is no
+    // spawn to wait on. The binary went green and got faster.
     // Cause (a) is now unreachable by construction here, so if this fails
     // again it is (b) or (c), and never the bound.
     loop {
@@ -1168,8 +1164,8 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
                  worker, queued behind the process-global spawn semaphore. \
                  That is NOT the pool's map locking (already fixed, and this \
                  test is the map's only user here); these tests pre-scale via \
-                 pre_scale_for_request, so the two keys come from one \
-                 derivation and cannot differ. Not this bound.\n\
+                 one model plan for pre-scale and dispatch, so the two keys \
+                 come from one derivation and cannot differ. Not this bound.\n\
                  No new pid AND zero free spawn permits means cause (c), the \
                  one this note originally missed: the spawn is queued at \
                  memory_guard's process-global permit (one, held until a worker \
@@ -1375,7 +1371,7 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
 
     // Warm the English key by using it. The shim is the real interpreter for
     // every language but the cold one, so this is an ordinary test-echo worker.
-    pool.dispatch_execute_v2(&warm_lang, &gpu_execute_request("warm-the-key"))
+    pool.dispatch_gpu_for_test(&GPU_PLAN, &warm_lang, &gpu_execute_request("warm-the-key"))
         .await
         .expect("warming dispatch should succeed");
 
@@ -1386,7 +1382,7 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
     let cold_lang_for_task = cold_lang.clone();
     let cold = tokio::spawn(async move {
         cold_pool
-            .dispatch_execute_v2(&cold_lang_for_task, &cold_request)
+            .dispatch_gpu_for_test(&GPU_PLAN, &cold_lang_for_task, &cold_request)
             .await
     });
 
@@ -1402,7 +1398,7 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
     // The property: the warm key is still dispatchable.
     let warm_again = tokio::time::timeout(
         WARM_DISPATCH_BOUND,
-        pool.dispatch_execute_v2(&warm_lang, &gpu_execute_request("warm-again")),
+        pool.dispatch_gpu_for_test(&GPU_PLAN, &warm_lang, &gpu_execute_request("warm-again")),
     )
     .await;
 
@@ -1483,7 +1479,7 @@ async fn concurrent_callers_at_a_cold_key_spawn_exactly_one_worker() {
         let lang = lang.clone();
         let request = gpu_execute_request_for_lang(&format!("cold-race-{i}"), lang.clone());
         handles.push(tokio::spawn(async move {
-            pool.dispatch_execute_v2(&lang, &request).await
+            pool.dispatch_gpu_for_test(&GPU_PLAN, &lang, &request).await
         }));
     }
     for (i, handle) in handles.into_iter().enumerate() {

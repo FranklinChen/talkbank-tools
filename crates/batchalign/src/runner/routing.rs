@@ -19,7 +19,6 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::api::{NumWorkers, ReleasedCommand};
-use crate::cache::UtteranceCache;
 use crate::capability::command_supported;
 use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind, command_spec};
 use crate::dispatch_language::DispatchLanguage;
@@ -29,7 +28,7 @@ use crate::execution::{
     dispatch_morphotag_job, dispatch_translate_job, dispatch_utseg_job,
 };
 use crate::store::RunnerJobSnapshot;
-use crate::worker::pool::WorkerPool;
+use crate::worker::pool::{GpuModelPlan, WorkerPool};
 
 use super::context::{DispatchHostContext, JobDispatchRequest, RunnerExecutionContext};
 use super::dispatch::{
@@ -85,6 +84,17 @@ pub(super) async fn dispatch_job_with_execution_context(
         return Ok(());
     }
 
+    // The job's family plan is built BEFORE any worker is probed. It owns the
+    // engines the job will run, and the probe must spawn the worker those
+    // engines select: probing on the command's main task alone used to give an
+    // align job an FA-only worker beside the one its UTR requests needed. A
+    // refused plan also fails the job before a model is loaded for it.
+    let runner_dispatch_kind = command_runner_dispatch_kind(command);
+    let Some(family) = FamilyPlan::build(&job, host, runner_dispatch_kind, all_chat).await else {
+        return Ok(());
+    };
+    let gpu_models = family.gpu_models();
+
     // Resolve the admitted report of the exact worker key this command
     // selects, bootstrapping that worker if the pool has not probed it yet. A
     // pool-wide first-worker report can advertise task availability, but it
@@ -103,6 +113,7 @@ pub(super) async fn dispatch_job_with_execution_context(
             command,
             job.dispatch.lang.to_worker_language(),
             &job.dispatch.options,
+            &gpu_models,
         )
         .await
     {
@@ -123,8 +134,8 @@ pub(super) async fn dispatch_job_with_execution_context(
         fail_job(&job, host, format!("cannot run '{command}': {unavailable}")).await;
         return Ok(());
     }
+    pre_scale_job_workers(&job, pool, num_workers, &gpu_models).await;
 
-    let runner_dispatch_kind = command_runner_dispatch_kind(command);
     info!(
         job_id = %job.identity.job_id,
         correlation_id = %job.identity.correlation_id,
@@ -133,26 +144,48 @@ pub(super) async fn dispatch_job_with_execution_context(
         "Dispatching job"
     );
 
-    match runner_dispatch_kind {
-        RunnerDispatchKind::NativeAudioExport => {
-            fail_job(
+    match family {
+        // Audio-first commands: they take audio input, not CHAT.
+        FamilyPlan::Transcribe(plan) => {
+            dispatch_transcribe_infer(
                 &job,
                 host,
-                "native command reached worker-backed dispatch".into(),
+                TranscribeDispatchRuntime {
+                    pool: pool.clone(),
+                    cache: cache.clone(),
+                    num_workers,
+                },
+                plan,
             )
             .await;
         }
-        // Audio-first commands: they take audio input, not CHAT.
-        RunnerDispatchKind::TranscribeAudioInfer => {
-            dispatch_transcribe_command(&job, host, pool, cache, num_workers).await;
+        FamilyPlan::Benchmark(plan) => {
+            dispatch_benchmark_infer(
+                &job,
+                host,
+                BenchmarkDispatchRuntime {
+                    pool: pool.clone(),
+                    cache: cache.clone(),
+                    num_workers,
+                },
+                plan,
+            )
+            .await;
         }
-        RunnerDispatchKind::BenchmarkAudioInfer => {
-            dispatch_benchmark_command(&job, host, pool, cache, num_workers).await;
+        FamilyPlan::MediaAnalysis(plan) => {
+            dispatch_media_analysis_v2(
+                &job,
+                host,
+                MediaAnalysisDispatchRuntime {
+                    pool: pool.clone(),
+                    cache: cache.clone(),
+                    num_workers,
+                },
+                plan,
+            )
+            .await;
         }
-        RunnerDispatchKind::MediaAnalysisV2 => {
-            dispatch_media_analysis_command(&job, host, pool, cache, num_workers).await;
-        }
-        RunnerDispatchKind::SpeakerIdentity if all_chat => {
+        FamilyPlan::SpeakerIdentity => {
             crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
                 &job,
                 host,
@@ -160,30 +193,22 @@ pub(super) async fn dispatch_job_with_execution_context(
             )
             .await;
         }
-        RunnerDispatchKind::SpeakerIdentity => {
-            fail_job(
-                &job,
-                host,
-                format!(
-                    "No released dispatch path remains for command '{command}' without CHAT \
-                     input for every file. Legacy process-path fallback is retired."
-                ),
-            )
-            .await;
-        }
         // FA cache rows and evidence envelopes are namespaced by the engine the
         // selected worker reported after FA loaded on it. A worker that still
         // names no FA engine then is refused: there is nothing honest to
         // namespace the cache by.
-        RunnerDispatchKind::ForcedAlignment => match FaCacheNamespace::from_loaded(&loaded) {
+        FamilyPlan::ForcedAlignment(plan) => match FaCacheNamespace::from_loaded(&loaded) {
             Ok(cache_namespace) => {
-                dispatch_forced_alignment_command(
+                dispatch_fa_infer(
                     &job,
                     host,
-                    pool,
-                    cache,
-                    cache_namespace,
-                    num_workers,
+                    FaDispatchRuntime {
+                        pool: pool.clone(),
+                        cache: cache.clone(),
+                        cache_namespace,
+                        num_workers,
+                    },
+                    plan,
                 )
                 .await;
             }
@@ -191,7 +216,7 @@ pub(super) async fn dispatch_job_with_execution_context(
                 fail_job(&job, host, format!("cannot run '{command}': {unavailable}")).await;
             }
         },
-        RunnerDispatchKind::BatchedTextInfer => {
+        FamilyPlan::BatchedText => {
             dispatch_batched_text_command(&job, host, execution, num_workers).await?;
         }
     }
@@ -433,103 +458,117 @@ async fn plan_or_fail_files<Plan>(
     }
 }
 
-async fn dispatch_forced_alignment_command(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    pool: &Arc<WorkerPool>,
-    cache: &Arc<UtteranceCache>,
-    cache_namespace: FaCacheNamespace,
-    num_workers: NumWorkers,
-) {
-    let Some(plan) = plan_or_fail_files(job, host, FaDispatchPlan::from_job).await else {
-        return;
-    };
-
-    dispatch_fa_infer(
-        job,
-        host,
-        FaDispatchRuntime {
-            pool: pool.clone(),
-            cache: cache.clone(),
-            cache_namespace,
-            num_workers,
-        },
-        plan,
-    )
-    .await;
+/// One job's dispatch plan, built from its persisted snapshot before any
+/// worker is probed.
+///
+/// The variant is the dispatch family; the payload is that family's typed
+/// plan, which owns the engines the job runs and therefore its GPU models.
+enum FamilyPlan {
+    Transcribe(TranscribeDispatchPlan),
+    Benchmark(BenchmarkDispatchPlan),
+    MediaAnalysis(MediaAnalysisDispatchPlan),
+    SpeakerIdentity,
+    ForcedAlignment(FaDispatchPlan),
+    BatchedText,
 }
 
-async fn dispatch_transcribe_command(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    pool: &Arc<WorkerPool>,
-    cache: &Arc<UtteranceCache>,
-    num_workers: NumWorkers,
-) {
-    let Some(plan) = plan_or_fail_files(job, host, TranscribeDispatchPlan::from_job).await else {
-        return;
-    };
+impl FamilyPlan {
+    /// Build the plan for `kind`, or fail the job (or its files) and answer
+    /// `None`. Every refusal is recorded here, before any worker is probed,
+    /// so a job that cannot run never has a model loaded for it.
+    async fn build(
+        job: &RunnerJobSnapshot,
+        host: &DispatchHostContext,
+        kind: RunnerDispatchKind,
+        all_chat: bool,
+    ) -> Option<Self> {
+        Some(match kind {
+            RunnerDispatchKind::NativeAudioExport => {
+                // Unreachable through `dispatch_job_with_execution_context`,
+                // which runs native commands before planning; refused rather
+                // than probed if a future caller gets here.
+                fail_job(
+                    job,
+                    host,
+                    "native command reached worker-backed dispatch".into(),
+                )
+                .await;
+                return None;
+            }
+            RunnerDispatchKind::TranscribeAudioInfer => Self::Transcribe(
+                plan_or_fail_files(job, host, TranscribeDispatchPlan::from_job).await?,
+            ),
+            RunnerDispatchKind::BenchmarkAudioInfer => Self::Benchmark(
+                plan_or_fail_files(job, host, BenchmarkDispatchPlan::from_job).await?,
+            ),
+            RunnerDispatchKind::MediaAnalysisV2 => Self::MediaAnalysis(
+                plan_or_fail_files(job, host, MediaAnalysisDispatchPlan::from_job).await?,
+            ),
+            RunnerDispatchKind::SpeakerIdentity if all_chat => Self::SpeakerIdentity,
+            RunnerDispatchKind::SpeakerIdentity => {
+                fail_job(
+                    job,
+                    host,
+                    format!(
+                        "No released dispatch path remains for command '{}' without CHAT \
+                         input for every file. Legacy process-path fallback is retired.",
+                        job.dispatch.command
+                    ),
+                )
+                .await;
+                return None;
+            }
+            RunnerDispatchKind::ForcedAlignment => Self::ForcedAlignment(
+                plan_or_fail_files(job, host, FaDispatchPlan::from_job).await?,
+            ),
+            RunnerDispatchKind::BatchedTextInfer => Self::BatchedText,
+        })
+    }
 
-    dispatch_transcribe_infer(
-        job,
-        host,
-        TranscribeDispatchRuntime {
-            pool: pool.clone(),
-            cache: cache.clone(),
-            num_workers,
-        },
-        plan,
-    )
-    .await;
+    /// The GPU-profile engines the job's requests name.
+    fn gpu_models(&self) -> GpuModelPlan {
+        match self {
+            Self::Transcribe(plan) => plan.gpu_models(),
+            Self::Benchmark(plan) => plan.gpu_models(),
+            Self::MediaAnalysis(plan) => plan.gpu_models(),
+            Self::ForcedAlignment(plan) => plan.gpu_models(),
+            Self::SpeakerIdentity | Self::BatchedText => GpuModelPlan::without_engines(),
+        }
+    }
 }
 
-async fn dispatch_benchmark_command(
+/// Pre-scale the job's workers before its files dispatch, so a batch pays one
+/// cold start rather than one per file.
+///
+/// Runs after the capability probe, on the same key ([`WorkerPool::pre_scale_for_command`]
+/// keys a GPU command by its model plan), so the workers it warms are the ones
+/// the job's requests reach.
+///
+/// Skipped for LazyProfile: on constrained machines workers start empty and
+/// load models on demand, so a pre-scaled worker would sit idle until files
+/// need it. Skipped for per-file commands (morphotag, translate, coref): they
+/// have no job-level language, and pre-scaling against a placeholder would
+/// spawn a worker no file is dispatched to; their pipelines spawn per-language
+/// workers as they walk the files.
+async fn pre_scale_job_workers(
     job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
     pool: &Arc<WorkerPool>,
-    cache: &Arc<UtteranceCache>,
     num_workers: NumWorkers,
+    gpu_models: &GpuModelPlan,
 ) {
-    let Some(plan) = plan_or_fail_files(job, host, BenchmarkDispatchPlan::from_job).await else {
-        return;
-    };
-
-    dispatch_benchmark_infer(
-        job,
-        host,
-        BenchmarkDispatchRuntime {
-            pool: pool.clone(),
-            cache: cache.clone(),
-            num_workers,
-        },
-        plan,
-    )
-    .await;
-}
-
-async fn dispatch_media_analysis_command(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    pool: &Arc<WorkerPool>,
-    cache: &Arc<UtteranceCache>,
-    num_workers: NumWorkers,
-) {
-    let Some(plan) = plan_or_fail_files(job, host, MediaAnalysisDispatchPlan::from_job).await
-    else {
-        return;
-    };
-
-    dispatch_media_analysis_v2(
-        job,
-        host,
-        MediaAnalysisDispatchRuntime {
-            pool: pool.clone(),
-            cache: cache.clone(),
-            num_workers,
-        },
-        plan,
-    )
-    .await;
+    if *num_workers > 1
+        && pool.bootstrap_mode() != crate::worker::WorkerBootstrapMode::LazyProfile
+        && !job.dispatch.lang.is_per_file()
+    {
+        pool.pre_scale_for_command(
+            job.dispatch.command,
+            job.dispatch.lang.to_worker_language(),
+            num_workers.0,
+            &job.dispatch.options,
+            gpu_models,
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]

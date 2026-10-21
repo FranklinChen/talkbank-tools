@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-16 09:58 EDT
+**Last updated:** 2026-10-21 11:40 EDT
 
 ## Release boundary
 
@@ -105,6 +105,47 @@ flowchart LR
     I --> R[PipelineServices]
     I --> H[Cache lookup and commit]
     P[Pool-wide availability snapshot] -.->|never cache identity| H
+```
+
+### GPU workers are keyed by the job's model plan
+
+A GPU-profile worker (ASR, forced alignment, speaker) hosts every task of its
+profile, so one job's requests for different tasks belong on one worker. Its
+key is therefore not derived from each request. Each command family's
+dispatch plan (`FaDispatchPlan`, `TranscribeDispatchPlan`,
+`BenchmarkDispatchPlan`, `MediaAnalysisDispatchPlan`) states the job's GPU
+engines as a `GpuModelPlan` (`crates/batchalign/src/worker/pool/model_plan.rs`):
+the worker-hosted ASR backend with its engine extras, the FA engine, and that
+engine's fallback. Rust-hosted ASR (Rev.AI, whisper.cpp) is never a worker
+resource and cannot enter a plan.
+
+Routing builds the family plan before the capability probe; a refused plan
+fails the job before any worker is probed. The probe and pre-scaling key the
+command's worker with `WorkerKey::for_command`, which for a GPU command is the
+plan's key (`GpuRoute::worker_key`), and every GPU request travels on a
+`GpuRoute` the pool mints from the same plan. Under the profile bootstrap
+modes every primary task of one plan has the same key, so an align job's UTR
+and FA requests, or a transcribe job's ASR and diarization requests, reach one
+worker, the one the probe selected. Under task mode (small hosts) a worker holds one
+task's model, so each task keeps its own key. An FA group retried on its
+engine's fallback goes to a worker keyed by the fallback engine alone, since
+the job's main worker does not host it.
+
+Two refusals keep the plan the only route. A request whose engines differ from
+its route's plan fails with `PlanMismatch`, because its builder and the plan
+chose separately. A GPU request sent through the request-keyed
+`dispatch_execute_v2` fails with `UnroutedGpuRequest`; that path serves only
+text and IO tasks.
+
+```mermaid
+flowchart LR
+    F[Family dispatch plan] -->|gpu_models| G[GpuModelPlan]
+    G -->|worker_key| K[Plan worker key]
+    K --> P[Capability probe and pre-scale]
+    G -->|gpu_route task, language| R[GpuRoute]
+    R -->|dispatch_routed_v2| W[One GPU worker per plan]
+    P --> W
+    Q[Request-keyed dispatch] -.->|refuses GPU tasks| W
 ```
 
 This distinction matters for experiments: a cache row labeled with another

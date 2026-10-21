@@ -23,7 +23,7 @@ use crate::worker::asr_request_v2::{
     AsrBuildInputV2, PreparedAsrRequestIdsV2, build_asr_request_v2,
 };
 use crate::worker::asr_result_v2::parse_asr_response_v2;
-use crate::worker::pool::WorkerPool;
+use crate::worker::pool::{GpuModelPlan, GpuRoute, GpuTask, WorkerPool};
 use crate::worker::speaker_request_v2::{
     PreparedSpeakerRequestIdsV2, SpeakerAudioBuildSourceV2, SpeakerBuildInputV2,
     build_speaker_request_v2,
@@ -52,6 +52,10 @@ pub(crate) struct AsrInferParams<'a> {
     /// function sees what the user actually requested, the `backend`
     /// enum only encodes WHICH engine, not its configuration.
     pub extras: &'a std::collections::BTreeMap<String, String>,
+    /// The job's GPU model plan. A worker-hosted request is routed by it, so it
+    /// reaches the worker the job's plan selected rather than one keyed by
+    /// this request alone.
+    pub gpu: &'a GpuModelPlan,
     /// Decode budget for `audio_path`, derived by the caller from a length it
     /// already measured, or `None` when it could not measure one (the request
     /// then carries no budget and the transport uses its named fallback
@@ -209,8 +213,9 @@ async fn infer_asr_via_worker_v2(
         ))
     })?;
 
+    let route = pool.gpu_route(params.gpu, GpuTask::Asr, worker_lang.clone())?;
     let response = pool
-        .dispatch_execute_v2(worker_lang, &request)
+        .dispatch_routed_v2(&route, &request)
         .await
         .map_err(ServerError::Worker)?;
 
@@ -230,7 +235,7 @@ async fn infer_asr_via_worker_v2(
 /// single audio file.
 async fn infer_speaker(
     pool: &WorkerPool,
-    worker_lang: &WorkerLanguage,
+    route: &GpuRoute,
     run: VerifiedSpeakerEvidenceRun,
 ) -> Result<SpeakerInferenceEvidenceV2, ServerError> {
     let (source_bytes, backend, expected_speakers) = run.into_worker_input();
@@ -256,7 +261,7 @@ async fn infer_speaker(
     })?;
 
     let response = pool
-        .dispatch_execute_v2(worker_lang, &request)
+        .dispatch_routed_v2(route, &request)
         .await
         .map_err(ServerError::Worker)?;
 
@@ -295,12 +300,12 @@ fn speaker_parse_failure_to_server_error(error: SpeakerResultParseError) -> Serv
 /// Production implementation of the typed speaker-evidence service boundary.
 pub(crate) struct SpeakerWorkerInference<'a> {
     pool: &'a WorkerPool,
-    worker_lang: WorkerLanguage,
+    route: GpuRoute,
 }
 
 impl<'a> SpeakerWorkerInference<'a> {
-    pub(crate) fn new(pool: &'a WorkerPool, worker_lang: WorkerLanguage) -> Self {
-        Self { pool, worker_lang }
+    pub(crate) fn new(pool: &'a WorkerPool, route: GpuRoute) -> Self {
+        Self { pool, route }
     }
 }
 
@@ -310,7 +315,7 @@ impl SpeakerEvidenceInference for SpeakerWorkerInference<'_> {
         &self,
         run: VerifiedSpeakerEvidenceRun,
     ) -> Result<SpeakerInferenceEvidenceV2, ServerError> {
-        infer_speaker(self.pool, &self.worker_lang, run).await
+        infer_speaker(self.pool, &self.route, run).await
     }
 }
 
@@ -365,6 +370,7 @@ impl ResolvedSpeakerEvidence {
 pub(crate) async fn resolve_speaker_evidence_for_audio(
     pool: &WorkerPool,
     cache: &UtteranceCache,
+    gpu: &GpuModelPlan,
     worker_lang: WorkerLanguage,
     params: SpeakerEvidenceRunParams<'_>,
 ) -> Result<ResolvedSpeakerEvidence, ServerError> {
@@ -377,7 +383,8 @@ pub(crate) async fn resolve_speaker_evidence_for_audio(
     )
     .await
     .map_err(|error| ServerError::Persistence(error.to_string()))?;
-    let inference = SpeakerWorkerInference::new(pool, worker_lang);
+    let route = pool.gpu_route(gpu, GpuTask::Speaker, worker_lang)?;
+    let inference = SpeakerWorkerInference::new(pool, route);
     let resolution = resolve_speaker_evidence(&request, cache, params.cache_policy, &inference)
         .await
         .map_err(speaker_resolution_error_to_server_error)?;

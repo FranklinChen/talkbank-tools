@@ -39,13 +39,20 @@ pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> Result<InferTa
     }
 }
 
-/// Derive the worker-pool key for one V2 execute request.
+/// Derive the worker-pool key for one text or IO V2 execute request.
+///
+/// A GPU-profile request is refused ([`WorkerError::UnroutedGpuRequest`]): a
+/// GPU worker hosts every task of its job's model plan, so its key comes from
+/// the plan (`WorkerPool::gpu_route`), never from one request.
 pub(super) fn execute_v2_worker_key(
     lang: WorkerLanguage,
     request: &ExecuteRequestV2,
     bootstrap_mode: WorkerBootstrapMode,
 ) -> Result<WorkerKey, WorkerError> {
     let infer_task = infer_task_for_execute_v2(request.task)?;
+    if super::GpuTask::of(infer_task).is_some() {
+        return Err(WorkerError::UnroutedGpuRequest { task: infer_task });
+    }
     let target = WorkerTarget::from_infer_task(infer_task, bootstrap_mode);
 
     // The selected engine is part of the worker identity in every bootstrap
@@ -72,7 +79,7 @@ pub(super) fn execute_v2_worker_key(
 }
 
 /// The engines a V2 request itself names, before any target-driven filling.
-fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOverrides {
+pub(super) fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOverrides {
     match &request.payload {
         TaskRequestV2::Asr(request) => EngineOverrides {
             asr: Some(asr_backend_engine(request.backend)),
@@ -128,7 +135,7 @@ pub(super) fn ensure_task_params(
     Ok((task, overrides))
 }
 
-fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
+pub(super) fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
     match backend {
         AsrBackendV2::LocalWhisper => AsrEngineName::Whisper,
         AsrBackendV2::WhisperHub => AsrEngineName::WhisperHub,
@@ -144,11 +151,7 @@ fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
 mod tests {
     use super::*;
     use crate::api::LanguageCode3;
-    use crate::types::engines::SelectableEngine;
-    use crate::types::worker_v2::{
-        AsrInputV2, AsrRequestV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2,
-        MorphosyntaxRequestV2, PreparedAudioInputV2, WorkerArtifactIdV2, WorkerRequestIdV2,
-    };
+    use crate::types::worker_v2::{MorphosyntaxRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2};
     use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
 
     fn request_with_payload(task: InferenceTaskV2, payload: TaskRequestV2) -> ExecuteRequestV2 {
@@ -160,47 +163,6 @@ mod tests {
         }
     }
 
-    /// Regression (2026-08-21): in eager Profile mode an ASR request spawns a
-    /// profile worker whose bootstrap preloads FA too, and the Python side
-    /// refuses a preloaded task with no named engine rather than defaulting.
-    /// The V2 route used to name only the engines the request itself carried,
-    /// so the worker died at bootstrap ("no 'fa' engine in overrides") and
-    /// every eager-mode whisper transcription failed as an internal error.
-    #[test]
-    fn eager_profile_asr_key_names_an_fa_engine_for_the_preloaded_task() {
-        let request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: WorkerLanguage::from(LanguageCode3::eng()),
-                backend: AsrBackendV2::LocalWhisper,
-                models: crate::model_manifest::resolve_asr_models(
-                    AsrBackendV2::LocalWhisper,
-                    None,
-                    &std::collections::BTreeMap::new(),
-                )
-                .expect("the manifest pins stock Whisper"),
-                input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                }),
-                extras: std::collections::BTreeMap::new(),
-                decode_budget_seconds: None,
-            }),
-        );
-
-        let key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &request,
-            WorkerBootstrapMode::Profile,
-        )
-        .expect("eager ASR request must derive a worker key");
-
-        assert_eq!(
-            key.engine_selection.overrides().fa,
-            Some(FaEngineName::DEFAULT),
-            "an eager profile worker preloads FA, so its key must name an FA engine"
-        );
-    }
-
     #[test]
     fn maps_forced_alignment_execute_v2_to_fa_worker_profile() {
         assert_eq!(
@@ -209,80 +171,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execute_v2_asr_worker_key_uses_request_backend_override() {
-        // Policy change (2026-08-21): this test used to pin the key JSON as
-        // {"asr":"whisper"} alone, which was the DEFECT: in eager Profile
-        // mode the spawned worker preloads FA too, and the Python bootstrap
-        // refuses a preloaded task with no named engine, so the pinned value
-        // was a worker that dies at startup. The eager key now also names
-        // the default FA engine.
-        let request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: WorkerLanguage::from(LanguageCode3::fra()),
-                backend: AsrBackendV2::LocalWhisper,
-                models: crate::model_manifest::resolve_asr_models(
-                    AsrBackendV2::LocalWhisper,
-                    None,
-                    &std::collections::BTreeMap::new(),
-                )
-                .expect("the manifest pins stock Whisper"),
-                input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                }),
-                extras: std::collections::BTreeMap::new(),
-                decode_budget_seconds: None,
-            }),
-        );
-
-        let key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::fra()),
-            &request,
-            WorkerBootstrapMode::Profile,
-        )
-        .unwrap();
-
-        assert_eq!(key.target, WorkerTarget::profile(WorkerProfile::Gpu));
-        assert_eq!(key.language, WorkerLanguage::from(LanguageCode3::fra()));
-        assert_eq!(
-            key.engine_selection.worker_config_json(),
-            r#"{"asr":"whisper","fa":"wave2vec"}"#
-        );
-    }
-
-    /// The worker key an ASR request for `backend` in `code` computes.
+    /// The worker key a transcription job's plan gives its ASR requests for
+    /// `mode` in `code`, under the lazy profile mode.
     fn asr_worker_key(
-        backend: AsrBackendV2,
+        mode: crate::transcribe::AsrWorkerMode,
         code: &str,
         extras: std::collections::BTreeMap<String, String>,
     ) -> WorkerKey {
         let language = LanguageCode3::try_new(code).expect("language code");
-        let request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: WorkerLanguage::from(language.clone()),
-                backend,
-                models: crate::model_manifest::resolve_asr_models(
-                    backend,
-                    Some(&language),
-                    &extras,
-                )
-                .expect("the manifest resolves a composition"),
-                input: AsrInputV2::ProviderMedia(crate::types::worker_v2::ProviderMediaInputV2 {
-                    media_path: "/dev/null".into(),
-                    diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
-                }),
-                extras,
-                decode_budget_seconds: None,
-            }),
+        let plan = super::super::GpuModelPlan::transcription(
+            crate::transcribe::AsrBackend::Worker(mode),
+            &extras,
         );
-        execute_v2_worker_key(
+        super::super::GpuRoute::worker_key(
+            &plan,
+            super::super::GpuTask::Asr,
             WorkerLanguage::from(language),
-            &request,
             WorkerBootstrapMode::LazyProfile,
         )
-        .expect("worker key")
+    }
+
+    /// The user's engine extras reach the worker's spawn configuration through
+    /// the plan-derived key: every key the job passed via
+    /// `--engine-overrides` is in the JSON the worker is spawned with.
+    /// (Regression, 2026-05-27: a Qwen job's `qwen_model` was dropped and the
+    /// worker silently loaded the default model.)
+    #[test]
+    fn asr_extras_reach_the_worker_spawn_configuration() {
+        let mut extras = std::collections::BTreeMap::new();
+        extras.insert("qwen_model".to_owned(), "Qwen/Qwen3-ASR-0.6B".to_owned());
+        extras.insert("qwen_device".to_owned(), "cpu".to_owned());
+        let json = asr_worker_key(
+            crate::transcribe::AsrWorkerMode::HkQwenV2,
+            "yue",
+            extras.clone(),
+        )
+        .engine_selection
+        .worker_config_json();
+        let parsed: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&json).expect("engine_overrides JSON must round-trip");
+        assert_eq!(parsed.get("asr").map(String::as_str), Some("qwen"));
+        for (k, v) in &extras {
+            assert_eq!(parsed.get(k), Some(v), "extras key {k:?} was dropped");
+        }
     }
 
     /// The spawn override `name` a worker for `key` receives, parsed.
@@ -302,7 +233,11 @@ mod tests {
         // tests in `transcribe::segmentation`).
         for code in ["nan", "yue"] {
             let language = LanguageCode3::try_new(code).expect("language code");
-            let key = asr_worker_key(AsrBackendV2::HkQwen, code, Default::default());
+            let key = asr_worker_key(
+                crate::transcribe::AsrWorkerMode::HkQwenV2,
+                code,
+                Default::default(),
+            );
             assert_eq!(
                 spawn_override::<QwenRecognitionV2>(&key, QWEN_RECOGNITION_KEY),
                 qwen_recognition(Some(&language)),
@@ -319,7 +254,11 @@ mod tests {
         use crate::types::worker_v2::{WHISPER_DECODE_LANGUAGE_KEY, WhisperDecodeLanguageV2};
         for code in ["ell", "jav", "yue"] {
             let language = LanguageCode3::try_new(code).expect("language code");
-            let key = asr_worker_key(AsrBackendV2::LocalWhisper, code, Default::default());
+            let key = asr_worker_key(
+                crate::transcribe::AsrWorkerMode::LocalWhisperV2,
+                code,
+                Default::default(),
+            );
             assert_eq!(
                 spawn_override::<WhisperDecodeLanguageV2>(&key, WHISPER_DECODE_LANGUAGE_KEY),
                 WhisperDecodeLanguageV2::for_language(&language).expect("Whisper has a token"),
@@ -375,9 +314,17 @@ mod tests {
         qwen_extras.insert("qwen_context".to_owned(), String::new());
         let mut written = std::collections::BTreeSet::new();
         for key in [
-            asr_worker_key(AsrBackendV2::HkQwen, "nan", qwen_extras),
+            asr_worker_key(
+                crate::transcribe::AsrWorkerMode::HkQwenV2,
+                "nan",
+                qwen_extras,
+            ),
             // English also has an utterance-boundary model to pin.
-            asr_worker_key(AsrBackendV2::LocalWhisper, "eng", Default::default()),
+            asr_worker_key(
+                crate::transcribe::AsrWorkerMode::LocalWhisperV2,
+                "eng",
+                Default::default(),
+            ),
         ] {
             let registered = super::super::lifecycle::spawn_engine_overrides(&key).expect("spawn");
             let map: std::collections::BTreeMap<String, String> =
@@ -393,135 +340,6 @@ mod tests {
         for spawn_key in super::super::lifecycle::SpawnKey::ALL {
             assert!(written.contains(spawn_key.as_str()), "{spawn_key:?}");
         }
-    }
-
-    #[test]
-    fn execute_v2_engine_overrides_preserves_asr_extras_through_dispatch() {
-        // Regression pin for the 2026-05-27 root-cause bug: prior to
-        // adding ``extras`` to ``AsrRequestV2`` and threading them
-        // through here, the pool key + worker spawn argv silently
-        // dropped every per-engine knob the user passed via
-        // ``--engine-overrides``. A request with
-        // ``qwen_model=Qwen/Qwen3-ASR-0.6B`` was serialized as bare
-        // ``{"asr":"qwen"}`` and the worker defaulted to 1.7B,
-        // costing hours of wasted compute.
-        //
-        // This test is the seam test the per-knob Fix 1 CLI-parse
-        // test SHOULD have been: it asserts the user's extras reach
-        // the worker spawn argv JSON. Adding any new per-engine knob
-        // (funaudio_*, future engines) is automatically covered
-        // because the assertion is "every key in input.extras
-        // appears in output JSON", not a fixed allowlist.
-        let mut extras = std::collections::BTreeMap::new();
-        extras.insert("qwen_model".to_owned(), "Qwen/Qwen3-ASR-0.6B".to_owned());
-        extras.insert("qwen_device".to_owned(), "cpu".to_owned());
-
-        let request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: WorkerLanguage::from(LanguageCode3::yue()),
-                backend: AsrBackendV2::HkQwen,
-                models: crate::model_manifest::resolve_asr_models(
-                    AsrBackendV2::HkQwen,
-                    Some(&LanguageCode3::yue()),
-                    &extras,
-                )
-                .expect("the manifest resolves a Qwen composition"),
-                input: AsrInputV2::ProviderMedia(crate::types::worker_v2::ProviderMediaInputV2 {
-                    media_path: "/dev/null".into(),
-                    diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
-                }),
-                extras: extras.clone(),
-                decode_budget_seconds: None,
-            }),
-        );
-
-        let json = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &request,
-            WorkerBootstrapMode::LazyProfile,
-        )
-        .unwrap()
-        .engine_selection
-        .worker_config_json();
-        let parsed: std::collections::BTreeMap<String, String> =
-            serde_json::from_str(&json).expect("engine_overrides JSON must round-trip");
-
-        assert_eq!(parsed.get("asr").map(String::as_str), Some("qwen"));
-        for (k, v) in &extras {
-            assert_eq!(
-                parsed.get(k),
-                Some(v),
-                "extras key {k:?} (value {v:?}) was dropped at the V2 dispatch boundary, \
-                 pool key + worker spawn argv would lose it"
-            );
-        }
-    }
-
-    #[test]
-    fn execute_v2_non_worker_asr_does_not_fragment_keys_but_keeps_extras() {
-        let mut extras = std::collections::BTreeMap::new();
-        extras.insert("provider_region".to_owned(), "us-east".to_owned());
-        let request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: WorkerLanguage::from(LanguageCode3::eng()),
-                backend: AsrBackendV2::Revai,
-                models: crate::model_manifest::resolve_asr_models(
-                    AsrBackendV2::Revai,
-                    Some(&LanguageCode3::eng()),
-                    &extras,
-                )
-                .expect("the manifest names the Rev.AI provider constant"),
-                input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                }),
-                extras: extras.clone(),
-                decode_budget_seconds: None,
-            }),
-        );
-
-        let key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &request,
-            WorkerBootstrapMode::LazyProfile,
-        )
-        .unwrap();
-        let selection = &key.engine_selection;
-        assert_eq!(selection.overrides().asr, None);
-        assert_eq!(selection.overrides().extras, extras);
-        assert_eq!(
-            selection.worker_config_json(),
-            r#"{"provider_region":"us-east"}"#
-        );
-    }
-
-    #[test]
-    fn execute_v2_fa_worker_key_uses_request_backend_override() {
-        let request = request_with_payload(
-            InferenceTaskV2::ForcedAlignment,
-            TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
-                attention_capture: None,
-                backend: FaBackendV2::Wave2vec,
-                payload_ref_id: WorkerArtifactIdV2::from("payload-1"),
-                audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                text_mode: FaTextModeV2::SpaceJoined,
-            }),
-        );
-
-        let key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &request,
-            WorkerBootstrapMode::Profile,
-        )
-        .unwrap();
-
-        assert_eq!(key.target, WorkerTarget::profile(WorkerProfile::Gpu));
-        assert_eq!(key.language, WorkerLanguage::from(LanguageCode3::eng()));
-        assert_eq!(
-            key.engine_selection.worker_config_json(),
-            r#"{"fa":"wave2vec"}"#
-        );
     }
 
     #[test]
@@ -547,65 +365,6 @@ mod tests {
             key.target,
             WorkerTarget::infer_task(InferTask::Morphosyntax)
         );
-    }
-
-    #[test]
-    fn lazy_profile_gpu_key_retains_the_request_engine_recipe() {
-        let fa_request = request_with_payload(
-            InferenceTaskV2::ForcedAlignment,
-            TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
-                attention_capture: None,
-                backend: FaBackendV2::Wave2vec,
-                payload_ref_id: WorkerArtifactIdV2::from("payload-1"),
-                audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                text_mode: FaTextModeV2::SpaceJoined,
-            }),
-        );
-
-        let asr_request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: WorkerLanguage::from(LanguageCode3::eng()),
-                backend: AsrBackendV2::LocalWhisper,
-                models: crate::model_manifest::resolve_asr_models(
-                    AsrBackendV2::LocalWhisper,
-                    None,
-                    &std::collections::BTreeMap::new(),
-                )
-                .expect("the manifest pins stock Whisper"),
-                input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                }),
-                extras: std::collections::BTreeMap::new(),
-                decode_budget_seconds: None,
-            }),
-        );
-
-        let fa_key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &fa_request,
-            WorkerBootstrapMode::LazyProfile,
-        )
-        .unwrap();
-
-        let asr_key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &asr_request,
-            WorkerBootstrapMode::LazyProfile,
-        )
-        .unwrap();
-
-        assert_eq!(
-            fa_key.engine_selection.worker_config_json(),
-            r#"{"fa":"wave2vec"}"#
-        );
-        assert_eq!(
-            asr_key.engine_selection.worker_config_json(),
-            r#"{"asr":"whisper"}"#
-        );
-        assert_eq!(fa_key.target, asr_key.target);
-        assert_eq!(fa_key.language, asr_key.language);
-        assert_ne!(fa_key, asr_key);
     }
 
     /// Shared overrides that name every key a request could carry plus an
@@ -737,80 +496,5 @@ mod tests {
                 }),
             ),
         );
-    }
-
-    #[test]
-    fn align_probe_and_dispatch_keys_agree_under_crowded_overrides() {
-        assert_probe_and_dispatch_keys_agree(
-            crate::api::ReleasedCommand::Align,
-            crate::options::CommandOptions::Align(crate::options::AlignOptions {
-                common: crowded_common_options(),
-                ..crate::options::AlignOptions::default()
-            }),
-            request_with_payload(
-                InferenceTaskV2::ForcedAlignment,
-                TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
-                    attention_capture: None,
-                    // The shared map's `fa` beats the flag.
-                    backend: FaBackendV2::Whisper,
-                    payload_ref_id: text_payload_id(),
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                    text_mode: FaTextModeV2::SpaceJoined,
-                }),
-            ),
-        );
-    }
-
-    /// The command-level capability probe and the actual V2 ASR dispatch are
-    /// two wire boundaries for one model recipe. This test survives because a
-    /// Rust type cannot prove that independently decoded command options and a
-    /// V2 request describe the same external model selection.
-    #[test]
-    fn lazy_transcribe_capability_key_matches_its_asr_execute_key() {
-        let language = WorkerLanguage::from(LanguageCode3::eng());
-        let options =
-            crate::options::CommandOptions::Transcribe(crate::options::TranscribeOptions {
-                auto_speakers: false,
-                common: crate::options::CommonOptions::default(),
-                asr_engine: AsrEngineName::Whisper,
-                diarize: false,
-                wor: false.into(),
-                merge_abbrev: false.into(),
-                utseg_fallback: false.into(),
-                batch_size: 8,
-            });
-        let request = request_with_payload(
-            InferenceTaskV2::Asr,
-            TaskRequestV2::Asr(AsrRequestV2 {
-                lang: language.clone(),
-                backend: AsrBackendV2::LocalWhisper,
-                models: crate::model_manifest::resolve_asr_models(
-                    AsrBackendV2::LocalWhisper,
-                    None,
-                    &std::collections::BTreeMap::new(),
-                )
-                .expect("the manifest pins stock Whisper"),
-                input: AsrInputV2::PreparedAudio(PreparedAudioInputV2 {
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                }),
-                extras: std::collections::BTreeMap::new(),
-                decode_budget_seconds: None,
-            }),
-        );
-
-        let capability_key = WorkerKey::from_command_options(
-            crate::command_model::command_spec(crate::api::ReleasedCommand::Transcribe)
-                .capabilities
-                .require_inference()
-                .expect("transcribe requires inference"),
-            language.clone(),
-            &options,
-            WorkerBootstrapMode::LazyProfile,
-        );
-        let execute_key =
-            execute_v2_worker_key(language, &request, WorkerBootstrapMode::LazyProfile)
-                .expect("typed ASR request must derive a worker key");
-
-        assert_eq!(capability_key, execute_key);
     }
 }

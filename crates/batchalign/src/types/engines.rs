@@ -541,6 +541,16 @@ pub enum FaFallbackPolicy {
     NoFallback,
 }
 
+impl FaFallbackPolicy {
+    /// The engine a failed group retries on, when the policy retries at all.
+    pub const fn retry_target(self) -> Option<FaEngineName> {
+        match self {
+            Self::RetryGroupOn(target) => Some(target),
+            Self::NoFallback => None,
+        }
+    }
+}
+
 /// Everything one forced-alignment engine is, stated once.
 ///
 /// # Why this exists

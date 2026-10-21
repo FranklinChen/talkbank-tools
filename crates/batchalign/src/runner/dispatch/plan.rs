@@ -153,6 +153,17 @@ impl FaDispatchPlan {
     }
 }
 
+impl FaDispatchPlan {
+    /// The GPU-profile engines this align job's requests name: its FA engine,
+    /// and its UTR engine when a worker hosts it.
+    pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
+        crate::worker::pool::GpuModelPlan::alignment(
+            self.options.fa_params.engine,
+            self.options.utr_engine.as_ref().map(AsrBackend::from),
+        )
+    }
+}
+
 /// Why a dispatch plan could not be built.
 ///
 /// `from_job` used to return `Option<Self>`, and the engine-selection refusal
@@ -280,6 +291,13 @@ impl TranscribeDispatchPlan {
     }
 }
 
+impl TranscribeDispatchPlan {
+    /// The GPU-profile engines this transcribe job's requests name.
+    pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
+        self.base_options.gpu_models()
+    }
+}
+
 /// Typed plan for benchmark dispatch.
 #[derive(Clone)]
 pub(crate) struct BenchmarkDispatchPlan {
@@ -359,6 +377,13 @@ impl BenchmarkDispatchPlan {
     }
 }
 
+impl BenchmarkDispatchPlan {
+    /// The GPU-profile engines this benchmark job's requests name.
+    pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
+        self.base_options.gpu_models()
+    }
+}
+
 /// Typed plan for media-analysis dispatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MediaAnalysisDispatchPlan {
@@ -390,6 +415,17 @@ pub(crate) enum MediaAnalysisDispatchPlan {
 }
 
 impl MediaAnalysisDispatchPlan {
+    /// The GPU-profile engines these jobs' requests name: none. Diarization's
+    /// speaker requests select no engine, and openSMILE and AVQI run on IO
+    /// workers.
+    pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
+        match self {
+            Self::Opensmile { .. } | Self::Avqi { .. } | Self::Diarize { .. } => {
+                crate::worker::pool::GpuModelPlan::without_engines()
+            }
+        }
+    }
+
     /// Build the media-analysis plan from the persisted job snapshot.
     ///
     /// Returns the typed refusal for the same reason `FaDispatchPlan` does:

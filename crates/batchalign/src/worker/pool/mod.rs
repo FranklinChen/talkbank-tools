@@ -49,6 +49,7 @@ mod idle_eviction;
 pub(crate) mod job_tracker;
 mod lifecycle;
 pub(crate) mod memory_gate;
+mod model_plan;
 mod permit;
 mod pre_scale;
 pub(crate) mod reaper;
@@ -59,6 +60,8 @@ mod spawn_runtime;
 pub mod status;
 
 pub use checkout::CheckedOutWorker;
+pub(crate) use model_plan::GpuRoute;
+pub use model_plan::{GpuModelPlan, GpuRouteRefusal, GpuTask, PlanMismatch};
 pub use status::{WorkerSummaryEntry, WorkerTransport};
 
 use std::collections::{HashMap, VecDeque};
@@ -123,35 +126,26 @@ impl EngineSelection {
         Self::default()
     }
 
-    /// The engines a command itself names, before any target-driven filling.
+    /// The engines a text or IO command itself names, before any
+    /// target-driven filling.
     ///
-    /// Split out so `for_target` can add to it and normalize ONCE.
-    /// Normalizing, unwrapping and re-normalizing left a reader unable to tell
-    /// whether the second pass was required or incidental.
+    /// Only translate selects an engine among those commands. The GPU
+    /// commands (align, transcribe, benchmark) are absent on purpose: their
+    /// workers are keyed by the job's model plan, never from options here.
     fn overrides_for_command(options: &CommandOptions) -> EngineOverrides {
         let mut overrides = options.common().engine_overrides.clone();
         match options {
-            CommandOptions::Align(options) => {
-                overrides
-                    .fa
-                    .get_or_insert_with(|| options.effective_fa_engine());
-            }
-            CommandOptions::Transcribe(options) | CommandOptions::TranscribeS(options) => {
-                overrides
-                    .asr
-                    .get_or_insert_with(|| options.effective_asr_engine());
-            }
-            CommandOptions::Benchmark(options) => {
-                overrides
-                    .asr
-                    .get_or_insert_with(|| options.effective_asr_engine());
-            }
             CommandOptions::Translate(options) => {
                 overrides
                     .translate
                     .get_or_insert_with(|| options.effective_translate_engine());
             }
-            CommandOptions::Morphotag(_)
+            // GPU commands: keyed by their model plan (`GpuRoute::worker_key`).
+            CommandOptions::Align(_)
+            | CommandOptions::Transcribe(_)
+            | CommandOptions::TranscribeS(_)
+            | CommandOptions::Benchmark(_)
+            | CommandOptions::Morphotag(_)
             | CommandOptions::Coref(_)
             | CommandOptions::Utseg(_)
             | CommandOptions::Opensmile(_)
@@ -167,9 +161,9 @@ impl EngineSelection {
         overrides
     }
 
-    /// The one derivation of a worker's engine identity.
+    /// The engine identity of a text or IO worker, from one request's task.
     ///
-    /// Both spawn routes end here: the command route
+    /// Both routes to such a worker end here: the command route
     /// ([`WorkerKey::from_command_options`], from the job's options) and the
     /// V2 request route (`execute_v2_worker_key`, from the request). They used
     /// to be two derivations that agreed only when the shared overrides were
@@ -179,16 +173,38 @@ impl EngineSelection {
     /// one worker at its capability probe and dispatched to a second one.
     ///
     /// The identity is a pure function of the task's own keys
-    /// ([`Self::task_keys`]), filled for the tasks an eager target preloads.
-    /// A lazy worker preloads nothing, so its identity is the task's keys
-    /// alone: an ASR probe must not acquire an unrelated FA selection.
+    /// ([`Self::task_keys`]). GPU workers are not keyed here: a GPU worker
+    /// hosts every task of its profile, so its identity is its job's whole
+    /// model plan ([`Self::for_job_plan`]).
     pub(super) fn derive(
         task: InferTask,
         selected: EngineOverrides,
         target: WorkerTarget,
         mode: WorkerBootstrapMode,
     ) -> Self {
-        let keys = Self::task_keys(task, selected);
+        Self::preloaded(Self::task_keys(task, selected), target, mode)
+    }
+
+    /// The identity of a worker serving a job's GPU model plan.
+    ///
+    /// A profile worker hosts every task of its profile, so its identity is
+    /// the plan's whole engine set; a task-mode worker hosts one task, so its
+    /// identity stays that task's own keys.
+    pub(super) fn for_job_plan(
+        plan: EngineOverrides,
+        target: WorkerTarget,
+        mode: WorkerBootstrapMode,
+    ) -> Self {
+        let keys = match target {
+            WorkerTarget::Profile(_) => plan,
+            WorkerTarget::InferTask(task) => Self::task_keys(task, plan),
+        };
+        Self::preloaded(keys, target, mode)
+    }
+
+    /// Fill `keys` for what `target` preloads under `mode`, then normalize.
+    /// A lazy worker preloads nothing, so its identity is the keys alone.
+    fn preloaded(keys: EngineOverrides, target: WorkerTarget, mode: WorkerBootstrapMode) -> Self {
         let filled = match mode {
             WorkerBootstrapMode::LazyProfile => keys,
             WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => {
@@ -420,7 +436,9 @@ impl WorkerKey {
         }
     }
 
-    pub(super) fn from_command_options(
+    /// A text or IO command's worker, from its options. GPU commands go
+    /// through [`Self::for_command`], which keys them by their model plan.
+    fn from_command_options(
         requirement: crate::command_model::InferenceRequirement,
         language: WorkerLanguage,
         options: &CommandOptions,
@@ -438,6 +456,23 @@ impl WorkerKey {
             target,
             language,
             engine_selection,
+        }
+    }
+
+    /// The worker a job's command is probed on, pre-scaled for and checked
+    /// for: its plan's worker for a GPU command, its options' worker for a
+    /// text or IO command. The one place a command-level key is derived, so
+    /// probe, pre-scale and dispatch cannot select different workers.
+    pub(super) fn for_command(
+        requirement: crate::command_model::InferenceRequirement,
+        language: WorkerLanguage,
+        options: &CommandOptions,
+        gpu: &GpuModelPlan,
+        bootstrap_mode: WorkerBootstrapMode,
+    ) -> Self {
+        match GpuTask::of(requirement.task()) {
+            Some(task) => GpuRoute::worker_key(gpu, task, language, bootstrap_mode),
+            None => Self::from_command_options(requirement, language, options, bootstrap_mode),
         }
     }
 
@@ -1596,65 +1631,42 @@ mod default_pool_config_tests {
     use crate::types::options::{AlignOptions, CommandOptions};
     use crate::worker::{InferTask, WorkerTarget};
 
+    /// A GPU command's worker key comes from its job's model plan, never from
+    /// its options: shared overrides naming other engines and extras cannot
+    /// reach it. (Until 2026-09-22 an align job's stray ASR extra entered its
+    /// probe key; until 2026-10-21 the probe keyed from the options at all,
+    /// and an align job with worker-hosted UTR used two GPU workers.)
     #[test]
-    fn command_options_selection_drops_keys_the_task_does_not_read() {
+    fn a_gpu_commands_key_comes_from_its_plan_not_its_options() {
         let mut options = AlignOptions::default();
         options.common.engine_overrides = EngineOverrides {
             asr: Some(AsrEngineName::RevAi),
+            fa: Some(crate::types::engines::FaEngineName::Whisper),
             extras: [("provider_region".to_owned(), "us-east".to_owned())].into(),
             ..EngineOverrides::default()
         };
-
-        // Through the production constructor, which is the one derivation
-        // every real key comes from.
-        let key = WorkerKey::from_command_options(
-            crate::command_model::command_spec(ReleasedCommand::Align)
-                .capabilities
-                .require_inference()
-                .expect("align requires inference"),
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &CommandOptions::Align(options),
+        let plan = GpuModelPlan::alignment(crate::types::engines::FaEngineName::Wave2Vec, None);
+        for mode in [
             WorkerBootstrapMode::Profile,
-        );
-        let selection = &key.engine_selection;
-
-        // An FA worker's identity is its FA engine: the ASR selection and the
-        // ASR extras belong to the ASR worker, whose request carries them.
-        // Until 2026-09-22 the extra survived here, so an align job given one
-        // spawned a worker at its probe that no FA request could ever match.
-        assert_eq!(selection.overrides().asr, None);
-        assert!(selection.overrides().extras.is_empty());
-        // Derived: `fa` is whatever the default engine is, not a value this
-        // test chooses.
-        assert_eq!(
-            selection.worker_config_json(),
-            format!(
-                r#"{{"fa":"{}"}}"#,
-                <crate::types::engines::FaEngineName as
-                    crate::types::engines::SelectableEngine>::DEFAULT
-                    .dispatch_override_name()
-            )
-        );
-    }
-
-    #[test]
-    fn lazy_profile_command_options_key_retains_engine_selection() {
-        let options = CommandOptions::Align(AlignOptions::default());
-        let key = WorkerKey::from_command_options(
-            crate::command_model::command_spec(ReleasedCommand::Align)
-                .capabilities
-                .require_inference()
-                .expect("align requires inference"),
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &options,
             WorkerBootstrapMode::LazyProfile,
-        );
-
-        assert_eq!(key.target.profile_kind(), WorkerProfile::Gpu);
-        assert_eq!(
-            key.engine_selection.worker_config_json(),
-            r#"{"fa":"wave2vec"}"#
-        );
+        ] {
+            let key = WorkerKey::for_command(
+                crate::command_model::command_spec(ReleasedCommand::Align)
+                    .capabilities
+                    .require_inference()
+                    .expect("align requires inference"),
+                WorkerLanguage::from(LanguageCode3::eng()),
+                &CommandOptions::Align(options.clone()),
+                &plan,
+                mode,
+            );
+            assert_eq!(key.target.profile_kind(), WorkerProfile::Gpu);
+            assert_eq!(
+                key.engine_selection.worker_config_json(),
+                r#"{"fa":"wave2vec"}"#,
+                "{mode:?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

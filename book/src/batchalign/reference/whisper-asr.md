@@ -148,6 +148,11 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
   rows before acoustic normalization and DTW, retaining zero prefix times.
   Lexical timestamps occupy their original decoder positions; the terminal
   prediction repeats the final observed boundary, as in upstream Transformers.
+  Under beam search, Transformers 5 records one beam index per generated step
+  while the first forward pass attends to the whole decoder prompt, so the
+  callback repeats the first step's beam index across the prompt rows before
+  gathering each beam's attention, exactly as upstream does; a test pins that
+  the rows handed to our DTW equal upstream's.
 - Chunk timestamps: a chunk with a missing bound keeps its words and goes
   downstream untimed on that side (the producer reports how many; an absence
   is not a time, and it is not an absence of words either). The HuggingFace

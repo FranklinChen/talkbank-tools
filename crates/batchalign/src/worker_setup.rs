@@ -108,7 +108,7 @@ pub enum RegistryDiscovery {
 /// Returns without spawning a worker. Workers arrive either from the registry
 /// (a pre-started TCP daemon, adopted when `discovery` is
 /// [`RegistryDiscovery::Adopt`], whose report the pool admits as it probes it)
-/// or from the job runner's per-job `pre_scale_for_command_options`.
+/// or from the job runner's per-job `pre_scale_for_command`.
 ///
 /// Capabilities are detected lazily on the first real worker spawn rather than
 /// at startup, which avoids a 10-30 second delay and a 2-3 GB peak from a probe

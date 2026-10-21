@@ -5,6 +5,26 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### One GPU worker per job
+
+- An `align` job with a worker-hosted UTR engine (`--utr-engine whisper`,
+  Tencent) used two GPU workers: one for its UTR requests, keyed by ASR and
+  FA, and one for its FA requests, keyed by FA alone, with the FA model loaded
+  in both. Measured on a 13.5 s English file: about 10 GB and 2.8 GB. A
+  `transcribe` job with dedicated diarization likewise sent its speaker
+  requests to a second worker, and multi-file jobs pre-scaled a worker their
+  requests never reached. GPU workers are now keyed by the job's model plan,
+  built once from the job's dispatch plan: the capability probe, pre-scaling
+  and the job's ASR, FA and speaker requests all reach one worker.
+- The one deliberate exception: an FA group retried on its engine's fallback
+  goes to a worker keyed by the fallback engine, which the job's main worker
+  does not host, as before.
+- A job whose dispatch plan is refused now fails before any worker is probed.
+- A GPU request whose engines differ from its job's plan, or one sent through
+  the request-keyed dispatch, is refused as an internal error instead of
+  spawning another worker.
+- Engine choice, models and CHAT output are unchanged.
+
 ### Whisper word timestamps work again under transformers 5
 
 - Stock Whisper with word timestamps (`--asr-engine whisper`, and Whisper

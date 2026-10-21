@@ -408,6 +408,7 @@ impl MediaAnalysisAttempt<'_, '_> {
                         job,
                         pool,
                         cache,
+                        &plan.gpu_models(),
                         SpeakerEvidenceRunParams {
                             audio_path: &audio_path,
                             backend: *backend,
@@ -437,6 +438,7 @@ impl MediaAnalysisAttempt<'_, '_> {
                     job,
                     pool,
                     cache,
+                    &plan.gpu_models(),
                     filename,
                     SpeakerEvidenceRunParams {
                         audio_path: &audio_path,
@@ -786,11 +788,12 @@ async fn dispatch_diarize_attempt(
     job: &RunnerJobSnapshot,
     pool: &Arc<WorkerPool>,
     cache: &Arc<UtteranceCache>,
+    gpu: &crate::worker::pool::GpuModelPlan,
     filename: &str,
     params: SpeakerEvidenceRunParams<'_>,
 ) -> Result<String, DispatchFailure> {
     let backend = params.backend;
-    let resolution = resolve_diarize_evidence(job, pool, cache, params).await?;
+    let resolution = resolve_diarize_evidence(job, pool, cache, gpu, params).await?;
     let turns_json = format_turns_json(
         SpeakerTurnsSource::from_backend(backend),
         resolution.segments(),
@@ -809,10 +812,11 @@ async fn resolve_diarize_evidence(
     job: &RunnerJobSnapshot,
     pool: &Arc<WorkerPool>,
     cache: &Arc<UtteranceCache>,
+    gpu: &crate::worker::pool::GpuModelPlan,
     params: SpeakerEvidenceRunParams<'_>,
 ) -> Result<crate::transcribe::ResolvedSpeakerEvidence, DispatchFailure> {
-    // Diarization is not language-aware, but `dispatch_execute_v2` still
-    // needs a concrete worker-pool key (same contract as opensmile/avqi).
+    // Diarization is not language-aware, but its route still needs a
+    // concrete worker-pool language (same contract as opensmile/avqi).
     let pool_key = job.dispatch.lang.as_resolved().cloned().ok_or_else(|| {
         DispatchFailure::Terminal(
             format!(
@@ -824,17 +828,22 @@ async fn resolve_diarize_evidence(
     })?;
     let backend = params.backend;
     let audio_path = params.audio_path;
-    let resolution =
-        resolve_speaker_evidence_for_audio(pool, cache, WorkerLanguage::from(pool_key), params)
-            .await
-            .map_err(|error| {
-                let category = classify_server_error(&error);
-                if is_retryable_worker_failure(category) {
-                    DispatchFailure::RetryableWorker(error.to_string(), category)
-                } else {
-                    DispatchFailure::Terminal(error.to_string(), category)
-                }
-            })?;
+    let resolution = resolve_speaker_evidence_for_audio(
+        pool,
+        cache,
+        gpu,
+        WorkerLanguage::from(pool_key),
+        params,
+    )
+    .await
+    .map_err(|error| {
+        let category = classify_server_error(&error);
+        if is_retryable_worker_failure(category) {
+            DispatchFailure::RetryableWorker(error.to_string(), category)
+        } else {
+            DispatchFailure::Terminal(error.to_string(), category)
+        }
+    })?;
     let evidence_identity = audio_path.to_string_lossy().into_owned();
     let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
     dumper

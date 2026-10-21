@@ -242,6 +242,7 @@ async fn request_context_preserves_partial_partition_output() {
             FaServices {
                 pipeline: PipelineServices::new(&pool, &cache),
                 cache_namespace: &namespace,
+                gpu: &crate::worker::pool::GpuModelPlan::alignment(FaEngineName::Wave2Vec, None),
                 attention_capture_dir: None,
             },
             &params,
@@ -360,6 +361,10 @@ async fn request_context_preserves_partial_partition_output() {
                 FaServices {
                     pipeline: PipelineServices::new(&pool, &cache),
                     cache_namespace: &namespace,
+                    gpu: &crate::worker::pool::GpuModelPlan::alignment(
+                        FaEngineName::Wave2Vec,
+                        None,
+                    ),
                     attention_capture_dir: None,
                 },
                 &params,

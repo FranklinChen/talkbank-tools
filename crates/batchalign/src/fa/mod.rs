@@ -87,6 +87,9 @@ pub(crate) struct FaServices<'a> {
     pub(crate) pipeline: PipelineServices<'a>,
     /// The FA engine the selected worker reported.
     pub(crate) cache_namespace: &'a FaCacheNamespace,
+    /// The job's GPU model plan; FA requests and their fallbacks are routed by
+    /// it, so they reach the worker the job's plan selected.
+    pub(crate) gpu: &'a crate::worker::pool::GpuModelPlan,
     /// Opt-in diagnostic directory; only Whisper requests use it.
     pub(crate) attention_capture_dir: Option<&'a std::path::Path>,
 }
@@ -1186,9 +1189,14 @@ mod tests {
             .await
             .expect("cache");
         let namespace = FaCacheNamespace::for_test("test-fa-wave-v1");
+        let gpu = crate::worker::pool::GpuModelPlan::alignment(
+            crate::types::engines::FaEngineName::Wave2Vec,
+            None,
+        );
         let services = FaServices {
             pipeline: PipelineServices::new(&pool, &cache),
             cache_namespace: &namespace,
+            gpu: &gpu,
             attention_capture_dir: None,
         };
         let params = FaParams {

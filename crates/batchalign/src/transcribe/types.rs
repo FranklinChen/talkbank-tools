@@ -688,6 +688,9 @@ pub(crate) trait TranscribePlan: Clone + Send + Sync + sealed::Sealed {
     const REPLAY: bool;
     fn language(&self) -> AsrLanguageRequest;
     fn expected_speakers(&self) -> Option<crate::api::NumSpeakers>;
+    /// The engine recognition runs on, or `None` when the plan replays
+    /// recorded recognition and runs no ASR model.
+    fn recognition_backend(&self) -> Option<AsrBackend>;
 }
 
 mod sealed {
@@ -704,6 +707,9 @@ impl TranscribePlan for TranscribeAsrPlan {
     fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
         self.expected_speakers()
     }
+    fn recognition_backend(&self) -> Option<AsrBackend> {
+        Some(self.backend())
+    }
 }
 
 impl TranscribePlan for ReplayAsrPlan {
@@ -713,6 +719,10 @@ impl TranscribePlan for ReplayAsrPlan {
     }
     fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
         Some(crate::api::NumSpeakers(self.speakers.get()))
+    }
+    /// Replay reads recorded recognition evidence and runs no ASR model.
+    fn recognition_backend(&self) -> Option<AsrBackend> {
+        None
     }
 }
 
@@ -842,6 +852,21 @@ impl<P: TranscribePlan> TranscribeOptions<P> {
     /// [`TranscribeAsrPlan`], the only place it is held.
     pub(crate) fn language(&self) -> AsrLanguageRequest {
         self.plan.asr().language()
+    }
+
+    /// The GPU-profile engines this job's requests name: its admitted ASR
+    /// backend, when a worker hosts it, with the job's engine extras.
+    ///
+    /// Derived from the two fields that already hold the choice, never stored
+    /// beside them, so the capability probe and every request site read the
+    /// same plan.
+    pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
+        match self.plan.asr().recognition_backend() {
+            Some(backend) => {
+                crate::worker::pool::GpuModelPlan::transcription(backend, &self.engine_extras)
+            }
+            None => crate::worker::pool::GpuModelPlan::without_engines(),
+        }
     }
 }
 

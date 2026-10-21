@@ -1,7 +1,7 @@
 # translate: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-02 23:08 EDT
+**Last updated:** 2026-10-21 11:40 EDT
 
 Implementation guide for the `translate` command. For user-facing
 documentation, see [User Guide: translate](../../user-guide/commands/translate.md).
@@ -224,9 +224,10 @@ a config file. See the no-config-junk principle in
 
 The worker pool key includes the resolved translate engine, and only that
 key: `EngineSelection::derive` (`crates/batchalign/src/worker/pool/mod.rs`)
-is the one derivation of a worker's identity, a pure function of the task's
-own keys (ASR: `asr` plus the extras; FA: `fa`; translate: `translate`;
-every other task: nothing) filled for the tasks an eager target preloads.
+is the one derivation of a text or IO worker's identity, a pure function of
+the task's own keys (translate: `translate`; every other text task: nothing).
+GPU workers are keyed by their job's model plan instead; see "GPU workers are
+keyed by the job's model plan" in the observability architecture chapter.
 The capability probe reaches it from the job's options
 (`WorkerKey::from_command_options`), dispatch from the request
 (`execute_v2_worker_key`, reading `TranslateRequestV2.engine`). Google,

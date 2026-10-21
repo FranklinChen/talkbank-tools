@@ -212,6 +212,14 @@ async fn infer_units_v2<'b>(
         ServerError::Validation(format!("failed to create FA V2 artifact runtime: {error}"))
     })?;
 
+    // One route for every unit of the batch: the job's plan, the FA task and
+    // the batch's language are the same for all of them.
+    let route = services.pipeline.pool.gpu_route(
+        services.gpu,
+        crate::worker::pool::GpuTask::Fa,
+        batch.worker_lang.clone(),
+    )?;
+
     let mut parsed_results = Vec::with_capacity(batch.authorization.misses.len());
     for &unit in &batch.authorization.misses {
         let ordinal = unit.ordinal();
@@ -227,6 +235,7 @@ async fn infer_units_v2<'b>(
             request_namespace,
             unit,
             batch.engine,
+            &route,
         )
         .await
         {
@@ -316,6 +325,12 @@ async fn infer_units_v2<'b>(
                      fallback engine"
                 );
                 let fallback_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
+                // Built only on this rare path: most batches never retry.
+                let fallback_route = services.pipeline.pool.gpu_route(
+                    services.gpu,
+                    crate::worker::pool::GpuTask::FaFallback,
+                    batch.worker_lang.clone(),
+                )?;
                 let fallback_response = dispatch_unit_request(
                     services,
                     &artifacts,
@@ -323,6 +338,7 @@ async fn infer_units_v2<'b>(
                     fallback_namespace,
                     unit,
                     retry.target,
+                    &fallback_route,
                 )
                 .await?;
                 match admission.admit(
@@ -398,6 +414,7 @@ async fn dispatch_unit_request(
     request_namespace: u64,
     unit: &DispatchUnit<'_>,
     engine: crate::types::engines::FaEngineName,
+    route: &crate::worker::pool::GpuRoute,
 ) -> Result<crate::types::worker_v2::ExecuteResponseV2, ServerError> {
     let infer_item = build_fa_infer_item(batch, unit);
     let request_ids = build_fa_request_ids(request_namespace, unit.ordinal());
@@ -437,7 +454,7 @@ async fn dispatch_unit_request(
     let response = services
         .pipeline
         .pool
-        .dispatch_execute_v2(&batch.worker_lang, &request)
+        .dispatch_routed_v2(route, &request)
         .await
         .map_err(|error| {
             if capture.is_some() {
@@ -709,11 +726,7 @@ fn fa_group_retry(
     // the Qwen3 aligner has nothing to fall back to, moved to that row: a new
     // engine still cannot compile without stating a policy, and it now states
     // it beside everything else it is.
-    use crate::types::engines::FaFallbackPolicy;
-    let target = match engine.fallback_policy() {
-        FaFallbackPolicy::RetryGroupOn(target) => target,
-        FaFallbackPolicy::NoFallback => return None,
-    };
+    let target = engine.fallback_policy().retry_target()?;
 
     let reason = match error {
         ServerError::Validation(message)

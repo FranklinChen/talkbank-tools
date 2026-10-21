@@ -8,9 +8,13 @@ use std::sync::Arc;
 async fn next_dispatches_replace_a_dead_shared_worker_once() {
     let python = require_python!();
     let pool = Arc::new(test_pool(python));
-    pool.dispatch_execute_v2(&LanguageCode3::eng(), &gpu_execute_request("before-crash"))
-        .await
-        .expect("warm the actual shared stdio worker");
+    pool.dispatch_gpu_for_test(
+        &GPU_PLAN,
+        &LanguageCode3::eng(),
+        &gpu_execute_request("before-crash"),
+    )
+    .await
+    .expect("warm the actual shared stdio worker");
     let original_pid = pool
         .worker_summary_entries()
         .await
@@ -29,7 +33,11 @@ async fn next_dispatches_replace_a_dead_shared_worker_once() {
     // poison every later request with the same dead OnceCell occupant.
     let _ = tokio::time::timeout(
         Duration::from_secs(30),
-        pool.dispatch_execute_v2(&LanguageCode3::eng(), &gpu_execute_request("observe-crash")),
+        pool.dispatch_gpu_for_test(
+            &GPU_PLAN,
+            &LanguageCode3::eng(),
+            &gpu_execute_request("observe-crash"),
+        ),
     )
     .await
     .expect("a dead worker must fail promptly");
@@ -41,7 +49,7 @@ async fn next_dispatches_replace_a_dead_shared_worker_once() {
             let request = gpu_execute_request(&format!("after-crash-{index}"));
             tokio::time::timeout(
                 Duration::from_secs(30),
-                pool.dispatch_execute_v2(&LanguageCode3::eng(), &request),
+                pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request),
             )
             .await
         }));

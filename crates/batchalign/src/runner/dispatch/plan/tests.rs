@@ -653,3 +653,31 @@ fn standalone_diarize_plan_carries_backend_and_required_cache_policy() {
     assert_eq!(expected_speakers, None);
     assert_eq!(cache_policy, crate::params::CachePolicy::RequireCache);
 }
+
+/// The measured defect, from the job's options down: one align job with
+/// Whisper UTR plans ONE GPU worker. Its family plan's GPU models give the UTR
+/// and FA routes the same worker, under the profile mode large hosts run.
+#[tokio::test]
+async fn an_align_job_with_whisper_utr_plans_one_gpu_worker() {
+    let mut options = AlignOptions::default();
+    options.utr.engine = Some(crate::options::UtrEngine::Whisper);
+    let snapshot = make_snapshot(
+        ReleasedCommand::Align,
+        CommandOptions::Align(options),
+        BTreeMap::new(),
+    );
+    let plan = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()).expect("align plan");
+    let gpu = plan.gpu_models();
+
+    let mut config = crate::worker::pool::PoolConfig::default();
+    config.runtime.bootstrap_mode = crate::worker::WorkerBootstrapMode::Profile;
+    let pool = crate::worker::pool::WorkerPool::new(config);
+    let english = crate::api::WorkerLanguage::from(LanguageCode3::eng());
+    let utr = pool
+        .gpu_route(&gpu, crate::worker::pool::GpuTask::Asr, english.clone())
+        .expect("Whisper UTR is a worker-hosted ASR engine");
+    let fa = pool
+        .gpu_route(&gpu, crate::worker::pool::GpuTask::Fa, english)
+        .expect("align declares its FA engine");
+    assert!(utr.shares_worker_with(&fa));
+}

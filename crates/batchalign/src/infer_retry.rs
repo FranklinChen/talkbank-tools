@@ -190,6 +190,26 @@ mod tests {
 
     use super::*;
 
+    /// A text-task request, the kind this retry loop carries in production.
+    ///
+    /// The tests that need a dispatch still in flight use it: a GPU request is
+    /// refused before any worker is involved (GPU requests travel on their
+    /// job's route, never through request-keyed dispatch), so an ASR request
+    /// would resolve on its first poll.
+    fn minimal_text_request() -> ExecuteRequestV2 {
+        ExecuteRequestV2 {
+            request_id: WorkerRequestIdV2::from("infer-retry-test"),
+            task: InferenceTaskV2::Morphosyntax,
+            payload: TaskRequestV2::Morphosyntax(crate::types::worker_v2::MorphosyntaxRequestV2 {
+                lang: LanguageCode3::eng(),
+                payload_ref_id: WorkerArtifactIdV2::from("payload-1"),
+                item_count: 1,
+                retokenize: false,
+            }),
+            attachments: Vec::new(),
+        }
+    }
+
     fn minimal_asr_request() -> ExecuteRequestV2 {
         ExecuteRequestV2 {
             request_id: WorkerRequestIdV2::from("infer-retry-test"),
@@ -282,7 +302,7 @@ mod tests {
     async fn not_wired_dispatch_is_not_spuriously_resolved() {
         let pool = WorkerPool::new(PoolConfig::default());
         let lang = LanguageCode3::eng();
-        let request = minimal_asr_request();
+        let request = minimal_text_request();
 
         let mut fut = Box::pin(dispatch_execute_v2_with_retry(
             &pool,
@@ -324,7 +344,7 @@ mod tests {
     async fn cancelled_during_the_first_attempt_stops_the_loop() {
         let pool = WorkerPool::new(PoolConfig::default());
         let lang = LanguageCode3::eng();
-        let request = minimal_asr_request();
+        let request = minimal_text_request();
         let cancel_token = CancellationToken::new();
 
         let mut fut = Box::pin(dispatch_execute_v2_with_retry(

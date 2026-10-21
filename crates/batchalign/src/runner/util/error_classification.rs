@@ -75,6 +75,9 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         WorkerError::SpawnFailed(_)
         | WorkerError::ReadyParseFailed(_)
         | WorkerError::NativeCommand { .. }
+        | WorkerError::UnroutedGpuRequest { .. }
+        | WorkerError::PlanMismatch(_)
+        | WorkerError::UndeclaredGpuTask(_)
         | WorkerError::NoWorker { .. } => FailureCategory::System,
     }
 }

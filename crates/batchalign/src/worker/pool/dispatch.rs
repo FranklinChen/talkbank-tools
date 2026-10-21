@@ -375,6 +375,11 @@ impl WorkerPool {
 
     /// Dispatch a V2 execute request, forwarding intermediate progress events
     /// through an optional async channel.
+    ///
+    /// Keys the worker by the request alone, which is right for text and IO
+    /// tasks, whose workers select at most one engine per task. A GPU-profile
+    /// request is refused here ([`WorkerError::UnroutedGpuRequest`]): it must
+    /// travel on its job's route ([`Self::dispatch_routed_v2`]).
     #[instrument(
         skip_all,
         fields(request_id = %request.request_id),
@@ -385,12 +390,75 @@ impl WorkerPool {
         request: &ExecuteRequestV2,
         progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        let lang = lang.into();
-        let key = execute_v2_worker_key(lang, request, self.config.runtime.bootstrap_mode)?;
+        let key = execute_v2_worker_key(lang.into(), request, self.config.runtime.bootstrap_mode)?;
+        self.dispatch_v2_on_key(&key, request, progress_tx).await
+    }
 
+    /// The route for one GPU task of a job's model plan, in `language`.
+    ///
+    /// Every task of one plan gets the same worker key under the profile
+    /// bootstrap modes, so one job reaches one GPU worker.
+    pub(crate) fn gpu_route(
+        &self,
+        plan: &super::GpuModelPlan,
+        task: super::GpuTask,
+        language: impl Into<WorkerLanguage>,
+    ) -> Result<super::GpuRoute, WorkerError> {
+        Ok(super::GpuRoute::new(
+            plan,
+            task,
+            language.into(),
+            self.config.runtime.bootstrap_mode,
+        )?)
+    }
+
+    /// Dispatch a GPU-profile request on its job's route.
+    ///
+    /// The request must be the route's task and name exactly the engines the
+    /// route was planned with; otherwise it is refused
+    /// ([`WorkerError::PlanMismatch`]) rather than sent to a worker spawned
+    /// for other models.
+    #[instrument(
+        skip_all,
+        fields(request_id = %request.request_id),
+    )]
+    pub(crate) async fn dispatch_routed_v2(
+        &self,
+        route: &super::GpuRoute,
+        request: &ExecuteRequestV2,
+    ) -> Result<ExecuteResponseV2, WorkerError> {
+        route.admit(request)?;
+        self.dispatch_v2_on_key(&route.key, request, None).await
+    }
+
+    /// Dispatch a GPU-profile request in integration tests, on the route
+    /// `plan` gives its task. Production requests are routed by their job's
+    /// plan at their own call sites ([`Self::dispatch_routed_v2`]).
+    #[doc(hidden)]
+    pub async fn dispatch_gpu_for_test(
+        &self,
+        plan: &super::GpuModelPlan,
+        language: impl Into<WorkerLanguage>,
+        request: &ExecuteRequestV2,
+    ) -> Result<ExecuteResponseV2, WorkerError> {
+        let task = execute_v2::infer_task_for_execute_v2(request.task)?;
+        let gpu_task = super::GpuTask::of(task).ok_or_else(|| {
+            WorkerError::Protocol(format!("a {task:?} request is not a GPU-profile request"))
+        })?;
+        let route = self.gpu_route(plan, gpu_task, language)?;
+        self.dispatch_routed_v2(&route, request).await
+    }
+
+    /// Dispatch one request to the worker `key` names.
+    async fn dispatch_v2_on_key(
+        &self,
+        key: &WorkerKey,
+        request: &ExecuteRequestV2,
+        progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
+    ) -> Result<ExecuteResponseV2, WorkerError> {
         if self.serving(key.target).is_shared() {
             // Shared workers don't support progress forwarding yet.
-            return self.dispatch_gpu_execute_v2(&key, request).await;
+            return self.dispatch_gpu_execute_v2(key, request).await;
         }
 
         // In LazyProfile mode the worker started with no models, so the task's
@@ -405,7 +473,7 @@ impl WorkerPool {
 
         // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut checkout) = self.try_checkout_tcp(&key)
+            && let Some(mut checkout) = self.try_checkout_tcp(key)
         {
             let result = async {
                 if let Some((task, overrides)) = &lazy_task {
@@ -425,7 +493,7 @@ impl WorkerPool {
         }
 
         // Fall back to stdio worker.
-        let mut worker = self.checkout(&key).await?;
+        let mut worker = self.checkout(key).await?;
         let _job_guard = TrackerGuard::new(&self.job_tracker, worker.pid());
         if let Some((task, overrides)) = &lazy_task {
             worker
@@ -555,15 +623,21 @@ impl WorkerPool {
         command: ReleasedCommand,
         lang: impl Into<WorkerLanguage>,
         options: &crate::options::CommandOptions,
+        gpu: &super::GpuModelPlan,
     ) -> Result<super::LoadedCapabilities, WorkerError> {
         let requirement = crate::command_model::command_spec(command)
             .capabilities
             .require_inference()
             .map_err(|_| WorkerError::NativeCommand { command })?;
-        let key = WorkerKey::from_command_options(
+        // A GPU command is probed on its plan's worker, so the worker the
+        // probe spawns is the one the job's requests reach. Keyed from the
+        // command's main task alone, an align job's probe used to spawn an
+        // FA-only worker beside the one its UTR requests then needed.
+        let key = WorkerKey::for_command(
             requirement,
             lang.into(),
             options,
+            gpu,
             self.config.runtime.bootstrap_mode,
         );
         let loaded_task = requirement.task();
@@ -748,6 +822,7 @@ mod tcp_checkout_tests {
                 ReleasedCommand::Morphotag,
                 WorkerLanguage::from(LanguageCode3::eng()),
                 &options,
+                &super::super::GpuModelPlan::without_engines(),
             )
             .await
             .expect_err("the fake daemon refuses to load the task");
@@ -774,6 +849,7 @@ mod tcp_checkout_tests {
                 ReleasedCommand::Morphotag,
                 WorkerLanguage::from(LanguageCode3::eng()),
                 &options,
+                &super::super::GpuModelPlan::without_engines(),
             )
             .await
             .expect_err("a reply about fa does not answer ensure_task(morphosyntax)");
@@ -797,6 +873,7 @@ mod tcp_checkout_tests {
                 ReleasedCommand::Morphotag,
                 WorkerLanguage::from(LanguageCode3::eng()),
                 &options,
+                &super::super::GpuModelPlan::without_engines(),
             )
             .await
             .expect_err("the fake daemon closed the connection");

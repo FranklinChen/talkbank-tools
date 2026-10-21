@@ -168,7 +168,6 @@ async fn run_hosted_job(
     engine: &super::context::ExecutionEngine,
     memory_gate_policy: MemoryGateFailurePolicy,
 ) -> Result<HostedJobRunOutcome, crate::error::ServerError> {
-    let pool = &engine.context.pool;
     let host_context = DispatchHostContext::from_store(store.clone());
     let sink = host_context.sink().clone();
 
@@ -321,37 +320,10 @@ async fn run_hosted_job(
             .collect()
     };
 
-    // Pre-scale workers before dispatch to avoid sequential spawn overhead.
-    //
-    // Skip for LazyProfile: on constrained machines (24-48 GB), workers start
-    // empty and load models on demand via ensure_task. Pre-scaling would
-    // eagerly spawn a worker that sits idle until files need it. The 30s cold
-    // start on first dispatch is acceptable on these machines.
-    //
-    // For Profile mode (large/fleet), pre-scaling is an optimization that
-    // amortizes cold start across concurrent files.
-    let bootstrap_mode = pool.bootstrap_mode();
-    // PerFile commands (morphotag, translate, coref) have no job-level
-    // language: files inside one job may span many `@Languages:` headers.
-    // Pre-scaling against a placeholder lang would either spawn an English
-    // worker that nobody asks for (the 2026-05-03 incident) or spawn an
-    // `Auto` worker that the per-file dispatch path would never key onto.
-    // The pipeline spawns workers per-language lazily as it walks files;
-    // skip pre-scale entirely for these commands.
-    let is_per_file = job.dispatch.lang.is_per_file();
-    if *num_workers > 1
-        && bootstrap_mode != crate::worker::WorkerBootstrapMode::LazyProfile
-        && !is_per_file
-    {
-        let pre_scale_lang = job.dispatch.lang.to_worker_language();
-        pool.pre_scale_for_command_options(
-            command,
-            pre_scale_lang,
-            num_workers.0,
-            &job.dispatch.options,
-        )
-        .await;
-    }
+    // Pre-scaling happens in routing, after the job's dispatch plan exists:
+    // a GPU command's workers are keyed by that plan, and pre-scaling from the
+    // options alone warmed a worker no request reached
+    // (`runner::routing::pre_scale_job_workers`).
 
     // Every file task the dispatch spawns inherits this attempt's job id and
     // cancellation token (see `runner::job_scope`).

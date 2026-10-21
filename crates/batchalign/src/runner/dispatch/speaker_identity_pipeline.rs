@@ -47,7 +47,7 @@ use super::media_search::resolve_transcript_media;
 /// `EmbeddingRequest`, which only `identify_speakers` builds.
 struct WorkerEmbedding {
     pool: Arc<WorkerPool>,
-    pool_key: crate::api::LanguageCode3,
+    route: crate::worker::pool::GpuRoute,
     recording: PreparedRecording,
     // Held so the prepared PCM file outlives every request that references it.
     // Dropping the runtime deletes the artifact, and a request naming a file
@@ -64,7 +64,7 @@ impl SpeakerEmbeddingInference for WorkerEmbedding {
     ) -> Result<EmbeddingResponse, EmbeddingInferenceFailure> {
         let response = self
             .pool
-            .dispatch_execute_v2(&self.pool_key, &self.recording.request_for(&request))
+            .dispatch_routed_v2(&self.route, &self.recording.request_for(&request))
             .await
             .map_err(EmbeddingInferenceFailure::from)?;
 
@@ -80,7 +80,7 @@ struct SpeakerIdentityTask {
     audio_path: PathBuf,
     media_display: String,
     pool: Arc<WorkerPool>,
-    pool_key: crate::api::LanguageCode3,
+    route: crate::worker::pool::GpuRoute,
     options: crate::options::SpeakerIdentifyOptions,
 }
 
@@ -124,7 +124,7 @@ impl AudioFileTask for SpeakerIdentityTask {
 
         let inference = WorkerEmbedding {
             pool: self.pool.clone(),
-            pool_key: self.pool_key.clone(),
+            route: self.route.clone(),
             recording,
             _artifacts: artifacts,
         };
@@ -200,6 +200,21 @@ pub(crate) async fn dispatch_speaker_identity(
         sink.fail_job(job_id, &message).await;
         return;
     };
+    // One route for the whole job, so every embedding request reaches the
+    // worker the probe selected. Speaker identity selects no engine, so its
+    // plan is the engine-free one routing probed with.
+    let route = match pool.gpu_route(
+        &crate::worker::pool::GpuModelPlan::without_engines(),
+        crate::worker::pool::GpuTask::Speaker,
+        pool_key,
+    ) {
+        Ok(route) => route,
+        Err(refusal) => {
+            sink.fail_job(job_id, &format!("cannot run speaker-identify: {refusal}"))
+                .await;
+            return;
+        }
+    };
 
     let mut tasks = Vec::new();
     for file in &job.pending_files {
@@ -210,7 +225,7 @@ pub(crate) async fn dispatch_speaker_identity(
         let host = host.clone();
         let sink = sink.clone();
         let pool = pool.clone();
-        let pool_key = pool_key.clone();
+        let route = route.clone();
         let options = options.clone();
         let file = file.clone();
         let filename = file.filename.clone();
@@ -218,9 +233,7 @@ pub(crate) async fn dispatch_speaker_identity(
         tasks.push(spawn_supervised_file_task(
             filename,
             "speaker-identify file task",
-            async move {
-                process_one_file(&job, &host, sink, pool, pool_key, options, &file).await
-            },
+            async move { process_one_file(&job, &host, sink, pool, route, options, &file).await },
         ));
     }
 
@@ -240,7 +253,7 @@ async fn process_one_file(
     host: &DispatchHostContext,
     sink: Arc<dyn RunnerEventSink>,
     pool: Arc<WorkerPool>,
-    pool_key: crate::api::LanguageCode3,
+    route: crate::worker::pool::GpuRoute,
     options: crate::options::SpeakerIdentifyOptions,
     file: &crate::store::PendingJobFile,
 ) -> FileTaskOutcome {
@@ -332,7 +345,7 @@ async fn process_one_file(
         audio_path,
         media_display,
         pool,
-        pool_key,
+        route,
         options,
     };
 
