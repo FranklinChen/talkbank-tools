@@ -57,33 +57,25 @@ class TestWhisperHubLoaderDispatch:
 
     def test_loader_resolves_model_id_from_lang(self, monkeypatch) -> None:
         captured: dict[str, object] = {}
-
-        class FakeHandle:
-            """Minimal stand-in that accepts the ``skip_language_force``
-            attribute write the loader performs. Checks that the loader
-            actually flips it, not just trusting ``language="auto"``,
-            because the V2 inference path ignores ``self.lang`` and
-            passes the request language to ``gen_kwargs``.
-            """
-
-            def __init__(self) -> None:
-                self.skip_language_force = False
+        sentinel = object()
 
         def fake_load_whisper_asr(
-            *, model, base, language, device_policy, timestamp_mode
+            *, model, base, decoding, device_policy, timestamp_mode
         ):
             captured["model"] = model
             captured["base"] = base
-            captured["language"] = language
+            captured["decoding"] = decoding
             captured["device_policy"] = device_policy
             captured["timestamp_mode"] = timestamp_mode
-            return FakeHandle()
+            return sentinel
 
         monkeypatch.setattr(
             "batchalign.inference.asr.load_whisper_asr",
             fake_load_whisper_asr,
         )
 
+        from batchalign.inference._domain_types import WhisperTimestampMode
+        from batchalign.inference.types import CheckpointPinnedLanguage
         from batchalign.inference.whisper_hub import load_whisper_hub_asr
 
         handle = load_whisper_hub_asr(
@@ -92,19 +84,11 @@ class TestWhisperHubLoaderDispatch:
             device_policy=DevicePolicy(force_cpu=True),
         )
 
-        assert isinstance(handle, FakeHandle)
+        assert handle is sentinel
         assert captured["model"] == "thennal/whisper-medium-ml"
         assert captured["base"] == "thennal/whisper-medium-ml"
-        # Secondary safety belt: pinning ``self.lang == "auto"`` matters
-        # for legacy code paths that read ``model.lang`` directly. The
-        # V2 path doesn't consult ``self.lang``.
-        assert captured["language"] == "auto"
+        # The fine-tune decodes with its own pinned language and task: the
+        # handle cannot be told otherwise, by the request or anyone else.
+        assert captured["decoding"] == CheckpointPinnedLanguage()
         assert captured["device_policy"] == DevicePolicy(force_cpu=True)
-        from batchalign.inference._domain_types import WhisperTimestampMode
-
         assert captured["timestamp_mode"] is WhisperTimestampMode.SEGMENT
-        # Primary invariant: the V2 path calls ``gen_kwargs(request_lang)``
-        # where request_lang is a concrete language like ``"malayalam"``.
-        # Without this flag, ``gen_kwargs`` would pass task/language to
-        # ``generate()`` and the fine-tune would emit gibberish.
-        assert handle.skip_language_force is True

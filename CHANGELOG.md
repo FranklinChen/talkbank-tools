@@ -5,6 +5,30 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Whisper is told its language by its own token; reuse rediscovered workers
+
+- Stock Whisper (`whisper`) now admits exactly the languages its decoder has a
+  token for, from a table generated from transformers' Whisper `LANGUAGES`,
+  and the control plane sends each worker that token at spawn
+  (`whisper_decode_language`). Previously the worker handed Whisper a
+  pycountry language name, so Greek, Malay, Nepali, Norwegian Nynorsk,
+  Occitan and Swahili failed on every file although Whisper supports them,
+  while languages with no token (Taiwanese, Zulu) were accepted and then
+  failed on every file. Javanese is decoded with Whisper's `jw`.
+- ASR admission asks each engine's own language table: Whisper's tokens,
+  whisper.cpp's table for `whisper_rs`, Rev.AI's list for `rev`. A refusal
+  lists the engines whose tables cover the language. Whisper timing recovery
+  asks the same token table.
+- A worker that preloads ASR with no engine named (an align job's GPU
+  worker) also receives the decode language when Whisper has a token.
+- A worker rediscovered from the registry is keyed exactly as the request
+  that spawned it. The control plane's injected spawn keys (pinned models,
+  language policies) were read back as user extras, so such workers were
+  filed under a key no request computed and never reused. One `SpawnKey` set
+  now names those keys for both writing and stripping.
+- GPU worker configuration is built only when a worker is spawned, not on
+  every dispatch to a live worker.
+
 ### One owner for the Taiwanese recognition policy
 
 - Rust now decides each language's Qwen decoding window and whether recognized

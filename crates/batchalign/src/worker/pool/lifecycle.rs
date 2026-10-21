@@ -5,6 +5,8 @@ use std::sync::atomic::Ordering;
 
 use tracing::{error, info, warn};
 
+use batchalign_types::worker::InferTask;
+
 use crate::api::NumSpeakers;
 use crate::worker::error::WorkerError;
 use crate::worker::handle::{WorkerConfig, WorkerHandle};
@@ -456,7 +458,9 @@ pub(super) fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerEr
         .transpose()
         .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
 
-    if asr_backend.is_none() && boundary_model.is_none() {
+    let whisper_language = stock_whisper_decode_language(key)?;
+
+    if asr_backend.is_none() && boundary_model.is_none() && whisper_language.is_none() {
         return Ok(key.engine_selection.worker_config_json());
     }
 
@@ -468,42 +472,122 @@ pub(super) fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerEr
             &overrides.extras,
         )
         .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
-        insert_spawn_json(
-            &mut map,
-            crate::model_manifest::PINNED_ASR_MODELS_KEY,
-            &models,
-        )?;
+        insert_spawn_json(&mut map, SpawnKey::PinnedAsrModels, &models)?;
         // Qwen loads only when named, which is exactly this branch, so every
         // Qwen worker receives the recognition policy for its language from
         // the same table that routes segmentation. The worker never decides it.
         if backend == crate::types::worker_v2::AsrBackendV2::HkQwen {
             insert_spawn_json(
                 &mut map,
-                crate::types::worker_v2::QWEN_RECOGNITION_KEY,
+                SpawnKey::QwenRecognition,
                 &crate::transcribe::segmentation::qwen_recognition(key.language.as_resolved()),
             )?;
         }
     }
+    if let Some(language) = whisper_language {
+        insert_spawn_json(&mut map, SpawnKey::WhisperDecodeLanguage, &language)?;
+    }
     if let Some(model) = boundary_model {
-        insert_spawn_json(
-            &mut map,
-            crate::model_manifest::PINNED_UTSEG_MODEL_KEY,
-            &model,
-        )?;
+        insert_spawn_json(&mut map, SpawnKey::PinnedUtsegModel, &model)?;
     }
     serde_json::to_string(&map).map_err(|error| WorkerError::SpawnFailed(error.to_string()))
+}
+
+/// The decode language for a worker that may load stock Whisper, decided from
+/// the same token table admission asked. The worker never maps a language
+/// code itself.
+///
+/// Stock Whisper loads in two ways, and they fail differently:
+/// - **Named**: the request chose it. Admission already refused a language
+///   with no Whisper token, so a refusal here is a broken invariant and fails
+///   the spawn.
+/// - **Fallback**: a worker that preloads ASR with no engine named (an align
+///   job's GPU worker; see `EngineSelection::for_target` for why none is
+///   named) resolves its own engine, and stock Whisper is its fallback for
+///   most languages. Its language may have no token because the worker will
+///   pick another engine, so nothing is sent, and the worker refuses only if
+///   it does fall back to Whisper.
+fn stock_whisper_decode_language(
+    key: &WorkerKey,
+) -> Result<Option<crate::types::worker_v2::WhisperDecodeLanguageV2>, WorkerError> {
+    use crate::types::engines::{AsrLanguageAuthority, LanguageTable};
+    use crate::types::worker_v2::WhisperDecodeLanguageV2;
+    // "Is this stock Whisper" is the engine's own language authority, the
+    // classification admission used, not a second list of backends.
+    match key
+        .engine_selection
+        .overrides()
+        .asr
+        .as_ref()
+        .map(crate::types::engines::AsrEngineName::language_authority)
+    {
+        Some(AsrLanguageAuthority::Table(LanguageTable::WhisperTokens)) => {
+            WhisperDecodeLanguageV2::for_worker_language(&key.language)
+                .map(Some)
+                .map_err(|error| WorkerError::SpawnFailed(error.to_string()))
+        }
+        // Named engines that are not stock Whisper's decoder: a fine-tune's
+        // checkpoint carries its own language, and the others take the
+        // language with each request.
+        Some(
+            AsrLanguageAuthority::Table(LanguageTable::WhisperCpp | LanguageTable::RevAi)
+            | AsrLanguageAuthority::EngineOwned,
+        ) => Ok(None),
+        None if key.target.preloaded_tasks().contains(&InferTask::Asr) => {
+            Ok(WhisperDecodeLanguageV2::for_worker_language(&key.language).ok())
+        }
+        None => Ok(None),
+    }
+}
+
+/// A spawn override the control plane injects, derived from the worker key.
+///
+/// The closed set of them, so the one place that writes them
+/// ([`insert_spawn_json`]) and the one place that must remove them again
+/// (`EngineSelection::from_registry_json`, which reads a worker's registered
+/// overrides back into a key) cannot list different keys. A derived key read
+/// back as a user extra would file a rediscovered worker under a key no
+/// request ever computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpawnKey {
+    PinnedAsrModels,
+    PinnedUtsegModel,
+    QwenRecognition,
+    WhisperDecodeLanguage,
+}
+
+impl SpawnKey {
+    /// Every key, for the strip on read-back.
+    pub(super) const ALL: [Self; 4] = [
+        Self::PinnedAsrModels,
+        Self::PinnedUtsegModel,
+        Self::QwenRecognition,
+        Self::WhisperDecodeLanguage,
+    ];
+
+    /// The wire spelling, owned by the module that defines each key.
+    /// Exhaustive, so a new variant stops the build here: list it in
+    /// [`Self::ALL`] at the same time.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::PinnedAsrModels => crate::model_manifest::PINNED_ASR_MODELS_KEY,
+            Self::PinnedUtsegModel => crate::model_manifest::PINNED_UTSEG_MODEL_KEY,
+            Self::QwenRecognition => crate::types::worker_v2::QWEN_RECOGNITION_KEY,
+            Self::WhisperDecodeLanguage => crate::types::worker_v2::WHISPER_DECODE_LANGUAGE_KEY,
+        }
+    }
 }
 
 /// Put one typed value into the spawn overrides as JSON under `key`; the
 /// worker parses it back at its boundary.
 fn insert_spawn_json<T: serde::Serialize>(
     map: &mut std::collections::BTreeMap<String, String>,
-    key: &str,
+    key: SpawnKey,
     value: &T,
 ) -> Result<(), WorkerError> {
     let json = serde_json::to_string(value)
         .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
-    map.insert(key.to_owned(), json);
+    map.insert(key.as_str().to_owned(), json);
     Ok(())
 }
 

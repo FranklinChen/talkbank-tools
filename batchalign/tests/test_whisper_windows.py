@@ -42,7 +42,7 @@ def test_window_postprocess_never_passes_neighbors_to_text_merger(monkeypatch):
         sample_rate = 16000
         model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
-        def gen_kwargs(self, _lang):
+        def gen_kwargs(self):
             return {}
 
         def __call__(self, *_args, **_kwargs):

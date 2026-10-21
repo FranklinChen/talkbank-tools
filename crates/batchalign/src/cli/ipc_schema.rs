@@ -119,6 +119,9 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             QwenRecognitionV2,
             DecodeWindowV2,
             RecognitionPunctuationV2,
+            // The decode language a stock Whisper worker receives at spawn
+            // under `WHISPER_DECODE_LANGUAGE_KEY`, with Whisper's token set.
+            WhisperDecodeLanguageV2,
             UtsegResultV2,
             UtsegItemResultV2,
             TranslationResultV2,

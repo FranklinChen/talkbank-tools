@@ -251,57 +251,147 @@ mod tests {
         );
     }
 
+    /// The worker key an ASR request for `backend` in `code` computes.
+    fn asr_worker_key(
+        backend: AsrBackendV2,
+        code: &str,
+        extras: std::collections::BTreeMap<String, String>,
+    ) -> WorkerKey {
+        let language = LanguageCode3::try_new(code).expect("language code");
+        let request = request_with_payload(
+            InferenceTaskV2::Asr,
+            TaskRequestV2::Asr(AsrRequestV2 {
+                lang: WorkerLanguage::from(language.clone()),
+                backend,
+                models: crate::model_manifest::resolve_asr_models(
+                    backend,
+                    Some(&language),
+                    &extras,
+                )
+                .expect("the manifest resolves a composition"),
+                input: AsrInputV2::ProviderMedia(crate::types::worker_v2::ProviderMediaInputV2 {
+                    media_path: "/dev/null".into(),
+                    diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
+                }),
+                extras,
+                decode_budget_seconds: None,
+            }),
+        );
+        execute_v2_worker_key(
+            WorkerLanguage::from(language),
+            &request,
+            WorkerBootstrapMode::LazyProfile,
+        )
+        .expect("worker key")
+    }
+
+    /// The spawn override `name` a worker for `key` receives, parsed.
+    fn spawn_override<T: serde::de::DeserializeOwned>(key: &WorkerKey, name: &str) -> T {
+        let json = super::super::lifecycle::spawn_engine_overrides(key).expect("spawn");
+        let map: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&json).expect("spawn overrides are a JSON map");
+        serde_json::from_str(map.get(name).expect("policy key")).expect("policy parses")
+    }
+
     #[test]
     fn a_qwen_worker_spawns_with_its_language_recognition_policy() {
         use crate::transcribe::segmentation::qwen_recognition;
         use crate::types::worker_v2::{QWEN_RECOGNITION_KEY, QwenRecognitionV2};
-        let spawn_policy = |code: &str| -> QwenRecognitionV2 {
-            let language = LanguageCode3::try_new(code).expect("language code");
-            let extras = std::collections::BTreeMap::new();
-            let request = request_with_payload(
-                InferenceTaskV2::Asr,
-                TaskRequestV2::Asr(AsrRequestV2 {
-                    lang: WorkerLanguage::from(language.clone()),
-                    backend: AsrBackendV2::HkQwen,
-                    models: crate::model_manifest::resolve_asr_models(
-                        AsrBackendV2::HkQwen,
-                        Some(&language),
-                        &extras,
-                    )
-                    .expect("the manifest resolves a Qwen composition"),
-                    input: AsrInputV2::ProviderMedia(
-                        crate::types::worker_v2::ProviderMediaInputV2 {
-                            media_path: "/dev/null".into(),
-                            diarization:
-                                crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
-                        },
-                    ),
-                    extras,
-                    decode_budget_seconds: None,
-                }),
-            );
-            let key = execute_v2_worker_key(
-                WorkerLanguage::from(language),
-                &request,
-                WorkerBootstrapMode::LazyProfile,
-            )
-            .expect("worker key");
-            let json = super::super::lifecycle::spawn_engine_overrides(&key).expect("spawn");
-            let map: std::collections::BTreeMap<String, String> =
-                serde_json::from_str(&json).expect("spawn overrides are a JSON map");
-            serde_json::from_str(map.get(QWEN_RECOGNITION_KEY).expect("policy key"))
-                .expect("policy parses")
-        };
         // The wiring under test: each worker receives exactly what the table
         // decides for its language (the values are pinned by the table's own
         // tests in `transcribe::segmentation`).
         for code in ["nan", "yue"] {
             let language = LanguageCode3::try_new(code).expect("language code");
+            let key = asr_worker_key(AsrBackendV2::HkQwen, code, Default::default());
             assert_eq!(
-                spawn_policy(code),
+                spawn_override::<QwenRecognitionV2>(&key, QWEN_RECOGNITION_KEY),
                 qwen_recognition(Some(&language)),
                 "{code}"
             );
+        }
+    }
+
+    /// A stock Whisper worker is told its language by Whisper's own token,
+    /// decided by the control plane (the decisions themselves are pinned by
+    /// `WhisperDecodeLanguageV2`'s tests).
+    #[test]
+    fn a_stock_whisper_worker_spawns_with_its_decode_language() {
+        use crate::types::worker_v2::{WHISPER_DECODE_LANGUAGE_KEY, WhisperDecodeLanguageV2};
+        for code in ["ell", "jav", "yue"] {
+            let language = LanguageCode3::try_new(code).expect("language code");
+            let key = asr_worker_key(AsrBackendV2::LocalWhisper, code, Default::default());
+            assert_eq!(
+                spawn_override::<WhisperDecodeLanguageV2>(&key, WHISPER_DECODE_LANGUAGE_KEY),
+                WhisperDecodeLanguageV2::for_language(&language).expect("Whisper has a token"),
+                "{code}"
+            );
+        }
+    }
+
+    /// A worker that preloads ASR with no engine named resolves its own and
+    /// falls back to stock Whisper for most languages, so it receives the
+    /// decode language whenever Whisper has a token; for a language with none,
+    /// nothing is sent and the worker refuses only if it does fall back.
+    #[test]
+    fn a_preloading_worker_receives_the_decode_language_when_whisper_has_one() {
+        use crate::types::worker_v2::{WHISPER_DECODE_LANGUAGE_KEY, WhisperDecodeLanguageV2};
+        let preload_key = |code: &str| WorkerKey {
+            target: WorkerTarget::profile(WorkerProfile::Gpu),
+            language: WorkerLanguage::from(LanguageCode3::try_new(code).expect("language code")),
+            engine_selection: EngineSelection::derive(
+                InferTask::Fa,
+                EngineOverrides::default(),
+                WorkerTarget::profile(WorkerProfile::Gpu),
+                WorkerBootstrapMode::Profile,
+            ),
+        };
+        let english = preload_key("eng");
+        assert_eq!(
+            english.engine_selection.overrides().asr,
+            None,
+            "no engine named"
+        );
+        assert_eq!(
+            spawn_override::<WhisperDecodeLanguageV2>(&english, WHISPER_DECODE_LANGUAGE_KEY),
+            WhisperDecodeLanguageV2::for_language(&LanguageCode3::eng()).expect("English")
+        );
+        let taiwanese =
+            super::super::lifecycle::spawn_engine_overrides(&preload_key("nan")).expect("spawn");
+        assert!(
+            !taiwanese.contains(WHISPER_DECODE_LANGUAGE_KEY),
+            "{taiwanese}"
+        );
+    }
+
+    /// A worker rediscovered from the registry must land under the key the
+    /// request that spawned it computes. The registry records the worker's
+    /// full spawn overrides, including the keys the control plane injected
+    /// (pinned models, language policies); those are derived from the key, so
+    /// reading them back as user extras would file the worker under a key no
+    /// request ever asks for, and it would never be reused.
+    #[test]
+    fn a_rediscovered_worker_keys_like_the_request_that_spawned_it() {
+        let mut qwen_extras = std::collections::BTreeMap::new();
+        qwen_extras.insert("qwen_context".to_owned(), String::new());
+        let mut written = std::collections::BTreeSet::new();
+        for key in [
+            asr_worker_key(AsrBackendV2::HkQwen, "nan", qwen_extras),
+            // English also has an utterance-boundary model to pin.
+            asr_worker_key(AsrBackendV2::LocalWhisper, "eng", Default::default()),
+        ] {
+            let registered = super::super::lifecycle::spawn_engine_overrides(&key).expect("spawn");
+            let map: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&registered).expect("spawn overrides are a JSON map");
+            written.extend(map.into_keys());
+            let rediscovered =
+                WorkerKey::from_registry_json(key.target, key.language.clone(), &registered)
+                    .expect("registry JSON parses");
+            assert_eq!(rediscovered, key);
+        }
+        // The cases above write every injected key, so a key the writer can
+        // inject but the reader does not strip fails this test.
+        for spawn_key in super::super::lifecycle::SpawnKey::ALL {
+            assert!(written.contains(spawn_key.as_str()), "{spawn_key:?}");
         }
     }
 

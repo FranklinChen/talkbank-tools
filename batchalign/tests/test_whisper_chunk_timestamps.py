@@ -44,7 +44,7 @@ class _FakeWhisper:
         # that the double stays a double rather than becoming a second fixture.
         self.model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
-    def gen_kwargs(self, _language_name: str) -> dict[str, Any]:
+    def gen_kwargs(self) -> dict[str, Any]:
         return {}
 
     def __call__(self, _inputs: Any, **_kwargs: Any) -> dict[str, Any]:

@@ -15,7 +15,6 @@ from batchalign.inference._domain_types import (
     WhisperCpuPrecision,
     parse_choice,
 )
-from batchalign.inference.asr import iso3_to_language_name
 from batchalign.worker._model_loading.pinned_hub import (
     hub_commit_of,
     resolve_pinned_snapshot,
@@ -40,6 +39,7 @@ from batchalign.worker._types_v2 import (
     SenseVoiceModelsV2,
     TencentModelIdentityV2,
     TencentModelsV2,
+    WhisperDecodeLanguageV2,
     WhisperModelIdentityV2,
     WhisperModelsV2,
 )
@@ -58,22 +58,65 @@ _PINNED_ASR_MODELS: TypeAdapter[AsrRequestedModelsV2] = TypeAdapter(
 # policy under. Must equal `QWEN_RECOGNITION_KEY` in the Rust wire types.
 QWEN_RECOGNITION_KEY = "qwen_recognition"
 
+# The engine-override key the control plane sends a stock Whisper worker's
+# decode language under. Must equal `WHISPER_DECODE_LANGUAGE_KEY` in the Rust
+# wire types.
+WHISPER_DECODE_LANGUAGE_KEY = "whisper_decode_language"
+
+_QWEN_RECOGNITION: TypeAdapter[QwenRecognitionV2] = TypeAdapter(QwenRecognitionV2)
+_WHISPER_DECODE_LANGUAGE: TypeAdapter[WhisperDecodeLanguageV2] = TypeAdapter(
+    WhisperDecodeLanguageV2
+)
+
+
+def _required_spawn_policy[T](
+    engine_overrides: dict[str, str] | None,
+    key: str,
+    adapter: TypeAdapter[T],
+    absent: str,
+) -> T:
+    """Read a policy the control plane decided and sent at spawn under ``key``.
+
+    Absence is not a state the worker fills in: deciding the policy here from
+    the language code would make the worker a second owner of it. ``absent``
+    says what a missing value means for this policy; a malformed one means the
+    two sides disagree about the wire and is refused by the adapter.
+    """
+    raw = (engine_overrides or {}).get(key)
+    if raw is None:
+        raise ValueError(f"no {key!r} was received from the control plane: {absent}")
+    return adapter.validate_json(raw)
+
 
 def qwen_recognition(engine_overrides: dict[str, str] | None) -> QwenRecognitionV2:
     """Return the recognition policy Rust decided for this Qwen worker.
 
-    Unlike the pinned models, absence is NOT a state: Qwen loads only when the
-    control plane named it, and that path always sends the policy. A missing
-    or malformed policy means the two sides disagree, and deciding it here
-    from the language code would be the second owner this key removed.
+    Qwen loads only when the control plane named it, and that path always
+    sends the policy, so absence means the two sides disagree.
     """
-    raw = (engine_overrides or {}).get(QWEN_RECOGNITION_KEY)
-    if raw is None:
-        raise ValueError(
-            "the Qwen recognizer needs the recognition policy the control plane "
-            f"sends under {QWEN_RECOGNITION_KEY!r}; none was received"
-        )
-    return QwenRecognitionV2.model_validate_json(raw)
+    return _required_spawn_policy(
+        engine_overrides,
+        QWEN_RECOGNITION_KEY,
+        _QWEN_RECOGNITION,
+        "the Qwen recognizer needs its recognition policy",
+    )
+
+
+def whisper_decode_language(
+    engine_overrides: dict[str, str] | None,
+) -> WhisperDecodeLanguageV2:
+    """Return the decode language Rust decided for this stock Whisper worker.
+
+    The control plane sends it to every worker that may load stock Whisper
+    and has one job language (or auto-detection) with a Whisper token.
+    """
+    return _required_spawn_policy(
+        engine_overrides,
+        WHISPER_DECODE_LANGUAGE_KEY,
+        _WHISPER_DECODE_LANGUAGE,
+        "stock Whisper was loaded for a worker whose language has no Whisper "
+        "token, or that has no single job language (per-file or none)",
+    )
 
 
 def pinned_asr_models(
@@ -440,11 +483,8 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         from batchalign.worker._progress import HF_ARTIFACTS_WHISPER
 
         # Stock Whisper loads ONE checkpoint whatever the language; only the
-        # generation hint differs, and ``language`` already carries that
-        # (``"auto"`` makes Whisper detect per segment). The two arms this
-        # replaces passed the same model id by two routes, one of them through
-        # the loader's defaults.
-        language = iso3_to_language_name(lang)
+        # decode language differs, and the control plane decided it.
+        decoding = whisper_decode_language(engine_overrides)
         whisper_pinned = _pinned_composition(WhisperModelsV2)
         member = (
             whisper_pinned.asr
@@ -457,7 +497,7 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         handle = load_whisper_asr(
             model=path,
             base=path,
-            language=language,
+            decoding=decoding,
             device_policy=bootstrap.device_policy,
             cpu_precision=WhisperCpuPrecision.from_overrides(engine_overrides),
         )
@@ -533,8 +573,9 @@ def resolve_injected_revai_api_key(
 
 
 __all__ = [
-    "iso3_to_language_name",
+    "WHISPER_DECODE_LANGUAGE_KEY",
     "load_asr_engine",
     "resolve_asr_engine",
     "resolve_injected_revai_api_key",
+    "whisper_decode_language",
 ]

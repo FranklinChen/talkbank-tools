@@ -648,6 +648,38 @@ class QwenRecognitionV2(BaseModel):
     punctuation: RecognitionPunctuationV2
 
 
+class DetectWhisperLanguageV2(BaseModel):
+    """Whisper detects the language itself."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    kind: Literal["detect"] = "detect"
+
+
+class ForceWhisperLanguageV2(BaseModel):
+    """Whisper decodes in this language, named by its own token, and transcribes.
+
+    The token is one of stock Whisper's (``el``, ``yue``, ``jw``), chosen by
+    the control plane; the loader refuses one the loaded checkpoint lacks.
+    """
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    kind: Literal["force"] = "force"
+    token: str
+
+
+WhisperDecodeLanguageV2: TypeAlias = Annotated[
+    DetectWhisperLanguageV2 | ForceWhisperLanguageV2,
+    Field(discriminator="kind"),
+]
+"""How a stock Whisper worker is told its language, decided by the control plane.
+
+Sent to every stock Whisper worker at spawn under
+``WHISPER_DECODE_LANGUAGE_KEY``; the worker never maps a language code itself.
+"""
+
+
 class QwenModelsV2(BaseModel):
     """Qwen3-ASR and the forced aligner it needs for word timings."""
 

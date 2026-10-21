@@ -72,18 +72,17 @@ class TestBilingualAutoDetect:
             AsrBatchItem,
             WhisperChunksAsrResponse,
             _infer_whisper,
-            iso3_to_language_name,
             load_whisper_asr,
         )
-        from batchalign.worker._types_v2 import NotRequestedDiarizationV2
-
-        language = iso3_to_language_name("auto")
-        assert language == "auto"
+        from batchalign.worker._types_v2 import (
+            DetectWhisperLanguageV2,
+            NotRequestedDiarizationV2,
+        )
 
         model = load_whisper_asr(
             model="openai/whisper-large-v3",
             base="openai/whisper-large-v3",
-            language="auto",
+            decoding=DetectWhisperLanguageV2(),
         )
 
         item = AsrBatchItem(
@@ -116,12 +115,15 @@ class TestBilingualAutoDetect:
             _infer_whisper,
             load_whisper_asr,
         )
-        from batchalign.worker._types_v2 import NotRequestedDiarizationV2
+        from batchalign.worker._types_v2 import (
+            ForceWhisperLanguageV2,
+            NotRequestedDiarizationV2,
+        )
 
         model = load_whisper_asr(
             model="openai/whisper-large-v3",
             base="openai/whisper-large-v3",
-            language="english",
+            decoding=ForceWhisperLanguageV2(token="en"),
         )
 
         item = AsrBatchItem(

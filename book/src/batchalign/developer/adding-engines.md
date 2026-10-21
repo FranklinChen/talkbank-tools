@@ -234,14 +234,13 @@ default.
 
 **HF Whisper fine-tune gotcha.** HF community Whisper fine-tunes bake
 `language` and `task` into their own `generation_config`. Passing
-those again in `generate_kwargs` produces gibberish. The escape hatch
-is the `skip_language_force: bool` flag on
-`batchalign/inference/types.py::WhisperASRHandle`: when `True`,
-`gen_kwargs()` returns ONLY `{"max_new_tokens": 444}` and omits
-`task`, `language`, `generation_config`, and `repetition_penalty`.
-See `batchalign/inference/whisper_hub.py` for the wiring:
-pass `language="auto"` to `load_whisper_asr()` AND set
-`handle.skip_language_force = True` before returning.
+those again in `generate_kwargs` produces gibberish. A fine-tune's loader
+therefore passes `decoding=CheckpointPinnedLanguage()` to
+`load_whisper_asr()` (see `batchalign/inference/whisper_hub.py`), and
+`WhisperASRHandle.gen_kwargs()` then returns ONLY
+`{"max_new_tokens": 444}`, omitting `task`, `language`,
+`generation_config`, and `repetition_penalty`. See
+[How a Whisper handle is told its language](#how-a-whisper-handle-is-told-its-language).
 
 **Why the `max_new_tokens=444` safety cap.** With empty
 `generate_kwargs`, the HuggingFace ASR pipeline can let a fine-tune
@@ -268,22 +267,14 @@ that assert "the right thing was passed *into* the constructor" for
 tests that assert "the object the constructor returns, when exercised
 by a downstream caller, produces the right observable behavior."
 
-Concrete example. The `whisper_hub` loader was initially tested only
-by asserting that `load_whisper_asr` received `language="auto"`,
-a proxy for "fine-tunes won't get their language re-forced at
-`generate()` time." That assertion was true but insufficient: the
-V2 inference path (`infer_whisper_prepared_audio`) calls
-`handle.gen_kwargs(request_lang)` and ignores `handle.lang`
-entirely. The fine-tune was receiving `task="transcribe",
-language="malayalam"` at every `generate()` call and would have
-produced cross-script gibberish. The unit tests did not fail because
-nothing ever exercised the actual runtime path.
-
-The fix was an additional test that constructs a
-`WhisperASRHandle(skip_language_force=True)` directly, calls
-`gen_kwargs("malayalam")` on it, and asserts `task` and `language`
-are absent from the returned dict. That test exercises the runtime
-contract that production depends on.
+Concrete example. The `whisper_hub` loader was once tested only by
+asserting what `load_whisper_asr` received, while the inference path
+computed the generation language again from the request, so a fine-tune
+would have been re-forced on every `generate()` call. The lasting fix was a
+type: the handle's `decoding` is fixed at construction and `gen_kwargs()`
+takes no language, so there is no second source to diverge. Where a type
+cannot close such a gap, test the object the constructor returns, exercised
+the way the downstream caller exercises it.
 
 General rule: **for every stateful intermediate in the pipeline,
 there must be tests on both sides of it.** Input-side tests verify
@@ -294,20 +285,10 @@ callers, given only the constructed object, see the right behavior.
 
 When you set a field on a shared handle or state object, grep for
 every call site that reads that field OR reads a seemingly-unrelated
-field that could diverge. `gen_kwargs(lang)` reading
-*the caller-supplied* `lang` rather than `self.lang` is exactly that
-kind of divergence: two plausibly-interchangeable data sources where
-only one was the contract.
-
-```bash
-# What reads self.lang?
-rg 'model\.lang|handle\.lang|\.lang =' batchalign/inference/
-# What calls gen_kwargs?
-rg 'gen_kwargs\(' batchalign/
-```
-
-If the same conceptual value (the "language to transcribe in") flows
-through both paths, your engine-addition test must cover both.
+value that could diverge: two plausibly-interchangeable data sources
+where only one is the contract. Better, remove the second source, as
+the Whisper handle did by taking its decoding once instead of a language
+per call.
 
 ### Add a failing runtime-behavior test before writing any loader code
 
@@ -321,11 +302,10 @@ For ASR engine additions, the RED test baseline is:
 3. `test_<engine>_loader_dispatch`: worker bootstrap's
    `load_asr_engine()` routes `engine_overrides["asr"]=="<engine>"`
    to your new loader function.
-4. **`test_<engine>_handle_gen_kwargs_for_concrete_language`**,
-   construct a handle the way your loader would, call its
-   generation-kwargs method with a concrete (non-auto) language, and
-   assert the output dict matches what you expect `generate()` to
-   receive. This is the test that catches the fine-tune trap above.
+4. **`test_<engine>_handle_gen_kwargs_for_its_decoding`**,
+   construct a handle the way your loader would, with each decoding
+   the loader can choose, and assert the dict `gen_kwargs()` returns is
+   what you expect `generate()` to receive.
 5. **`test_<engine>_resolves_model_id_for_seeded_language`**: if
    your engine uses per-language defaults from `resolve.py`, pin the
    seed entry with a direct assertion on `resolve("<engine>", lang)`.
@@ -381,7 +361,7 @@ variant means you must:
    `ipc-schema/`, so run `bash scripts/generate_ipc_types.sh` after the
    Rust change and let the test tell you what is missing.
 
-**Same class of bug as the `gen_kwargs` trap.** Both are "state
+**Same class of bug as the fine-tune trap.** Both are "state
 crosses a boundary I didn't search for, so the test suite never
 exercises the real runtime path." The fix is the same grep ritual:
 
@@ -421,20 +401,23 @@ describes the crate as "outside the root workspace by design",
 that comment predates the move into the workspace and should be
 updated when next touched.)
 
-### Structural opportunity: `gen_kwargs` takes a string
+### How a Whisper handle is told its language
 
-`WhisperASRHandle.gen_kwargs(lang)` dispatches on a string: `"auto"`
-is one special case, `"Cantonese"` is another, and any other string
-means "force this language on `generate()`". Plus the new
-`skip_language_force` flag adds a fourth behavior. This is
-boolean-blindness dressed in string clothing, four distinct
-generation modes hidden in two orthogonal inputs. A future refactor
-should replace this with an enum such as `WhisperGenMode::{
-AutoDetect, FinetunePinnedByConfig, CantoneseSpecialCase,
-ForceLanguage(Name) }`, with each engine's loader picking the
-variant explicitly. Out of scope for a single-engine addition, but
-worth doing before the *next* whisper-family engine (WhisperX,
-WhisperOai Hub variant, etc.) repeats the same mistake.
+A `WhisperASRHandle` carries one `decoding` value for its whole life,
+`WhisperDecoding = DetectWhisperLanguageV2 | ForceWhisperLanguageV2 |
+CheckpointPinnedLanguage`, and `gen_kwargs()` is an exhaustive match on it:
+
+| Decoding | Chosen by | `generate()` receives |
+| --- | --- | --- |
+| `Force { token }` | The control plane, for a stock checkpoint | the stock knobs, `task="transcribe"`, `language=<token>` |
+| `Detect` | The control plane (`--lang auto`, and Cantonese) | the stock knobs only |
+| `CheckpointPinnedLanguage` | A fine-tune's loader | `max_new_tokens=444` only |
+
+The stock decisions are the control plane's (see
+[Whisper ASR: language support](../reference/whisper-asr.md#language-support)):
+the worker receives `WhisperDecodeLanguageV2` at spawn and never maps a
+language code itself. A new Whisper-family engine picks its variant in its
+loader, or adds a variant, which every `match` then has to handle.
 
 ## Adding a new server command
 

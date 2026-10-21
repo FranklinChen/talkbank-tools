@@ -22,13 +22,15 @@ from typing import (
     NamedTuple,
     Protocol,
     TypeAlias,
+    assert_never,
     overload,
     runtime_checkable,
 )
 
 import numpy as np
 
-from batchalign.inference._domain_types import LanguageCode, SampleRate
+from batchalign.inference._domain_types import SampleRate
+from batchalign.worker._types_v2 import DetectWhisperLanguageV2, ForceWhisperLanguageV2
 
 if TYPE_CHECKING:
     import torch
@@ -195,6 +197,25 @@ Wave2VecFAResult = list[Wave2VecWordAlignment]
 GenerateKwargs: TypeAlias = "dict[str, str | int | float | GenerationConfig]"
 
 
+@dataclass(frozen=True)
+class CheckpointPinnedLanguage:
+    """A fine-tune decodes with the language and task its own generation
+    config pins.
+
+    HuggingFace Whisper fine-tunes bake their language hint and suppress-token
+    set in during training; forcing a language or task on top produces
+    cross-script gibberish. Used by the ``whisper_hub`` engine; see
+    ``batchalign/inference/whisper_hub.py``.
+    """
+
+
+WhisperDecoding: TypeAlias = (
+    DetectWhisperLanguageV2 | ForceWhisperLanguageV2 | CheckpointPinnedLanguage
+)
+"""How one loaded Whisper is told its language: the control plane's decision
+for a stock checkpoint, or the checkpoint's own for a fine-tune."""
+
+
 class WhisperASRHandle:
     """Typed wrapper for a HuggingFace ASR pipeline with metadata.
 
@@ -206,23 +227,16 @@ class WhisperASRHandle:
         self,
         pipe: AutomaticSpeechRecognitionPipeline,
         config: GenerationConfig,
-        lang: LanguageCode,
+        decoding: WhisperDecoding,
         sample_rate: SampleRate,
-        *,
-        skip_language_force: bool = False,
     ) -> None:
         self._pipe = pipe
         self.config = config
-        self.lang = lang
+        # Fixed for the handle's life: a worker is spawned for one language,
+        # and the decision was made once, by the control plane or the
+        # checkpoint, before the model loaded.
+        self.decoding = decoding
         self.sample_rate = sample_rate
-        # HuggingFace Whisper fine-tunes pin language/task inside their
-        # own ``generation_config``. Re-forcing those via ``generate_kwargs``
-        # produces cross-script gibberish. When this flag is ``True``,
-        # ``gen_kwargs`` omits ``task`` and ``language`` regardless of the
-        # requested language: the caller is trusting the checkpoint's
-        # own configuration. Used by the ``whisper_hub`` engine variant;
-        # see ``batchalign/inference/whisper_hub.py``.
-        self.skip_language_force = skip_language_force
 
         # Which checkpoint this handle actually loaded, set by the worker
         # layer that resolved it (``batchalign/worker/_model_loading/asr.py``).
@@ -247,16 +261,11 @@ class WhisperASRHandle:
             observation_mode=observation_mode,
         )
 
-    def gen_kwargs(self, lang: LanguageCode) -> GenerateKwargs:
-        """Build generation kwargs for a given language.
+    def gen_kwargs(self) -> GenerateKwargs:
+        """Build generation kwargs from the handle's decoding decision.
 
-        Three modes:
-
-        - ``skip_language_force=True`` (HF fine-tunes) → only
-          ``max_new_tokens=444``. Fine-tunes bake their own
-          ``generation_config`` / language hints / suppress-token
-          set during training; overriding any of those degrades
-          output. The ``max_new_tokens`` cap is a hard upper bound on
+        - A fine-tune (``CheckpointPinnedLanguage``) gets only
+          ``max_new_tokens=444``. That cap is a hard upper bound on
           per-chunk generation, not a decoding override: Whisper's
           ``max_target_positions=448`` includes the 3 special start
           tokens, so 444 is one below the legal max, a no-op under
@@ -264,32 +273,26 @@ class WhisperASRHandle:
           runaway-generation case where the decoder fails to predict
           end-of-utterance and would otherwise spin indefinitely.
 
-        - ``lang == "auto"`` (stock Whisper, multilingual) → omit
-          ``language`` / ``task`` so Whisper auto-detects, but keep
-          the stock-model tuning knobs.
+        - ``Detect`` (stock Whisper) omits ``language`` and ``task`` so
+          Whisper detects, keeping the stock-model tuning knobs.
 
-        - Otherwise (stock Whisper, concrete language) → force the
-          language and task on the stock checkpoint's decoder.
-          Cantonese is a special case where even stock Whisper lacks
-          a clean language hint; skip the forcing there too.
+        - ``Force`` (stock Whisper) names the language by Whisper's own
+          token and transcribes.
         """
-        if self.skip_language_force:
-            # See docstring, only the safety cap, no overrides.
-            return {"max_new_tokens": 444}
-        if lang == "auto":
-            return {
-                "repetition_penalty": 1.001,
-                "generation_config": self.config,
-            }
-        kw: GenerateKwargs = {
-            "repetition_penalty": 1.001,
-            "generation_config": self.config,
-            "task": "transcribe",
-            "language": lang,
-        }
-        if lang == "Cantonese":
-            kw = {"repetition_penalty": 1.001, "generation_config": self.config}
-        return kw
+        match self.decoding:
+            case CheckpointPinnedLanguage():
+                return {"max_new_tokens": 444}
+            case DetectWhisperLanguageV2():
+                return {"repetition_penalty": 1.001, "generation_config": self.config}
+            case ForceWhisperLanguageV2(token=token):
+                return {
+                    "repetition_penalty": 1.001,
+                    "generation_config": self.config,
+                    "task": "transcribe",
+                    "language": token,
+                }
+            case _:
+                assert_never(self.decoding)
 
 
 @dataclass(frozen=True)

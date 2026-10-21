@@ -1150,6 +1150,49 @@ impl<'de> Deserialize<'de> for FaEngineName {
     }
 }
 
+/// Who answers "can this ASR engine be asked for this language".
+///
+/// Each engine names exactly one authority ([`AsrEngineName::language_authority`],
+/// exhaustive). A [`LanguageTable`] is the table that engine's own runtime
+/// enforces, so admission refuses precisely the jobs the runtime would fail
+/// on every file. `EngineOwned` has no table on this side and so nothing to
+/// ask: it is not a table that happens to admit everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AsrLanguageAuthority {
+    /// The engine's runtime enforces this table.
+    Table(LanguageTable),
+    /// A fine-tune chosen per language (with an explicit `model_id` for any
+    /// language without a default), or a provider that answers for its own
+    /// languages at its boundary.
+    EngineOwned,
+}
+
+/// A language table an engine's runtime enforces, asked at admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LanguageTable {
+    /// Stock Whisper's decoder: the languages it has a token for
+    /// ([`batchalign_types::whisper_language::WhisperLanguageToken`]).
+    WhisperTokens,
+    /// whisper.cpp's narrower table (`whisper_native::language`).
+    WhisperCpp,
+    /// Rev.AI's language list ([`super::revai_language::RevSupported`]).
+    RevAi,
+}
+
+impl LanguageTable {
+    /// Whether the table lists `lang`.
+    pub(crate) fn admits(self, lang: &crate::api::LanguageCode3) -> bool {
+        match self {
+            Self::WhisperTokens => {
+                batchalign_types::whisper_language::WhisperLanguageToken::for_language(lang)
+                    .is_some()
+            }
+            Self::WhisperCpp => crate::whisper_native::language::supports_language(lang),
+            Self::RevAi => super::revai_language::RevSupported::for_iso3(lang).is_some(),
+        }
+    }
+}
+
 /// Typed ASR engine selector.
 ///
 /// The wire format still uses the legacy string tokens (`"rev"`,
@@ -1191,6 +1234,25 @@ pub enum AsrEngineName {
 }
 
 impl AsrEngineName {
+    /// The table that decides which languages this engine can be asked for.
+    /// Exhaustive on purpose: a new engine must name its own.
+    pub(crate) const fn language_authority(&self) -> AsrLanguageAuthority {
+        match self {
+            // WhisperX and the OpenAI API decode with stock Whisper's tokens
+            // too; they are refused earlier as unimplemented in this build.
+            Self::Whisper | Self::WhisperX | Self::WhisperOai => {
+                AsrLanguageAuthority::Table(LanguageTable::WhisperTokens)
+            }
+            Self::WhisperRs => AsrLanguageAuthority::Table(LanguageTable::WhisperCpp),
+            Self::RevAi => AsrLanguageAuthority::Table(LanguageTable::RevAi),
+            Self::WhisperHub
+            | Self::HkTencent
+            | Self::HkAliyun
+            | Self::HkFunaudio
+            | Self::HkQwen => AsrLanguageAuthority::EngineOwned,
+        }
+    }
+
     /// The wire name, usable in a `const` context.
     ///
     /// THE owner of the table; [`EngineBackend::wire_name`] delegates here. It

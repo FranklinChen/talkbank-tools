@@ -44,7 +44,7 @@ flowchart TD
 
     subgraph ASR["ASR (Whisper)"]
         model_sel["Model Selection\neng→CHATWhisper-en\nyue→whisper-small-cantonese\nheb→whisper-large-v3\n*→whisper-large-v3"]
-        gen_kwargs["generate_kwargs\nlanguage: lang\ntask: transcribe"]
+        gen_kwargs["generate_kwargs\nlanguage: Whisper token\n(sent at spawn)\ntask: transcribe"]
         whisper["Whisper Pipeline"]
     end
 

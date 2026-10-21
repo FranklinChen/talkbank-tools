@@ -123,11 +123,11 @@ critical way: they bake `language` and `task` into their own
 `generation_config`. Passing them again via `generate_kwargs` produces
 gibberish, the model applies two competing prompts.
 
-`whisper_hub` handles this by passing `language="auto"` through to the
-shared `load_whisper_asr()`, which makes the handle's `gen_kwargs("auto")`
-branch fire and omit those overrides. Do not replicate the
-`language=<concrete>` path used by stock Whisper when adding a new
-fine-tune loader.
+`whisper_hub` handles this by loading with
+`decoding=CheckpointPinnedLanguage()`, so the handle's `gen_kwargs()` passes
+only the runaway-generation cap and never a language or task. A new
+fine-tune loader does the same; the stock decodings (`Detect`,
+`Force { token }`) are the control plane's, for stock checkpoints.
 
 ## When this engine stops being a fit
 

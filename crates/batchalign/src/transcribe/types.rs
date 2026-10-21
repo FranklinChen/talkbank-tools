@@ -225,10 +225,14 @@ impl AsrBackend {
     /// applies to UTR engines: the remedy comes from the predicate that
     /// produced the rejection, never from a second hand-written list.
     pub(crate) fn implemented_engine_names() -> impl Iterator<Item = &'static str> {
+        Self::implemented_engines().map(AsrEngineName::as_wire_name)
+    }
+
+    /// Every ASR engine this build can run, in help-display order.
+    pub(crate) fn implemented_engines() -> impl Iterator<Item = &'static AsrEngineName> {
         AsrEngineName::ALL
             .iter()
             .filter(|engine| Self::try_from_engine(engine).is_ok())
-            .map(AsrEngineName::as_wire_name)
     }
 
     pub(crate) fn as_non_rev(self) -> Option<NonRevAsrBackend> {

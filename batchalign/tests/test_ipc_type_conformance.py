@@ -273,6 +273,23 @@ class TestWorkerV2Conformance:
             _load_schema("worker_v2", "DecodeWindowV2"), DecodeWindowV2
         )
 
+    def test_whisper_decode_language(self) -> None:
+        """The decode language a stock Whisper worker receives at spawn reads
+        the same on both sides, and its tokens are exactly Whisper's.
+
+        The Rust table is generated from transformers' Whisper ``LANGUAGES``
+        (``scripts/generate_whisper_language_table.py``); a transformers
+        upgrade that changes the tokens fails here until it is regenerated.
+        """
+        from transformers.models.whisper.tokenization_whisper import LANGUAGES
+
+        from batchalign.worker._types_v2 import WhisperDecodeLanguageV2
+
+        schema = _load_schema("worker_v2", "WhisperDecodeLanguageV2")
+        _assert_tagged_union_matches(schema, WhisperDecodeLanguageV2)
+        tokens = _schema_enum_values(schema["$defs"]["WhisperLanguageToken"])
+        assert tokens == set(LANGUAGES)
+
     def test_ud_relation_repair(self) -> None:
         """The repair an analyzed item carries must read the same on both sides.
 

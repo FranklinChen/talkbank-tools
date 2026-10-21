@@ -253,11 +253,23 @@ impl EngineSelection {
     /// This is ingress from the Python registry boundary, not another source
     /// of pool-key derivation. Once admitted, equality is structural
     /// [`EngineOverrides`] equality rather than spelling-sensitive JSON.
+    ///
+    /// The registry records everything the worker was spawned with, including
+    /// the keys the control plane injected from the worker key
+    /// (`lifecycle::SpawnKey`). Those are removed first: they describe the
+    /// key, they do not select it, so the rebuilt selection equals the one the
+    /// spawning request computed.
     pub(super) fn from_registry_json(json: &str) -> Result<Self, serde_json::Error> {
         if json.trim().is_empty() {
             return Ok(Self::none());
         }
-        serde_json::from_str(json).map(Self::from_overrides)
+        // Every injected key is outside the typed fields, so it lands in
+        // `extras`, where it is removed.
+        let mut overrides: EngineOverrides = serde_json::from_str(json)?;
+        for key in lifecycle::SpawnKey::ALL {
+            overrides.extras.remove(key.as_str());
+        }
+        Ok(Self::from_overrides(overrides))
     }
 
     /// JSON for the Rust/Python worker configuration boundary.
@@ -1328,10 +1340,12 @@ impl WorkerPool {
                 .clone()
         };
 
-        let config = self.worker_config(key)?;
-
         let worker = slot
             .worker_or_init(|| async move {
+                // Built only when a worker is actually spawned: a live slot
+                // returns its worker without re-resolving models or
+                // re-serializing spawn overrides on every dispatch.
+                let config = self.worker_config(key)?;
                 let mut handle = self.spawn_runtime.spawn_worker(config).await?;
                 self.admit_worker_runtime(&handle)?;
                 if self.first_admitted_capabilities.get().is_none() {

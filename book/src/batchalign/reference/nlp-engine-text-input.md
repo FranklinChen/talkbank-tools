@@ -63,10 +63,11 @@ returns.
 **Output:** Raw text chunks with timestamps. Whisper produces its own text --
 batchalign3 does not send any text to Whisper for ASR.
 
-**Preprocessing by Rust:** None for ASR input (audio only). The language code
-is converted from ISO 639-3 to a Whisper language name via
-`iso3_to_language_name()` in `asr.py` (e.g., `eng` -> `english`, `yue` ->
-`Cantonese`).
+**Preprocessing by Rust:** None for ASR input (audio only). The control plane
+converts the language from ISO 639-3 to Whisper's own token (`eng` -> `en`,
+`jav` -> `jw`) and sends it to the worker at spawn as
+`WhisperDecodeLanguageV2`; see
+[Whisper ASR: language support](whisper-asr.md#language-support).
 
 **Post-processing by Rust (`asr_postprocess/`):** The raw Whisper output goes
 through a multi-stage Rust pipeline before becoming CHAT:

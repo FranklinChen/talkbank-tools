@@ -11,7 +11,6 @@ import typing
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import numpy as np
-import pycountry
 from pydantic import BaseModel, Field
 
 from batchalign.inference._domain_types import (
@@ -25,12 +24,14 @@ from batchalign.inference._domain_types import (
     WhisperCpuPrecision,
     WhisperTimestampMode,
 )
-from batchalign.worker._types_v2 import ProviderDiarizationV2
+from batchalign.worker._types_v2 import ForceWhisperLanguageV2, ProviderDiarizationV2
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from batchalign.inference.types import WhisperASRHandle
+    from transformers import GenerationConfig
+
+    from batchalign.inference.types import WhisperASRHandle, WhisperDecoding
     from batchalign.worker._types_v2 import WhisperChunkResultPayloadV2
 
 # ---------------------------------------------------------------------------
@@ -144,28 +145,6 @@ class WhisperChunksAsrResponse(BaseModel):
     chunks: list[WhisperChunk] = Field(default_factory=list)
 
 
-def iso3_to_language_name(iso3: LanguageCode) -> str:
-    """Convert ISO-639-3 language code to a Whisper language name.
-
-    Raises ``ValueError`` if the code is not recognized by pycountry.
-    Previously this silently fell back to ``"english"``, which caused
-    wrong-language transcription with no warning, a regression from
-    batchalign2 which used the same pycountry lookup but in a context
-    where unrecognized codes would surface earlier.
-    """
-    special: dict[str, str] = {"yue": "Cantonese", "cmn": "chinese", "auto": "auto"}
-    if iso3 in special:
-        return special[iso3]
-    lang_obj = pycountry.languages.get(alpha_3=iso3)
-    if lang_obj is not None:
-        return str(lang_obj.name).lower()
-    raise ValueError(
-        f"Unrecognized ISO 639-3 language code '{iso3}', pycountry has no "
-        f"entry for this code. Whisper cannot determine the target language. "
-        f"Check that the --lang value is a valid ISO 639-3 code."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Whisper ASR load/infer (replaces WhisperASRModel class)
 # ---------------------------------------------------------------------------
@@ -187,14 +166,18 @@ def _cpu_torch_dtype(precision: WhisperCpuPrecision) -> Any:
 def load_whisper_asr(
     model: str = "openai/whisper-large-v3",
     base: str = "openai/whisper-large-v3",
-    language: str = "english",
     target_sample_rate: SampleRate = 16000,
     *,
+    decoding: WhisperDecoding,
     device_policy=None,
     cpu_precision: WhisperCpuPrecision = WhisperCpuPrecision.FLOAT32,
     timestamp_mode: WhisperTimestampMode = WhisperTimestampMode.WORD,
 ) -> WhisperASRHandle:
     """Load a Whisper ASR pipeline. Returns a typed handle.
+
+    ``decoding`` is how the handle is told its language for its whole life. A
+    forced token the loaded checkpoint lacks is refused here, at load, rather
+    than by ``generate`` on every file.
 
     ``cpu_precision`` applies only when the resolved device is a CPU; CUDA
     always loads float16. Stock checkpoints request acoustic word timestamps;
@@ -228,6 +211,7 @@ def load_whisper_asr(
     config = GenerationConfig.from_pretrained(base)
     config.no_repeat_ngram_size = 4
     config.use_cache = True
+    _admit_decoding(decoding, config)
 
     # No per-language overrides of the generation config. BA2 carried a
     # Cantonese block here that set `no_timestamps_token_id = 50363` and nine
@@ -262,9 +246,25 @@ def load_whisper_asr(
     return WhisperASRHandle(
         pipe=pipe,
         config=config,
-        lang=language,
+        decoding=decoding,
         sample_rate=target_sample_rate,
     )
+
+
+def _admit_decoding(decoding: WhisperDecoding, config: GenerationConfig) -> None:
+    """Refuse a forced language token the loaded checkpoint does not have.
+
+    The control plane chooses tokens from stock Whisper's table; this checks
+    the checkpoint actually loaded agrees, so a disagreement fails the worker
+    at load with the token named.
+    """
+    if isinstance(decoding, ForceWhisperLanguageV2):
+        known = getattr(config, "lang_to_id", None) or {}
+        if f"<|{decoding.token}|>" not in known:
+            raise ValueError(
+                f"Whisper language token {decoding.token!r} is not in this "
+                "checkpoint's generation config"
+            )
 
 
 def _infer_whisper(
@@ -281,7 +281,7 @@ def _infer_whisper(
     still owns all shared postprocessing after deserializing this tagged
     payload.
     """
-    gen_kwargs = model.gen_kwargs(model.lang)
+    gen_kwargs = model.gen_kwargs()
 
     raw = model(
         item.audio_path,
@@ -319,7 +319,7 @@ def infer_whisper_prepared_audio(
         WhisperChunkSpanV2,
     )
 
-    gen_kwargs = model.gen_kwargs(iso3_to_language_name(lang))
+    gen_kwargs = model.gen_kwargs()
     raw = model(
         {
             "raw": np.asarray(audio, dtype=np.float32),

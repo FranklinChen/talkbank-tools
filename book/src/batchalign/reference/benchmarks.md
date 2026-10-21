@@ -286,8 +286,9 @@ The `--lang` flag affects ASR engine behavior:
 - **Rev.AI:** ISO 639-3 codes are translated to Rev.AI codes. Some languages
   (e.g., Hakka `hak`) are not supported by Rev.AI, see
   [Language Code Resolution](language-code-resolution.md) for the mapping table.
-- **Whisper:** Uses `pycountry` to resolve language names. Unknown codes
-  raise `ValueError`.
+- **Whisper:** Uses Whisper's own language token (see
+  [Whisper ASR: language support](whisper-asr.md#language-support)); a
+  language with no token is refused at submission.
 - Benchmark does **not** run utterance segmentation or forced alignment, it
   only transcribes and compares.
 

@@ -25,6 +25,7 @@ mod audio;
 mod cache;
 mod config;
 mod error;
+pub(crate) mod language;
 // Numeric FA core (median filter + standardization + DTW): lives in the
 // leaf crate `batchalign-fa-core` (shared with the whisper pilot);
 // re-exported here so existing `whisper_native::fa_dtw::...` paths keep

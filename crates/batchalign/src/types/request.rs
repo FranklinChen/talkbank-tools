@@ -4,9 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::revai_language::{RevSupported, revai_known_broken};
+use super::revai_language::revai_known_broken;
 use crate::options::{AsrEngineName, CommandOptions, FaEngineName, UtrEngine};
-use crate::types::engines::SelectableEngine;
+use crate::types::engines::{LanguageTable, SelectableEngine};
 use crate::types::params::FaParams;
 
 use super::domain::{DisplayPath, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand};
@@ -476,22 +476,11 @@ impl JobSubmission {
         // backend validation is deferred to the runtime after parsing.
         let asr_engine = self.selected_asr_engine();
 
-        // Check Rev.AI language support
-        if let Some(AsrEngineName::RevAi) = &asr_engine
-            && RevSupported::for_iso3(lang).is_none()
-        {
-            // Not derived like the UTR message below: ASR has no per-engine
-            // language predicate to filter on, since Rev.AI is the only engine
-            // whose language support is modelled at all. Deriving it means
-            // modelling that first.
-            return Err(ValidationError(format!(
-                "Language '{}' is not supported by Rev.AI ASR. Alternatives:\n\
-                 - Use --asr-engine whisper for local Whisper ASR (supports most languages)\n\
-                 - Use --asr-engine tencent for Chinese/Hakka via Tencent\n\
-                 - Run `batchalign3 transcribe --help` for every engine name\n\
-                 - Check supported languages: book/src/batchalign/reference/language-code-resolution.md",
-                lang
-            )));
+        // Every ASR engine names the one table that decides its languages, the
+        // table its own runtime enforces, so a job the engine would fail on
+        // every file is refused here with one message instead.
+        if let Some(engine) = &asr_engine {
+            validate_asr_language_support(lang, engine)?;
         }
 
         // Rev.AI known-broken (engine, language) deny-list.
@@ -564,6 +553,52 @@ impl JobSubmission {
 
         Ok(())
     }
+}
+
+/// Refuse an ASR engine whose language table lacks `lang`.
+///
+/// The alternatives are DERIVED, as for UTR below: the implemented engines
+/// whose own table lists the language, then those that answer for their
+/// languages at their own boundary.
+fn validate_asr_language_support(
+    lang: &LanguageCode3,
+    engine: &AsrEngineName,
+) -> Result<(), ValidationError> {
+    use crate::transcribe::AsrBackend;
+    use crate::types::engines::AsrLanguageAuthority;
+
+    match engine.language_authority() {
+        AsrLanguageAuthority::EngineOwned => return Ok(()),
+        AsrLanguageAuthority::Table(table) if table.admits(lang) => return Ok(()),
+        AsrLanguageAuthority::Table(_) => {}
+    }
+    let mut covering = Vec::new();
+    let mut engine_owned = Vec::new();
+    for candidate in AsrBackend::implemented_engines() {
+        match candidate.language_authority() {
+            AsrLanguageAuthority::EngineOwned => engine_owned.push(candidate.selection_name()),
+            AsrLanguageAuthority::Table(table) if table.admits(lang) => {
+                covering.push(candidate.selection_name());
+            }
+            AsrLanguageAuthority::Table(_) => {}
+        }
+    }
+    let covered = if covering.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Engines whose language table covers it: {}.",
+            covering.join(", ")
+        )
+    };
+    Err(ValidationError(format!(
+        "ASR engine '{}' cannot be asked for language '{lang}'.{covered} Engines that \
+         answer for their own languages: {} (whisper_hub needs an explicit model_id for \
+         a language with no default fine-tune). Supported languages: \
+         book/src/batchalign/reference/language-code-resolution.md",
+        engine.selection_name(),
+        engine_owned.join(", ")
+    )))
 }
 
 /// Validate that one selected UTR backend can support a resolved language.
@@ -895,10 +930,11 @@ const TENCENT_UTR_LANGUAGES: [&str; 6] = ["zho", "yue", "wuu", "nan", "hak", "cm
 /// restate the answer in an error string.
 fn utr_engine_supports_language(engine: &UtrEngine, lang: &LanguageCode3) -> bool {
     match engine {
-        UtrEngine::RevAi => RevSupported::for_iso3(lang).is_some(),
+        UtrEngine::RevAi => LanguageTable::RevAi.admits(lang),
         UtrEngine::HkTencent => TENCENT_UTR_LANGUAGES.contains(&lang.as_ref()),
-        // Local Whisper is language-general.
-        UtrEngine::Whisper => true,
+        // Timing recovery runs stock Whisper's decoder, so it asks the same
+        // table ASR admission does.
+        UtrEngine::Whisper => LanguageTable::WhisperTokens.admits(lang),
     }
 }
 
@@ -1136,8 +1172,84 @@ mod tests {
         let error = transcribe_submission("nan", AsrEngineName::RevAi)
             .validate()
             .expect_err("native boundaries do not add Rev language support");
-        assert!(error.to_string().contains("Rev.AI"), "{error}");
+        assert!(error.to_string().contains("'rev'"), "{error}");
         assert!(utseg_submission("nan").validate().is_err());
+    }
+
+    /// Timing recovery asks stock Whisper's token table, and the refusal
+    /// derives its alternative from the engines that do support the language.
+    #[test]
+    fn whisper_timing_recovery_admits_exactly_the_languages_with_a_token() {
+        let nan = LanguageCode3::try_new("nan").expect("language code");
+        let error = validate_utr_language_support(&nan, &UtrEngine::Whisper)
+            .expect_err("no Whisper token for Taiwanese");
+        let message = error.to_string();
+        assert!(
+            message.contains(UtrEngine::HkTencent.selection_name()),
+            "{message}"
+        );
+        for admitted in ["yue", "ell", "jav"] {
+            let lang = LanguageCode3::try_new(admitted).expect("language code");
+            validate_utr_language_support(&lang, &UtrEngine::Whisper).expect(admitted);
+        }
+    }
+
+    /// Each ASR engine is admitted for exactly its own runtime's languages.
+    ///
+    /// Stock Whisper: Zulu has an ISO 639-1 code and no Whisper token (the
+    /// case an ISO guess admitted), Taiwanese has neither; Greek is admitted
+    /// (its registry name used to fail in the worker), as is Javanese under
+    /// Whisper's own `jw`. whisper.cpp's narrower table refuses Swahili, and
+    /// that refusal names the engines whose tables cover it.
+    #[test]
+    fn each_asr_engine_is_admitted_for_its_own_runtimes_languages() {
+        let lang = |raw: &str| LanguageCode3::try_new(raw).expect("language code");
+        for refused in ["zul", "nan"] {
+            let error = validate_asr_language_support(&lang(refused), &AsrEngineName::Whisper)
+                .expect_err(refused);
+            assert!(
+                error
+                    .to_string()
+                    .contains(AsrEngineName::HkQwen.selection_name()),
+                "{error}"
+            );
+        }
+        for admitted in ["ell", "jav", "yue", "eng"] {
+            validate_asr_language_support(&lang(admitted), &AsrEngineName::Whisper)
+                .expect(admitted);
+        }
+        validate_asr_language_support(&lang("ell"), &AsrEngineName::WhisperRs)
+            .expect("Greek is in whisper.cpp's table");
+        let error = validate_asr_language_support(&lang("swa"), &AsrEngineName::WhisperRs)
+            .expect_err("Swahili is not in whisper.cpp's table");
+        assert!(
+            error.to_string().contains("covers it: rev, whisper."),
+            "{error}"
+        );
+        validate_asr_language_support(&lang("nan"), &AsrEngineName::WhisperHub)
+            .expect("a fine-tune may cover a language stock Whisper lacks");
+        // The whole submission refuses through the same check.
+        assert!(
+            transcribe_submission("zul", AsrEngineName::Whisper)
+                .validate()
+                .is_err()
+        );
+    }
+
+    /// The refusal text the book quotes (language-code-resolution.md), with
+    /// both lists derived: Rev.AI has no Hakka, and no table lists it.
+    #[test]
+    fn the_asr_refusal_reads_as_the_book_quotes_it() {
+        let hakka = LanguageCode3::try_new("hak").expect("language code");
+        let error = validate_asr_language_support(&hakka, &AsrEngineName::RevAi)
+            .expect_err("Rev.AI has no Hakka");
+        assert_eq!(
+            error.to_string(),
+            "ASR engine 'rev' cannot be asked for language 'hak'. Engines that answer for \
+             their own languages: whisper_hub, tencent, aliyun, funaudio, qwen (whisper_hub \
+             needs an explicit model_id for a language with no default fine-tune). \
+             Supported languages: book/src/batchalign/reference/language-code-resolution.md"
+        );
     }
 
     fn utseg_submission(lang: &str) -> JobSubmission {

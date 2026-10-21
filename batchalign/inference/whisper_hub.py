@@ -25,8 +25,8 @@ Mechanics:
   the language + engine_overrides and returns either a concrete HF
   model_id or raises ``WhisperHubModelNotFoundError``.
 - Model loading delegates through ``batchalign.inference.asr.load_whisper_asr``
-  with ``language="auto"`` so the existing ``gen_kwargs`` path skips
-  the task/language force (which breaks fine-tunes). The returned
+  with ``CheckpointPinnedLanguage`` decoding, so ``gen_kwargs`` never forces
+  a task or language (which breaks fine-tunes). The returned
   handle is the same ``WhisperASRHandle`` used by stock Whisper, so
   the V2 inference boundary
   (``batchalign.inference.asr.infer_whisper_prepared_audio``) works
@@ -112,22 +112,16 @@ def load_whisper_hub_asr(
     modification because the handle carries the pipeline and metadata
     uniformly.
 
-    The returned handle has ``skip_language_force=True`` so
-    ``gen_kwargs(request_lang)`` omits ``task`` and ``language`` on every
-    ``generate()`` call. Fine-tunes pin language/task inside their own
-    ``generation_config``; re-forcing them produces gibberish.
-
-    Passing ``language="auto"`` through to ``load_whisper_asr`` here is
-    a secondary safety belt: it makes ``self.lang == "auto"`` inside the
-    handle, which matters for code paths that read ``model.lang``
-    directly (the legacy ``_infer_whisper`` provider path), not for the
-    V2 prepared-audio path. Both paths must produce no language force.
+    The handle decodes with ``CheckpointPinnedLanguage``: fine-tunes pin
+    language and task inside their own ``generation_config``, and re-forcing
+    them produces gibberish, so ``gen_kwargs`` never names either.
     """
     # Import lazily so the resolver path and error types are usable
     # without pulling in the heavy ML stack (transformers / torch) just
     # for a configuration lookup.
     from batchalign.inference._domain_types import WhisperTimestampMode
     from batchalign.inference.asr import load_whisper_asr
+    from batchalign.inference.types import CheckpointPinnedLanguage
 
     # ``model_path`` is a snapshot the worker already materialized at the
     # revision the control plane pinned. When it is given, the per-language
@@ -137,19 +131,13 @@ def load_whisper_hub_asr(
     # control plane, and for the named "no default for this language" error.
     model_id = model_path or resolve_whisper_hub_model_id(lang, engine_overrides)
 
-    handle = load_whisper_asr(
+    return load_whisper_asr(
         model=model_id,
         base=model_id,
-        language="auto",
+        decoding=CheckpointPinnedLanguage(),
         device_policy=device_policy,
         timestamp_mode=WhisperTimestampMode.SEGMENT,
     )
-    # Flip the fine-tune flag on the shared handle after construction.
-    # The stock ``load_whisper_asr`` signature does not take
-    # ``skip_language_force`` because every other caller wants the stock
-    # behavior. Setting it here keeps the whisper_hub concern localized.
-    handle.skip_language_force = True
-    return handle
 
 
 __all__ = [

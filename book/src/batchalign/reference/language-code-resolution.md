@@ -253,24 +253,15 @@ behavior is:
    as `"auto"` with a warning log, which transcribed a job asking for one
    language as whatever Rev.AI detected; that fallback was deleted
 
-## Whisper Language Strings
+## Whisper Language Tokens
 
-Some engines use human-readable language names rather than ISO codes.
-The mapping in the worker:
-
-```python
-special = {"yue": "Cantonese", "cmn": "chinese"}
-```
-
-For all other languages, the worker resolves the ISO-639-3 code through
-`pycountry` and passes the lower-cased language name to Whisper.
-
-### No silent English fallback
-
-If `pycountry` has no entry for an ISO 639-3 code, the Whisper code path
-raises `ValueError` with a clear message naming the unrecognized code,
-rather than silently defaulting to `"english"`.
-See the [no-silent-fallback policy](#design-principle-no-silent-fallbacks).
+Stock Whisper is told its language by a token from its own vocabulary, never
+by a language name. The control plane maps the ISO 639-3 code to that token
+through a table generated from the decoder's own token list (`eng` -> `en`,
+`jav` -> `jw`, `cmn` -> `zh`) and sends it to the worker at spawn. A language
+with no token is refused at submission, never defaulted to English. See
+[Whisper ASR: language support](whisper-asr.md#language-support) and the
+[no-silent-fallback policy](#design-principle-no-silent-fallbacks).
 
 ## Cross-Engine Language Support Summary
 
@@ -300,7 +291,7 @@ may be derived from the owner above but are not replaced by it:
 flowchart TD
     lang["LanguageCode3\n(ISO 639-3)"] --> stanza["Stanza\n55-entry explicit table\nfallback: truncate + warn"]
     lang --> revai["Rev.AI\n~75 explicit entries\nfallback: auto-detect + warn"]
-    lang --> whisper["Whisper\npycountry lookup\nhard error on unknown"]
+    lang --> whisper["Whisper\n100 decoder tokens (generated)\nrefused at submission without one"]
     lang --> tencent["Tencent\nHan script: 16k_zh_large\nelse 16k_ plus ISO 639-1\nrefused when there is none"]
     lang --> aliyun["Aliyun\nCantonese-only\n(yue)"]
     lang --> funasr["FunASR\nISO 639-3 passed through"]
@@ -337,11 +328,11 @@ any audio processing or model loading. The diagnostic should name the
 engine, the unsupported language, and suggest alternatives:
 
 ```text
-Error: Language 'hak' (Hakka) is not supported by Rev.AI ASR.
-  Supported alternatives:
-  - Use --asr-engine whisper for Hakka (Whisper supports all languages)
-  - Use --lang auto to let Rev.AI auto-detect the language
-  - Use --asr-engine tencent for Chinese/Hakka via Tencent ASR
+Error: ASR engine 'rev' cannot be asked for language 'hak'. Engines that
+answer for their own languages: whisper_hub, tencent, aliyun, funaudio, qwen
+(whisper_hub needs an explicit model_id for a language with no default
+fine-tune). Supported languages:
+book/src/batchalign/reference/language-code-resolution.md
 ```
 
 ### Per-Engine Language Support: Can We Query at Runtime?
@@ -373,15 +364,15 @@ maintain our own validation tables.
 
 #### Whisper (local HuggingFace ASR)
 
-- **No programmatic language list** in the model API
-- The model's `GenerationConfig` has `is_multilingual: true` but no language
-  list; supported languages are implicit in the tokenizer's language tokens
-- Our mapping: `iso3_to_language_name()` in `batchalign/inference/asr.py`
-  uses `pycountry` lookup with special cases for `yue`/`cmn`
-- **Fixed (2026-03-19):** Unknown codes now raise `ValueError` instead of
-  silently falling back to English.
-- Whisper `large-v3` nominally supports 99 languages, but quality varies
-  dramatically (English/European languages are much better than others)
+- The supported set is the decoder's language tokens (100 in transformers'
+  `LANGUAGES`, including `yue`, `haw` and `jw` for Javanese), not ISO 639-1
+- Our mapping: the generated table in
+  `crates/batchalign-types/src/whisper_language/` (from
+  `scripts/generate_whisper_language_table.py`), used for admission and for
+  the token the control plane sends each stock Whisper worker; see
+  [Whisper ASR: language support](whisper-asr.md#language-support)
+- Quality varies dramatically across those languages (English and European
+  languages are much better than others)
 
 #### Stanza (morphosyntax)
 

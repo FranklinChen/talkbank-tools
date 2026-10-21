@@ -67,6 +67,56 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisperx --lang=eng
   `--asr-engine rev` when no ASR override is given AND no per-language default
   applies (see "Per-language defaults" below).
 
+### Language support
+
+Stock Whisper's decoder is told its language by a token from its own
+vocabulary: `en`, `el`, `yue`, `haw`, and `jw` for Javanese. That set (100
+tokens) is a fact about the model, not about ISO 639: Zulu has an ISO 639-1
+code and no Whisper token, Taiwanese (`nan`) has neither, and `jw` is no ISO
+code at all. One generated table owns it:
+`crates/batchalign-types/src/whisper_language/table.rs`, produced by
+`scripts/generate_whisper_language_table.py` from the token table of the
+transformers Whisper decoder the worker runs, each token paired with its ISO
+639-3 code. `cmn` is an alias for Whisper's `zh`.
+
+```mermaid
+flowchart LR
+    table["Whisper token table<br/>(generated from transformers)"]
+    admit["Admission<br/>AsrLanguageAuthority::WhisperTokens"]
+    utr["Timing recovery<br/>UtrEngine::Whisper"]
+    decide["WhisperDecodeLanguageV2<br/>Detect | Force { token }"]
+    worker["Python worker<br/>WhisperASRHandle.decoding"]
+    hf["generate(language=token)"]
+    table --> admit
+    table --> utr
+    table --> decide
+    decide -->|"spawn override<br/>whisper_decode_language"| worker
+    worker --> hf
+```
+
+- **Admission.** Each ASR engine names the one table its runtime enforces
+  (`AsrEngineName::language_authority`, exhaustive): stock Whisper's tokens
+  for `whisper`, whisper.cpp's narrower table for `whisper_rs`, Rev.AI's list
+  for `rev`, and none on this side for engines chosen per language
+  (`whisper_hub`) or that answer for their own languages (`tencent`,
+  `aliyun`, `funaudio`, `qwen`). A job the engine would fail on every file is
+  refused at submission, and the refusal lists the engines whose tables cover
+  the language. Timing recovery with the Whisper UTR engine asks the same
+  token table.
+- **The worker is told the token.** The control plane decides
+  `WhisperDecodeLanguageV2` once per worker from its language (`auto`
+  detects; Cantonese detects too, a long-standing rule; every other language
+  forces its token) and sends it at spawn. The worker never maps a language
+  code itself, and its loader refuses a token the loaded checkpoint lacks.
+- **Preloading workers.** A worker that preloads ASR with no engine named
+  (an align job's GPU worker) resolves its own engine and falls back to stock
+  Whisper for most languages, so it also receives the decode language when
+  Whisper has a token. For a language without one it receives nothing, and
+  refuses at load only if it does fall back to Whisper.
+
+A token is a necessary condition, not a quality claim: Whisper decodes some
+of its 100 languages far better than others.
+
 ### HuggingFace Whisper (`--asr-engine whisper`)
 
 ```bash
@@ -217,11 +267,10 @@ batchalign3 transcribe bilingual_audio/ -o output/ --asr-engine whisper --lang a
 
 ```mermaid
 graph LR
-    A["--lang auto"] --> B["iso3_to_language_name()"]
-    B --> C["'auto' sentinel"]
-    C --> D["gen_kwargs()"]
+    A["--lang auto"] --> B["WhisperDecodeLanguageV2::Detect<br/>(sent at spawn)"]
+    B --> D["gen_kwargs()"]
     D --> E["Omit 'language' key"]
-    E --> F["Whisper auto-detects\nfrom first 30s of audio"]
+    E --> F["Whisper auto-detects<br/>from first 30s of audio"]
 ```
 
 **Behavior per engine:**
@@ -362,10 +411,10 @@ use, not at CLI startup.
 
 | Context              | Model ID                           | Size    |
 |----------------------|------------------------------------|---------|
-| ASR (`--asr-engine whisper`, all languages) | `openai/whisper-large-v3` | large-v3 |
+| ASR (`--asr-engine whisper`, every language with a Whisper token) | `openai/whisper-large-v3` | large-v3 |
 | ASR (`--asr-engine whisper_hub`, opt-in fine-tunes) | per `_RESOLVER["whisper_hub"]` or `--engine-overrides model_id` | varies |
 | FA                                          | `openai/whisper-large-v2` | large-v2 |
-| UTR (`--utr-engine whisper`, all languages) | `openai/whisper-large-v3`, pinned to an exact commit | large-v3 |
+| UTR (`--utr-engine whisper`, every language with a Whisper token) | `openai/whisper-large-v3`, pinned to an exact commit | large-v3 |
 
 ## Implications for whisper.cpp Migration
 

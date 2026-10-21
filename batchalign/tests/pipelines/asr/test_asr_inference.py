@@ -27,11 +27,15 @@ from batchalign.inference.asr import (
     WhisperChunksAsrResponse,
     _infer_whisper,
     infer_whisper_prepared_audio,
-    iso3_to_language_name,
     load_whisper_asr,
 )
 from batchalign.tests._asr_model_pins import loaded_identity
-from batchalign.worker._types_v2 import AsrBackendV2, NotRequestedDiarizationV2
+from batchalign.worker._types_v2 import (
+    AsrBackendV2,
+    DetectWhisperLanguageV2,
+    ForceWhisperLanguageV2,
+    NotRequestedDiarizationV2,
+)
 
 # ---------------------------------------------------------------------------
 # Pydantic model tests
@@ -112,22 +116,6 @@ class TestAsrModels:
 class TestWhisperPathBoundary:
     """Verify the local Whisper adapter stays thin at the Python boundary."""
 
-    def test_iso3_to_language_name_maps_whisper_names(self) -> None:
-        """Prepared-audio Whisper should share the same ISO3->name mapping as load."""
-        assert iso3_to_language_name("eng") == "english"
-        assert iso3_to_language_name("yue") == "Cantonese"
-
-    def test_iso3_to_language_name_rejects_unknown_codes(self) -> None:
-        """Unknown ISO 639-3 codes raise ValueError (no silent English fallback)."""
-        import pytest
-
-        with pytest.raises(ValueError, match="Unrecognized ISO 639-3"):
-            iso3_to_language_name("zzz")
-
-    def test_iso3_to_language_name_auto_returns_auto(self) -> None:
-        """``--lang auto`` should map to the sentinel ``"auto"`` language name."""
-        assert iso3_to_language_name("auto") == "auto"
-
     def test_infer_whisper_passes_source_path_to_pipeline(self) -> None:
         """The wrapper should forward the source path, not decode audio itself."""
 
@@ -135,12 +123,11 @@ class TestWhisperPathBoundary:
             """Minimal structured test double for the local Whisper handle."""
 
             def __init__(self) -> None:
-                self.lang = "english"
                 self.sample_rate = 16000
                 self.calls: list[tuple[object, int, object]] = []
 
-            def gen_kwargs(self, lang: str) -> dict[str, object]:
-                return {"language": lang}
+            def gen_kwargs(self) -> dict[str, object]:
+                return {"language": "en"}
 
             def __call__(
                 self,
@@ -171,7 +158,7 @@ class TestWhisperPathBoundary:
 
         assert response.kind == "whisper_chunks"
         assert response.text == "hello world"
-        assert model.calls == [("/tmp/input.wav", 1, {"language": "english"})]
+        assert model.calls == [("/tmp/input.wav", 1, {"language": "en"})]
 
     def test_infer_whisper_prepared_audio_passes_waveform_directly(self) -> None:
         """The prepared-audio helper should not reopen media paths in Python."""
@@ -186,8 +173,8 @@ class TestWhisperPathBoundary:
                 # every result, so a double for it has to carry one.
                 self.model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
-            def gen_kwargs(self, lang: str) -> dict[str, object]:
-                return {"language": lang}
+            def gen_kwargs(self) -> dict[str, object]:
+                return {"language": "en"}
 
             def __call__(
                 self,
@@ -216,7 +203,7 @@ class TestWhisperPathBoundary:
         assert len(model.calls) == 1
         prepared_input, batch_size, generate_kwargs = model.calls[0]
         assert batch_size == 1
-        assert generate_kwargs == {"language": "english"}
+        assert generate_kwargs == {"language": "en"}
         assert isinstance(prepared_input, dict)
         assert prepared_input["sampling_rate"] == 16000
         assert np.array_equal(prepared_input["raw"], waveform)
@@ -228,17 +215,19 @@ class TestWhisperPathBoundary:
             """Test double that records generate_kwargs for auto-detect assertion."""
 
             def __init__(self) -> None:
-                self.lang = "auto"
                 self.sample_rate = 16000
                 self.calls: list[tuple[object, int, object]] = []
 
-            def gen_kwargs(self, lang: str) -> dict[str, object]:
+            def gen_kwargs(self) -> dict[str, object]:
                 from batchalign.inference.types import WhisperASRHandle
 
                 handle = WhisperASRHandle(
-                    pipe=None, config="cfg", lang="auto", sample_rate=16000
+                    pipe=None,
+                    config="cfg",
+                    decoding=DetectWhisperLanguageV2(),
+                    sample_rate=16000,
                 )
-                return handle.gen_kwargs(lang)
+                return handle.gen_kwargs()
 
             def __call__(
                 self,
@@ -287,13 +276,16 @@ class TestWhisperPathBoundary:
                 # which checkpoint it loaded.
                 self.model_identity = loaded_identity(AsrBackendV2.LOCAL_WHISPER)
 
-            def gen_kwargs(self, lang: str) -> dict[str, object]:
+            def gen_kwargs(self) -> dict[str, object]:
                 from batchalign.inference.types import WhisperASRHandle
 
                 handle = WhisperASRHandle(
-                    pipe=None, config="cfg", lang="auto", sample_rate=16000
+                    pipe=None,
+                    config="cfg",
+                    decoding=DetectWhisperLanguageV2(),
+                    sample_rate=16000,
                 )
-                return handle.gen_kwargs(lang)
+                return handle.gen_kwargs()
 
             def __call__(
                 self,
@@ -329,6 +321,9 @@ class _FakeGenerationConfig:
         self.use_cache: bool | None = None
         self.no_timestamps_token_id: int | None = None
         self.alignment_heads: list[list[int]] | None = None
+        # Stock Whisper's language tokens, as a multilingual checkpoint's
+        # generation config lists them.
+        self.lang_to_id = {"<|en|>": 50259, "<|el|>": 50281}
 
     @classmethod
     def from_pretrained(cls, base: str) -> _FakeGenerationConfig:
@@ -401,12 +396,12 @@ class TestWhisperLoader:
         handle = load_whisper_asr(
             model="cuda-model",
             base="cuda-base",
-            language="english",
+            decoding=ForceWhisperLanguageV2(token="en"),
             target_sample_rate=44100,
             device_policy=DevicePolicy(),
         )
 
-        assert handle.lang == "english"
+        assert handle.decoding == ForceWhisperLanguageV2(token="en")
         assert handle.sample_rate == 44100
         assert handle.config.base == "cuda-base"
         assert handle.config.no_repeat_ngram_size == 4
@@ -455,7 +450,7 @@ class TestWhisperLoader:
         handle = load_whisper_asr(
             model="mps-model",
             base="mps-base",
-            language="Cantonese",
+            decoding=DetectWhisperLanguageV2(),
             target_sample_rate=22050,
             device_policy=DevicePolicy(),
         )
@@ -491,11 +486,24 @@ class TestWhisperLoader:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
 
-        handle = load_whisper_asr(device_policy=DevicePolicy())
+        handle = load_whisper_asr(
+            decoding=DetectWhisperLanguageV2(), device_policy=DevicePolicy()
+        )
 
-        assert handle.lang == "english"
+        assert handle.decoding == DetectWhisperLanguageV2()
         assert pipeline_calls[0][1]["device"] == torch.device("cpu")
         assert pipeline_calls[0][1]["torch_dtype"] == torch.float32
+
+    def test_load_refuses_a_token_the_checkpoint_lacks(self, monkeypatch) -> None:
+        """The control plane's token must be one this checkpoint has: a
+        disagreement fails the worker at load, naming the token, instead of
+        ``generate`` failing on every file."""
+        _install_fake_transformers(monkeypatch, lambda task, **kwargs: _FakePipe())
+        with pytest.raises(ValueError, match="'sw'"):
+            load_whisper_asr(
+                decoding=ForceWhisperLanguageV2(token="sw"),
+                device_policy=DevicePolicy(),
+            )
 
     # test_load_whisper_asr_falls_back_when_pipeline_rejects_bfloat16 removed:
     # The try/except TypeError fallback was eliminated because after the MPS

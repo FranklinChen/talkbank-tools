@@ -15,6 +15,7 @@ from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
 from batchalign.worker._model_loading import asr as asr_loading
 from batchalign.worker._model_loading.asr import (
     PINNED_ASR_MODELS_KEY,
+    WHISPER_DECODE_LANGUAGE_KEY,
     load_asr_engine,
     resolve_asr_engine,
     resolve_injected_revai_api_key,
@@ -27,6 +28,7 @@ from batchalign.worker._types import (
     _state,
 )
 from batchalign.worker._types_v2 import (
+    ForceWhisperLanguageV2,
     RequestedModelV2,
     RequestedProviderParameterV2,
     TencentModelsV2,
@@ -38,6 +40,10 @@ from batchalign.worker._types_v2 import (
 # Hugging Face cache, which is not a property a unit test may rely on.
 _FAKE_SNAPSHOT_PATH = "/cache/models--fake/snapshots/" + "a" * 40
 _FAKE_SNAPSHOT_COMMIT = "a" * 40
+
+# What the control plane sends an English stock Whisper worker.
+_ENGLISH_DECODING = ForceWhisperLanguageV2(token="en")
+_ENGLISH_SPAWN = {WHISPER_DECODE_LANGUAGE_KEY: _ENGLISH_DECODING.model_dump_json()}
 
 
 class _FakeHandle:
@@ -146,8 +152,8 @@ class TestResolveAsrEngine:
 def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
     """Whisper bootstrap should not touch legacy config-discovery paths."""
 
-    def fake_load_whisper_asr(*, model, base, language, device_policy, cpu_precision):
-        assert language == "english"
+    def fake_load_whisper_asr(*, model, base, decoding, device_policy, cpu_precision):
+        assert decoding == _ENGLISH_DECODING
         assert device_policy == DevicePolicy(force_cpu=True)
         # No `whisper_cpu_dtype` extra on this job: the default precision.
         assert cpu_precision is WhisperCpuPrecision.FLOAT32
@@ -170,7 +176,7 @@ def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
                 task=InferTask.ASR,
                 lang="eng",
                 num_speakers=1,
-                engine_overrides={"asr": "whisper"},
+                engine_overrides={"asr": "whisper", **_ENGLISH_SPAWN},
                 device_policy=DevicePolicy(force_cpu=True),
             )
         )
@@ -345,11 +351,14 @@ def test_load_asr_engine_eng_with_no_override_or_rev_still_loads_whisper(
     old_whisper = _state.whisper_asr_model
     old_key = _state.rev_api_key
     try:
+        # No engine named, as for a preloading worker; the control plane
+        # still sends the decode language because Whisper has an English token.
         load_asr_engine(
             WorkerBootstrapRuntime(
                 task=InferTask.ASR,
                 lang="eng",
                 num_speakers=1,
+                engine_overrides=_ENGLISH_SPAWN,
             )
         )
 
@@ -358,6 +367,24 @@ def test_load_asr_engine_eng_with_no_override_or_rev_still_loads_whisper(
         )
         assert _state.asr_engine is AsrEngine.WHISPER
         assert isinstance(_state.whisper_asr_model, _FakeHandle)
+    finally:
+        _state.asr_engine = old_engine
+        _state.whisper_asr_model = old_whisper
+        _state.rev_api_key = old_key
+
+
+def test_a_whisper_fallback_without_a_decode_language_is_refused() -> None:
+    """A preloading worker whose language has no Whisper token receives no
+    decode language. If it falls back to stock Whisper anyway, it refuses at
+    load, naming the key, rather than deciding a language itself."""
+    old_engine = _state.asr_engine
+    old_whisper = _state.whisper_asr_model
+    old_key = _state.rev_api_key
+    try:
+        with pytest.raises(ValueError, match=WHISPER_DECODE_LANGUAGE_KEY):
+            load_asr_engine(
+                WorkerBootstrapRuntime(task=InferTask.ASR, lang="nan", num_speakers=1)
+            )
     finally:
         _state.asr_engine = old_engine
         _state.whisper_asr_model = old_whisper
