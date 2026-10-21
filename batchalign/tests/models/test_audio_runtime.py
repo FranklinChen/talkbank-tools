@@ -549,3 +549,64 @@ def test_extract_token_timestamps_handles_beam_indices(monkeypatch) -> None:
 
     assert timestamps.shape == (1, 3)
     assert recorded[0].shape == (2, 2)
+
+
+def test_beam_search_with_a_decoder_prompt_gathers_the_rows_upstream_gathers(
+    monkeypatch,
+) -> None:
+    """Beam search under transformers 5 with a multi-token decoder prompt.
+
+    The prefill step carries one attention row per prompt token while
+    `beam_indices` holds one entry per generated step, and one beam finishes
+    early. The old prompt handling raised a tensor-size error here, on every
+    real file. The attention matrix each implementation hands its DTW must be
+    identical: that is the row selection. The DTWs themselves differ on
+    purpose (ours is open-begin, fixed-end), so their outputs are not compared.
+    """
+    from transformers.models.whisper import generation_whisper
+
+    import batchalign_core
+
+    generator = torch.Generator().manual_seed(7)
+    beams, frames, prompt, steps = 2, 10, 3, 4
+
+    def rows(count: int) -> list[torch.Tensor]:
+        return [torch.rand(beams, 1, count, frames, generator=generator)]
+
+    # Prefill: one row per prompt token; then one row per later step. The
+    # final token has no attention row, as in autoregressive generation.
+    attentions = [rows(prompt)] + [rows(1) for _ in range(steps - 2)]
+    output = _FakeGenerateOutput(
+        cross_attentions=attentions,
+        sequences=torch.zeros(beams, prompt + steps - 1, dtype=torch.int64),
+        beam_indices=torch.tensor([[0, 1, 1, -1], [1, 0, -1, -1]], dtype=torch.int64),
+    )
+    model = _FakeWhisperModel()
+
+    ours: list[np.ndarray] = []
+    real_ours = batchalign_core.whisper_lexical_frame_indices
+    monkeypatch.setattr(
+        batchalign_core,
+        "whisper_lexical_frame_indices",
+        lambda m: ours.append(np.array(m)) or real_ours(m),
+    )
+    upstream: list[np.ndarray] = []
+    real_upstream = generation_whisper._dynamic_time_warping
+    monkeypatch.setattr(
+        generation_whisper,
+        "_dynamic_time_warping",
+        lambda m: upstream.append(np.array(m)) or real_upstream(m),
+    )
+
+    timestamps = _extract_token_timestamps(
+        model, output, [(0, 0)], num_frames=2 * frames, num_input_ids=prompt
+    )
+    reference = generation_whisper.WhisperGenerationMixin._extract_token_timestamps(
+        model, output, [(0, 0)], num_frames=2 * frames, num_input_ids=prompt
+    )
+
+    assert timestamps.shape == reference.shape == (beams, prompt + steps - 1)
+    assert len(ours) == len(upstream) == beams
+    for mine, theirs in zip(ours, upstream, strict=True):
+        assert mine.shape == theirs.shape
+        assert np.allclose(mine, theirs)

@@ -5,6 +5,18 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Whisper word timestamps work again under transformers 5
+
+- Stock Whisper with word timestamps (`--asr-engine whisper`, and Whisper
+  timing recovery) failed on every file with "The expanded size of the tensor
+  ... must match the existing size" since the move to transformers 5. Our
+  token-timestamp extractor assumed beam-search indices left room for the
+  decoder prompt; transformers 5 (every version from 5.13) records one index
+  per generated step and attends to the whole prompt in the first step. The
+  extractor now repeats the first step's beam index across the prompt rows,
+  as upstream does. A test checks it gathers exactly the attention rows
+  transformers' own extractor gathers.
+
 ### Chatter 0.31.0
 
 - The CHAT crates now come from Chatter 0.31.0 (`f7e32e22`). Every value BA3

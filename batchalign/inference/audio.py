@@ -402,18 +402,22 @@ def _extract_token_timestamps(
     weight_length = None
 
     if "beam_indices" in generate_outputs:
+        # Beam search can return a sequence that finished a few steps early, so
+        # the cross-attentions run longer than the real output: crop to the
+        # longest real sequence.
         weight_length = (generate_outputs.beam_indices != -1).sum(-1).max()
-        weight_length = (
-            weight_length if num_input_ids is None else weight_length + num_input_ids
-        )
-        beam_indices = torch.zeros_like(
-            generate_outputs.beam_indices[:, :weight_length],
-            dtype=generate_outputs.beam_indices.dtype,
-        )
-        beam_indices[:, num_input_ids:] = generate_outputs.beam_indices[
-            :, : weight_length - num_input_ids
-        ]
-        weights = weights[:, :, :weight_length]
+        beam_indices = generate_outputs.beam_indices[:, :weight_length]
+        # transformers 5 records one beam index per generated step, but the
+        # first forward pass (the prefill) produced an attention row for every
+        # decoder prompt token. Repeat the first step's index across those rows
+        # so every row can be gathered, as upstream's extractor does in every
+        # version this package admits (5.13 onward). Assuming the index tensor
+        # had room for the prompt broke every beam-search word-timestamp run.
+        if num_input_ids is not None and num_input_ids > 1:
+            weight_length = weight_length + num_input_ids - 1
+            prefill = beam_indices[:, 0:1].expand(-1, num_input_ids - 1)
+            beam_indices = torch.cat([prefill, beam_indices], dim=-1)
+        # A -1 marks the end-of-sequence token; index_select refuses negatives.
         beam_indices = beam_indices.masked_fill(beam_indices == -1, 0)
         weights = torch.stack(
             [
