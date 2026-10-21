@@ -1,7 +1,7 @@
 # Pushing without CI churn
 
 **Status:** Current
-**Last updated:** 2026-09-06 03:40 EDT
+**Last updated:** 2026-10-21 17:09 EDT
 
 Run the verification once, then push the content it verified:
 
@@ -43,15 +43,38 @@ it does not replace those checks with a smaller subset.
 
 `scripts/check_push_gate_sync.py`, run by `make lint`, follows actual Makefile
 prerequisites and direct recursive make commands. It checks all push/PR-triggered
-workflows. Comments and echoed suggestions cannot establish coverage. This
-checker follows the repository's direct-command convention; arbitrary shell
-control flow or raw tool invocations need explicit review when changing CI.
+workflows. Comments and echoed suggestions cannot establish coverage.
+
+It enforces two rules, so neither depends on review:
+
+- **A workflow target the gate does not reach fails**, unless `EXEMPT` gives
+  the reason (today: checks that need a built wheel or the npm frontend).
+- **A workflow step that runs a verifier directly fails.** A verifier is found
+  by the program a command invokes (mypy, stubtest, pytest, ruff, shellcheck,
+  actionlint, lychee, unittest, `cargo test`/`clippy`/`fmt`/`llvm-cov`/`deny`,
+  `mdbook test`) or by a `--check` flag or a `scripts/check_*` script, looking
+  through `VAR=value`, `sudo`, `uv run` and `python -m`. Such a step must call a
+  make target instead, so the command has one owner the gate can be compared
+  against, or be listed in `RAW_VERIFIERS` by exact text with its reason. An
+  entry no workflow uses any more also fails.
+
+The second rule exists because a raw step is invisible to the first. A raw
+`ruff` step let a formatting failure reach main on 2026-08-14, and a raw
+`uv run mypy` step let a stub missing a new PyO3 function reach main on
+2026-10-21; each time the gate was green.
 
 `make gate-receipts-test` exercises both the receipt protocol in temporary Git
 repositories and the coverage checker. These checks also run in CI without
 building a Rust test binary. Exemptions in the checker document wheel-installed
 Python and frontend checks that require their own CI setup; a local receipt is
 not evidence that those jobs or other platforms have passed.
+
+**A change to the PyO3 extension** (`crates/batchalign-pyo3`, or anything a
+`#[pyfunction]` exposes) needs `make batchalign-test-python` before the push as
+well as the gate. It builds the wheel, runs `make batchalign-stubtest`, which
+checks the hand-written `stubs/batchalign_core/` against the built extension,
+and runs the Python suite against it. The gate's strict mypy trusts the stub;
+stubtest is what makes the stub true.
 
 ## What local checks cannot catch: the runner is Linux
 

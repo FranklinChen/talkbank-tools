@@ -1,0 +1,7 @@
+# Names the stub declares that the built extension does not, each with its
+# reason. `make batchalign-stubtest` refuses any other difference. Keep this
+# list short: an entry is a place the stub is not checked.
+
+# A stub-only type alias, imported only under TYPE_CHECKING. Its spelling is
+# held to the runtime's WORKER_ERROR_KINDS by test_worker_error_kinds_match_rust.
+batchalign_core.batchalign_core.WorkerErrorKind

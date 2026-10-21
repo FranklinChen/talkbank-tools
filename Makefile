@@ -1,4 +1,4 @@
-.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
+.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-typecheck-python-source batchalign-stubtest batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
 
 help:
 	@echo "talkbank-tools task index (batchalign3 workspace)"
@@ -26,6 +26,8 @@ help:
 	@echo "  make batchalign-lint-python        Imported Batchalign Python ruff gate"
 	@echo "  make batchalign-ipc-schema-check   IPC schema vs Rust types drift gate"
 	@echo "  make batchalign-typecheck-python   Imported Batchalign Python typecheck gate"
+	@echo "  make batchalign-typecheck-python-source  Strict mypy only (no wheel; in the gate)"
+	@echo "  make batchalign-stubtest           batchalign_core stub vs the built extension"
 	@echo "  make batchalign-ci-python          Imported Batchalign Python wheel/test/type gate"
 	@echo "  make batchalign-dashboard-build       Imported dashboard frontend build"
 	@echo "  make batchalign-dashboard-api-check  Imported dashboard API drift gate"
@@ -245,6 +247,7 @@ _batchalign-test-python:
 	@# cannot certify freshness. This check never builds or installs.
 	@echo "==> Checking the extension Python will import is current..."
 	bash scripts/check_extension_freshness.sh
+	@$(MAKE) batchalign-stubtest
 	@echo "==> Running imported Batchalign Python tests..."
 	uv run --no-sync python -m pytest $(BATCHALIGN_PYTEST_ARGS)
 
@@ -281,13 +284,37 @@ _batchalign-typecheck-python:
 	@echo "==> Running imported Batchalign CI hygiene..."
 	cargo run -q -p xtask -- lint-ci-hygiene
 	@$(MAKE) batchalign-runtime-check
-	@echo "==> Running imported Batchalign Python typecheck (Linux and macOS)..."
-	@# mypy checks only the platform it is told to, defaulting to the host's.
-	@# Code branching on sys.platform (the worker supervisor's exit watch) passed
-	@# a macOS gate and failed Linux CI on 2026-09-30, so both run everywhere:
-	@# the local gate sees CI's platform and CI sees the developer's.
+	@$(MAKE) batchalign-typecheck-python-source
+
+# Strict mypy, the one owner of how it runs; the gate and CI both call this.
+#
+# SOURCE-ONLY, like ruff: mypy types the extension from the hand-written
+# `stubs/batchalign_core/` (mypy.ini `mypy_path = stubs`), never from the
+# installed wheel. It was exempted from the gate as "needs a built wheel",
+# which was false, and on 2026-10-21 a stub missing a new PyO3 function reached
+# main through that exemption while CI's raw `uv run mypy` step, invisible to
+# the gate-coverage check, failed.
+#
+# mypy checks only the platform it is told to, defaulting to the host's. Code
+# branching on sys.platform (the worker supervisor's exit watch) passed a macOS
+# gate and failed Linux CI on 2026-09-30, so both run everywhere: the local
+# gate sees CI's platform and CI sees the developer's.
+batchalign-typecheck-python-source:
+	@echo "==> Running Batchalign Python strict typecheck (Linux and macOS)..."
 	uv run --no-sync mypy --platform linux
 	uv run --no-sync mypy --platform darwin
+
+# The hand-written batchalign_core stub against the BUILT extension. mypy
+# trusts the stub; this is what makes the stub true: a function the extension
+# registers that the stub lacks (or the reverse), a differing parameter, or an
+# `__all__` that disagrees fails here. Needs the wheel installed, so it runs in
+# `_batchalign-test-python` and CI's wheel-installed type-check job, not the
+# gate. Stub-only names, each with its reason, are in the allowlist file.
+batchalign-stubtest:
+	@echo "==> Checking the batchalign_core stub against the built extension..."
+	uv run --no-sync python -m mypy.stubtest batchalign_core \
+		--mypy-config-file mypy.ini \
+		--allowlist stubs/batchalign_core/stubtest-allowlist.txt
 
 batchalign-typecheck-python: batchalign-python-prepare
 	@$(MAKE) _batchalign-typecheck-python
@@ -467,7 +494,8 @@ book-check:
 	cd $(CURDIR)/book && mdbook build
 	python3 $(CURDIR)/scripts/mdbook_git_dates.py verify --book-root $(CURDIR)/book --page introduction.md $(CURDIR)/book/build/index.html
 	lychee --offline --root-dir "$(CURDIR)/book/build" "$(CURDIR)/book/build"
-	@# The fence-shape regression guard, mirroring book.yml's third step.
+	@# The fence-shape regression guard. book.yml runs this target, so the
+	@# two cannot drift apart again.
 	@# rustdoc compiles every UNTAGGED ``` block as a Rust doctest, so a
 	@# bare fence around sample output fails the build. This target ran
 	@# only build + lychee until 2026-07-31, so it passed locally while

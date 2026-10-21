@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-10-15 15:25 EDT
+**Last updated:** 2026-10-21 17:09 EDT
 
 ## Philosophy
 
@@ -763,11 +763,15 @@ npm run test:e2e:setup
 ## Type checking
 
 ```bash
-uv run mypy --platform linux     # mypy for Linux (what GitHub CI runs on)
-uv run mypy --platform darwin    # and for macOS; the gate runs both
-make batchalign-typecheck-python  # mypy under the batchalign-* target group
+make batchalign-typecheck-python-source  # strict mypy, Linux and macOS: what the gate and CI run
+make batchalign-stubtest          # the batchalign_core stub against the built extension
 make lint-affected                # affected-Rust clippy + affected Python mypy
 ```
+
+mypy types the PyO3 extension from the hand-written stub, so the stub is
+checked against the built extension by `make batchalign-stubtest`, which runs
+in `make batchalign-test-python` and in CI; see
+[Building](building.md#type-checking).
 
 The gate is inverted, and that is the property to preserve: `mypy.ini` checks
 every module under `batchalign` and exempts NAMED modules one at a time, each

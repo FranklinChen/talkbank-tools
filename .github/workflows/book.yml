@@ -56,30 +56,15 @@ jobs:
             mdbook-mermaid@0.17.1 \
             lychee@0.24.2 \
             --locked
-      - name: Test the git-dates preprocessor
-        run: python3 -m unittest scripts/test_mdbook_git_dates.py
-      - name: Build book
-        # Run with the book directory as cwd, never `mdbook build book` from
-        # the repo root: mdBook 0.4.x sets no cwd of its own
-        # for preprocessor subprocesses and just inherits whatever directory
-        # `mdbook` itself was started from, so book.toml's `../scripts/...`
-        # preprocessor commands only resolve when that directory is `book/`.
-        working-directory: book
-        run: mdbook build
-      - name: Verify the front page carries git-derived dates
-        run: python3 scripts/mdbook_git_dates.py verify --book-root book --page introduction.md book/build/index.html
-      - name: Link-check book (lychee, offline)
-        run: lychee --offline --root-dir "${GITHUB_WORKSPACE}/book/build" "${GITHUB_WORKSPACE}/book/build"
-      - name: Test book code blocks (fence-shape regression guard)
-        # Every Rust block in the book is currently rust,ignore (mdbook
-        # test can't disambiguate workspace crate variants in
-        # target/debug/deps/, so executable doctest verification lives
-        # in crates/<crate>/tests/book_*_examples.rs files instead).
-        # This step is a guard against untagged ``` fences or stray
-        # ``` rust blocks creeping back in. Same cwd requirement as the
-        # build step above; 0.5.x always uses the book directory, 0.4.x did not.
-        working-directory: book
-        run: mdbook test
+      - name: Build and check the book
+        # The make target the local gate runs, so the two cannot disagree:
+        # preprocessor tests, the build (from `book/`, which book.toml's
+        # `../scripts/...` preprocessor commands require), the git-dates
+        # verification, the offline lychee link check and the fence-shape
+        # `mdbook test` guard. These were five steps written out here and
+        # copied by hand into the Makefile, and the copy drifted on
+        # 2026-07-31; the target's comments explain each step.
+        run: make book-check
       - name: Upload book artifact
         uses: actions/upload-artifact@v7
         with:

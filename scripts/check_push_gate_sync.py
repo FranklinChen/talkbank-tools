@@ -72,8 +72,16 @@ EXEMPT: dict[str, Exemption] = {
     "batchalign-lint-python": HookExemption(
         "needs a built wheel; use -source in the hook"
     ),
+    # Its mypy half is NOT exempt: it is `batchalign-typecheck-python-source`,
+    # which the gate runs. This was exempted whole as "mypy against the
+    # install", which was false (mypy reads stubs/, mypy.ini `mypy_path`), and
+    # a stub missing a new PyO3 function reached main through it on 2026-10-21.
     "batchalign-typecheck-python": HookExemption(
-        "needs a built wheel; mypy against the install"
+        "its prerequisite builds the wheel; the mypy half runs in the gate"
+    ),
+    "batchalign-stubtest": HookExemption(
+        "imports the built extension; runs in batchalign-test-python and the "
+        "wheel-installed CI job"
     ),
     "batchalign-test-python": HookExemption("needs a built wheel"),
     "batchalign-python-prepare": HookExemption("builds the wheel these depend on"),
@@ -106,6 +114,143 @@ EXEMPT: dict[str, Exemption] = {
     ),
     "batchalign-runtime-check": HookExemption("runs in the wheel-installed job"),
 }
+
+
+#: Commands that VERIFY something. A workflow step that runs one directly,
+#: instead of through a make target, is invisible to the target comparison in
+#: `main`, so the gate can silently cover less than CI. That happened with
+#: ruff (2026-08-14) and then with mypy (2026-10-21), each fixed by moving one
+#: step into a target while the next raw step sat below it. This rule closes
+#: the class: a raw verifier is refused unless `RAW_VERIFIERS` names it, with
+#: its reason, by its exact command text.
+VERIFIER_PROGRAMS = frozenset(
+    {
+        "mypy",
+        "stubtest",
+        "pytest",
+        "ruff",
+        "shellcheck",
+        "actionlint",
+        "lychee",
+        "unittest",
+    }
+)
+#: Subcommands that verify, for programs whose other subcommands build or run.
+VERIFIER_SUBCOMMANDS = {
+    "cargo": frozenset({"test", "clippy", "fmt", "llvm-cov", "deny", "nextest"}),
+    "mdbook": frozenset({"test"}),
+}
+
+
+def invoked_program(command: str) -> tuple[str, str | None]:
+    """The program a command line runs, and its first argument.
+
+    Looks through what only launches another program: leading `VAR=value`
+    assignments, `sudo`, `uv run` (with its options) and `python -m`. A word
+    inside an argument (a download URL, an install path) is not the program.
+    """
+    try:
+        words = shlex.split(command, comments=True)
+    except ValueError:
+        return ("", None)
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    if words[:1] == ["sudo"]:
+        words.pop(0)
+    if words[:2] == ["uv", "run"]:
+        words = words[2:]
+        while words and words[0].startswith("-"):
+            words.pop(0)
+    if len(words) >= 3 and re.fullmatch(r"python3?", words[0]) and words[1] == "-m":
+        words = words[2:]
+    if not words:
+        return ("", None)
+    program = words[0].rsplit("/", 1)[-1].split(".", 1)[0]
+    return (program, words[1] if len(words) > 1 else None)
+
+
+def is_verifier(command: str) -> bool:
+    """Does this command line run a check, rather than set one up?"""
+    program, first = invoked_program(command)
+    if program in VERIFIER_PROGRAMS:
+        return True
+    if first is not None and first in VERIFIER_SUBCOMMANDS.get(program, ()):
+        return True
+    words = command.split()
+    return "--check" in words or any(
+        re.search(r"(^|/)scripts/check_\w+", word) for word in words
+    )
+
+
+#: Raw verifier commands a push-triggered workflow may run, by exact text,
+#: each with the reason it is not a make target the gate reaches.
+RAW_VERIFIERS: dict[str, HookExemption] = {
+    "uv run --no-sync python -m pytest batchalign --disable-pytest-warnings "
+    "-k 'not test_whisper_fa_pipeline'": HookExemption(
+        "the Python suite against the CI wheel; locally batchalign-test-python, "
+        "which needs a built wheel"
+    ),
+    "uv run --no-sync pytest --cov=batchalign --cov-report=lcov:lcov-python.info "
+    "batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'": (
+        HookExemption("coverage measurement of the same Python suite")
+    ),
+    "cargo llvm-cov --no-fail-fast --workspace --exclude "
+    "batchalign-dashboard-desktop --locked --lcov --output-path "
+    "lcov-rust-workspace.info": HookExemption(
+        "coverage measurement of the Rust suites the gate runs"
+    ),
+    "shellcheck --version": HookExemption(
+        "prints the installed version; make lint-shell is the check"
+    ),
+}
+
+
+def run_commands(text: str) -> list[str]:
+    """Every command line a workflow's `run:` steps execute.
+
+    A one-line `run: cmd` gives one command; a `run: |` block gives each of
+    its non-blank, non-comment lines. Heredoc bodies are data, not commands,
+    and are skipped. Read as text for the same reason as `is_push_triggered`.
+    """
+    commands: list[str] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^(\s*)(?:- )?run:\s*(.*)$", lines[index])
+        index += 1
+        if match is None:
+            continue
+        indent, value = len(match.group(1)), match.group(2).strip()
+        if value not in {"|", ">", "|-", ">-"}:
+            commands.append(value)
+            continue
+        heredoc_end: str | None = None
+        while index < len(lines):
+            line = lines[index]
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            index += 1
+            command = line.strip()
+            if heredoc_end is not None:
+                if command == heredoc_end:
+                    heredoc_end = None
+                continue
+            if not command or command.startswith("#"):
+                continue
+            heredoc = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", command)
+            if heredoc:
+                heredoc_end = heredoc.group(1)
+            commands.append(command)
+    return commands
+
+
+def raw_verifiers(text: str) -> list[str]:
+    """Commands in `text` that run a verifier directly, not via make."""
+    return [
+        command
+        for command in run_commands(text)
+        if not make_targets(command) and is_verifier(command)
+    ]
 
 
 def make_targets(text: str) -> set[str]:
@@ -280,6 +425,8 @@ def main() -> int:
         return 1
 
     missing: list[Uncovered] = []
+    raw: list[tuple[str, str]] = []
+    exempt_seen: set[str] = set()
     for workflow in sorted(WORKFLOWS.glob("*.yml")):
         text = workflow.read_text(encoding="utf-8")
         # EVERY push-triggered workflow, not just the Rust one. Scoping this to
@@ -291,6 +438,11 @@ def main() -> int:
         # rather than by which target it happens to name.
         if not is_push_triggered(text):
             continue
+        for command in raw_verifiers(text):
+            if command in RAW_VERIFIERS:
+                exempt_seen.add(command)
+            else:
+                raw.append((workflow.name, command))
         # Intersected with the Makefile's own targets, so English prose in a
         # workflow comment ("make target", "make each ...") is not read as an
         # invocation. A workflow naming a target that does not exist fails in
@@ -299,6 +451,27 @@ def main() -> int:
             if target in hook_targets or target in EXEMPT:
                 continue
             missing.append(Uncovered(workflow=workflow.name, target=target))
+
+    # An exemption no workflow uses any more is a hole waiting for a command
+    # to match it again; it goes when its command does.
+    stale = sorted(RAW_VERIFIERS.keys() - exempt_seen)
+    if stale:
+        print("RAW_VERIFIERS names commands no workflow runs:", file=sys.stderr)
+        for command in stale:
+            print(f"  {command}", file=sys.stderr)
+        return 1
+
+    if raw:
+        print("CI runs a verifier the gate cannot see:", file=sys.stderr)
+        for workflow_name, command in raw:
+            print(f"  {workflow_name}: {command}", file=sys.stderr)
+        print(
+            "\nMake it a make target the workflow calls (and the gate, unless "
+            "EXEMPT says why not), or add its exact text to RAW_VERIFIERS WITH "
+            "a reason.",
+            file=sys.stderr,
+        )
+        return 1
 
     if missing:
         print("local gate does not run what CI runs:", file=sys.stderr)

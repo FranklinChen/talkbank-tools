@@ -444,7 +444,7 @@ def test_worker_error_kinds_match_rust() -> None:
 
     import batchalign_core
 
-    stub = ROOT / "stubs" / "batchalign_core" / "__init__.pyi"
+    stub = ROOT / "stubs" / "batchalign_core" / "batchalign_core.pyi"
     tree = ast.parse(stub.read_text())
     literal = next(
         node.value

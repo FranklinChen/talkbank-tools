@@ -170,18 +170,18 @@ jobs:
           test ! -e batchalign/serve/app.py
           test ! -e batchalign/serve/job_store.py
       - name: Verify runtime constants
-        run: uv run --no-sync python scripts/check_runtime_drift.py
+        run: make batchalign-runtime-check
       - name: Verify IPC schema matches the Rust types
         # The schema is generated from the Rust types and committed. Nothing
         # ran this before, so a schema stale against its own source could sit
         # in the tree indefinitely; the conformance test reads the SCHEMA, so a
         # stale one silently checks Python against yesterday's contract.
         #
-        # Through `uv run`, so the check uses the binary bundled in the
-        # wheel this job already installed. A bare `cargo run` would compile
+        # The make target, with the binary bundled in the wheel this job
+        # already installed. Without BATCHALIGN_BIN the target would compile
         # the crate again in the debug profile, which is the cost the CI
         # hygiene step above was rewritten to avoid.
-        run: uv run --no-sync batchalign3 ipc-schema --check --output ipc-schema/
+        run: BATCHALIGN_BIN="$PWD/.venv/bin/batchalign3" make batchalign-ipc-schema-check
       - name: Ruff lint and format check
         # The make target, not the two commands, so this job and the pre-push
         # hook cannot disagree about what ruff runs. Config lives in
@@ -194,7 +194,15 @@ jobs:
         # invisible to it.
         run: make batchalign-lint-python-source
       - name: Strict mypy
-        run: uv run --no-sync mypy
+        # The make target, which the local gate also runs. This step was a raw
+        # `uv run mypy`, invisible to scripts/check_push_gate_sync.py, which is
+        # how a stub missing a new PyO3 function passed the gate and failed
+        # here on 2026-10-21. The checker now refuses a raw verifier step.
+        run: make batchalign-typecheck-python-source
+      - name: Stub matches the built extension
+        # mypy trusts stubs/batchalign_core; this proves the stub against the
+        # wheel this job installed.
+        run: make batchalign-stubtest
 
   generated-artifacts:
     name: Generated Artifacts

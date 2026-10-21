@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-10-15 15:45 EDT
+**Last updated:** 2026-10-21 17:09 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -329,14 +329,22 @@ cargo test --manifest-path crates/batchalign-pyo3/Cargo.toml
 Run the current mypy gate before every commit:
 
 ```bash
-uv run mypy --platform linux     # mypy for Linux (what GitHub CI runs on)
-uv run mypy --platform darwin    # and for macOS; the gate runs both
-make batchalign-typecheck-python  # mypy under the batchalign- target group used by CI
+make batchalign-typecheck-python-source  # strict mypy, Linux and macOS: what the gate and CI run
+make batchalign-stubtest          # the batchalign_core stub against the built extension
 make lint-affected                # affected-Rust clippy + affected Python mypy
 ```
 
-Strictness lives in `mypy.ini`, and CI runs the same repo-native
-command shape. The per-module exemptions there are enumerated rather than
+Strictness lives in `mypy.ini`, and the gate and CI both run
+`make batchalign-typecheck-python-source`, the one owner of the command. It
+needs no wheel: mypy reads the extension's types from the hand-written
+`stubs/batchalign_core/` (`mypy_path = stubs`), never from the installed
+package. That is why `make batchalign-stubtest` exists. It imports the built
+extension and fails on any difference from the stub: a registered function or
+class the stub lacks, a name only the stub has, a differing parameter, or an
+`__all__` that disagrees. Adding a `#[pyfunction]` therefore means adding its
+stub entry, which `make batchalign-test-python` and CI both check. Stub-only
+names (a type alias that exists only for mypy) go in
+`stubs/batchalign_core/stubtest-allowlist.txt` with their reason. The per-module exemptions there are enumerated rather than
 wildcards, so a module nobody listed is checked by default; adding a new
 module needs no entry, and removing an existing entry, with its recorded error
 count, is the unit of work.

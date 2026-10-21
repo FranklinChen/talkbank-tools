@@ -42,9 +42,10 @@ if TYPE_CHECKING:
     # failure) or ``invalid_request`` (the request was refused as sent).
     # Required on the wire. Spelled once, in the extension's stub, against
     # Rust's own list (``batchalign_core.WORKER_ERROR_KINDS``).
+    from batchalign_core.batchalign_core import WorkerErrorKind
+
     from batchalign.inference._domain_types import TcpPort
     from batchalign.worker._registry import WorkerRegistryEntry
-    from batchalign_core import WorkerErrorKind
 
 from batchalign.worker._protocol_ops import (
     PendingProtocolRequest,

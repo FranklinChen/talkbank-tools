@@ -53,7 +53,12 @@ class CoverageEvidenceTests(unittest.TestCase):
                 "on:\n  push:\njobs:\n  test:\n    run: make missing\n"
             )
             with patch.multiple(
-                checker, GATE=gate, MAKEFILE=makefile, WORKFLOWS=workflows, EXEMPT={}
+                checker,
+                GATE=gate,
+                MAKEFILE=makefile,
+                WORKFLOWS=workflows,
+                EXEMPT={},
+                RAW_VERIFIERS={},
             ):
                 with contextlib.redirect_stderr(io.StringIO()) as errors:
                     self.assertEqual(checker.main(), 1)
@@ -87,6 +92,101 @@ class CoverageEvidenceTests(unittest.TestCase):
                 "# make commented\n"
             ),
             {"lint-shell", "schema", "_python", "rust"},
+        )
+
+    def test_raw_verifier_step_is_refused(self):
+        """The step that let a stale stub reach main on 2026-10-21."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate = root / "gate.sh"
+            makefile = root / "Makefile"
+            workflows = root / "workflows"
+            workflows.mkdir()
+            gate.write_text("make typecheck\n")
+            makefile.write_text("typecheck:\n\tuv run --no-sync mypy\n")
+            workflow = workflows / "python.yml"
+            workflow.write_text(
+                "on:\n  push:\njobs:\n  types:\n    steps:\n"
+                "      - name: Strict mypy\n"
+                "        run: uv run --no-sync mypy\n"
+            )
+            with patch.multiple(
+                checker,
+                GATE=gate,
+                MAKEFILE=makefile,
+                WORKFLOWS=workflows,
+                EXEMPT={},
+                RAW_VERIFIERS={},
+            ):
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(checker.main(), 1)
+                self.assertIn("python.yml: uv run --no-sync mypy", errors.getvalue())
+                workflow.write_text(
+                    workflow.read_text().replace(
+                        "uv run --no-sync mypy", "make typecheck"
+                    )
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(checker.main(), 0)
+
+    def test_stale_raw_verifier_exemption_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate = root / "gate.sh"
+            makefile = root / "Makefile"
+            workflows = root / "workflows"
+            workflows.mkdir()
+            gate.write_text("make root\n")
+            makefile.write_text("root:\n")
+            (workflows / "ci.yml").write_text(
+                "on:\n  push:\njobs:\n  test:\n    run: make root\n"
+            )
+            gone = {"pytest gone": checker.HookExemption("was here once")}
+            with patch.multiple(
+                checker,
+                GATE=gate,
+                MAKEFILE=makefile,
+                WORKFLOWS=workflows,
+                EXEMPT={},
+                RAW_VERIFIERS=gone,
+            ):
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(checker.main(), 1)
+                self.assertIn("pytest gone", errors.getvalue())
+
+    def test_verifiers_are_found_by_the_program_invoked(self):
+        for command, verifies in [
+            ("uv run --no-sync mypy", True),
+            ("uv run --no-sync python -m pytest batchalign", True),
+            ("python3 -m unittest scripts/test_x.py", True),
+            ("cargo test -p crate", True),
+            ("cargo build -p crate", False),
+            ("mdbook test", True),
+            ("mdbook build", False),
+            ("uv run --no-sync batchalign3 ipc-schema --check --output x/", True),
+            ("uv run --no-sync python scripts/check_runtime_drift.py", True),
+            ('curl -fsSL "https://x/shellcheck.tar.xz" -o shellcheck.tar.xz', False),
+            ('sudo install "shellcheck-1/shellcheck" /usr/local/bin/shellcheck', False),
+            ("SERVER=1 ./target/debug/batchalign3 serve start", False),
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(checker.is_verifier(command), verifies)
+
+    def test_run_blocks_skip_heredoc_bodies_and_comments(self):
+        text = (
+            "    steps:\n"
+            "      - run: uv run --no-sync mypy\n"
+            "      - run: |\n"
+            "          # pytest in a comment\n"
+            "          python3 - <<'PY'\n"
+            "          import pytest\n"
+            "          PY\n"
+            "          cargo test -p x\n"
+            "      - name: next\n"
+        )
+        self.assertEqual(
+            checker.run_commands(text),
+            ["uv run --no-sync mypy", "python3 - <<'PY'", "cargo test -p x"],
         )
 
     def test_prerequisite_cycle_terminates(self):
