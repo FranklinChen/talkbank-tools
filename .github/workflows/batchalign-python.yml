@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: "3.13"
@@ -96,7 +96,7 @@ jobs:
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -118,9 +118,14 @@ jobs:
     needs: build-wheel
     runs-on: ubuntu-latest
     steps:
-      - uses: astral-sh/setup-uv@v10.2.0
+      # No checkout: the job installs the built wheel into a clean tool
+      # environment, so there is no lockfile to key a cache on and the
+      # working directory is empty on purpose.
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.13"
+          enable-cache: false
+          ignore-empty-workdir: true
       - uses: actions/download-artifact@v8
         with:
           name: wheel
@@ -143,7 +148,7 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: "3.13"
@@ -235,7 +240,7 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: "3.13"
@@ -291,7 +296,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
           sudo rm -rf /usr/local/lib/android /usr/share/swift
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: "3.13"
@@ -382,7 +387,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
           sudo rm -rf /usr/local/lib/android /usr/share/swift
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           python-version: "3.13"
