@@ -1707,6 +1707,7 @@ impl PostValidated {
 mod tests {
     use super::*;
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
+    use talkbank_model::Location;
     use talkbank_model::model::Line;
 
     /// A minimal fully valid CHAT file with a terminator.
@@ -2034,7 +2035,7 @@ mod tests {
         for line in &mut file.lines {
             if let Line::Utterance(utt) = line {
                 utt.main.content.content = TierContentItems::new(vec![UtteranceContent::Word(
-                    Box::new(Word::simple("F B I")),
+                    Box::new(Word::simple(Location::Unlocated, "F B I")),
                 )]);
             }
         }
@@ -2080,8 +2081,8 @@ mod tests {
         for line in &mut file.lines {
             if let Line::Utterance(utt) = line {
                 utt.main.content.content = TierContentItems::new(vec![
-                    UtteranceContent::Word(Box::new(Word::simple("hello"))),
-                    UtteranceContent::Word(Box::new(Word::simple("b2"))),
+                    UtteranceContent::Word(Box::new(Word::simple(Location::Unlocated, "hello"))),
+                    UtteranceContent::Word(Box::new(Word::simple(Location::Unlocated, "b2"))),
                 ]);
             }
         }
@@ -2203,7 +2204,12 @@ mod tests {
                 utt.main.content.content = TierContentItems::new(
                     ["F", "B", "I", "b2"]
                         .into_iter()
-                        .map(|word| UtteranceContent::Word(Box::new(Word::simple(word))))
+                        .map(|word| {
+                            UtteranceContent::Word(Box::new(Word::simple(
+                                Location::Unlocated,
+                                word,
+                            )))
+                        })
                         .collect(),
                 );
             }

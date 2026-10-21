@@ -1211,7 +1211,11 @@ pub fn update_utterance_bullet_with_boundary_policy(
                 (_, None) => (word_start, word_end),
             };
         // The resulting bullet is authoritative (FA-derived).
-        utterance.main.content.bullet = Some(Bullet::new(final_start, final_end));
+        utterance.main.content.bullet = Some(Bullet::new(
+            talkbank_model::Location::Unlocated,
+            final_start,
+            final_end,
+        ));
     }
     // If no word timings: leave existing bullet unchanged, UNLESS it is
     // zero-duration (start >= end), which is an invalid timing that would

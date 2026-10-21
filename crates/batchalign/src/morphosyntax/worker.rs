@@ -516,13 +516,15 @@ fn compute_chunk_count(item_count: usize, max_workers: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use talkbank_model::Span;
+    use talkbank_model::Location;
     use talkbank_model::Terminator;
 
     fn batch_item(lang: &str) -> MorphosyntaxBatchItem {
         MorphosyntaxBatchItem::new(
             Vec::new(),
-            Terminator::Period { span: Span::DUMMY },
+            Terminator::Period {
+                location: Location::Unlocated,
+            },
             talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
         )
     }

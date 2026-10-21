@@ -134,12 +134,20 @@ fn a_kept_diary_bullet_is_restored_after_ordering_and_orders_nothing() {
             // `exact` keeps an unbulleted utterance unbulleted: give the
             // spoken one a bullet of its own so both policies time it.
             get_test_utterance(&mut chat, 2).main.content.bullet =
-                Some(talkbank_model::model::Bullet::new(3_400, 4_600));
+                Some(talkbank_model::model::Bullet::new(
+                    talkbank_model::Location::Unlocated,
+                    3_400,
+                    4_600,
+                ));
         }
         let keep = if let MainBulletPolicy::KeepExact = policy {
             let mut given = input.clone();
             get_test_utterance(&mut given, 2).main.content.bullet =
-                Some(talkbank_model::model::Bullet::new(3_400, 4_600));
+                Some(talkbank_model::model::Bullet::new(
+                    talkbank_model::Location::Unlocated,
+                    3_400,
+                    4_600,
+                ));
             bound_projection(&given, EndOverlapPolicy::ClampAllAdjacent, policy)
         } else {
             keep

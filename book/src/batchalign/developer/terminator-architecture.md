@@ -75,12 +75,12 @@ variant.
 ```rust,ignore
 pub struct TierContent {
     pub linkers: Linkers,
-    pub language_code: Option<LanguageCode>,
+    pub language_code: Option<LanguagePrecode>,
     pub content: TierItems,           // words, separators, groups, etc.
     pub terminator: Option<Terminator>,  // <-- HERE
     pub postcodes: Vec<Postcode>,
     pub bullet: Option<Bullet>,       // terminal utterance-level bullet
-    pub span: Span,
+    pub location: Location,
 }
 ```
 
@@ -207,7 +207,7 @@ created from ASR will have periods that should not exist.
 When splitting an utterance into multiple, every split gets a hardcoded Period:
 
 ```rust,ignore
-Terminator::Period { span: Span::DUMMY }
+Terminator::Period { location: Location::Unlocated }
 ```
 
 **Impact:** Running utseg on a CA transcript destroys the original
@@ -220,7 +220,7 @@ terminator-less structure.
 Infers terminator from the last word text. Default is Period:
 
 ```rust,ignore
-_ => Terminator::Period { span: Span::DUMMY }
+_ => Terminator::Period { location: Location::Unlocated }
 ```
 
 **Impact:** All build-from-ASR paths produce Period terminators.

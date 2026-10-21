@@ -602,7 +602,12 @@ mod tests {
                 utt.main.content.content = TierContentItems::new(
                     ["F", "B", "I", "said", "b2"]
                         .into_iter()
-                        .map(|word| UtteranceContent::Word(Box::new(Word::simple(word))))
+                        .map(|word| {
+                            UtteranceContent::Word(Box::new(Word::simple(
+                                talkbank_model::Location::Unlocated,
+                                word,
+                            )))
+                        })
                         .collect(),
                 );
             }

@@ -239,7 +239,11 @@ mod helper_self_tests {
                 _ => None,
             });
         utterances.next().unwrap().main.content.bullet = None;
-        utterances.next().unwrap().main.content.bullet = Some(Bullet::new(20_000, 21_000));
+        utterances.next().unwrap().main.content.bullet = Some(Bullet::new(
+            talkbank_model::Location::Unlocated,
+            20_000,
+            21_000,
+        ));
         let observation = DriftObservation::observe(&chat, &expected, result, Vec::new());
         assert_eq!(observation.violations().len(), 1);
         assert!(observation.summary().contains(
@@ -279,7 +283,8 @@ mod helper_self_tests {
         for line in chat.lines.as_mut_slice().iter_mut() {
             if let Line::Utterance(utt) = line {
                 if let Some((s, e)) = bullets[utt_i] {
-                    utt.main.content.bullet = Some(Bullet::new(s, e));
+                    utt.main.content.bullet =
+                        Some(Bullet::new(talkbank_model::Location::Unlocated, s, e));
                 }
                 utt_i += 1;
                 if utt_i == 3 {

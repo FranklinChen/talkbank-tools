@@ -1,5 +1,5 @@
 use super::BuildChatError;
-use talkbank_model::Span;
+use talkbank_model::Location;
 use talkbank_model::model::{
     BracketedContent, BracketedItem, DependentTier, LanguageCode, Line, Retrace, RetraceKind,
     Separator, Terminator, Utterance, UtteranceContent, Word,
@@ -59,7 +59,10 @@ fn apply_utterance_language_override(
                 code: utterance_lang.to_string(),
                 source,
             })?;
-        utterance.main.content.language_code = Some(code);
+        utterance.main.content.language_code = Some(talkbank_model::model::LanguagePrecode::new(
+            Location::Unlocated,
+            code,
+        ));
     }
     Ok(())
 }
@@ -68,9 +71,15 @@ fn apply_utterance_language_override(
 /// return the corresponding [`Separator`] model type. Otherwise return `None`.
 pub fn tag_marker_separator(text: &str) -> Option<Separator> {
     match text {
-        "," => Some(Separator::Comma { span: Span::DUMMY }),
-        "\u{201E}" => Some(Separator::Tag { span: Span::DUMMY }),
-        "\u{2021}" => Some(Separator::Vocative { span: Span::DUMMY }),
+        "," => Some(Separator::Comma {
+            location: Location::Unlocated,
+        }),
+        "\u{201E}" => Some(Separator::Tag {
+            location: Location::Unlocated,
+        }),
+        "\u{2021}" => Some(Separator::Vocative {
+            location: Location::Unlocated,
+        }),
         _ => None,
     }
 }
@@ -209,8 +218,11 @@ fn build_word_utterance(
     let mut span = UtteranceSpan::default();
 
     let last_text = words.last().map(|word| word.text.as_str()).unwrap_or(".");
-    let terminator = Terminator::try_from_chat_str(last_text)
-        .unwrap_or(Terminator::Period { span: Span::DUMMY });
+    let terminator = Terminator::try_from_chat_str(Location::Unlocated, last_text).unwrap_or(
+        Terminator::Period {
+            location: Location::Unlocated,
+        },
+    );
 
     let mut index = 0;
     while index < words.len() {
@@ -247,7 +259,12 @@ fn build_word_utterance(
         return Ok(None);
     }
 
-    let mut main = talkbank_model::model::MainTier::new(speaker, content, terminator);
+    let mut main = talkbank_model::model::MainTier::new(
+        talkbank_model::model::MainTierLocations::UNLOCATED,
+        speaker,
+        content,
+        terminator,
+    );
     // The utterance bullet covers every timed word: positive by construction.
     if let UtteranceSpan(Some(interval)) = span {
         main = main.with_bullet(interval.bullet());
@@ -305,7 +322,12 @@ fn push_retrace_content(parsed: Vec<Word>, content: &mut Vec<UtteranceContent>) 
     if parsed.len() == 1 || all_same_text {
         for word in parsed {
             let bracketed = BracketedContent::new(vec![BracketedItem::Word(Box::new(word))]);
-            let retrace = Retrace::new(bracketed, RetraceKind::Partial);
+            let retrace = Retrace::new(
+                Location::Unlocated,
+                Location::Unlocated,
+                bracketed,
+                RetraceKind::Partial,
+            );
             content.push(UtteranceContent::Retrace(Box::new(retrace)));
         }
         return;
@@ -316,6 +338,12 @@ fn push_retrace_content(parsed: Vec<Word>, content: &mut Vec<UtteranceContent>) 
         .map(|word| BracketedItem::Word(Box::new(word)))
         .collect();
     let bracketed = BracketedContent::new(items);
-    let retrace = Retrace::new(bracketed, RetraceKind::Partial).as_group();
+    let retrace = Retrace::new(
+        Location::Unlocated,
+        Location::Unlocated,
+        bracketed,
+        RetraceKind::Partial,
+    )
+    .as_group();
     content.push(UtteranceContent::Retrace(Box::new(retrace)));
 }

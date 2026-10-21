@@ -167,7 +167,7 @@ impl std::fmt::Display for MissingSpeakerEvidence {
 /// not invalid submitted CHAT or permission to write an untimed result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingTimingRegenerationEvidence {
-    header_span: talkbank_model::Span,
+    header_location: talkbank_model::Location,
     origin: TimingObligationOrigin,
     reason: TimingRegenerationFailure,
 }
@@ -255,8 +255,8 @@ enum TimingRegenerationFailure {
 
 impl MissingTimingRegenerationEvidence {
     /// Location of the source declaration whose obligation remains outstanding.
-    pub fn header_span(&self) -> talkbank_model::Span {
-        self.header_span
+    pub fn header_location(&self) -> talkbank_model::Location {
+        self.header_location
     }
 
     /// Only a checked pending source and an actually refused empty grouping
@@ -280,14 +280,14 @@ impl MissingTimingRegenerationEvidence {
             .iter()
             .find_map(|decision| match &decision.strategy {
                 DecisionStrategy::Fa(FaStrategy::LocalizationUnavailable) => Some(Self {
-                    header_span: outstanding.header_span(),
+                    header_location: outstanding.header_location(),
                     origin: outstanding.origin(),
                     reason: TimingRegenerationFailure::LocalizationUnavailable {
                         line_idx: decision.line_idx,
                     },
                 }),
                 DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => Some(Self {
-                    header_span: outstanding.header_span(),
+                    header_location: outstanding.header_location(),
                     origin: outstanding.origin(),
                     reason: TimingRegenerationFailure::NoRequest {
                         line_idx: decision.line_idx,
@@ -309,7 +309,7 @@ impl MissingTimingRegenerationEvidence {
             talkbank_model::model::TranscriptTimingEvidence::Absent
         )
         .then(|| Self {
-            header_span: outstanding.header_span(),
+            header_location: outstanding.header_location(),
             origin: outstanding.origin(),
             reason: TimingRegenerationFailure::NoRestoredTiming,
         })

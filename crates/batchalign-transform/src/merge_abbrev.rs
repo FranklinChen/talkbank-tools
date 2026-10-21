@@ -96,7 +96,10 @@ fn merge_in_content_items(items: &mut Vec<UtteranceContent>) {
                     .collect();
                 if ABBREV.contains(&candidate) {
                     let merged_text: String = letters[j..j + len].concat();
-                    result.push(UtteranceContent::Word(Box::new(Word::simple(merged_text))));
+                    result.push(UtteranceContent::Word(Box::new(Word::simple(
+                        talkbank_model::Location::Unlocated,
+                        merged_text,
+                    ))));
                     j += len;
                     matched = true;
                     break;

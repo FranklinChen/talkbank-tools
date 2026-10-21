@@ -526,7 +526,7 @@ fn refuse_detected_languages(
             && let Some(code) = &utterance.main.content.language_code
         {
             return Err(UtsegReplayRefusal::CodeSwitchPrecode {
-                code: code.as_str().to_owned(),
+                code: code.code.as_str().to_owned(),
             });
         }
     }

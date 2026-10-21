@@ -422,7 +422,7 @@ mod tests {
     fn planned_span_carries_the_positions_terminator() {
         let def = make_deferred(5, 1, "spa", "obj", Some(0), "camino").with_terminator(
             talkbank_model::Terminator::Question {
-                span: talkbank_model::Span::DUMMY,
+                location: talkbank_model::Location::Unlocated,
             },
         );
 

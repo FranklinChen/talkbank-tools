@@ -357,9 +357,13 @@ fn apply_media_header_from_main(
         .iter()
         .position(|line| matches!(line, Line::Utterance(_)))
         .unwrap_or(gold_file.lines.len());
-    gold_file
-        .lines
-        .insert(insert_at, Line::header(Header::Media((*media).clone())));
+    gold_file.lines.insert(
+        insert_at,
+        Line::header(
+            talkbank_model::Location::Unlocated,
+            Header::Media((*media).clone()),
+        ),
+    );
 }
 
 /// Process a single CHAT file through the compare pipeline.

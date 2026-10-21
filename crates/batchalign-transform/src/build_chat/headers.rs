@@ -1,4 +1,5 @@
 use std::path::Path;
+use talkbank_model::Location;
 
 use indexmap::IndexMap;
 use talkbank_model::model::{
@@ -17,22 +18,31 @@ pub(super) fn build_header_lines(
     let participant_entries = build_participant_entries(desc);
     let id_headers = build_id_headers(desc, langs);
     let mut lines: Vec<Line> = vec![
-        Line::header(Header::Utf8),
-        Line::header(Header::Begin),
-        Line::header(Header::Languages {
-            codes: LanguageCodes::new(langs.to_vec()),
-        }),
-        Line::header(Header::Participants {
-            entries: ParticipantEntries::new(participant_entries),
-        }),
+        Line::header(Location::Unlocated, Header::Utf8),
+        Line::header(Location::Unlocated, Header::Begin),
+        Line::header(
+            Location::Unlocated,
+            Header::Languages {
+                codes: LanguageCodes::new(langs.to_vec()),
+            },
+        ),
+        Line::header(
+            Location::Unlocated,
+            Header::Participants {
+                entries: ParticipantEntries::new(participant_entries),
+            },
+        ),
     ];
 
     for id in id_headers {
-        lines.push(Line::header(Header::ID(id)));
+        lines.push(Line::header(Location::Unlocated, Header::ID(id)));
     }
 
     if let Some(media_header) = build_media_header(desc)? {
-        lines.push(Line::header(Header::Media(media_header)));
+        lines.push(Line::header(
+            Location::Unlocated,
+            Header::Media(media_header),
+        ));
     }
 
     Ok(lines)

@@ -242,9 +242,12 @@ impl<'source> MappedDiarizeSource<'source> {
             let position = crate::provenance::insert_pos_after_constant_headers(&output);
             output.lines.insert(
                 position,
-                Line::header(Header::Comment {
-                    content: crate::chat_ops::BulletContent::from_text(text),
-                }),
+                Line::header(
+                    talkbank_model::Location::Unlocated,
+                    Header::Comment {
+                        content: crate::chat_ops::BulletContent::from_text(text),
+                    },
+                ),
             );
         }
         Ok(PostValidated::gate_owned(output, ReleasedCommand::Diarize)?)

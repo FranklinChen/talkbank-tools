@@ -37,7 +37,6 @@ pub use cache_key::{CacheKey, CacheTaskName};
 // Re-export talkbank_model types commonly needed by downstream crates
 // (e.g. batchalign-server) that shouldn't depend on talkbank_model directly.
 pub use talkbank_model::ParseError;
-pub use talkbank_model::Span;
 pub use talkbank_model::alignment::helpers::TierDomain;
 pub use talkbank_model::header::Header;
 pub use talkbank_model::model::BulletContent;

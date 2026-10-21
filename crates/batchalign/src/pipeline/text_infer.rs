@@ -988,7 +988,12 @@ mod tests {
                     utterance.main.content.content = TierContentItems::new(
                         ["we", "took", "b2", "there"]
                             .into_iter()
-                            .map(|word| UtteranceContent::Word(Box::new(Word::simple(word))))
+                            .map(|word| {
+                                UtteranceContent::Word(Box::new(Word::simple(
+                                    talkbank_model::Location::Unlocated,
+                                    word,
+                                )))
+                            })
                             .collect(),
                     );
                 }
@@ -1066,7 +1071,10 @@ mod tests {
                                 ["the", "c3", "ball"]
                                     .into_iter()
                                     .map(|word| {
-                                        UtteranceContent::Word(Box::new(Word::simple(word)))
+                                        UtteranceContent::Word(Box::new(Word::simple(
+                                            talkbank_model::Location::Unlocated,
+                                            word,
+                                        )))
                                     })
                                     .collect(),
                             );

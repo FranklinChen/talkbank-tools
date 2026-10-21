@@ -793,7 +793,8 @@ fn test_postprocess_does_not_clamp_word_timings_to_utr_hint_bullet() {
         walk_words_mut(utt.main.content.content.as_mut_slice(), None, &mut |leaf| {
             if let WordItemMut::Word(w) = leaf {
                 if let Some(Some((s, e))) = timings.get(idx) {
-                    w.inline_bullet = Some(Bullet::new(*s, *e));
+                    w.inline_bullet =
+                        Some(Bullet::new(talkbank_model::Location::Unlocated, *s, *e));
                 }
                 idx += 1;
             }
@@ -890,7 +891,8 @@ fn test_postprocess_does_not_clamp_word_timings_on_first_time_alignment_no_wor()
         walk_words_mut(utt.main.content.content.as_mut_slice(), None, &mut |leaf| {
             if let WordItemMut::Word(w) = leaf {
                 if let Some(Some((s, e))) = timings.get(idx) {
-                    w.inline_bullet = Some(Bullet::new(*s, *e));
+                    w.inline_bullet =
+                        Some(Bullet::new(talkbank_model::Location::Unlocated, *s, *e));
                 }
                 idx += 1;
             }

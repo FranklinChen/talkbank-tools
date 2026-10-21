@@ -3,6 +3,7 @@
 use super::*;
 use crate::chat_ops::fa::coordinates::Ms;
 use crate::chat_ops::fa::origin::{EngineId, Origin};
+use talkbank_model::Location;
 use talkbank_model::model::Bullet;
 
 #[test]
@@ -151,7 +152,7 @@ fn onset_end_boundary_controls_preserve_fallback_and_review_evidence() {
         },
         Control {
             name: "long provisional UTR hint",
-            bullet: Some(Bullet::utr_hint(0, 7000)),
+            bullet: Some(Bullet::utr_hint(Location::Unlocated, 0, 7000)),
             policy: onset,
             origin: fallback(),
             expected_end: 2760,
@@ -159,7 +160,7 @@ fn onset_end_boundary_controls_preserve_fallback_and_review_evidence() {
         },
         Control {
             name: "short provisional UTR hint",
-            bullet: Some(Bullet::utr_hint(0, 2300)),
+            bullet: Some(Bullet::utr_hint(Location::Unlocated, 0, 2300)),
             policy: onset,
             origin: fallback(),
             expected_end: 2760,
@@ -167,7 +168,7 @@ fn onset_end_boundary_controls_preserve_fallback_and_review_evidence() {
         },
         Control {
             name: "retained transcript boundary",
-            bullet: Some(Bullet::new(0, 7000)),
+            bullet: Some(Bullet::new(Location::Unlocated, 0, 7000)),
             policy: onset,
             origin: fallback(),
             expected_end: 7000,
@@ -175,7 +176,7 @@ fn onset_end_boundary_controls_preserve_fallback_and_review_evidence() {
         },
         Control {
             name: "measured end",
-            bullet: Some(Bullet::new(0, 7000)),
+            bullet: Some(Bullet::new(Location::Unlocated, 0, 7000)),
             policy: WordEndPolicy::measured(WordGapHealing::Heal),
             origin: Origin::EngineMeasured {
                 engine: EngineId::new("whisper_fa"),
@@ -185,7 +186,7 @@ fn onset_end_boundary_controls_preserve_fallback_and_review_evidence() {
         },
         Control {
             name: "preserved onset fallback",
-            bullet: Some(Bullet::new(0, 7000)),
+            bullet: Some(Bullet::new(Location::Unlocated, 0, 7000)),
             policy: WordEndPolicy::onset_only(WordGapHealing::PreserveMeasured),
             origin: fallback(),
             expected_end: 2760,

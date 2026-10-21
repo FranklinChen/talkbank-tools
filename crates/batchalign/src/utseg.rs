@@ -510,9 +510,12 @@ pub(crate) fn apply_utseg_document(
         let insert_pos = crate::provenance::insert_pos_after_constant_headers(chat_file);
         chat_file.lines.insert(
             insert_pos,
-            talkbank_model::model::Line::header(talkbank_model::model::Header::Comment {
-                content: crate::chat_ops::BulletContent::from_text(text),
-            }),
+            talkbank_model::model::Line::header(
+                talkbank_model::Location::Unlocated,
+                talkbank_model::model::Header::Comment {
+                    content: crate::chat_ops::BulletContent::from_text(text),
+                },
+            ),
         );
     }
     Ok(layout)

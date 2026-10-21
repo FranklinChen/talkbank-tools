@@ -246,7 +246,11 @@ impl WordTiming {
     /// word timing only. Every FA site that writes a word bullet (injection,
     /// timing post-processing, the bound clamp) goes through here.
     pub(super) fn bullet(&self) -> Bullet {
-        Bullet::new(self.start_ms, self.end_ms)
+        Bullet::new(
+            talkbank_model::Location::Unlocated,
+            self.start_ms,
+            self.end_ms,
+        )
     }
 }
 

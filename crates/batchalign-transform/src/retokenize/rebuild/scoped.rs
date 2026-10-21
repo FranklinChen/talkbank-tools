@@ -187,23 +187,27 @@ pub(super) fn rebuild_annotated_word(
     if excluded_from_mor(&annotated.scoped_annotations) {
         return RebuiltScopedWord::Word(Box::new(annotated));
     }
+    // The rebuilt construct stands where the original word stood, so it keeps
+    // the original's location.
     let Annotated {
         inner,
         scoped_annotations,
-        span,
+        location,
     } = annotated;
     let expansion = expand_word(inner, ctx);
     if expansion.rest.is_empty() {
-        RebuiltScopedWord::Word(Box::new(
-            Annotated::new(expansion.first, scoped_annotations).with_span(span),
-        ))
+        RebuiltScopedWord::Word(Box::new(Annotated::new(
+            location,
+            expansion.first,
+            scoped_annotations,
+        )))
     } else {
         let items = std::iter::once(expansion.first)
             .chain(expansion.rest)
             .map(|word| BracketedItem::Word(Box::new(word)))
             .collect();
-        let group = Group::new(BracketedContent::new(items)).with_span(span);
-        RebuiltScopedWord::Group(Annotated::new(group, scoped_annotations).with_span(span))
+        let group = Group::new(location, BracketedContent::new(items));
+        RebuiltScopedWord::Group(Annotated::new(location, group, scoped_annotations))
     }
 }
 
@@ -324,9 +328,12 @@ mod tests {
     #[test]
     fn a_different_source_word_cannot_acquire_the_expansion() {
         with_context(|_word, mut ctx| {
-            let refusal = AdmittedExpansion::admit(&Word::simple("dog"), &mut ctx)
-                .err()
-                .expect("refusal");
+            let refusal = AdmittedExpansion::admit(
+                &Word::simple(talkbank_model::Location::Unlocated, "dog"),
+                &mut ctx,
+            )
+            .err()
+            .expect("refusal");
             assert!(matches!(refusal, ExpansionRefusal::WrongSource));
             assert_eq!(ctx.mor_cursor, 0);
             assert!(ctx.emitted_tokens.is_empty());

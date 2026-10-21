@@ -27,7 +27,7 @@ use crate::decisions::LineIdx;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use talkbank_model::Span;
+use talkbank_model::Location;
 use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::{
     ChatFile, DependentTier, Line, NonEmptyString, UserDefinedDependentTier,
@@ -374,7 +374,7 @@ pub fn inject_coref(
     let new_tier = DependentTier::UserDefined(UserDefinedDependentTier {
         label,
         content: Some(content),
-        span: Span::DUMMY,
+        location: Location::Unlocated,
     });
 
     crate::inject::replace_or_add_tier(&mut utterance.dependent_tiers, new_tier);

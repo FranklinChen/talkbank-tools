@@ -74,6 +74,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use talkbank_model::Location;
 
 use crate::api::{
     InvalidStampSafeText, LanguageCode3, ReleasedCommand, ReportedEngineName, StampJoiner,
@@ -830,9 +831,12 @@ pub fn inject_provenance(file: &mut ChatFile, comment: &ProvenanceComment) {
 
     file.lines.insert(
         insert_pos,
-        Line::header(Header::Comment {
-            content: bullet_content,
-        }),
+        Line::header(
+            Location::Unlocated,
+            Header::Comment {
+                content: bullet_content,
+            },
+        ),
     );
 }
 
@@ -1021,9 +1025,12 @@ pub(crate) fn finish_incremental_morphotag_provenance(
                 let position = insert_pos_after_constant_headers(destination);
                 destination.lines.insert(
                     position,
-                    Line::header(Header::Comment {
-                        content: crate::chat_ops::BulletContent::from_text(stamp.format()),
-                    }),
+                    Line::header(
+                        Location::Unlocated,
+                        Header::Comment {
+                            content: crate::chat_ops::BulletContent::from_text(stamp.format()),
+                        },
+                    ),
                 );
             }
             MorphologyProvenanceReport::Incomplete(cause)
@@ -1423,9 +1430,12 @@ pub(crate) fn inject_unchecked_warning(file: &mut ChatFile, asr: &AsrIdentity) {
 
     file.lines.insert(
         insert_pos,
-        Line::header(Header::Comment {
-            content: bullet_content,
-        }),
+        Line::header(
+            Location::Unlocated,
+            Header::Comment {
+                content: bullet_content,
+            },
+        ),
     );
 }
 

@@ -161,7 +161,7 @@ impl L2DeferredPosition {
             primary,
             word: crate::parsed_word_text_cleaned(word),
             terminator: talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
+                location: talkbank_model::Location::Unlocated,
             },
         }
     }

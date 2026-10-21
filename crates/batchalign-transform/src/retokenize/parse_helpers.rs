@@ -13,18 +13,18 @@ pub fn try_parse_token_as_utterance_content(
     expected_terminator: Option<&str>,
     diagnostics: &mut Vec<String>,
 ) -> Option<UtteranceContent> {
-    use talkbank_model::Span;
+    use talkbank_model::Location;
     use talkbank_model::model::Separator;
 
     match text {
         "," => Some(UtteranceContent::Separator(Separator::Comma {
-            span: Span::DUMMY,
+            location: Location::Unlocated,
         })),
         "\u{201E}" => Some(UtteranceContent::Separator(Separator::Tag {
-            span: Span::DUMMY,
+            location: Location::Unlocated,
         })),
         "\u{2021}" => Some(UtteranceContent::Separator(Separator::Vocative {
-            span: Span::DUMMY,
+            location: Location::Unlocated,
         })),
         _ => {
             if handle_ending_punct_skip(text, expected_terminator, diagnostics) {
@@ -44,23 +44,23 @@ pub fn try_parse_token_as_bracketed_item(
     expected_terminator: Option<&str>,
     diagnostics: &mut Vec<String>,
 ) -> Option<BracketedItem> {
-    use talkbank_model::Span;
+    use talkbank_model::Location;
     use talkbank_model::model::Separator;
 
     match text {
         "," => {
             return Some(BracketedItem::Separator(Separator::Comma {
-                span: Span::DUMMY,
+                location: Location::Unlocated,
             }));
         }
         "\u{201E}" => {
             return Some(BracketedItem::Separator(Separator::Tag {
-                span: Span::DUMMY,
+                location: Location::Unlocated,
             }));
         }
         "\u{2021}" => {
             return Some(BracketedItem::Separator(Separator::Vocative {
-                span: Span::DUMMY,
+                location: Location::Unlocated,
             }));
         }
         _ => {}

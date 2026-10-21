@@ -130,7 +130,11 @@ impl KeptBullet {
 
     /// The bullet as written back; `Bullet::new` serializes the same pair.
     fn to_bullet(self) -> Bullet {
-        Bullet::new(self.start_ms(), self.end_ms())
+        Bullet::new(
+            talkbank_model::Location::Unlocated,
+            self.start_ms(),
+            self.end_ms(),
+        )
     }
 
     /// Whether the live bullet is exactly this one.

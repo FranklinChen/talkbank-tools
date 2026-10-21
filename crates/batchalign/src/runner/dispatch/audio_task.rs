@@ -569,8 +569,14 @@ mod tests {
             for line in &mut file.lines {
                 if let Line::Utterance(utt) = line {
                     utt.main.content.content = TierContentItems::new(vec![
-                        UtteranceContent::Word(Box::new(Word::simple("hello"))),
-                        UtteranceContent::Word(Box::new(Word::simple("b2"))),
+                        UtteranceContent::Word(Box::new(Word::simple(
+                            talkbank_model::Location::Unlocated,
+                            "hello",
+                        ))),
+                        UtteranceContent::Word(Box::new(Word::simple(
+                            talkbank_model::Location::Unlocated,
+                            "b2",
+                        ))),
                     ]);
                 }
             }

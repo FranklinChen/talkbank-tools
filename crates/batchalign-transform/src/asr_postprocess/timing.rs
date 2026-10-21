@@ -209,7 +209,11 @@ impl PositiveInterval {
 
     /// THE construction of a generated bullet: from a positive interval only.
     pub fn bullet(self) -> talkbank_model::model::Bullet {
-        talkbank_model::model::Bullet::new(self.start_ms, self.end_ms)
+        talkbank_model::model::Bullet::new(
+            talkbank_model::Location::Unlocated,
+            self.start_ms,
+            self.end_ms,
+        )
     }
 }
 

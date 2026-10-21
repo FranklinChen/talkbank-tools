@@ -554,7 +554,10 @@ impl PreparedSession {
                     utterance
                         .dependent_tiers
                         .push(DependentTierEntry::new(DependentTier::Com(
-                            ComTier::from_text(demotion_note(verdict)),
+                            ComTier::from_text(
+                                talkbank_model::Location::Unlocated,
+                                demotion_note(verdict),
+                            ),
                         )));
                     queue.push(queue_entry(&session.0, verdict, outcome));
                 }

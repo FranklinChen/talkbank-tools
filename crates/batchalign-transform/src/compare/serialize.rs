@@ -1,5 +1,5 @@
 use talkbank_model::model::{DependentTier, NonEmptyString, UserDefinedDependentTier};
-use talkbank_model::{Span, WriteChat};
+use talkbank_model::{Location, WriteChat};
 
 use super::model::{CompareStatus, UtteranceComparison};
 
@@ -288,7 +288,7 @@ impl<T: WriteChat> CompareUserDefinedTier<T> {
         Ok(DependentTier::UserDefined(UserDefinedDependentTier {
             label: self.label.into_inner(),
             content: Some(content),
-            span: Span::DUMMY,
+            location: Location::Unlocated,
         }))
     }
 }

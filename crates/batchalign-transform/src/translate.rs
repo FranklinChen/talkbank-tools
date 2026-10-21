@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use talkbank_model::Span;
+use talkbank_model::Location;
 use talkbank_model::model::content::{Separator, Terminator};
 use talkbank_model::model::{
     ChatFile, DependentTier, LanguageCode, Line, NonEmptyString, UserDefinedDependentTier,
@@ -429,7 +429,7 @@ pub fn inject_translation(utterance: &mut Utterance, translation: &TranslationTe
     let new_tier = DependentTier::UserDefined(UserDefinedDependentTier {
         label,
         content: Some(translation.0.clone()),
-        span: Span::DUMMY,
+        location: Location::Unlocated,
     });
 
     crate::inject::replace_or_add_tier(&mut utterance.dependent_tiers, new_tier);
@@ -514,32 +514,64 @@ pub fn extract_translation_strings(
 /// Includes both MOR separators (vocative ‡, tag „, comma ,) and terminators
 /// (. ? ! +... +/. +/? etc.).
 pub fn chat_punct_chars() -> Vec<String> {
-    use talkbank_model::Span;
+    use talkbank_model::Location;
     use talkbank_model::model::content::{Separator, Terminator};
 
     let separators: Vec<String> = vec![
-        Separator::Vocative { span: Span::DUMMY },
-        Separator::Tag { span: Span::DUMMY },
-        Separator::Comma { span: Span::DUMMY },
+        Separator::Vocative {
+            location: Location::Unlocated,
+        },
+        Separator::Tag {
+            location: Location::Unlocated,
+        },
+        Separator::Comma {
+            location: Location::Unlocated,
+        },
     ]
     .into_iter()
     .map(|s| s.to_string())
     .collect();
 
     let terminators: Vec<String> = vec![
-        Terminator::Period { span: Span::DUMMY },
-        Terminator::Question { span: Span::DUMMY },
-        Terminator::Exclamation { span: Span::DUMMY },
-        Terminator::TrailingOff { span: Span::DUMMY },
-        Terminator::Interruption { span: Span::DUMMY },
-        Terminator::SelfInterruption { span: Span::DUMMY },
-        Terminator::InterruptedQuestion { span: Span::DUMMY },
-        Terminator::BrokenQuestion { span: Span::DUMMY },
-        Terminator::QuotedNewLine { span: Span::DUMMY },
-        Terminator::QuotedPeriodSimple { span: Span::DUMMY },
-        Terminator::SelfInterruptedQuestion { span: Span::DUMMY },
-        Terminator::TrailingOffQuestion { span: Span::DUMMY },
-        Terminator::BreakForCoding { span: Span::DUMMY },
+        Terminator::Period {
+            location: Location::Unlocated,
+        },
+        Terminator::Question {
+            location: Location::Unlocated,
+        },
+        Terminator::Exclamation {
+            location: Location::Unlocated,
+        },
+        Terminator::TrailingOff {
+            location: Location::Unlocated,
+        },
+        Terminator::Interruption {
+            location: Location::Unlocated,
+        },
+        Terminator::SelfInterruption {
+            location: Location::Unlocated,
+        },
+        Terminator::InterruptedQuestion {
+            location: Location::Unlocated,
+        },
+        Terminator::BrokenQuestion {
+            location: Location::Unlocated,
+        },
+        Terminator::QuotedNewLine {
+            location: Location::Unlocated,
+        },
+        Terminator::QuotedPeriodSimple {
+            location: Location::Unlocated,
+        },
+        Terminator::SelfInterruptedQuestion {
+            location: Location::Unlocated,
+        },
+        Terminator::TrailingOffQuestion {
+            location: Location::Unlocated,
+        },
+        Terminator::BreakForCoding {
+            location: Location::Unlocated,
+        },
     ]
     .into_iter()
     .map(|t| t.to_string())

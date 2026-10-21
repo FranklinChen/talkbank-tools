@@ -78,14 +78,14 @@ pub(super) struct FaAdmission {
 /// an obligation from a bare span.
 #[derive(Clone)]
 pub(crate) struct OutstandingTiming {
-    header_span: talkbank_model::Span,
+    header_location: talkbank_model::Location,
     origin: TimingObligationOrigin,
 }
 
 impl OutstandingTiming {
     /// Where the declaration that owes timing is.
-    pub(crate) fn header_span(&self) -> talkbank_model::Span {
-        self.header_span
+    pub(crate) fn header_location(&self) -> talkbank_model::Location {
+        self.header_location
     }
 
     /// Why the source owes it.
@@ -108,7 +108,7 @@ impl OutstandingTiming {
 pub(super) struct AlignableMedia {
     linkage: DeclaredLinkage,
     /// Where the declaration is, for an obligation align establishes itself.
-    header_span: talkbank_model::Span,
+    header_location: talkbank_model::Location,
 }
 
 /// What the admitted declaration says about linkage.
@@ -131,14 +131,13 @@ impl AlignableMedia {
         // The same scan the transition makes: every header line, not only
         // the leading block, so the two cannot disagree about which
         // declarations exist.
-        let mut declarations =
-            document
-                .headers_with_spans()
-                .filter_map(|(header, span)| match header {
-                    Header::Media(media) => Some((media, span)),
-                    _ => None,
-                });
-        let Some((media, header_span)) = declarations.next() else {
+        let mut declarations = document
+            .headers_with_locations()
+            .filter_map(|(header, span)| match header {
+                Header::Media(media) => Some((media, span)),
+                _ => None,
+            });
+        let Some((media, header_location)) = declarations.next() else {
             return Err(AlignmentMediaRefusal::Undeclared {
                 suggested: match name {
                     TranscriptName::Named(stem) => {
@@ -185,7 +184,7 @@ impl AlignableMedia {
         };
         Ok(Self {
             linkage,
-            header_span,
+            header_location,
         })
     }
 
@@ -280,7 +279,7 @@ impl FaAdmission {
     /// That admission includes E544: no outstanding linkage can reach writing.
     pub(super) fn discharge(self) {
         if let Some(outstanding) = self.pending_timing {
-            tracing::debug!(header_span = ?outstanding.header_span,
+            tracing::debug!(header_location = ?outstanding.header_location,
                 origin = ?outstanding.origin,
                 "source timing obligation fulfilled by complete output admission");
         }
@@ -430,11 +429,11 @@ pub(crate) fn read_fa_source_named(
         AdmittedAlignmentSource::Planned(AdmittedDisposition::Regenerating(pending)) => {
             let (file, obligation) = working_parts(pending.into_pending_file());
             let origin = TimingObligationOrigin::DiscardedWordTiming;
-            let header_span = obligation.header_span();
+            let header_location = obligation.header_location();
             (
                 file,
                 Some(OutstandingTiming {
-                    header_span,
+                    header_location,
                     origin,
                 }),
             )
@@ -442,11 +441,11 @@ pub(crate) fn read_fa_source_named(
         AdmittedAlignmentSource::NeverTimed(pending) => {
             let (file, obligation) = working_parts(pending);
             let origin = TimingObligationOrigin::NeverTimed;
-            let header_span = obligation.header_span();
+            let header_location = obligation.header_location();
             (
                 file,
                 Some(OutstandingTiming {
-                    header_span,
+                    header_location,
                     origin,
                 }),
             )
@@ -530,7 +529,7 @@ fn off_record_timing_only(
             if !main_bullets.restores_off_record_bullet() =>
         {
             Some(OutstandingTiming {
-                header_span: media.header_span,
+                header_location: media.header_location,
                 origin: TimingObligationOrigin::OffRecordTimingOnly(notes),
             })
         }

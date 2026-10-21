@@ -13,7 +13,7 @@
 pub struct OtherSpokenEvent {
     pub speaker: SpeakerCode,     // e.g., "INV"
     pub text: smol_str::SmolStr,  // e.g., "oh_okay_yeah"
-    pub span: Span,               // source location (skipped in serde)
+    pub location: Location,       // source location (skipped in serde)
 }
 ```
 

@@ -149,7 +149,10 @@ pub fn build_chat(desc: &TranscriptDescription) -> Result<ChatFile, BuildChatErr
         });
     }
     lines.extend(utterances);
-    lines.push(Line::header(Header::End));
+    lines.push(Line::header(
+        talkbank_model::Location::Unlocated,
+        Header::End,
+    ));
 
     // Programmatically assembled CHAT carries the same typed participant
     // metadata as parsed CHAT; `ChatFile::new`'s empty map is for parser

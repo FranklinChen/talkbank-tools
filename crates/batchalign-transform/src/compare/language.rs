@@ -383,7 +383,13 @@ pub(in crate::compare) fn languaged_utterances<S: Side>(
                 raw: index,
                 side: PhantomData,
             };
-            let tier_language = utterance.main.content.language_code.as_ref().or(primary);
+            let tier_language = utterance
+                .main
+                .content
+                .language_code
+                .as_ref()
+                .map(|precode| &precode.code)
+                .or(primary);
             let utterance_bucket = match tier_language {
                 Some(code) => LanguageBucket::Language(code.clone()),
                 None => LanguageBucket::Unresolved,

@@ -15,6 +15,7 @@
 //! and the expected/actual counts so the caller can triage without
 //! re-running. See `morphosyntax/outcome.rs` for the full outcome model.
 
+use talkbank_model::Location;
 use talkbank_model::WriteChat;
 use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::alignment::helpers::{MorAlignableWordCount, MorItemCount};
@@ -192,7 +193,7 @@ pub fn inject_morphosyntax(
     // produce a `%mor` without a paired `%gra` (e.g., utseg).
     if gra_relations.is_empty() {
         tracing::info!(mor_count = mors.len(), "inject_morphosyntax: mor-only");
-        let mor_tier = MorTier::new_mor(mors, terminator);
+        let mor_tier = MorTier::new_mor(Location::Unlocated, mors, terminator);
         replace_or_add_tier(&mut utterance.dependent_tiers, DependentTier::Mor(mor_tier));
         return Ok(());
     }
@@ -216,7 +217,7 @@ pub fn inject_morphosyntax(
         mors,
         item_relations,
         slot,
-        talkbank_model::Span::DUMMY,
+        Location::Unlocated,
     ) {
         Ok(pair) => pair,
         Err(talkbank_model::alignment::MorGraConstructionError::CountMismatch {
@@ -296,7 +297,7 @@ mod tests {
         let xtra1 = DependentTier::UserDefined(UserDefinedDependentTier {
             label: NonEmptyString::new("xtra").unwrap(),
             content: Some(NonEmptyString::new("first").unwrap()),
-            span: talkbank_model::Span::DUMMY,
+            location: Location::Unlocated,
         });
         replace_or_add_tier(&mut tiers, xtra1);
         assert_eq!(tiers.len(), 1);
@@ -305,7 +306,7 @@ mod tests {
         let xtra2 = DependentTier::UserDefined(UserDefinedDependentTier {
             label: NonEmptyString::new("xtra").unwrap(),
             content: Some(NonEmptyString::new("second").unwrap()),
-            span: talkbank_model::Span::DUMMY,
+            location: Location::Unlocated,
         });
         replace_or_add_tier(&mut tiers, xtra2);
         assert_eq!(tiers.len(), 1); // replaced, not appended
@@ -321,7 +322,7 @@ mod tests {
         let xcod = DependentTier::UserDefined(UserDefinedDependentTier {
             label: NonEmptyString::new("xcod").unwrap(),
             content: Some(NonEmptyString::new("code").unwrap()),
-            span: talkbank_model::Span::DUMMY,
+            location: Location::Unlocated,
         });
         replace_or_add_tier(&mut tiers, xcod);
         assert_eq!(tiers.len(), 2); // appended, not replaced
@@ -332,11 +333,15 @@ mod tests {
         use talkbank_model::model::WorTier;
 
         let mut tiers = smallvec::smallvec![talkbank_model::model::DependentTierEntry::new(
-            DependentTier::Wor(WorTier::default())
+            DependentTier::Wor(WorTier::from_words(Location::Unlocated, Vec::new()))
         )];
-        let replacement = DependentTier::Wor(WorTier::from_words(vec![
-            talkbank_model::model::Word::simple("hello"),
-        ]));
+        let replacement = DependentTier::Wor(WorTier::from_words(
+            Location::Unlocated,
+            vec![talkbank_model::model::Word::simple(
+                Location::Unlocated,
+                "hello",
+            )],
+        ));
 
         replace_or_add_tier(&mut tiers, replacement);
 
@@ -357,7 +362,7 @@ mod tests {
             utt,
             Vec::new(),
             talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
+                location: Location::Unlocated,
             },
             Vec::new(),
         )
@@ -388,7 +393,7 @@ mod tests {
             utt,
             too_many_mors,
             talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
+                location: Location::Unlocated,
             },
             Vec::new(),
         );
@@ -449,7 +454,7 @@ mod tests {
             utt,
             mors,
             talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
+                location: Location::Unlocated,
             },
             item_only_gras,
         );

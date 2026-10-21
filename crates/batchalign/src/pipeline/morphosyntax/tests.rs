@@ -1272,7 +1272,12 @@ fn transcript_diagnosed_in_its_second_utterance()
     utterance.main.content.content = TierContentItems::new(
         ["we", "took", "b2"]
             .into_iter()
-            .map(|word| UtteranceContent::Word(Box::new(Word::simple(word))))
+            .map(|word| {
+                UtteranceContent::Word(Box::new(Word::simple(
+                    talkbank_model::Location::Unlocated,
+                    word,
+                )))
+            })
             .collect(),
     );
     let crate::pipeline::post_validate::ProducedOutput::Diagnosed(diagnosed) =
@@ -1377,8 +1382,9 @@ fn an_analysis_that_adds_a_finding_outside_the_held_out_utterances_is_refused() 
         .into_iter()
         .find(|line| matches!(line, Line::Utterance(_)))
     {
-        first.main.content.content =
-            TierContentItems::new(vec![UtteranceContent::Word(Box::new(Word::simple("c3")))]);
+        first.main.content.content = TierContentItems::new(vec![UtteranceContent::Word(Box::new(
+            Word::simple(talkbank_model::Location::Unlocated, "c3"),
+        ))]);
     }
     let Err(failure) = crate::pipeline::post_validate::PostValidated::produced_outside(
         file,

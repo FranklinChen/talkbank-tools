@@ -8,6 +8,7 @@
 //! `kept_main_bullets_ordering.rs`.
 
 use super::*;
+use talkbank_model::Location;
 
 use batchalign_transform::decisions::{DecisionStrategy, FaStrategy};
 use talkbank_model::model::{Bullet, BulletSource};
@@ -274,7 +275,8 @@ fn held_check_fails_when_a_kept_absence_gains_a_bullet() {
     let held = authority.verify_held(&chat).expect("nothing changed");
     assert_eq!((held.kept(), held.kept_absent()), (1, 1));
 
-    get_test_utterance(&mut chat, 1).main.content.bullet = Some(Bullet::new(2500, 3000));
+    get_test_utterance(&mut chat, 1).main.content.bullet =
+        Some(Bullet::new(Location::Unlocated, 2500, 3000));
     assert!(matches!(
         authority.verify_held(&chat),
         Err(KeptBulletError::GainedBullet {
@@ -313,7 +315,10 @@ fn exact_refuses_utterance_timing_recovery() {
 /// as it would by default.
 #[test]
 fn utr_bullets_written_after_the_bind_still_derive() {
-    for utr_bullet in [Bullet::utr_hint(4800, 7000), Bullet::new(4800, 7000)] {
+    for utr_bullet in [
+        Bullet::utr_hint(Location::Unlocated, 4800, 7000),
+        Bullet::new(Location::Unlocated, 4800, 7000),
+    ] {
         let (derived, kept) = run_under_both_policies(
             &two_speaker_transcript(
                 "*CHI:\thello . \u{15}1000_2000\u{15}\n*MOT:\tgood morning .\n",

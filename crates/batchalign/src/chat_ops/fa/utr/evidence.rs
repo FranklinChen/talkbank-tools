@@ -408,7 +408,11 @@ impl PositiveUtrInterval {
     /// Publish admitted recovery geometry as a provisional hint, never as an
     /// original transcript boundary. FA must derive its final span from words.
     pub(super) fn into_hint(self) -> talkbank_model::model::Bullet {
-        talkbank_model::model::Bullet::utr_hint(self.start_ms, self.end_ms)
+        talkbank_model::model::Bullet::utr_hint(
+            talkbank_model::Location::Unlocated,
+            self.start_ms,
+            self.end_ms,
+        )
     }
 
     /// Keep only the observed interval after a preceding non-overlap end.

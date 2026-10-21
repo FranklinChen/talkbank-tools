@@ -9,6 +9,7 @@
 //! the small [`prepare_text`] adapter live here too because they share
 //! the same iteration shape over `ChatFile.lines`.
 
+use talkbank_model::Location;
 use talkbank_model::WriteChat;
 use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::SemanticEq;
@@ -232,7 +233,7 @@ pub(crate) fn stanza_input_terminator(
         .terminator
         .clone()
         .unwrap_or(talkbank_model::Terminator::Period {
-            span: talkbank_model::Span::DUMMY,
+            location: Location::Unlocated,
         })
 }
 
@@ -349,7 +350,8 @@ impl<'source> MorphologyInput<'source> {
             .main
             .content
             .language_code
-            .clone()
+            .as_ref()
+            .map(|precode| precode.code.clone())
             .unwrap_or_else(|| {
                 declared_languages
                     .first()
@@ -449,7 +451,13 @@ pub fn collect_payloads(
 
         let skip = multilingual_policy.should_skip_non_primary()
             && utt.main.content.language_code.is_some()
-            && utt.main.content.language_code.as_ref() != Some(primary_lang);
+            && utt
+                .main
+                .content
+                .language_code
+                .as_ref()
+                .map(|precode| &precode.code)
+                != Some(primary_lang);
 
         let has_mor = utt.dependent_tiers.iter().any(|t| match &t.tier {
             talkbank_model::model::DependentTier::Mor(m) => !m.items().is_empty(),
@@ -524,12 +532,16 @@ fn reset_mor_gra_in_place(utterance: &mut talkbank_model::model::Utterance) {
         // "position-preserving" now means for a DependentTierEntry.
         let emptied = match &entry.tier {
             DependentTier::Mor(_) => Some(DependentTier::Mor(MorTier::new_mor(
+                Location::Unlocated,
                 Vec::new(),
                 Terminator::Period {
-                    span: talkbank_model::Span::DUMMY,
+                    location: Location::Unlocated,
                 },
             ))),
-            DependentTier::Gra(_) => Some(DependentTier::Gra(GraTier::new_gra(Vec::new()))),
+            DependentTier::Gra(_) => Some(DependentTier::Gra(GraTier::new_gra(
+                Location::Unlocated,
+                Vec::new(),
+            ))),
             _ => None,
         };
         if let Some(tier) = emptied {

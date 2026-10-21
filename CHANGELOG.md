@@ -5,6 +5,17 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Chatter 0.31.0
+
+- The CHAT crates now come from Chatter 0.31.0 (`f7e32e22`). Every value BA3
+  builds programmatically (generated headers, utterances, terminators,
+  `%mor`, `%gra`, `%wor`, bullets, comments) is `Location::Unlocated` instead
+  of a fabricated zero span. A word retokenization rebuilds keeps the
+  original word's location. The `@Media` declaration a timing obligation
+  points at is a `Location`, located when it came from source.
+- No CHAT output changes: locations are not written to CHAT, and Chatter's
+  AST JSON no longer carries them.
+
 ### Whisper is told its language by its own token; reuse rediscovered workers
 
 - Stock Whisper (`whisper`) now admits exactly the languages its decoder has a

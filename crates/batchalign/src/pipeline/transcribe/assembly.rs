@@ -97,9 +97,12 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
             .unwrap_or(chat_file.lines.len());
         chat_file.lines.insert(
             position,
-            crate::chat_ops::Line::header(crate::chat_ops::Header::Comment {
-                content: crate::chat_ops::BulletContent::from_text(warning),
-            }),
+            crate::chat_ops::Line::header(
+                talkbank_model::Location::Unlocated,
+                crate::chat_ops::Header::Comment {
+                    content: crate::chat_ops::BulletContent::from_text(warning),
+                },
+            ),
         );
     }
 

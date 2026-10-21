@@ -184,8 +184,15 @@ fn build_projected_mor_tier(
         .get(gold_utterance_index)
         .cloned()
         .flatten()?;
-    let typed_terminator = talkbank_model::Terminator::try_from_chat_str(raw_terminator.trim())?;
-    Some(MorTier::new_mor(items, typed_terminator))
+    let typed_terminator = talkbank_model::Terminator::try_from_chat_str(
+        talkbank_model::Location::Unlocated,
+        raw_terminator.trim(),
+    )?;
+    Some(MorTier::new_mor(
+        talkbank_model::Location::Unlocated,
+        items,
+        typed_terminator,
+    ))
 }
 
 fn replace_or_add_mor_tier(chat_file: &mut ChatFile, utterance_index: usize, mor: MorTier) {

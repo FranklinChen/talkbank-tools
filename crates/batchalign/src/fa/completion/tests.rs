@@ -2,6 +2,7 @@ use super::*;
 use crate::chat_ops::fa::WordGapHealing;
 use crate::engine_reports::FaCacheNamespace;
 use crate::fa::{FaInputDocument, input::FaAdmission};
+use talkbank_model::Location;
 use talkbank_model::alignment::helpers::{WordItemMut, walk_words_mut};
 use talkbank_model::model::{Bullet, FileStem, TranscriptName};
 
@@ -46,16 +47,20 @@ fn time_words(file: &mut talkbank_model::ChatFile, only_last: bool) -> usize {
                 if counts_for_tier(word, TierDomain::Wor) {
                     if !only_last || ordinal + 1 == words {
                         word.inline_bullet = Some(if only_last {
-                            Bullet::new(19_980, 20_000)
+                            Bullet::new(Location::Unlocated, 19_980, 20_000)
                         } else {
-                            Bullet::new(100 + ordinal as u64 * 100, 180 + ordinal as u64 * 100)
+                            Bullet::new(
+                                Location::Unlocated,
+                                100 + ordinal as u64 * 100,
+                                180 + ordinal as u64 * 100,
+                            )
                         });
                     }
                     ordinal += 1;
                 }
             },
         );
-        utterance.main.content.bullet = Some(Bullet::new(0, 20_000));
+        utterance.main.content.bullet = Some(Bullet::new(Location::Unlocated, 0, 20_000));
         crate::chat_ops::fa::add_wor_tier(utterance);
         return words;
     }
@@ -234,7 +239,7 @@ fn real_injection_retains_exact_word_intervals_through_written_chat() {
     let mut cursor = 0;
     let _injected = inject_timings_for_utterance(utterance, &timings, &mut cursor);
     assert_eq!(cursor, 3, "compound filler consumes two model units");
-    utterance.main.content.bullet = Some(Bullet::new(100, 380));
+    utterance.main.content.bullet = Some(Bullet::new(Location::Unlocated, 100, 380));
     crate::chat_ops::fa::add_wor_tier(utterance);
     let expected = written_words(&file);
     let output = admission
@@ -294,7 +299,7 @@ fn durable_partial_tier_is_authoritative_over_working_word_timings() {
                     if let WordItemMut::Word(word) = leaf
                         && word.inline_bullet.is_none()
                     {
-                        word.inline_bullet = Some(Bullet::new(100, 180));
+                        word.inline_bullet = Some(Bullet::new(Location::Unlocated, 100, 180));
                     }
                 },
             );
@@ -519,7 +524,8 @@ fn a_diary_notes_given_bullet_is_kept_only_where_the_policy_keeps_given_bullets(
 
     let (mut file, admission) = attempt_with_diary(given, MainBulletPolicy::KeepGiven);
     time_words(&mut file, false);
-    diary_utterance(&mut file).main.content.bullet = Some(Bullet::new(20_000, 21_000));
+    diary_utterance(&mut file).main.content.bullet =
+        Some(Bullet::new(Location::Unlocated, 20_000, 21_000));
     assert!(
         admission.finish(result(file)).is_ok(),
         "keep: the given bullet, restored, is the input's own"
@@ -528,9 +534,12 @@ fn a_diary_notes_given_bullet_is_kept_only_where_the_policy_keeps_given_bullets(
     for (policy, bullet) in [
         (
             MainBulletPolicy::DeriveFromWords,
-            Bullet::new(20_000, 21_000),
+            Bullet::new(Location::Unlocated, 20_000, 21_000),
         ),
-        (MainBulletPolicy::KeepGiven, Bullet::new(20_000, 22_000)),
+        (
+            MainBulletPolicy::KeepGiven,
+            Bullet::new(Location::Unlocated, 20_000, 22_000),
+        ),
     ] {
         let (mut file, admission) = attempt_with_diary(given, policy);
         time_words(&mut file, false);
@@ -569,7 +578,8 @@ fn a_kept_diary_bullet_that_conflicts_with_aligned_timing_is_named() {
     let (mut file, admission) = (active.chat_file, active.admission);
     // The spoken utterance aligned across the note's given extent.
     time_words(&mut file, false);
-    diary_utterance(&mut file).main.content.bullet = Some(Bullet::new(1_000, 2_000));
+    diary_utterance(&mut file).main.content.bullet =
+        Some(Bullet::new(Location::Unlocated, 1_000, 2_000));
     let Err(error) = admission.finish(result(file)) else {
         panic!("an overlapping same-speaker bullet cannot be written");
     };
@@ -605,7 +615,7 @@ fn a_timed_word_on_a_diary_note_is_a_producer_fault() {
             if let WordItemMut::Word(word) = leaf
                 && std::mem::take(&mut first)
             {
-                word.inline_bullet = Some(Bullet::new(20_100, 20_400));
+                word.inline_bullet = Some(Bullet::new(Location::Unlocated, 20_100, 20_400));
             }
         },
     );

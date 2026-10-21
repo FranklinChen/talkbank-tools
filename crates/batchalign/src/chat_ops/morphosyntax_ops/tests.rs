@@ -1,6 +1,7 @@
 //! Tests for morphosyntax module.
 
 use super::*;
+use talkbank_model::Location;
 
 fn ud_response_from_words(words_json: &str) -> crate::chat_ops::nlp::UdResponse {
     serde_json::from_str(&format!(r#"{{"sentences":[{{"words":{words_json}}}]}}"#)).unwrap()
@@ -186,7 +187,7 @@ fn snapshot_morphosyntax_batch_item() {
     let item = MorphosyntaxBatchItem::new(
         words.into_iter().map(BatchWord::analysed).collect(),
         talkbank_model::Terminator::Period {
-            span: talkbank_model::Span::DUMMY,
+            location: Location::Unlocated,
         },
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code"),
     );
@@ -1394,15 +1395,16 @@ fn clear_then_reinject_preserves_tier_order_mor_gra_wor() {
     replace_or_add_tier(
         &mut utt.dependent_tiers,
         DependentTier::Mor(MorTier::new_mor(
+            Location::Unlocated,
             Vec::new(),
             talkbank_model::Terminator::Period {
-                span: talkbank_model::Span::DUMMY,
+                location: Location::Unlocated,
             },
         )),
     );
     replace_or_add_tier(
         &mut utt.dependent_tiers,
-        DependentTier::Gra(GraTier::new_gra(Vec::new())),
+        DependentTier::Gra(GraTier::new_gra(Location::Unlocated, Vec::new())),
     );
     assert_eq!(
         dep_tier_kinds(&chat),
@@ -1415,7 +1417,7 @@ fn clear_then_reinject_preserves_tier_order_mor_gra_wor() {
     let utt = first_utterance_mut(&mut chat);
     replace_or_add_tier(
         &mut utt.dependent_tiers,
-        DependentTier::Wor(WorTier::default()),
+        DependentTier::Wor(WorTier::from_words(Location::Unlocated, Vec::new())),
     );
     assert_eq!(
         dep_tier_kinds(&chat),
