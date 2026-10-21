@@ -58,6 +58,10 @@
     },
     {
       "schema": "execute_request",
+      "file": "execute_request_word_segmentation_inline.json"
+    },
+    {
+      "schema": "execute_request",
       "file": "execute_request_morphosyntax_prepared_text.json"
     },
     {
@@ -119,6 +123,10 @@
     {
       "schema": "execute_response",
       "file": "execute_response_translate_success.json"
+    },
+    {
+      "schema": "execute_response",
+      "file": "execute_response_word_segmentation_success.json"
     },
     {
       "schema": "execute_response",

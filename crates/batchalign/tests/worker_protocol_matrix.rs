@@ -118,6 +118,7 @@ fn payload_kind_name(payload: &TaskRequestV2) -> &'static str {
         TaskRequestV2::SpeakerEmbedding(_) => "speaker_embedding",
         TaskRequestV2::Opensmile(_) => "opensmile",
         TaskRequestV2::Avqi(_) => "avqi",
+        TaskRequestV2::WordSegmentation(_) => "word_segmentation",
     }
 }
 
@@ -134,6 +135,7 @@ fn expected_payload_kind(task: InferenceTaskV2) -> &'static str {
         InferenceTaskV2::SpeakerEmbedding => "speaker_embedding",
         InferenceTaskV2::Opensmile => "opensmile",
         InferenceTaskV2::Avqi => "avqi",
+        InferenceTaskV2::WordSegmentation => "word_segmentation",
     }
 }
 
@@ -265,6 +267,7 @@ fn result_kind_name(result: &TaskResultV2) -> &'static str {
         TaskResultV2::SpeakerEmbeddingResult(_) => "speaker_embedding_result",
         TaskResultV2::OpensmileResult(_) => "opensmile_result",
         TaskResultV2::AvqiResult(_) => "avqi_result",
+        TaskResultV2::WordSegmentationResult(_) => "word_segmentation_result",
     }
 }
 
@@ -278,6 +281,7 @@ fn expected_result_kind(file: &str) -> Option<&'static str> {
         "execute_response_morphosyntax_success.json" => Some("morphosyntax_result"),
         "execute_response_utseg_success.json" => Some("utseg_result"),
         "execute_response_translate_success.json" => Some("translation_result"),
+        "execute_response_word_segmentation_success.json" => Some("word_segmentation_result"),
         "execute_response_coref_success.json" => Some("coref_result"),
         "execute_response_protocol_error.json" => None,
         "execute_response_speaker_segments.json" => Some("speaker_result"),
@@ -479,6 +483,10 @@ fn validate_execute_request_invariants(request: &ExecuteRequestV2) -> Result<(),
         }
         TaskRequestV2::Translate(translate_request) => {
             require_json_attachment(request, &translate_request.payload_ref_id)?;
+            Ok(())
+        }
+        TaskRequestV2::WordSegmentation(segmentation_request) => {
+            require_json_attachment(request, &segmentation_request.payload_ref_id)?;
             Ok(())
         }
         TaskRequestV2::Coref(coref_request) => {
@@ -747,6 +755,17 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
             }
             Ok(())
         }
+        TaskResultV2::WordSegmentationResult(value) => {
+            // One token list per run sent; a run is never empty, so neither
+            // is its list. Whether the tokens re-spell the run is checked by
+            // `SegmentationPlan::apply`, which holds the runs.
+            if value.items.is_empty() || value.items.iter().any(Vec::is_empty) {
+                return Err(
+                    "word segmentation result must hold a non-empty token list per run".into(),
+                );
+            }
+            Ok(())
+        }
         TaskResultV2::CorefResult(value) => {
             // Every item is a tagged outcome (resolved, no sentences, or
             // failed), so "neither annotations nor an error" is not
@@ -944,6 +963,7 @@ fn worker_protocol_v2_request_manifest_covers_live_backend_matrix() {
             TaskRequestV2::Morphosyntax(_)
             | TaskRequestV2::Utseg(_)
             | TaskRequestV2::Translate(_)
+            | TaskRequestV2::WordSegmentation(_)
             | TaskRequestV2::Coref(_)
             | TaskRequestV2::SpeakerEmbedding(_)
             | TaskRequestV2::Opensmile(_)

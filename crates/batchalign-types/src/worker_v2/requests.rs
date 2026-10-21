@@ -256,6 +256,8 @@ pub enum WorkerKindV2 {
 pub enum InferenceTaskV2 {
     /// Morphosyntax tagging.
     Morphosyntax,
+    /// Word segmentation of Han-character text.
+    WordSegmentation,
     /// Utterance segmentation.
     Utseg,
     /// Machine translation.
@@ -938,6 +940,88 @@ pub struct TranslateRequestV2 {
     pub item_count: u32,
 }
 
+/// The word segmenter a request names, decided by the Rust control plane.
+///
+/// A closed set: each variant is one segmenter and one lexicon, so a request
+/// cannot reach a worker that would segment with something else.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WordSegmenterV2 {
+    /// Taiwanese: taibun's dictionary tokeniser, whose lexicon comes from the
+    /// Taiwanese-Chinese Online Dictionary and iTaigi (via ChhoeTaigi).
+    TaibunTaiwanese,
+}
+
+impl WordSegmenterV2 {
+    /// Every segmenter, the one owner of which exist; the wire-spelling test
+    /// below iterates it.
+    pub const ALL: [Self; 1] = [Self::TaibunTaiwanese];
+
+    /// The segmenter a transcript in `lang` uses, if any. A language absent
+    /// here keeps the recognizer's words unchanged.
+    #[must_use]
+    pub fn for_language(lang: &LanguageCode3) -> Option<Self> {
+        match lang.as_ref() {
+            "nan" => Some(Self::TaibunTaiwanese),
+            _ => None,
+        }
+    }
+
+    /// The wire spelling of this segmenter, which the PyO3 executor hands to
+    /// the Python runner. Pinned against serde by the test below, as for
+    /// [`ProtocolErrorCodeV2::as_wire_str`].
+    #[must_use]
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::TaibunTaiwanese => "taibun_taiwanese",
+        }
+    }
+}
+
+#[cfg(test)]
+mod word_segmenter_tests {
+    use super::{LanguageCode3, WordSegmenterV2};
+
+    #[test]
+    fn only_taiwanese_is_segmented() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            WordSegmenterV2::for_language(&LanguageCode3::try_new("nan")?),
+            Some(WordSegmenterV2::TaibunTaiwanese)
+        );
+        for other in ["yue", "zho", "cmn", "eng"] {
+            assert_eq!(
+                WordSegmenterV2::for_language(&LanguageCode3::try_new(other)?),
+                None,
+                "{other}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Every variant's `as_wire_str` must equal what serde serializes it to.
+    #[test]
+    fn wire_spelling_matches_serde() {
+        for segmenter in WordSegmenterV2::ALL {
+            assert_eq!(
+                serde_json::to_string(&segmenter).ok(),
+                Some(format!("\"{}\"", segmenter.as_wire_str())),
+                "wire spelling drifted for {segmenter:?}"
+            );
+        }
+    }
+}
+
+/// V2 word-segmentation request payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct WordSegmentationRequestV2 {
+    /// The segmenter the job's language selects.
+    pub segmenter: WordSegmenterV2,
+    /// Reference to the prepared batch payload: one Han-character run per item.
+    pub payload_ref_id: WorkerArtifactIdV2,
+    /// Number of runs frozen into the prepared batch payload.
+    pub item_count: u32,
+}
+
 /// V2 coreference request payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CorefRequestV2 {
@@ -1050,6 +1134,8 @@ pub enum TaskRequestV2 {
     Translate(TranslateRequestV2),
     /// Coreference request.
     Coref(CorefRequestV2),
+    /// Word-segmentation request.
+    WordSegmentation(WordSegmentationRequestV2),
     /// Speaker diarization request.
     Speaker(SpeakerRequestV2),
     /// Speaker-embedding request.
@@ -1144,6 +1230,7 @@ impl TaskRequestV2 {
             Self::Utseg(_) => InferenceTaskV2::Utseg,
             Self::Translate(_) => InferenceTaskV2::Translate,
             Self::Coref(_) => InferenceTaskV2::Coref,
+            Self::WordSegmentation(_) => InferenceTaskV2::WordSegmentation,
             Self::Speaker(_) => InferenceTaskV2::Speaker,
             Self::SpeakerEmbedding(_) => InferenceTaskV2::SpeakerEmbedding,
             Self::Opensmile(_) => InferenceTaskV2::Opensmile,
@@ -1164,6 +1251,7 @@ impl TaskRequestV2 {
             Self::Utseg(request) => batched_items_timeout(u64::from(request.item_count)),
             Self::Translate(request) => batched_items_timeout(u64::from(request.item_count)),
             Self::Coref(request) => batched_items_timeout(u64::from(request.item_count)),
+            Self::WordSegmentation(request) => batched_items_timeout(u64::from(request.item_count)),
             // The ASR request carries its own decode budget, derived from
             // the audio's actual duration (see `DecodeBudgetSeconds`), so
             // its transport ceiling scales with the file rather than using

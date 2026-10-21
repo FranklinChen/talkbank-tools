@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-09 15:48 EDT
+**Last updated:** 2026-10-21 14:20 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -337,7 +337,11 @@ removed (see [Number Expansion](../reference/number-expansion.md)).
 The functions involved are:
 `prepare_words_pre_expansion()` (stages 1-3, Cantonese normalization included),
 `write_word_forms()` (stage 4 + 4.5), and
-`finalize_words_to_chunks()` (stages 5-5b). The monolithic `process_raw_asr()`
+`finalize_words_to_chunks()` (stages 5-5b). `prepare_monologue_words()` runs
+stages 1-4.5 for every monologue and returns `MonologueWords`;
+`chunk_monologues()` runs stages 5-5b over them. Transcribe calls the two
+itself, with word segmentation (stage 4c) between them; `prepare_asr_chunks()`
+calls them with nothing between. The monolithic `process_raw_asr()`
 is a sync fallback that follows the same shape. Both return a `Result`: their
 one failure is a Cantonese normalization that changed a monologue's character
 count.
@@ -394,6 +398,7 @@ sanitization cannot recover. Before stage 9 landed, a single
 grammar-illegal char anywhere in the transcript would fail the entire
 file at this gate; the v2 Cantonese ASR benchmark lost 6 of 18
 fixtures this way.
+| 4c | **Word segmentation** (`nan` only; transcribe) | `segment_words()` (`pipeline/transcribe/word_segmentation.rs`), over `SegmentationPlan` | Each run of consecutive one-character Han words in a monologue is sent to the worker's segmenter (taibun) and replaced by the words it returns; each word takes the span its timed characters cover (`AdmittedInterval::covering`). A token list that does not spell its run exactly refuses the file. It runs on whole monologues, before stage 5, so a long-turn split never cuts a run, and before speaker projection, so a word is attributed whole. Its result, `SegmentedMonologues`, is transcribe's only route to chunks. Trace stage `after_word_segmentation`. See [Language Code Resolution](../reference/language-code-resolution.md#word-segmentation). |
 | 5 | Long turn splitting | `finalize_words_to_chunks()` | Chunks > 300 words split |
 | 5b | Pause-based splitting | `finalize_words_to_chunks()` | A gap of at least 800 ms creates a boundary only when the next word is an English sentence starter (`LONG_PAUSE_SENTENCE_STARTERS`); it never fires for non-English text |
 | 6 | Retokenization | `utterances_from_prepared_chunks()` | Split into utterances by punctuation boundaries |

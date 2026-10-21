@@ -224,6 +224,8 @@ infer_tasks! {
     Avqi,
     /// Speaker diarization.
     Speaker,
+    /// Word segmentation of Han-character text.
+    WordSegmentation,
 }
 
 /// Request for a single inference operation.

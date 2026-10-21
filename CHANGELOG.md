@@ -5,6 +5,22 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Taiwanese transcripts are written in words
+
+- `transcribe --lang nan` wrote one main-tier word per Han character, because
+  the recognizer's aligner returns one timed unit per character. Each run of
+  one-character Han words is now grouped into words by taibun's dictionary
+  tokeniser (`我欲去學校` becomes `我 欲 去 學校`), and each word takes the
+  span its timed characters cover. It runs before a long turn is split, so
+  a split never cuts a word in two.
+- A segmenter answer that does not spell its run exactly refuses the file
+  instead of moving timings onto other characters.
+- The stamp records the segmenter and its version as `word_seg=taibun@<version>`.
+- New dependency: `taibun` (MIT code; its bundled lexicon, from the
+  Taiwanese-Chinese Online Dictionary and iTaigi via ChhoeTaigi, is CC BY-SA
+  4.0 and is used unmodified from the published package).
+- Other languages are unchanged.
+
 ### One GPU worker per job
 
 - An `align` job with a worker-hosted UTR engine (`--utr-engine whisper`,

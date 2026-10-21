@@ -306,6 +306,7 @@ def _load_single_task(task: str, bootstrap: WorkerBootstrapRuntime) -> None:
         InferTask.SPEAKER.value,
         InferTask.OPENSMILE.value,
         InferTask.AVQI.value,
+        InferTask.WORD_SEGMENTATION.value,
     ):
         # These tasks use lazy loading at request time, no startup model load.
         pass

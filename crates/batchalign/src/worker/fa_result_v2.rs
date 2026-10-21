@@ -74,6 +74,12 @@ pub fn parse_forced_alignment_result_v2(
                 "worker protocol V2 forced-alignment response returned translation data".into(),
             );
         }
+        TaskResultV2::WordSegmentationResult(_) => {
+            return Err(
+                "worker protocol V2 forced-alignment response returned word-segmentation data"
+                    .into(),
+            );
+        }
         TaskResultV2::CorefResult(_) => {
             return Err(
                 "worker protocol V2 forced-alignment response returned coreference data".into(),

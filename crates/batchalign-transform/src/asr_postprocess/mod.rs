@@ -45,6 +45,7 @@ mod snapshot;
 mod tests;
 mod timing;
 mod utterance;
+pub mod word_segmentation;
 
 use batchalign_types::domain::AudioPositionSeconds;
 use serde::{Deserialize, Serialize};
@@ -63,7 +64,9 @@ pub use timing::{
     AdmittedInterval, IntervalBound, IntervalRefusal, PositiveInterval, UntimedCause, WordTiming,
 };
 pub use utterance::{
-    finalize_utterances, prepare_asr_chunks, process_raw_asr, utterances_from_prepared_chunks,
+    chunk_monologues, chunk_monologues_with_snapshot, finalize_utterances, prepare_asr_chunks,
+    prepare_monologue_words, prepare_monologue_words_with_snapshot, process_raw_asr,
+    utterances_from_prepared_chunks,
 };
 
 use prepare::trim_word_boundaries;
@@ -71,6 +74,7 @@ pub use prepare::{
     is_cjk_ideograph, prepare_words_pre_expansion, prepare_words_pre_expansion_with_snapshot,
 };
 pub use retrace::{ExactRetraceAnalysis, analyze_exact_retraces};
+pub use word_segmentation::{PlannedSegmentation, SegmentationPlan, SegmentationRefusal};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -167,6 +171,27 @@ pub struct Utterance {
     /// the primary language. Used for `[- lang]` code-switching precodes in CHAT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+}
+
+/// One monologue's words after stages 1-4 (final CHAT word forms), before
+/// they are cut into chunks.
+///
+/// The state between [`prepare_monologue_words`] and [`chunk_monologues`].
+/// A pass over a whole monologue's words (word segmentation) runs here, so a
+/// long-turn split cannot cut what it works on in two, and turn length is
+/// counted in the words that pass produced. Built only by
+/// [`prepare_monologue_words`]; its fields are private to this crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonologueWords {
+    pub(crate) speaker: SpeakerIndex,
+    pub(crate) words: Vec<AsrWord>,
+}
+
+impl MonologueWords {
+    /// The monologue's words, in order.
+    pub fn words(&self) -> &[AsrWord] {
+        &self.words
+    }
 }
 
 /// One prepared pre-CHAT chunk after ASR normalization but before utterance

@@ -1,7 +1,7 @@
 # Processing Provenance
 
 **Status:** Current
-**Last updated:** 2026-09-24 00:10 EDT
+**Last updated:** 2026-10-21 14:20 EDT
 
 ## What is provenance?
 
@@ -190,6 +190,7 @@ name.
 | `lang` | Language code |
 | `diarize` | Present if speaker diarization was enabled |
 | `wor` | Present if %wor tier was written |
+| `word_seg` | The word segmenter that grouped the recognizer's one-character words into words, as `<name>@<version>` (for example `taibun@1.1.8`). Present only when one did; today only for Taiwanese (`nan`), see [Language Code Resolution](../reference/language-code-resolution.md#word-segmentation) |
 
 Transcribe also writes a human-readable warning:
 

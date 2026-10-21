@@ -90,6 +90,7 @@ class InferTask(str, Enum):
     OPENSMILE = "opensmile"
     AVQI = "avqi"
     SPEAKER = "speaker"
+    WORD_SEGMENTATION = "word_segmentation"
 
 
 class WorkerServing(str, Enum):
@@ -113,7 +114,7 @@ class WorkerProfile(str, Enum):
 
     - GPU: ASR, FA, Speaker, GPU-bound models
     - STANZA: Morphosyntax, Utseg, Coref, Stanza NLP processors
-    - IO: Translate, OpenSMILE, AVQI, lightweight API/library calls
+    - IO: Translate, OpenSMILE, AVQI, word segmentation, lightweight API/library calls
     """
 
     GPU = "gpu"
@@ -124,7 +125,7 @@ class WorkerProfile(str, Enum):
 PROFILE_TASKS: dict[WorkerProfile, set[str]] = {
     WorkerProfile.GPU: {"asr", "fa", "speaker"},
     WorkerProfile.STANZA: {"morphosyntax", "utseg", "coref"},
-    WorkerProfile.IO: {"translate", "opensmile", "avqi"},
+    WorkerProfile.IO: {"translate", "opensmile", "avqi", "word_segmentation"},
 }
 
 

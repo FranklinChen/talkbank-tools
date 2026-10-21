@@ -69,6 +69,7 @@ from batchalign.worker._text_v2 import (
     execute_morphosyntax_request_v2,
     execute_translate_request_v2,
     execute_utseg_request_v2,
+    execute_word_segmentation_request_v2,
 )
 from batchalign.worker._types import _state, sleep_test_delay
 from batchalign.worker._types_v2 import (
@@ -180,6 +181,8 @@ def execute_request_v2(
             return execute_translate_request_v2(request, execution_host.text)
         case InferenceTaskV2.COREF:
             return execute_coref_request_v2(request, execution_host.text)
+        case InferenceTaskV2.WORD_SEGMENTATION:
+            return execute_word_segmentation_request_v2(request)
         case InferenceTaskV2.ASR:
             return execute_asr_request_v2(request, execution_host.asr)
         case InferenceTaskV2.FORCED_ALIGNMENT:
@@ -304,6 +307,8 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
         TranslationResultPayloadV2,
         UtsegRequestV2,
         UtsegResultPayloadV2,
+        WordSegmentationRequestV2,
+        WordSegmentationResultPayloadV2,
     )
 
     match payload:
@@ -315,6 +320,8 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
             return TranslationResultPayloadV2(items=[])
         case CorefRequestV2():
             return CorefResultPayloadV2(items=[])
+        case WordSegmentationRequestV2():
+            return WordSegmentationResultPayloadV2(segmenter="test-echo", items=[])
         case AsrRequestV2():
             return MonologueAsrResultPayloadV2(
                 lang="eng", monologues=[], model=_echo_model_identity(payload)

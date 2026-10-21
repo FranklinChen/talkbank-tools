@@ -266,6 +266,23 @@ def execute_coref_request_v2(
     )
 
 
+def execute_word_segmentation_request_v2(
+    request: ExecuteRequestV2,
+) -> ExecuteResponseV2:
+    """Execute one batched word-segmentation V2 request through the Rust control plane.
+
+    The runner is the pure segmentation function itself: it holds no loaded
+    model state, so it needs no execution host.
+    """
+
+    import batchalign_core
+    from batchalign.inference.word_segmentation import segment_batch
+
+    return ExecuteResponseV2.model_validate_json(
+        batchalign_core.execute_word_segmentation_request_v2(request, segment_batch)
+    )
+
+
 __all__ = [
     "TextExecutionHostV2",
     "build_default_text_execution_host_v2",
@@ -273,4 +290,5 @@ __all__ = [
     "execute_morphosyntax_request_v2",
     "execute_translate_request_v2",
     "execute_utseg_request_v2",
+    "execute_word_segmentation_request_v2",
 ]

@@ -15,7 +15,7 @@ use crate::chat_ops::morphosyntax_ops::{MorphosyntaxBatchItem, MwtDict};
 use crate::types::worker_v2::{
     ArtifactRefV2, CorefRequestV2, ExecuteRequestV2, InferenceTaskV2, InlineJsonRefV2,
     MorphosyntaxRequestV2, TaskRequestV2, TranslateBackendV2, TranslateRequestV2, UtsegRequestV2,
-    WorkerArtifactIdV2, WorkerRequestIdV2,
+    WordSegmentationRequestV2, WordSegmenterV2, WorkerArtifactIdV2, WorkerRequestIdV2,
 };
 use batchalign_transform::coref::CorefBatchItem;
 use batchalign_transform::translate::TranslateBatchItem;
@@ -194,6 +194,41 @@ pub fn build_translate_request_v2(
             engine,
             payload_ref_id: attachment.id.clone(),
             item_count: 1,
+        }),
+        attachments: vec![ArtifactRefV2::InlineJson(attachment)],
+    })
+}
+
+/// The prepared batch a word-segmentation request names: one Han run per item.
+///
+/// Mirrors `batchalign/inference/word_segmentation.py::WordSegmentationPreparedBatchV2`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedWordSegmentationBatchV2 {
+    /// The runs, in the order their token lists must come back.
+    pub items: Vec<String>,
+}
+
+/// Build a word-segmentation V2 request for one file's runs.
+///
+/// Carried inline, like translation: one transcript's runs are a few
+/// kilobytes, which is what the inline attachment kind is for.
+pub fn build_word_segmentation_request_v2(
+    ids: &PreparedTextRequestIdsV2,
+    segmenter: WordSegmenterV2,
+    runs: Vec<String>,
+) -> Result<ExecuteRequestV2, TextRequestBuildErrorV2> {
+    let count = item_count(runs.len())?;
+    let attachment = InlineJsonRefV2 {
+        id: ids.payload_ref_id.clone(),
+        value: serde_json::to_value(PreparedWordSegmentationBatchV2 { items: runs })?,
+    };
+    Ok(ExecuteRequestV2 {
+        request_id: ids.request_id.clone(),
+        task: InferenceTaskV2::WordSegmentation,
+        payload: TaskRequestV2::WordSegmentation(WordSegmentationRequestV2 {
+            segmenter,
+            payload_ref_id: attachment.id.clone(),
+            item_count: count,
         }),
         attachments: vec![ArtifactRefV2::InlineJson(attachment)],
     })

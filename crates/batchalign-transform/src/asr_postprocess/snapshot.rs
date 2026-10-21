@@ -49,6 +49,11 @@ pub struct AsrPipelineSnapshot {
     pub after_multiword_split: Vec<AsrWord>,
     /// Stage 4: after per-word number expansion.
     pub after_number_expand: Vec<AsrWord>,
+    /// Stage 4c: after word segmentation, all monologues in order. `None`
+    /// when no segmenter changed the words: the language has none (see
+    /// `WordSegmenterV2::for_language`) or the file had nothing to segment.
+    /// Filled by the transcribe pipeline, which runs the segmenter.
+    pub after_word_segmentation: Option<Vec<AsrWord>>,
     /// Stage 5: after long-turn splitting (one inner Vec per turn chunk).
     pub after_long_turn_split: Vec<Vec<AsrWord>>,
     /// Stage 6: final retokenized utterances.

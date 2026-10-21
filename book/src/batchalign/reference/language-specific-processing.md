@@ -1,7 +1,7 @@
 # Language-Specific Processing Overview
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-10-21 14:20 EDT
 
 This page is the single entry point for understanding how batchalign3 handles
 non-English languages. It maps every stage of the processing pipeline to the
@@ -99,6 +99,11 @@ automatically.
 
 See [Cantonese Processing](languages/cantonese.md) for the full replacement
 table and architecture.
+
+For Taiwanese (`nan`), before each speaker turn is cut into chunks, each run of
+one-character Han words the recognizer returned is grouped into words by
+taibun's dictionary tokeniser, keeping its characters' timing; see
+[Word segmentation](language-code-resolution.md#word-segmentation).
 
 ### Stage 4: RTL Punctuation Normalization
 

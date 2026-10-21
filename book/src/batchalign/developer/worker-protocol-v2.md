@@ -2,7 +2,7 @@
 
 **Status:** Current
 **Last verified:** 2026-08-31 07:13 EDT
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-21 14:20 EDT
 
 **Speaker attribution (2026-09-16).** `AsrMonologueV2.speaker` is a tagged
 `SpeakerAttribution` rather than a bare string, and `ProviderMediaInput`
@@ -422,6 +422,7 @@ InferenceTask =
   Utseg
   Translate
   Coref
+  WordSegmentation
   Asr
   ForcedAlignment
   Speaker
@@ -658,6 +659,28 @@ rather than an invented one.
 
 `InlineJsonRef` still exists for small metadata payloads, but the live text NLP
 tasks no longer use inline JSON as their primary boundary.
+
+### Word Segmentation
+
+`word_segmentation` groups the one-character Han words a recognizer returns
+into words, during `transcribe`, for the languages
+`WordSegmenter::for_language` names (today `nan`, segmented by taibun). It is
+an IO-profile task: the runner is a pure function with no loaded model, so the
+PyO3 executor (`worker_text_exec.rs::run_word_segmentation`) requires no host.
+
+- the request names its `segmenter` (`WordSegmenterV2`) and carries the runs
+  inline (`InlineJsonRef`, `{"items": [run, ...]}`) with their `item_count`;
+  the runs are small and exist only for this request
+- the result (`word_segmentation_result`) is the segmenter's reported
+  identity (`ReportedEngineName`, `taibun@<version>`) and one token list per
+  run, in order. The executor admits only its wire shape
+- that there is one list per run, each re-spelling its run, is checked once,
+  where the words are merged, by `SegmentationPlan::apply` in
+  `batchalign-transform`. The plan owns the monologues' words between the
+  request and the answer, so token lists can only be applied to the words
+  they were computed from, and `PlannedSegmentation::new` returns
+  `NothingToSegment` rather than a plan when there is no run, so an empty
+  request is never sent
 
 ### `speaker_embedding`: many spans of ONE prepared decode
 

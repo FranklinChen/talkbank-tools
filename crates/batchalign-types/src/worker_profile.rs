@@ -41,7 +41,10 @@ impl WorkerProfile {
         match task {
             InferTask::Asr | InferTask::Fa | InferTask::Speaker => Self::Gpu,
             InferTask::Morphosyntax | InferTask::Utseg | InferTask::Coref => Self::Stanza,
-            InferTask::Translate | InferTask::Opensmile | InferTask::Avqi => Self::Io,
+            InferTask::Translate
+            | InferTask::Opensmile
+            | InferTask::Avqi
+            | InferTask::WordSegmentation => Self::Io,
         }
     }
 

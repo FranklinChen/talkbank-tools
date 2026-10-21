@@ -57,6 +57,7 @@ def _reported_engine(task: InferTask) -> str | None:
             | InferTask.OPENSMILE
             | InferTask.AVQI
             | InferTask.SPEAKER
+            | InferTask.WORD_SEGMENTATION
         ):
             return None
         case _:
@@ -112,6 +113,8 @@ def _capabilities() -> CapabilitiesResponse:
         InferTask.FA: ("torch", "torchaudio"),
         InferTask.OPENSMILE: ("opensmile",),
         InferTask.AVQI: ("parselmouth", "torchaudio"),
+        # The segmenter is named per request; taibun is the only one today.
+        InferTask.WORD_SEGMENTATION: ("taibun",),
     }
 
     import importlib

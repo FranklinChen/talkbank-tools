@@ -184,6 +184,9 @@ pub fn parse_asr_response_v2(
         TaskResultV2::CorefResult(_) => {
             Err("worker protocol V2 ASR response returned coreference data".into())
         }
+        TaskResultV2::WordSegmentationResult(_) => {
+            Err("worker protocol V2 ASR response returned word-segmentation data".into())
+        }
         TaskResultV2::SpeakerResult(_) => {
             Err("worker protocol V2 ASR response returned speaker diarization data".into())
         }

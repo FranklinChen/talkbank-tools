@@ -230,6 +230,9 @@ pub fn snapshot_into_pipeline_trace(snapshot: AsrPipelineSnapshot) -> AsrPipelin
         after_han_script_norm: snapshot
             .after_han_script_norm
             .map(|words| words.iter().map(asr_word_to_timed_trace).collect()),
+        after_word_segmentation: snapshot
+            .after_word_segmentation
+            .map(|words| words.iter().map(asr_word_to_timed_trace).collect()),
         after_long_turn_split: snapshot
             .after_long_turn_split
             .iter()

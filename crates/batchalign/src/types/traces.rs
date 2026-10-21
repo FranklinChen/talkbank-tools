@@ -124,6 +124,10 @@ pub struct AsrPipelineTrace {
     /// compatibility. It ran per word after number expansion (as stage 4b)
     /// until 2026-09-16.
     pub after_han_script_norm: Option<Vec<TimedWordTrace>>,
+    /// Stage 4c: after word segmentation, which groups one-character Han
+    /// words into words before chunking. Present only when a segmenter
+    /// changed the words (today `nan`).
+    pub after_word_segmentation: Option<Vec<TimedWordTrace>>,
     /// Stage 5: after long-turn splitting (nested by turn).
     pub after_long_turn_split: Vec<Vec<TimedWordTrace>>,
     /// Stage 6: final utterances.

@@ -81,6 +81,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
         &asr,
         ctx.opts.diarize,
         ctx.opts.write_wor,
+        ctx.state.word_segmenter.as_ref(),
     );
     crate::provenance::inject_provenance(&mut chat_file, &provenance);
 

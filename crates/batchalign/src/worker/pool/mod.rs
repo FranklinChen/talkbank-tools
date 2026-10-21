@@ -241,7 +241,8 @@ impl EngineSelection {
             | InferTask::Coref
             | InferTask::Opensmile
             | InferTask::Avqi
-            | InferTask::Speaker => EngineOverrides::default(),
+            | InferTask::Speaker
+            | InferTask::WordSegmentation => EngineOverrides::default(),
         }
     }
 

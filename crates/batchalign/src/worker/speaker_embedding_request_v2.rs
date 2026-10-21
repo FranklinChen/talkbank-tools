@@ -226,6 +226,7 @@ fn result_kind(result: &TaskResultV2) -> &'static str {
         TaskResultV2::UtsegResult(_) => "utterance-segmentation",
         TaskResultV2::TranslationResult(_) => "translation",
         TaskResultV2::CorefResult(_) => "coreference",
+        TaskResultV2::WordSegmentationResult(_) => "word segmentation",
         TaskResultV2::SpeakerResult(_) => "speaker diarization",
         TaskResultV2::SpeakerEmbeddingResult(_) => "speaker embedding",
         TaskResultV2::OpensmileResult(_) => "openSMILE feature",

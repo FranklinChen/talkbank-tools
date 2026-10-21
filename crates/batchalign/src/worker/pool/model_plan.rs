@@ -225,7 +225,8 @@ impl GpuTask {
             | InferTask::Translate
             | InferTask::Coref
             | InferTask::Opensmile
-            | InferTask::Avqi => None,
+            | InferTask::Avqi
+            | InferTask::WordSegmentation => None,
         }
     }
 }

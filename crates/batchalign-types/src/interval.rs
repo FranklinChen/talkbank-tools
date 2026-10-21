@@ -335,6 +335,16 @@ impl AdmittedInterval {
         )
     }
 
+    /// The smallest interval covering both. Admitted because both are: the
+    /// earlier start and the later end are each an admitted bound, in order.
+    #[must_use]
+    pub fn covering(self, other: Self) -> Self {
+        Self {
+            start_ms: self.start_ms.min(other.start_ms),
+            end_ms: self.end_ms.max(other.end_ms),
+        }
+    }
+
     /// Whether the interval covers no time at all.
     ///
     /// A zero-width interval is a legal admission but locates nothing, so
@@ -397,6 +407,24 @@ mod tests {
         }
         Ok(())
     }
+
+    /// The covering interval is each pair's outer bounds, in either order,
+    /// and overlapping, nested and disjoint pairs alike.
+    #[test]
+    fn covering_takes_the_outer_bounds() -> Result<(), Box<dyn std::error::Error>> {
+        for ((a, b), expected) in [
+            (((100, 160), (240, 320)), (100, 320)),
+            (((240, 320), (100, 160)), (100, 320)),
+            (((100, 400), (200, 300)), (100, 400)),
+            (((100, 300), (200, 400)), (100, 400)),
+        ] {
+            let covered = AdmittedInterval::admit_millis(a.0, a.1)?
+                .covering(AdmittedInterval::admit_millis(b.0, b.1)?);
+            assert_eq!((covered.start_ms(), covered.end_ms()), expected);
+        }
+        Ok(())
+    }
+
     #[test]
     fn a_non_finite_bound_is_refused_by_name_instead_of_saturating() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {

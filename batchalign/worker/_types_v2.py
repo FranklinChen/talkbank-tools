@@ -66,6 +66,7 @@ class InferenceTaskV2(str, Enum):
     SPEAKER_EMBEDDING = "speaker_embedding"
     OPENSMILE = "opensmile"
     AVQI = "avqi"
+    WORD_SEGMENTATION = "word_segmentation"
 
 
 class AsrBackendV2(str, Enum):
@@ -381,6 +382,24 @@ class TranslateRequestV2(BaseModel):
     item_count: int = Field(ge=0)
 
 
+class WordSegmenterV2(str, Enum):
+    """Word segmenter named by Rust.
+
+    Mirrors `crates/batchalign-types/src/worker_v2/requests.rs::WordSegmenterV2`.
+    """
+
+    TAIBUN_TAIWANESE = "taibun_taiwanese"
+
+
+class WordSegmentationRequestV2(BaseModel):
+    """V2 word-segmentation request (internally tagged as ``"word_segmentation"``)."""
+
+    kind: Literal["word_segmentation"] = "word_segmentation"
+    segmenter: WordSegmenterV2
+    payload_ref_id: WorkerArtifactIdV2
+    item_count: int = Field(ge=0)
+
+
 class CorefRequestV2(BaseModel):
     """V2 coreference request payload (internally tagged as ``"coref"``)."""
 
@@ -463,6 +482,7 @@ TaskRequestV2: TypeAlias = Annotated[
     | UtsegRequestV2
     | TranslateRequestV2
     | CorefRequestV2
+    | WordSegmentationRequestV2
     | SpeakerRequestV2
     | SpeakerEmbeddingRequestV2
     | OpenSmileRequestV2
@@ -1391,6 +1411,14 @@ class CorefResultPayloadV2(BaseModel):
     items: list[CorefItemResultV2]
 
 
+class WordSegmentationResultPayloadV2(BaseModel):
+    """Batched word-segmentation response payload (internally tagged)."""
+
+    kind: Literal["word_segmentation_result"] = "word_segmentation_result"
+    segmenter: ReportedEngineName
+    items: list[list[str]]
+
+
 class SpeakerSegmentV2(BaseModel):
     """One raw speaker diarization segment returned by Python."""
 
@@ -1525,6 +1553,7 @@ MorphosyntaxResultV2 = MorphosyntaxResultPayloadV2
 UtsegResultV2 = UtsegResultPayloadV2
 TranslationResultV2 = TranslationResultPayloadV2
 CorefResultV2 = CorefResultPayloadV2
+WordSegmentationResultV2 = WordSegmentationResultPayloadV2
 SpeakerResultV2 = SpeakerResultPayloadV2
 SpeakerEmbeddingResultV2 = SpeakerEmbeddingResultPayloadV2
 OpenSmileResultV2 = OpenSmileResultPayloadV2
@@ -1539,6 +1568,7 @@ TaskResultV2: TypeAlias = Annotated[
     | UtsegResultPayloadV2
     | TranslationResultPayloadV2
     | CorefResultPayloadV2
+    | WordSegmentationResultPayloadV2
     | SpeakerResultPayloadV2
     | SpeakerEmbeddingResultPayloadV2
     | OpenSmileResultPayloadV2

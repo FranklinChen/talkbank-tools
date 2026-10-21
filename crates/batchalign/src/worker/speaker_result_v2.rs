@@ -93,6 +93,9 @@ pub fn parse_speaker_result_v2(
         TaskResultV2::CorefResult(_) => Err(SpeakerResultParseError::UnexpectedPayload(
             "worker protocol V2 speaker response returned coreference data".into(),
         )),
+        TaskResultV2::WordSegmentationResult(_) => Err(SpeakerResultParseError::UnexpectedPayload(
+            "worker protocol V2 speaker response returned word-segmentation data".into(),
+        )),
         TaskResultV2::SpeakerEmbeddingResult(_) => Err(SpeakerResultParseError::UnexpectedPayload(
             "worker protocol V2 speaker response returned speaker embedding data".into(),
         )),

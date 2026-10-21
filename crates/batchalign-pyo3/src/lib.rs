@@ -169,6 +169,10 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         worker_text_exec::execute_coref_request_v2,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        worker_text_exec::execute_word_segmentation_request_v2,
+        m
+    )?)?;
 
     // Worker artifact loaders
 

@@ -36,6 +36,7 @@ pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> Result<InferTa
         InferenceTaskV2::SpeakerEmbedding => Ok(InferTask::Speaker),
         InferenceTaskV2::Opensmile => Ok(InferTask::Opensmile),
         InferenceTaskV2::Avqi => Ok(InferTask::Avqi),
+        InferenceTaskV2::WordSegmentation => Ok(InferTask::WordSegmentation),
     }
 }
 
@@ -96,9 +97,13 @@ pub(super) fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOve
         },
         // One implementation each: nothing to select, so nothing enters the
         // key. Listed rather than wildcarded so a new task has to decide.
+        // Word segmentation names its segmenter per request, and the worker
+        // applies the named one to that request alone: no model is bound at
+        // spawn, so the segmenter is not worker identity.
         TaskRequestV2::Morphosyntax(_)
         | TaskRequestV2::Utseg(_)
         | TaskRequestV2::Coref(_)
+        | TaskRequestV2::WordSegmentation(_)
         | TaskRequestV2::Speaker(_)
         | TaskRequestV2::SpeakerEmbedding(_)
         | TaskRequestV2::Opensmile(_)

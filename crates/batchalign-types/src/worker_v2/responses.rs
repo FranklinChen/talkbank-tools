@@ -861,6 +861,17 @@ pub struct AvqiResultV2 {
     pub error: Option<String>,
 }
 
+/// Batched word-segmentation response payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct WordSegmentationResultV2 {
+    /// The segmenter that ran, with its version, for provenance.
+    pub segmenter: ReportedEngineName,
+    /// One token list per prepared run, in payload order. Each list's
+    /// concatenation must re-spell its run exactly; the control plane
+    /// refuses any that does not.
+    pub items: Vec<Vec<String>>,
+}
+
 /// Typed execute result payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -881,6 +892,8 @@ pub enum TaskResultV2 {
     TranslationResult(TranslationResultV2),
     /// Batched coreference result.
     CorefResult(CorefResultV2),
+    /// Batched word-segmentation result.
+    WordSegmentationResult(WordSegmentationResultV2),
     /// Raw speaker diarization result.
     SpeakerResult(SpeakerResultV2),
     /// Speaker embeddings for named spans of one prepared recording.

@@ -1,6 +1,8 @@
 //! Word preparation, speaker projection, and pre-CHAT segmentation.
 
+use super::word_segmentation::segment_words;
 use super::*;
+use crate::infer_retry::Cancellation;
 
 pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
     mut ctx: TranscribePipelineContext<'a, Recognized, P>,
@@ -27,6 +29,7 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
     let PostprocessedSpeech {
         utterances,
         speaker_assignments,
+        word_segmenter,
     } = process_asr_with_prechat_segmentation(&mut ctx, &asr_output, &resolved_lang).await?;
     // The engine returned words and post-processing kept no utterance from
     // them. Its own empty-chunk path returns an empty Vec here, so without
@@ -65,6 +68,7 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
         asr,
         utterances,
         speaker_assignments,
+        word_segmenter,
     }))
 }
 
@@ -123,6 +127,32 @@ pub(crate) fn apply_prechat_assignments(
 struct PostprocessedSpeech {
     utterances: Vec<Utterance>,
     speaker_assignments: SpeakerAssignmentOutcome,
+    /// The segmenter that changed the words, for the provenance stamp.
+    word_segmenter: Option<crate::api::ReportedEngineName>,
+}
+
+/// `TranscribePipelineContext` has no job cancellation token wired yet (see
+/// `stage_run_morphosyntax`'s identical note); genuinely NotWired rather than
+/// a fabricated stand-in.
+const fn transcribe_cancellation() -> Cancellation<'static> {
+    Cancellation::NotWired {
+        reason: "TranscribePipelineContext has no job cancellation token wired yet",
+    }
+}
+
+/// Punctuation retokenization and cleanup of projected chunks: what every
+/// path without a pre-CHAT boundary model ends with.
+fn punctuation_utterances(
+    chunks: Vec<PreparedMonologueChunk>,
+    lang: &str,
+    snapshot: Option<&mut AsrPipelineSnapshot>,
+) -> Vec<Utterance> {
+    let mut utterances = asr_postprocess::utterances_from_prepared_chunks(chunks);
+    asr_postprocess::finalize_utterances(&mut utterances, lang);
+    if let Some(s) = snapshot {
+        s.final_utterances = utterances.clone();
+    }
+    utterances
 }
 
 struct ProjectedSpeechChunks {
@@ -185,23 +215,38 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
             speaker_assignments: SpeakerAssignmentOutcome::Dedicated(parts.evidence),
         })
     };
+    // Stages 1-4, word segmentation, stages 5-5b, then speaker projection:
+    // the same for every path below. Segmentation runs on whole monologues,
+    // before chunking, and its result is the only route to chunks.
+    let monologues = asr_postprocess::prepare_monologue_words_with_snapshot(
+        asr_output,
+        text_language,
+        ctx.asr_pipeline_snapshot.as_mut(),
+    )
+    .map_err(han_script_normalization_refused)?;
+    let segmented = segment_words(
+        ctx.services.pool,
+        resolved_lang,
+        monologues,
+        transcribe_cancellation(),
+    )
+    .await?;
+    let (prepared, word_segmenter) =
+        segmented.chunk(text_language.rules(), ctx.asr_pipeline_snapshot.as_mut());
+    let ProjectedSpeechChunks {
+        chunks: prepared_chunks,
+        speaker_assignments,
+    } = project_speakers(prepared)?;
+
     let Some(pre_chat_policy) = ctx.utseg_execution.pre_chat_policy() else {
-        let ProjectedSpeechChunks {
-            chunks,
-            speaker_assignments,
-        } = project_speakers(prepare_asr_chunks_with_snapshot(
-            asr_output,
-            text_language,
-            ctx.asr_pipeline_snapshot.as_mut(),
-        )?)?;
-        let mut utterances = asr_postprocess::utterances_from_prepared_chunks(chunks);
-        asr_postprocess::finalize_utterances(&mut utterances, &lang_str);
-        if let Some(s) = ctx.asr_pipeline_snapshot.as_mut() {
-            s.final_utterances = utterances.clone();
-        }
         return Ok(PostprocessedSpeech {
-            utterances,
+            utterances: punctuation_utterances(
+                prepared_chunks,
+                &lang_str,
+                ctx.asr_pipeline_snapshot.as_mut(),
+            ),
             speaker_assignments,
+            word_segmenter,
         });
     };
 
@@ -213,37 +258,22 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
         ServerError::Validation("pre-CHAT segmentation requested from a disabled plan".into())
     })?;
     let Some(route) = route.model().filter(|model| model.uses_boundary_model()) else {
-        let ProjectedSpeechChunks {
-            chunks,
-            speaker_assignments,
-        } = project_speakers(prepare_asr_chunks_with_snapshot(
-            asr_output,
-            text_language,
-            ctx.asr_pipeline_snapshot.as_mut(),
-        )?)?;
-        let mut utterances = asr_postprocess::utterances_from_prepared_chunks(chunks);
-        asr_postprocess::finalize_utterances(&mut utterances, &lang_str);
-        if let Some(s) = ctx.asr_pipeline_snapshot.as_mut() {
-            s.final_utterances = utterances.clone();
-        }
         return Ok(PostprocessedSpeech {
-            utterances,
+            utterances: punctuation_utterances(
+                prepared_chunks,
+                &lang_str,
+                ctx.asr_pipeline_snapshot.as_mut(),
+            ),
             speaker_assignments,
+            word_segmenter,
         });
     };
 
-    let ProjectedSpeechChunks {
-        chunks: prepared_chunks,
-        speaker_assignments,
-    } = project_speakers(prepare_asr_chunks_with_snapshot(
-        asr_output,
-        text_language,
-        ctx.asr_pipeline_snapshot.as_mut(),
-    )?)?;
     if prepared_chunks.is_empty() {
         return Ok(PostprocessedSpeech {
             utterances: Vec::new(),
             speaker_assignments,
+            word_segmenter,
         });
     }
 
@@ -254,12 +284,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
         &items,
         route.fallback().is_allowed(),
         pre_chat_policy,
-        // `TranscribePipelineContext` has no job cancellation token wired
-        // yet (see `stage_run_morphosyntax`'s identical note); genuinely
-        // NotWired rather than a fabricated stand-in.
-        crate::infer_retry::Cancellation::NotWired {
-            reason: "TranscribePipelineContext has no job cancellation token wired yet",
-        },
+        transcribe_cancellation(),
     )
     .await?;
     let split_chunks = apply_prechat_assignments(&prepared_chunks, &predictions);
@@ -287,6 +312,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     Ok(PostprocessedSpeech {
         utterances,
         speaker_assignments,
+        word_segmenter,
     })
 }
 
@@ -301,7 +327,10 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
 /// The entry point for any caller that wants what transcribe produces without
 /// a per-stage trace, including the offline `eval utseg-replay` pre-ASR pass.
 /// A replay that prepared its chunks some other way would be comparing two
-/// implementations rather than replaying one.
+/// implementations rather than replaying one. The one stage it leaves out is
+/// word segmentation, which needs a worker and applies only to the languages
+/// `WordSegmenterV2::for_language` names; none of them has a pre-CHAT
+/// boundary model, so no replay of one is affected.
 pub(crate) fn prepare_asr_chunks<'a>(
     asr_output: &batchalign_transform::asr_postprocess::AsrOutput,
     language: impl Into<asr_postprocess::AsrTextLanguage<'a>>,
@@ -322,87 +351,29 @@ fn han_script_normalization_refused(
     ServerError::Validation(format!("ASR post-processing refused this file: {refusal}"))
 }
 
-/// Snapshot-aware variant of [`prepare_asr_chunks`].
+/// Snapshot-aware variant of [`prepare_asr_chunks`]: the transform's two
+/// steps with the trace threaded through them, and nothing between them.
 ///
 /// When `snapshot` is `Some`, populates per-stage trace fields:
 /// `raw_elements`, `after_compound_merge`, `after_timing_extract`,
 /// `after_multiword_split`, `after_number_expand`,
-/// `after_han_script_norm` (`yue` and `nan` only), `after_long_turn_split`. The
-/// `final_utterances` field is filled by the caller after `retokenize`.
-///
-/// Multi-monologue inputs concatenate their stage outputs into the
-/// snapshot's flat fields (other than `after_long_turn_split` which
-/// is `Vec<Vec<...>>` and accumulates chunks in order).
+/// `after_han_script_norm` (`yue` and `nan` only), `after_long_turn_split`.
 pub(super) fn prepare_asr_chunks_with_snapshot(
     asr_output: &batchalign_transform::asr_postprocess::AsrOutput,
     language: asr_postprocess::AsrTextLanguage<'_>,
     mut snapshot: Option<&mut AsrPipelineSnapshot>,
 ) -> Result<Vec<PreparedMonologueChunk>, ServerError> {
-    let lang = language.rules();
-    let Some(_) = snapshot.as_ref() else {
-        // One implementation of this step, not two. Without a trace to fill in
-        // there is nothing this function adds over the transform's own
-        // preparation, and keeping a second copy here is exactly the drift
-        // `eval utseg-replay` exists to catch. The traced path below stays
-        // separate only because it must record each stage as it goes;
-        // `snapshot_and_plain_preparation_agree` holds the two to one answer.
-        return asr_postprocess::prepare_asr_chunks(asr_output, language)
-            .map_err(han_script_normalization_refused);
-    };
-
-    if let Some(ref mut s) = snapshot {
-        for m in &asr_output.monologues {
-            s.raw_elements.extend_from_slice(&m.elements);
-        }
-    }
-
-    let mut monologue_words: Vec<(asr_postprocess::SpeakerIndex, Vec<AsrWord>)> =
-        Vec::with_capacity(asr_output.monologues.len());
-    for m in &asr_output.monologues {
-        let mut sub = AsrPipelineSnapshot::default();
-        let cap = snapshot.is_some().then_some(&mut sub);
-        let words =
-            asr_postprocess::prepare_words_pre_expansion_with_snapshot(&m.elements, language, cap)
-                .map_err(han_script_normalization_refused)?;
-        if let Some(ref mut s) = snapshot {
-            s.after_compound_merge.extend(sub.after_compound_merge);
-            s.after_timing_extract.extend(sub.after_timing_extract);
-            // Han-script normalization is captured here now: it runs inside
-            // preparation, before the multi-word split, not after expansion.
-            if let Some(normalized) = sub.after_han_script_norm {
-                s.after_han_script_norm
-                    .get_or_insert_with(Vec::new)
-                    .extend(normalized);
-            }
-            s.after_multiword_split.extend(sub.after_multiword_split);
-        }
-        monologue_words.push((m.speaker, words));
-    }
-
-    // Stage 4, CHAT word forms: the one implementation the untraced path
-    // runs too (it owns the code-switched policy as well).
-    for (_speaker, words) in &mut monologue_words {
-        *words = asr_postprocess::write_word_forms(std::mem::take(words), language);
-    }
-
-    if let Some(ref mut s) = snapshot {
-        for (_, words) in &monologue_words {
-            s.after_number_expand.extend_from_slice(words);
-        }
-    }
-
-    let mut prepared = Vec::new();
-    for (speaker, words) in monologue_words {
-        let mut sub = AsrPipelineSnapshot::default();
-        let cap = snapshot.is_some().then_some(&mut sub);
-        prepared.extend(asr_postprocess::finalize_words_to_chunks_with_snapshot(
-            words, speaker, lang, cap,
-        ));
-        if let Some(ref mut s) = snapshot {
-            s.after_long_turn_split.extend(sub.after_long_turn_split);
-        }
-    }
-    Ok(prepared)
+    let monologues = asr_postprocess::prepare_monologue_words_with_snapshot(
+        asr_output,
+        language,
+        snapshot.as_deref_mut(),
+    )
+    .map_err(han_script_normalization_refused)?;
+    Ok(asr_postprocess::chunk_monologues_with_snapshot(
+        monologues,
+        language.rules(),
+        snapshot,
+    ))
 }
 
 #[cfg(test)]

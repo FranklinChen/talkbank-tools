@@ -1,7 +1,8 @@
 use super::han_script::NormalizationChangedLength;
 use super::{
-    AsrNormalizedText, AsrOutput, AsrTextLanguage, AsrWord, ENDING_PUNCT, MOR_PUNCT, RTL_PUNCT,
-    SpeakerIndex, Utterance, cleanup, finalize_words_to_chunks, prepare_words_pre_expansion,
+    AsrNormalizedText, AsrOutput, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, ENDING_PUNCT,
+    MOR_PUNCT, MonologueWords, PreparedMonologueChunk, RTL_PUNCT, SpeakerIndex, Utterance, cleanup,
+    finalize_words_to_chunks_with_snapshot, prepare_words_pre_expansion_with_snapshot,
     write_word_forms,
 };
 
@@ -28,30 +29,100 @@ pub fn process_raw_asr<'a>(
 /// Normalize raw ASR monologues into pre-CHAT chunks while preserving speaker
 /// boundaries.
 ///
-/// This is the monolithic pipeline that applies all stages in sequence.
-/// For pipelines that need to intercept the number expansion step (e.g. to
-/// route through Python IPC), use [`super::prepare_words_pre_expansion`] and
-/// [`super::finalize_words_to_chunks`] separately.
+/// The two steps, [`prepare_monologue_words`] then [`chunk_monologues`], with
+/// nothing between them. A caller that runs a whole-monologue pass (word
+/// segmentation, which needs a worker) calls the two steps itself.
 pub fn prepare_asr_chunks<'a>(
     output: &AsrOutput,
     language: impl Into<AsrTextLanguage<'a>>,
-) -> Result<Vec<super::PreparedMonologueChunk>, NormalizationChangedLength> {
+) -> Result<Vec<PreparedMonologueChunk>, NormalizationChangedLength> {
     let language = language.into();
-    let mut prepared = Vec::new();
+    Ok(chunk_monologues(
+        prepare_monologue_words(output, language)?,
+        language.rules(),
+    ))
+}
 
+/// Stages 1-4 for every monologue: each monologue's words in their final CHAT
+/// word forms, not yet chunked.
+pub fn prepare_monologue_words<'a>(
+    output: &AsrOutput,
+    language: impl Into<AsrTextLanguage<'a>>,
+) -> Result<Vec<MonologueWords>, NormalizationChangedLength> {
+    prepare_monologue_words_with_snapshot(output, language.into(), None)
+}
+
+/// Snapshot-aware variant of [`prepare_monologue_words`].
+///
+/// When `snapshot` is `Some`, fills `raw_elements` and the stage 1-4 fields,
+/// concatenating the monologues' stage outputs in order.
+pub fn prepare_monologue_words_with_snapshot(
+    output: &AsrOutput,
+    language: AsrTextLanguage<'_>,
+    mut snapshot: Option<&mut AsrPipelineSnapshot>,
+) -> Result<Vec<MonologueWords>, NormalizationChangedLength> {
+    let mut monologues = Vec::with_capacity(output.monologues.len());
     for monologue in &output.monologues {
-        let words = prepare_words_pre_expansion(&monologue.elements, language)?;
+        // The preparation step SETS its snapshot fields, so each monologue
+        // records into its own and is appended here.
+        let mut sub = snapshot.is_some().then(AsrPipelineSnapshot::default);
+        let words =
+            prepare_words_pre_expansion_with_snapshot(&monologue.elements, language, sub.as_mut())?;
         // Stage 4: CHAT word forms (number words, alphanumeric linkages,
         // letter strings)
         let words = write_word_forms(words, language);
-        prepared.extend(finalize_words_to_chunks(
+        if let (Some(s), Some(sub)) = (snapshot.as_deref_mut(), sub) {
+            s.raw_elements.extend_from_slice(&monologue.elements);
+            s.after_compound_merge.extend(sub.after_compound_merge);
+            s.after_timing_extract.extend(sub.after_timing_extract);
+            if let Some(normalized) = sub.after_han_script_norm {
+                s.after_han_script_norm
+                    .get_or_insert_with(Vec::new)
+                    .extend(normalized);
+            }
+            s.after_multiword_split.extend(sub.after_multiword_split);
+            s.after_number_expand.extend_from_slice(&words);
+        }
+        monologues.push(MonologueWords {
+            speaker: monologue.speaker,
             words,
-            monologue.speaker,
-            language.rules(),
-        ));
+        });
     }
+    Ok(monologues)
+}
 
-    Ok(prepared)
+/// Stages 5-5b for every monologue: long-turn and pause splitting into
+/// chunks, in monologue order.
+pub fn chunk_monologues(
+    monologues: Vec<MonologueWords>,
+    lang: &str,
+) -> Vec<PreparedMonologueChunk> {
+    chunk_monologues_with_snapshot(monologues, lang, None)
+}
+
+/// Snapshot-aware variant of [`chunk_monologues`]: fills
+/// `after_long_turn_split` when `snapshot` is `Some`.
+pub fn chunk_monologues_with_snapshot(
+    monologues: Vec<MonologueWords>,
+    lang: &str,
+    mut snapshot: Option<&mut AsrPipelineSnapshot>,
+) -> Vec<PreparedMonologueChunk> {
+    let mut prepared = Vec::new();
+    for MonologueWords { speaker, words } in monologues {
+        // Chunking SETS `after_long_turn_split`, so each monologue records
+        // into its own snapshot and is appended here.
+        let mut sub = snapshot.is_some().then(AsrPipelineSnapshot::default);
+        prepared.extend(finalize_words_to_chunks_with_snapshot(
+            words,
+            speaker,
+            lang,
+            sub.as_mut(),
+        ));
+        if let (Some(s), Some(sub)) = (snapshot.as_deref_mut(), sub) {
+            s.after_long_turn_split.extend(sub.after_long_turn_split);
+        }
+    }
+    prepared
 }
 
 /// Retokenize prepared chunks into utterances using punctuation boundaries.

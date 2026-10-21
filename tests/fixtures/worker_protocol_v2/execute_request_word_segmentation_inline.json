@@ -1,0 +1,22 @@
+{
+  "request_id": "req-word-segmentation-0001",
+  "task": "word_segmentation",
+  "payload": {
+    "kind": "word_segmentation",
+    "segmenter": "taibun_taiwanese",
+    "payload_ref_id": "inline-ref-0001",
+    "item_count": 2
+  },
+  "attachments": [
+    {
+      "kind": "inline_json",
+      "id": "inline-ref-0001",
+      "value": {
+        "items": [
+          "你食飽未",
+          "阮阿公佇厝"
+        ]
+      }
+    }
+  ]
+}

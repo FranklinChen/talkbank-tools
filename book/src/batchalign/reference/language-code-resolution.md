@@ -1,7 +1,7 @@
 # Language Code Resolution
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:56 EDT
+**Last updated:** 2026-10-21 14:20 EDT
 
 This page documents how batchalign3 maps language codes to models, Stanza
 pipelines, and processing behavior.
@@ -53,6 +53,36 @@ character with OpenCC `s2tw` (not `s2twp`, which would substitute Taiwan
 Mandarin vocabulary for what was said). Each word keeps its timing, and the
 same conversion applies to every engine admitted for `nan` and to provider
 tokens when UTR matches them against a Taiwanese transcript.
+
+### Word segmentation
+
+The recognizer's aligner returns one word per Han character. A CHAT main tier
+writes words, so each run of consecutive one-character Han words is grouped
+into words by [taibun](https://github.com/andreihar/taibun)'s
+dictionary tokeniser, run by the worker: `我欲去學校` becomes `我 欲 去 學校`.
+Each word takes the span its timed characters cover; a character missing a
+start or an end contributes no time, and a word with no timed character stays
+untimed. Words the recognizer already returned with several characters,
+punctuation, and non-Han words are left as they are.
+
+Segmentation runs on each speaker turn's whole word list, after the words take
+their final forms and before the turn is split into chunks, so a long-turn
+split never cuts a word in two and turn length is counted in words. With
+`--trace`, the segmented words are the stage `after_word_segmentation`.
+
+The segmenter's answer is admitted only if each run's tokens spell that run
+exactly; anything else refuses the file rather than moving timings onto other
+characters. The stamp records the segmenter and its version in `word_seg`
+(see [Provenance](../user-guide/provenance.md#transcribe)).
+
+The lexicon decides the words, so segmentation follows the characters the
+recognizer wrote: where it writes Mandarin characters for a Taiwanese word,
+the grouping is of those characters.
+
+taibun's code is MIT-licensed. The lexicon it ships comes from the
+Taiwanese-Chinese Online Dictionary and iTaigi, via ChhoeTaigi, under CC BY-SA
+4.0. Batchalign depends on the published package and does not copy or modify
+the lexicon.
 
 Qwen's Chinese forced aligner supplies timestamps; this is not a separately
 trained Taiwanese aligner. Punctuation is restored only when its lexical text

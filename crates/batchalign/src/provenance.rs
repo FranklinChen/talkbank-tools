@@ -195,6 +195,7 @@ enum StampField {
     Utr,
     UtrUnavailable,
     Wor,
+    WordSeg,
 }
 
 impl StampField {
@@ -215,6 +216,7 @@ impl StampField {
             Self::Utr => "utr",
             Self::UtrUnavailable => "utr_unavailable",
             Self::Wor => "wor",
+            Self::WordSeg => "word_seg",
         }
     }
 }
@@ -1190,20 +1192,27 @@ pub(crate) fn align_provenance(
         .field_if(StampField::Incremental, incremental)
 }
 
-/// Build a provenance comment for transcribe: `asr=` names the engine and
-/// `asr_model=` the selected checkpoint, when there is one. Infallible: the
-/// checkpoint was admitted as stamp-safe text with the transcribe plan.
+/// Build a provenance comment for transcribe: `asr=` names the engine,
+/// `asr_model=` the selected checkpoint, when there is one, and `word_seg=`
+/// the segmenter that grouped the recognizer's characters into words, when
+/// one did. Infallible: the checkpoint was admitted as stamp-safe text with
+/// the transcribe plan, and the segmenter's name is a reported engine name.
 pub(crate) fn transcribe_provenance(
     lang: &crate::api::TranscriptLanguage,
     asr: &AsrIdentity,
     diarize: bool,
     wor: bool,
+    word_segmenter: Option<&crate::api::ReportedEngineName>,
 ) -> ProvenanceComment {
     let comment = ProvenanceComment::new(ReleasedCommand::Transcribe)
         .field(StampField::Asr, StampFieldValue::from(asr.engine().clone()))
         .field(StampField::Lang, StampFieldValue::from(lang))
         .field_if(StampField::Diarize, diarize)
-        .field_if(StampField::Wor, wor);
+        .field_if(StampField::Wor, wor)
+        .field_if_some(
+            StampField::WordSeg,
+            word_segmenter.map(StampFieldValue::from),
+        );
     match asr.asr_model() {
         Some(model) => comment.field(StampField::AsrModel, StampFieldValue::from(model)),
         None => comment,
@@ -1752,6 +1761,7 @@ mod tests {
             &qwen,
             false,
             false,
+            None,
         )
         .format();
         assert!(
@@ -2116,6 +2126,7 @@ mod tests {
             &funaudio,
             true,
             false,
+            None,
         )
         .format();
         assert!(
@@ -2154,6 +2165,7 @@ mod tests {
             &unreported,
             true,
             false,
+            None,
         )
         .format();
         assert!(!comment.contains("asr_model="), "{comment}");

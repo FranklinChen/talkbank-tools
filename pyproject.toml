@@ -83,6 +83,12 @@ dependencies = [
     # transitive Rust dependencies) are deliberate decisions, not
     # accidental upgrades.
     "pycantonese>=5.0.0,<6",
+    # Taiwanese (`nan`) word segmentation during transcription. The code is
+    # MIT; the lexicon it ships is CC BY-SA 4.0 (Taiwanese-Chinese Online
+    # Dictionary and iTaigi via ChhoeTaigi). BA3 depends on the package and
+    # does not redistribute or modify the lexicon. Bounded so a major-version
+    # change, which could re-segment transcripts, is a deliberate decision.
+    "taibun>=1.1.8,<2",
 ]
 
 [project.optional-dependencies]

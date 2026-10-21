@@ -59,6 +59,7 @@ from batchalign.worker._types_v2 import (
     FaTextModeV2,
     ForcedAlignmentRequestV2,
     InferenceTaskV2,
+    InlineJsonRefV2,
     IntegratedDiarizationV2,
     MonologueAsrResultV2,
     MorphosyntaxAnalyzedItemV2,
@@ -85,6 +86,9 @@ from batchalign.worker._types_v2 import (
     WhisperChunkResultV2,
     WhisperChunkSpanV2,
     WhisperTokenTimingResultV2,
+    WordSegmentationRequestV2,
+    WordSegmentationResultV2,
+    WordSegmenterV2,
 )
 
 
@@ -1596,6 +1600,64 @@ def test_returns_typed_error_for_missing_text_v2_host(tmp_path: Path) -> None:
     assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
     assert response.result is None
     assert "no translate host loaded" in response.outcome.message
+
+
+def _word_segmentation_request(runs: list[str], item_count: int) -> ExecuteRequestV2:
+    """A word-segmentation request with its runs inline, as Rust builds it."""
+
+    return ExecuteRequestV2(
+        request_id="req-execute-v2-word-segmentation-1",
+        task=InferenceTaskV2.WORD_SEGMENTATION,
+        payload=WordSegmentationRequestV2(
+            segmenter=WordSegmenterV2.TAIBUN_TAIWANESE,
+            payload_ref_id="inline-ref-word-segmentation-1",
+            item_count=item_count,
+        ),
+        attachments=[
+            InlineJsonRefV2(
+                id="inline-ref-word-segmentation-1",
+                value={"items": runs},
+            )
+        ],
+    )
+
+
+def _no_loaded_host() -> WorkerExecutionHostV2:
+    """A host with no model loaded: word segmentation needs none."""
+
+    return WorkerExecutionHostV2(
+        asr=AsrExecutionHostV2(),
+        forced_alignment=ForcedAlignmentExecutionHostV2(),
+        speaker=SpeakerExecutionHostV2(),
+        text=TextExecutionHostV2(),
+    )
+
+
+def test_routes_word_segmentation_execute_v2_request() -> None:
+    """The live V2 router segments with the named segmenter; no host is loaded."""
+
+    response = execute_request_v2(
+        request=_word_segmentation_request(["你食飽未", "臺灣"], item_count=2),
+        host=_no_loaded_host(),
+    )
+
+    assert isinstance(response.outcome, ExecuteSuccessV2)
+    assert isinstance(response.result, WordSegmentationResultV2)
+    assert response.result.segmenter.startswith("taibun@")
+    assert response.result.items == [["你", "食飽", "未"], ["臺灣"]]
+
+
+def test_word_segmentation_item_count_mismatch_is_invalid_payload() -> None:
+    """A batch whose run count disagrees with the request is refused before segmenting."""
+
+    response = execute_request_v2(
+        request=_word_segmentation_request(["你食飽未"], item_count=2),
+        host=_no_loaded_host(),
+    )
+
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code == ProtocolErrorCodeV2.INVALID_PAYLOAD
+    assert response.result is None
 
 
 def _assert_item_failure(response: ExecuteResponseV2, message_fragment: str) -> None:

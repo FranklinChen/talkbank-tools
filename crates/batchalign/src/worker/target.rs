@@ -146,6 +146,7 @@ pub(crate) fn task_name(task: InferTask) -> &'static str {
         InferTask::Opensmile => "opensmile",
         InferTask::Avqi => "avqi",
         InferTask::Speaker => "speaker",
+        InferTask::WordSegmentation => "word_segmentation",
     }
 }
 

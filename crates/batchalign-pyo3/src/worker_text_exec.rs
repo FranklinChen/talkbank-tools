@@ -13,11 +13,16 @@
 //! callback where the host reads one, and calls the loaded model. See
 //! `batchalign/worker/_text_v2.py`.
 //!
+//! Word segmentation joined later, on the same control plane, with a runner
+//! that holds no model: see `run_word_segmentation`.
+//!
 //! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section
 //! "7. Text Task Result Normalization" for the shared result contracts.
 
 use batchalign_types::worker::BatchInferResponse;
-use batchalign_types::worker_v2::{ExecuteRequestV2, TaskRequestV2, TaskResultV2};
+use batchalign_types::worker_v2::{
+    ExecuteRequestV2, TaskRequestV2, TaskResultV2, WordSegmentationResultV2,
+};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 
@@ -252,6 +257,52 @@ fn run_coref(
         normalize_coref_result(&response, task_request.item_count as usize)
             .map_err(|error| host_output_error("coref", error))?,
     ))
+}
+
+/// Word segmentation: the runner is a pure function of the segmenter named in
+/// the request and the frozen batch, so there is no loaded host to require.
+/// The result is admitted here only for its wire shape. That it holds one
+/// token list per run, each re-spelling its run, is checked once, where the
+/// words are merged, by the plan that holds the runs
+/// (`SegmentationPlan::apply` in `batchalign-transform`).
+fn run_word_segmentation(
+    py: Python<'_>,
+    request: ValidatedRequestV2<'_>,
+    runner: Option<Py<PyAny>>,
+) -> Result<TaskResultV2, ExecuteFailure> {
+    let task_request = extract_task_payload(
+        &request,
+        |payload| match payload {
+            TaskRequestV2::WordSegmentation(value) => Some(value),
+            _ => None,
+        },
+        "word segmentation",
+    )?;
+    let batch = CountedBatch::load(
+        &request,
+        task_request.payload_ref_id.as_ref(),
+        task_request.item_count,
+        "word segmentation",
+    )?;
+    let runner = require_runner(runner, "no word segmenter for worker protocol V2")?;
+    let response = runner
+        .bind(py)
+        .call1((task_request.segmenter.as_wire_str(), batch.json.as_str()))
+        .map_err(|error| classify_runner_error(py, error))?;
+    let result: WordSegmentationResultV2 = parse_host_output(&response, "word segmentation")?;
+    Ok(TaskResultV2::WordSegmentationResult(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (request, runner=None))]
+pub(crate) fn execute_word_segmentation_request_v2(
+    py: Python<'_>,
+    request: &Bound<'_, PyAny>,
+    runner: Option<Py<PyAny>>,
+) -> PyResult<String> {
+    execute_request_v2(request, |request| {
+        run_word_segmentation(py, request, runner)
+    })
 }
 
 #[pyfunction]

@@ -538,6 +538,11 @@
           "const": "morphosyntax"
         },
         {
+          "description": "Word segmentation of Han-character text.",
+          "type": "string",
+          "const": "word_segmentation"
+        },
+        {
           "description": "Utterance segmentation.",
           "type": "string",
           "const": "utseg"
@@ -1212,6 +1217,20 @@
           ]
         },
         {
+          "description": "Word-segmentation request.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "word_segmentation"
+            }
+          },
+          "$ref": "#/$defs/WordSegmentationRequestV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
           "description": "Speaker diarization request.",
           "type": "object",
           "properties": {
@@ -1377,6 +1396,41 @@
       "required": [
         "destination",
         "semantic_key"
+      ]
+    },
+    "WordSegmentationRequestV2": {
+      "description": "V2 word-segmentation request payload.",
+      "type": "object",
+      "properties": {
+        "item_count": {
+          "description": "Number of runs frozen into the prepared batch payload.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "payload_ref_id": {
+          "description": "Reference to the prepared batch payload: one Han-character run per item.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "segmenter": {
+          "description": "The segmenter the job's language selects.",
+          "$ref": "#/$defs/WordSegmenterV2"
+        }
+      },
+      "required": [
+        "segmenter",
+        "payload_ref_id",
+        "item_count"
+      ]
+    },
+    "WordSegmenterV2": {
+      "description": "The word segmenter a request names, decided by the Rust control plane.\n\nA closed set: each variant is one segmenter and one lexicon, so a request\ncannot reach a worker that would segment with something else.",
+      "oneOf": [
+        {
+          "description": "Taiwanese: taibun's dictionary tokeniser, whose lexicon comes from the\nTaiwanese-Chinese Online Dictionary and iTaigi (via ChhoeTaigi).",
+          "type": "string",
+          "const": "taibun_taiwanese"
+        }
       ]
     },
     "WorkerArtifactIdV2": {

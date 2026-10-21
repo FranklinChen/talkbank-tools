@@ -9,6 +9,11 @@
       "const": "morphosyntax"
     },
     {
+      "description": "Word segmentation of Han-character text.",
+      "type": "string",
+      "const": "word_segmentation"
+    },
+    {
       "description": "Utterance segmentation.",
       "type": "string",
       "const": "utseg"

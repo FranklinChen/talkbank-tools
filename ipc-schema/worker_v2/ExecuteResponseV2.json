@@ -1486,6 +1486,20 @@
           ]
         },
         {
+          "description": "Batched word-segmentation result.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "word_segmentation_result"
+            }
+          },
+          "$ref": "#/$defs/WordSegmentationResultV2",
+          "required": [
+            "kind"
+          ]
+        },
+        {
           "description": "Raw speaker diarization result.",
           "type": "object",
           "properties": {
@@ -2244,6 +2258,30 @@
       "required": [
         "sample_rate_hz",
         "windows"
+      ]
+    },
+    "WordSegmentationResultV2": {
+      "description": "Batched word-segmentation response payload.",
+      "type": "object",
+      "properties": {
+        "items": {
+          "description": "One token list per prepared run, in payload order. Each list's\nconcatenation must re-spell its run exactly; the control plane\nrefuses any that does not.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "segmenter": {
+          "description": "The segmenter that ran, with its version, for provenance.",
+          "$ref": "#/$defs/ReportedEngineName"
+        }
+      },
+      "required": [
+        "segmenter",
+        "items"
       ]
     },
     "WorkerArtifactPathV2": {

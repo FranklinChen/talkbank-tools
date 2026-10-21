@@ -9,7 +9,7 @@ use crate::chat_ops::speaker::{
     SpeakerSegment as ChatSpeakerSegment, project_speakers_onto_chunks,
 };
 use batchalign_transform::asr_postprocess::{
-    self, AsrPipelineSnapshot, AsrWord, PreparedMonologueChunk, Utterance,
+    self, AsrPipelineSnapshot, PreparedMonologueChunk, Utterance,
 };
 use batchalign_transform::build_chat;
 use batchalign_transform::utseg::UtsegBatchItem;
@@ -18,8 +18,8 @@ use std::path::Path;
 use tracing::info;
 
 use crate::api::{
-    AsrLanguageRequest, LanguageCode3, NumSpeakers, StageRefusalRecord, TranscriptLanguage,
-    WorkerLanguage,
+    AsrLanguageRequest, LanguageCode3, NumSpeakers, ReportedEngineName, StageRefusalRecord,
+    TranscriptLanguage, WorkerLanguage,
 };
 use crate::error::{EmptyTranscription, OutputAdmissionRefusal, ServerError};
 use crate::params::MorphosyntaxParams;
@@ -81,6 +81,9 @@ struct Postprocessed {
     asr: Recognized,
     utterances: Vec<Utterance>,
     speaker_assignments: SpeakerAssignmentOutcome,
+    /// The segmenter that changed the words, for the provenance stamp:
+    /// `None` when the language has none or nothing was segmented.
+    word_segmenter: Option<ReportedEngineName>,
 }
 
 /// The generated document, judged once at assembly by the producer
@@ -1080,6 +1083,7 @@ async fn stage_run_morphosyntax<'a, P: TranscribePlan>(
 mod assembly;
 mod inference;
 mod preprocessing;
+mod word_segmentation;
 use assembly::stage_build_chat;
 use inference::{stage_asr_infer, stage_speaker_diarization};
 #[cfg(test)]

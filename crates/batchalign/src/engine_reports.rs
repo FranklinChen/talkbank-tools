@@ -204,7 +204,8 @@ impl WorkerEngineReports {
                     | InferTask::Asr
                     | InferTask::Opensmile
                     | InferTask::Avqi
-                    | InferTask::Speaker => {
+                    | InferTask::Speaker
+                    | InferTask::WordSegmentation => {
                         return Err(EngineReportAdmissionError::EngineNamedForNonFaTask { task });
                     }
                 },
