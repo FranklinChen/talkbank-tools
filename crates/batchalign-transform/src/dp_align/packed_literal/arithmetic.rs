@@ -2,6 +2,7 @@
 //! certificate; producers own geometry, policy, complete work and graph edges.
 
 use super::WorkControl;
+use crate::dp_align::zero_padded::{PackedBits, WindowStart};
 mod edge;
 pub(in crate::dp_align) use edge::{CutBoundary, observe_edge_cuts};
 const ONES: u64 = 0x0101_0101_0101_0101;
@@ -100,48 +101,30 @@ pub(in crate::dp_align) fn merge_bits<C: WorkControl + ?Sized>(
     Ok(())
 }
 
-fn shifted_word(bits: &[u64], offset: usize, block: usize) -> u64 {
-    let Some(at) = block.checked_sub(offset / 64) else {
-        return 0;
-    };
-    let shift = offset % 64;
-    let low = bits.get(at).copied().unwrap_or(0) << shift;
-    if shift == 0 || at == 0 {
-        low
-    } else {
-        low | (bits.get(at - 1).copied().unwrap_or(0) >> (64 - shift))
-    }
-}
-
 /// Shift and merge in one output pass, without materializing padded parents.
-/// The producer binds the common score origin and viable union domain.
+/// The producer binds the common score origin and viable union domain:
+/// `left` begins `left_offset` bits into the result, `right` `right_offset`.
 pub(in crate::dp_align) fn merge_shifted<C: WorkControl + ?Sized>(
-    left: &[u64],
+    left: &PackedBits,
     left_offset: usize,
-    right: &[u64],
+    right: &PackedBits,
     right_offset: usize,
     length: usize,
     control: &C,
-) -> Result<Vec<u64>, C::Error> {
+) -> Result<PackedBits, C::Error> {
     control.check()?;
-    let mut result = Vec::with_capacity(length.div_ceil(64));
+    let (left, right) = (left.padded(), right.padded());
     let mut difference = 0;
-    for block in 0..length.div_ceil(64) {
+    PackedBits::try_from_fn(length, |block| {
         if block % 1024 == 0 {
             control.check()?;
         }
-        result.push(maximum_word(
-            shifted_word(left, left_offset, block),
-            shifted_word(right, right_offset, block),
+        Ok(maximum_word(
+            left.window_word(WindowStart::Before(left_offset), block),
+            right.window_word(WindowStart::Before(right_offset), block),
             &mut difference,
-        ));
-    }
-    if !length.is_multiple_of(64)
-        && let Some(last) = result.last_mut()
-    {
-        *last &= (1 << (length % 64)) - 1;
-    }
-    Ok(result)
+        ))
+    })
 }
 
 /// Window-aligned sparse equality masks feed the recurrence directly. Each
@@ -194,7 +177,7 @@ pub(in crate::dp_align) fn extend_window_sparse<C: WorkControl + ?Sized>(
 #[cfg(test)]
 fn score_cut_bits<C: WorkControl + ?Sized>(
     forward: &[u64],
-    backward: &[u64],
+    backward: &PackedBits,
     length: usize,
     target: usize,
     matched: bool,
@@ -205,34 +188,21 @@ fn score_cut_bits<C: WorkControl + ?Sized>(
     if target > length || (matched && (target == 0 || length == 0)) {
         return Ok(cuts);
     }
-    let mut reverse: Vec<_> = backward
-        .iter()
-        .rev()
-        .map(|bits| bits.reverse_bits())
-        .collect();
+    // The reverse profile built by hand, independently of `reverse_bits`:
+    // the stored words reversed, then read from past their padding.
+    let words = backward.words();
+    let reversed_words = PackedBits::from_fn(words.len() * 64, |block| {
+        words[words.len() - 1 - block].reverse_bits()
+    });
     let padding = (64 - length % 64) % 64;
-    if padding != 0 {
-        for i in 0..reverse.len() {
-            if i % 1024 == 0 {
-                control.check()?;
-            }
-            let next = reverse.get(i + 1).copied().unwrap_or(0);
-            reverse[i] = (reverse[i] >> padding) | (next << (64 - padding));
-        }
-    }
-    let mut base = backward
+    let mut reverse = PackedBits::window(reversed_words.padded(), WindowStart::At(padding), length);
+    let mut base = words
         .iter()
         .map(|bits| bits.count_ones() as i64)
         .sum::<i64>();
     let target = if matched {
-        base -= (reverse[0] & 1) as i64;
-        for i in 0..reverse.len() {
-            if i % 1024 == 0 {
-                control.check()?;
-            }
-            let next = reverse.get(i + 1).copied().unwrap_or(0);
-            reverse[i] = (reverse[i] >> 1) | (next << 63);
-        }
+        base -= (reverse.padded().window_word(WindowStart::At(0), 0) & 1) as i64;
+        reverse = PackedBits::window(reverse.padded(), WindowStart::At(1), length);
         target - 1
     } else {
         target
@@ -256,6 +226,10 @@ fn score_cut_bits<C: WorkControl + ?Sized>(
 mod tests {
     use super::*;
     use crate::dp_align::control::Uninterrupted;
+
+    fn packed(words: &[u64], length: usize) -> PackedBits {
+        PackedBits::from_words(words.to_vec(), length).unwrap()
+    }
 
     fn score(bits: &[u64], k: usize) -> usize {
         bits[..k / 64]
@@ -281,7 +255,7 @@ mod tests {
                     for k in 0..=n {
                         assert_eq!(score(&merged, k), score(&ab, k).max(score(&bb, k)));
                     }
-                    let aligned = reverse_bits(&bb, n);
+                    let aligned = reverse_bits(&packed(&bb, n));
                     let total = score(&bb, n);
                     for target in 0..=n + 1 {
                         for kind in [CutKind::Deleted, CutKind::Matched] {
@@ -296,9 +270,15 @@ mod tests {
                             )
                             .unwrap();
                             let matched = matches!(kind, CutKind::Matched);
-                            let reference =
-                                score_cut_bits(&ab, &bb, n, target, matched, &Uninterrupted)
-                                    .unwrap();
+                            let reference = score_cut_bits(
+                                &ab,
+                                &packed(&bb, n),
+                                n,
+                                target,
+                                matched,
+                                &Uninterrupted,
+                            )
+                            .unwrap();
                             assert_eq!(cuts, reference);
                             for k in 0..=n {
                                 let expected = if matched {
@@ -341,7 +321,7 @@ mod tests {
                 for k in 0..=n {
                     assert_eq!(score(&merged, k), score(&a, k).max(score(&b, k)));
                 }
-                let suffix = reverse_bits(&b, n);
+                let suffix = reverse_bits(&packed(&b, n));
                 let total = score(&b, n);
                 for target in [0, n / 2, n, n + 1, usize::MAX] {
                     for kind in [CutKind::Deleted, CutKind::Matched] {
@@ -405,11 +385,19 @@ mod tests {
                         }
                     }
                     let span = n + a_offset.max(b_offset);
-                    let result =
-                        merge_shifted(&a, a_offset, &b, b_offset, span, &Uninterrupted).unwrap();
+                    let result = merge_shifted(
+                        &packed(&a, n),
+                        a_offset,
+                        &packed(&b, n),
+                        b_offset,
+                        span,
+                        &Uninterrupted,
+                    )
+                    .unwrap();
+                    let result = result.words();
                     for k in 0..=span {
                         assert_eq!(
-                            score(&result, k),
+                            score(result, k),
                             score(&a, k.saturating_sub(a_offset).min(n))
                                 .max(score(&b, k.saturating_sub(b_offset).min(n)))
                         );
@@ -467,16 +455,18 @@ mod tests {
     }
 }
 
-pub(in crate::dp_align) fn reverse_bits(bits: &[u64], length: usize) -> Vec<u64> {
-    let mut result: Vec<_> = bits.iter().rev().map(|bits| bits.reverse_bits()).collect();
-    let padding = (64 - length % 64) % 64;
-    if padding != 0 {
-        for i in 0..result.len() {
-            let next = result.get(i + 1).copied().unwrap_or(0);
-            result[i] = (result[i] >> padding) | (next << (64 - padding));
-        }
-    }
-    result
+/// The vector read from its last bit to its first: bit `k` of the result is
+/// bit `length - 1 - k` of `bits`.
+pub(in crate::dp_align) fn reverse_bits(bits: &PackedBits) -> PackedBits {
+    // Reversing the stored words reverses all `64 * words` stored bits, so
+    // the vector's own bits land after `padding` zero bits; the window from
+    // there is the reversed vector.
+    let words = bits.words();
+    let reversed = PackedBits::from_fn(words.len() * 64, |block| {
+        words[words.len() - 1 - block].reverse_bits()
+    });
+    let padding = (64 - bits.length() % 64) % 64;
+    PackedBits::window(reversed.padded(), WindowStart::At(padding), bits.length())
 }
 
 #[cfg(test)]
@@ -489,7 +479,7 @@ pub(in crate::dp_align) enum CutKind {
 #[cfg(test)]
 pub(in crate::dp_align) fn score_cuts_aligned<C: WorkControl + ?Sized>(
     forward: &[u64],
-    reverse: &[u64],
+    reverse: &PackedBits,
     total: usize,
     length: usize,
     optimum: usize,
@@ -502,23 +492,25 @@ pub(in crate::dp_align) fn score_cuts_aligned<C: WorkControl + ?Sized>(
     if optimum > length || (matched && (optimum == 0 || length == 0)) {
         return Ok(cuts);
     }
+    let reverse = reverse.padded();
+    // A matched cut reads the reverse profile one bit on: B(k+1).
+    let from = match matched {
+        true => WindowStart::At(1),
+        false => WindowStart::At(0),
+    };
     let mut base = total as i64;
     let target = if matched {
-        base -= (reverse[0] & 1) as i64;
+        base -= (reverse.window_word(WindowStart::At(0), 0) & 1) as i64;
         optimum - 1
     } else {
         optimum
     };
     cuts[0] = u64::from(base == target as i64);
-    for (block, (&a, &original)) in forward.iter().zip(reverse).enumerate() {
+    for (block, &a) in forward.iter().enumerate() {
         if block % 1024 == 0 {
             control.check()?;
         }
-        let b = if matched {
-            (original >> 1) | (reverse.get(block + 1).copied().unwrap_or(0) << 63)
-        } else {
-            original
-        };
+        let b = reverse.window_word(from, block);
         for byte in 0..8 {
             let start = block * 64 + byte * 8;
             if start >= length {

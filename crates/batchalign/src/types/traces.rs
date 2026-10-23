@@ -180,8 +180,30 @@ pub struct TimedWordTrace {
 pub struct UtteranceTrace {
     /// Speaker index (0-based).
     pub speaker: usize,
-    /// Words in the utterance.
+    /// Words in the utterance: content only.
     pub words: Vec<TimedWordTrace>,
+    /// How the utterance ends.
+    pub end: UtteranceEndTrace,
+}
+
+/// How a final utterance ends: the terminator the recognizer gave, or one
+/// the pipeline added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UtteranceEndTrace {
+    /// The recognizer's ending punctuation, as its CHAT terminator.
+    Observed {
+        /// The terminator's CHAT text.
+        terminator: String,
+    },
+    /// The pipeline closed the utterance; CHAT writes it as a period.
+    Synthesized {
+        /// Why: the source gave no ending punctuation, or a mark CHAT cannot
+        /// write as a terminator.
+        #[cfg_attr(feature = "server", schema(value_type = Object))]
+        cause: batchalign_transform::asr_postprocess::SynthesisCause,
+    },
 }
 
 // ---------------------------------------------------------------------------

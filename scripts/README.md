@@ -37,7 +37,7 @@ corpus-age fixers) were removed when this workspace became batchalign3-only.
 |---|---|---|
 | `generate_dashboard_api_types.sh` | Regenerates dashboard API artifacts from the Batchalign server surface. | Called by `make batchalign-dashboard-api-check` and dashboard smoke scripts |
 | `generate_ipc_types.sh` | Regenerates Python IPC models from Rust JSON Schema. | Direct script after a Rust/Python boundary change |
-| `generate_stanza_language_table.py` | Refreshes the hardcoded Stanza support table from upstream resource data. | Direct script after Stanza/resource updates |
+| `snapshot_stanza_catalog.py` | Writes the installed Stanza catalog's languages, processors and aliases as a test fixture, for the language census (`test_stanza_language_census.py`). | Direct script after a Stanza upgrade |
 | `generate_whisper_language_table.py` | Regenerates the ISO 639-3 to stock Whisper token table in `batchalign-types` from transformers' Whisper `LANGUAGES`. | Direct script after a transformers upgrade (the IPC conformance test fails until it is run) |
 
 ### Drift checks and guardrails

@@ -35,7 +35,7 @@ impl SecondaryReport {
     ) {
         self.failures.push(SecondaryMorphologyFailure {
             span,
-            cause,
+            cause: cause.into(),
             detail: detail.to_string().chars().take(500).collect(),
         });
     }

@@ -9,24 +9,25 @@ use tracing::{error, info, warn};
 use crate::api::WorkerLanguage;
 use crate::cache::UtteranceCache;
 use crate::ensure_wav;
+use crate::error::ServerError;
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::runner::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    classify_worker_error, drain_supervised_file_tasks, is_retryable_worker_failure,
-    spawn_supervised_file_task, user_facing_error,
+    drain_supervised_file_tasks, spawn_supervised_file_task, user_facing_error,
 };
-use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
+use crate::scheduling::{FailureCategory, NextAttempt, RetryPolicy, WorkUnitKind};
 use crate::store::{PendingJobFile, RunnerJobSnapshot};
 use crate::transcribe::{
     SpeakerEvidenceRunParams, SpeakerEvidenceSource, resolve_speaker_evidence_for_audio,
 };
-use crate::types::worker_v2::{AvqiResultV2, OpenSmileResultV2, TaskResultV2};
+use crate::types::worker_v2::{AvqiResultV2, ExecuteResponseV2, OpenSmileResultV2, TaskResultV2};
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::avqi_request_v2::{
     AvqiBuildInputV2, PreparedAvqiRequestIdsV2, build_avqi_request_v2,
 };
-use crate::worker::execute_result_v2::require_success_result;
+use crate::worker::error::WorkerError;
+use crate::worker::execute_result_v2::{ExecuteFailureRead, ModelLocality, require_success_result};
 use crate::worker::opensmile_request_v2::{
     OpenSmileBuildInputV2, PreparedOpenSmileRequestIdsV2, build_opensmile_request_v2,
 };
@@ -261,11 +262,11 @@ async fn process_one_media_analysis_file_v2(
                 written.record(&lifecycle).await;
                 return FileTaskOutcome::TerminalStateRecorded;
             }
-            Err(DispatchFailure::RetryableWorker(error, category)) => {
-                let has_retry_budget = attempt_number < retry_policy.max_attempts;
-                if has_retry_budget && is_retryable_worker_failure(category) {
-                    let retry_number = attempt_number;
-                    let backoff_ms = retry_policy.backoff_for_retry(retry_number);
+            Err(DispatchFailure::Runtime(error)) => {
+                let category = classify_server_error(&error);
+                if let NextAttempt::RetryAfter(backoff_ms) =
+                    retry_policy.after_failure(attempt_number, category)
+                {
                     lifecycle
                         .retry_after(
                             backoff_ms.duration(),
@@ -307,9 +308,31 @@ async fn process_one_media_analysis_file_v2(
     FileTaskOutcome::MissingTerminalState
 }
 
+#[derive(Debug)]
 enum DispatchFailure {
-    RetryableWorker(String, FailureCategory),
+    /// Keep execution failures typed until the file's retry decision.
+    Runtime(ServerError),
     Terminal(String, FailureCategory),
+}
+
+impl From<ServerError> for DispatchFailure {
+    fn from(error: ServerError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<WorkerError> for DispatchFailure {
+    fn from(error: WorkerError) -> Self {
+        Self::Runtime(ServerError::Worker(error))
+    }
+}
+
+impl From<ExecuteFailureRead> for DispatchFailure {
+    fn from(failure: ExecuteFailureRead) -> Self {
+        // openSMILE and AVQI execute locally. The protocol code still owns
+        // download, memory, access and request failures independently of that.
+        Self::Runtime(failure.into_server_error(ModelLocality::Local))
+    }
 }
 
 struct MediaAnalysisAttempt<'runtime, 'source> {
@@ -551,39 +574,11 @@ async fn dispatch_opensmile_attempt(
             FailureCategory::Validation,
         )
     })?;
-    let response = pool
-        .dispatch_execute_v2(&pool_key, &request)
-        .await
-        .map_err(|error| {
-            DispatchFailure::RetryableWorker(error.to_string(), classify_worker_error(&error))
-        })?;
+    let response = pool.dispatch_execute_v2(&pool_key, &request).await?;
 
-    // Outcome and payload are read as one thing. This path used to test the
-    // payload first, and since a failed request carries `result: None` by
-    // construction, every typed error response came out as "missing a result
-    // payload" with the worker's own code and message discarded.
-    let result = match require_success_result(&response, "openSMILE").map_err(|failure| {
-        DispatchFailure::Terminal(failure.into(), FailureCategory::ProviderTerminal)
-    })? {
-        TaskResultV2::OpensmileResult(result) => result,
-        other => {
-            return Err(DispatchFailure::Terminal(
-                format!("openSMILE V2 returned unexpected payload: {other:?}"),
-                FailureCategory::ProviderTerminal,
-            ));
-        }
-    };
-    if !result.success {
-        return Err(DispatchFailure::Terminal(
-            result
-                .error
-                .clone()
-                .unwrap_or_else(|| "openSMILE V2 runtime failed without detail".into()),
-            FailureCategory::ProviderTerminal,
-        ));
-    }
-
-    Ok(format_opensmile_csv(result))
+    Ok(format_opensmile_csv(AdmittedOpenSmileResult::admit(
+        &response,
+    )?))
 }
 
 async fn dispatch_avqi_attempt(
@@ -634,29 +629,38 @@ async fn dispatch_avqi_attempt(
             FailureCategory::Validation,
         )
     })?;
-    let response = pool
-        .dispatch_execute_v2(&pool_key, &request)
-        .await
-        .map_err(|error| {
-            DispatchFailure::RetryableWorker(error.to_string(), classify_worker_error(&error))
-        })?;
+    let response = pool.dispatch_execute_v2(&pool_key, &request).await?;
 
-    // Outcome and payload read as one thing, for the reason in the openSMILE
-    // path above.
-    let result = match require_success_result(&response, "AVQI").map_err(|failure| {
-        DispatchFailure::Terminal(failure.into(), FailureCategory::ProviderTerminal)
-    })? {
-        TaskResultV2::AvqiResult(result) => result,
-        other => {
-            return Err(DispatchFailure::Terminal(
-                format!("AVQI V2 returned unexpected payload: {other:?}"),
-                FailureCategory::ProviderTerminal,
-            ));
-        }
-    };
-    let report = AdmittedAvqiReport::admit(result, &pair.source)?;
+    let report = AdmittedAvqiReport::from_response(&response, &pair.source)?;
 
     Ok(report.format(pool_key.as_ref()))
+}
+
+/// A successful openSMILE response, admitted before it can reach the writer.
+struct AdmittedOpenSmileResult<'a>(&'a OpenSmileResultV2);
+
+impl<'a> AdmittedOpenSmileResult<'a> {
+    fn admit(response: &'a ExecuteResponseV2) -> Result<Self, DispatchFailure> {
+        let result = match require_success_result(response, "openSMILE")? {
+            TaskResultV2::OpensmileResult(result) => result,
+            other => {
+                return Err(WorkerError::Protocol(format!(
+                    "openSMILE V2 returned unexpected payload: {other:?}"
+                ))
+                .into());
+            }
+        };
+        if !result.success || result.error.is_some() {
+            return Err(WorkerError::ModelRuntime(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "openSMILE V2 runtime failed without detail".into()),
+            )
+            .into());
+        }
+        Ok(Self(result))
+    }
 }
 
 /// Serialize an openSMILE result to CSV using BA2's
@@ -683,7 +687,8 @@ async fn dispatch_avqi_attempt(
 /// `opensmile.csv` keep working. Feature order is alphabetical (it
 /// comes from `BTreeMap`); BA2's order is opensmile-python's natural
 /// feature-set order, which is feature-set-dependent.
-fn format_opensmile_csv(result: &OpenSmileResultV2) -> String {
+fn format_opensmile_csv(admitted: AdmittedOpenSmileResult<'_>) -> String {
+    let result = admitted.0;
     // BA2's `feature_level='functionals'` invariant means one segment
     // per file. Higher-level callers should not be feeding multi-segment
     // (LLD-mode) results into this serializer, BA2 itself would have
@@ -729,18 +734,31 @@ struct AdmittedAvqiReport<'a> {
 }
 
 impl<'a> AdmittedAvqiReport<'a> {
+    fn from_response(
+        response: &'a ExecuteResponseV2,
+        source: &'a AvqiSourcePair,
+    ) -> Result<Self, DispatchFailure> {
+        match require_success_result(response, "AVQI")? {
+            TaskResultV2::AvqiResult(result) => Self::admit(result, source),
+            other => Err(WorkerError::Protocol(format!(
+                "AVQI V2 returned unexpected payload: {other:?}"
+            ))
+            .into()),
+        }
+    }
+
     fn admit(
         result: &'a AvqiResultV2,
         source: &'a AvqiSourcePair,
     ) -> Result<Self, DispatchFailure> {
         if !result.success || result.error.is_some() {
-            return Err(DispatchFailure::Terminal(
+            return Err(WorkerError::ModelRuntime(
                 result
                     .error
                     .clone()
                     .unwrap_or_else(|| "AVQI V2 runtime failed without detail".into()),
-                FailureCategory::ProviderTerminal,
-            ));
+            )
+            .into());
         }
         if [
             result.avqi,
@@ -835,15 +853,7 @@ async fn resolve_diarize_evidence(
         WorkerLanguage::from(pool_key),
         params,
     )
-    .await
-    .map_err(|error| {
-        let category = classify_server_error(&error);
-        if is_retryable_worker_failure(category) {
-            DispatchFailure::RetryableWorker(error.to_string(), category)
-        } else {
-            DispatchFailure::Terminal(error.to_string(), category)
-        }
-    })?;
+    .await?;
     let evidence_identity = audio_path.to_string_lossy().into_owned();
     let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
     dumper
@@ -882,6 +892,94 @@ fn resolve_avqi_sv_path(cs_audio_path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise the wire-to-output admission used by both dispatchers, not
+    /// only the shared protocol classifier: these paths formerly flattened
+    /// every reported code into ProviderTerminal before retry could see it.
+    #[test]
+    fn media_response_failures_keep_their_category_and_retry_policy() {
+        use crate::scheduling::Retryability;
+
+        let source = AvqiSourcePair::resolve(Path::new("sample.cs.wav")).expect("source pair");
+        struct FailureCase {
+            code: &'static str,
+            category: FailureCategory,
+            retryability: Retryability,
+        }
+        for FailureCase {
+            code,
+            category: expected,
+            retryability,
+        } in [
+            FailureCase {
+                code: "runtime_failure",
+                category: FailureCategory::LocalRuntime,
+                retryability: Retryability::Retryable,
+            },
+            FailureCase {
+                code: "model_download_failed",
+                category: FailureCategory::ProviderTransient,
+                retryability: Retryability::Retryable,
+            },
+            FailureCase {
+                code: "device_out_of_memory",
+                category: FailureCategory::MemoryPressure,
+                retryability: Retryability::Retryable,
+            },
+            FailureCase {
+                code: "model_access_denied",
+                category: FailureCategory::ModelAccessDenied,
+                retryability: Retryability::Final,
+            },
+            FailureCase {
+                code: "provider_quota_exhausted",
+                category: FailureCategory::ProviderQuotaExhausted,
+                retryability: Retryability::Final,
+            },
+            FailureCase {
+                code: "model_unavailable",
+                category: FailureCategory::WorkerBootstrap,
+                retryability: Retryability::Final,
+            },
+            FailureCase {
+                code: "invalid_payload",
+                category: FailureCategory::WorkerProtocol,
+                retryability: Retryability::Final,
+            },
+        ] {
+            let response: ExecuteResponseV2 = serde_json::from_value(serde_json::json!({
+                "request_id": "media-test",
+                "outcome": {"kind": "error", "code": code, "message": "reported detail"},
+                "result": null,
+                "elapsed_s": 0.0
+            }))
+            .expect("worker wire failure");
+            let failures = [
+                AdmittedOpenSmileResult::admit(&response)
+                    .err()
+                    .expect("openSMILE refusal"),
+                AdmittedAvqiReport::from_response(&response, &source)
+                    .err()
+                    .expect("AVQI refusal"),
+            ];
+            for failure in failures {
+                let DispatchFailure::Runtime(error) = failure else {
+                    panic!("{code} lost its execution failure type");
+                };
+                assert!(error.to_string().contains("reported detail"));
+                let category = classify_server_error(&error);
+                assert_eq!(category, expected, "{code}");
+                assert_eq!(category.retryability(), retryability, "{code}");
+                let decision = RetryPolicy::default().after_failure(1, category);
+                match retryability {
+                    Retryability::Retryable => {
+                        assert!(matches!(decision, NextAttempt::RetryAfter(_)))
+                    }
+                    Retryability::Final => assert!(matches!(decision, NextAttempt::Stop(_))),
+                }
+            }
+        }
+    }
 
     #[test]
     fn avqi_pair_resolution_rewrites_cs_to_sv() {
@@ -932,7 +1030,13 @@ mod tests {
             success: true,
             error: None,
         };
-        let csv = format_opensmile_csv(&result);
+        let response = ExecuteResponseV2::success(
+            "media-test".into(),
+            TaskResultV2::OpensmileResult(result),
+            crate::api::NonNegativeSeconds::ZERO,
+        );
+        let admitted = AdmittedOpenSmileResult::admit(&response).expect("successful response");
+        let csv = format_opensmile_csv(admitted);
         assert_eq!(csv, "feature,value\nalphaFeature,1.5\nbetaFeature,2.5\n");
     }
 
@@ -950,7 +1054,13 @@ mod tests {
             success: true,
             error: None,
         };
-        let csv = format_opensmile_csv(&result);
+        let response = ExecuteResponseV2::success(
+            "media-test".into(),
+            TaskResultV2::OpensmileResult(result),
+            crate::api::NonNegativeSeconds::ZERO,
+        );
+        let admitted = AdmittedOpenSmileResult::admit(&response).expect("successful response");
+        let csv = format_opensmile_csv(admitted);
         assert_eq!(csv, "feature,value\n");
     }
 
@@ -992,10 +1102,20 @@ mod tests {
             Ok(pair) => pair,
             Err(_) => panic!("source pair should resolve"),
         };
-        let admitted = match AdmittedAvqiReport::admit(&result, &pair) {
-            Ok(report) => report,
-            Err(_) => panic!("successful finite metrics should admit"),
-        };
+        let response = ExecuteResponseV2::success(
+            "media-test".into(),
+            TaskResultV2::AvqiResult(result.clone()),
+            crate::api::NonNegativeSeconds::ZERO,
+        );
+        let admitted = AdmittedAvqiReport::from_response(&response, &pair)
+            .expect("successful finite metrics should admit");
+        let wrong_task = AdmittedOpenSmileResult::admit(&response)
+            .err()
+            .expect("AVQI is not openSMILE");
+        assert!(matches!(
+            wrong_task,
+            DispatchFailure::Runtime(ServerError::Worker(WorkerError::Protocol(_)))
+        ));
         let report = admitted.format("eng");
         let expected = "AVQI: 5.123\n\
                         CPPS: 67.890\n\

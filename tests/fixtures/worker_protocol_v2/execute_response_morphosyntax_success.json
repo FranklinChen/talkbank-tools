@@ -48,7 +48,8 @@
             "from_relation": "iob",
             "to_relation": "iobj"
           }
-        ]
+        ],
+        "feature_repairs": []
       },
       {
         "kind": "no_words"

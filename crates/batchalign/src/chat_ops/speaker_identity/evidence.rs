@@ -381,9 +381,9 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("evidence serializes: {error}"),
         };
-        let note = value["provenance"]["interpretation"]
-            .as_str()
-            .unwrap_or_default();
+        let Some(note) = value["provenance"]["interpretation"].as_str() else {
+            panic!("the interpretation is a string");
+        };
         assert!(note.contains("AGREEMENT"), "the caveat must be present");
         assert!(note.contains("not accuracy"));
     }

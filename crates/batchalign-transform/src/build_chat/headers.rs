@@ -3,9 +3,8 @@ use talkbank_model::Location;
 
 use indexmap::IndexMap;
 use talkbank_model::model::{
-    Header, IDHeader, LanguageCode, LanguageCodes, Line, MediaFilename, MediaHeader, MediaType,
-    Participant, ParticipantEntries, ParticipantEntry, ParticipantName, ParticipantRole,
-    SpeakerCode,
+    Header, IDHeader, LanguageCodes, Line, MediaFilename, MediaHeader, MediaType, Participant,
+    ParticipantEntries, ParticipantEntry, ParticipantName, ParticipantRole, SpeakerCode,
 };
 
 use super::BuildChatError;
@@ -13,17 +12,16 @@ use super::TranscriptDescription;
 
 pub(super) fn build_header_lines(
     desc: &TranscriptDescription,
-    langs: &[LanguageCode],
 ) -> Result<Vec<Line>, BuildChatError> {
     let participant_entries = build_participant_entries(desc);
-    let id_headers = build_id_headers(desc, langs);
+    let id_headers = build_id_headers(desc);
     let mut lines: Vec<Line> = vec![
         Line::header(Location::Unlocated, Header::Utf8),
         Line::header(Location::Unlocated, Header::Begin),
         Line::header(
             Location::Unlocated,
             Header::Languages {
-                codes: LanguageCodes::new(langs.to_vec()),
+                codes: LanguageCodes::new(desc.langs.all()),
             },
         ),
         Line::header(
@@ -60,11 +58,10 @@ pub(super) fn build_header_lines(
 /// [`ChatFile`]: talkbank_model::model::ChatFile
 pub(super) fn build_participant_map(
     desc: &TranscriptDescription,
-    langs: &[LanguageCode],
 ) -> IndexMap<SpeakerCode, Participant> {
     build_participant_entries(desc)
         .into_iter()
-        .zip(build_id_headers(desc, langs))
+        .zip(build_id_headers(desc))
         .map(|(entry, id)| (entry.speaker_code.clone(), Participant::new(entry, id)))
         .collect()
 }
@@ -80,12 +77,9 @@ fn build_participant_entries(desc: &TranscriptDescription) -> Vec<ParticipantEnt
         .collect()
 }
 
-fn build_id_headers(desc: &TranscriptDescription, langs: &[LanguageCode]) -> Vec<IDHeader> {
-    // BuildChatContext guarantees a non-empty, already-validated list;
-    // @ID headers carry the primary (first) language.
-    let Some(lang_code) = langs.first() else {
-        return Vec::new();
-    };
+fn build_id_headers(desc: &TranscriptDescription) -> Vec<IDHeader> {
+    // @ID headers carry the primary language.
+    let lang_code = desc.langs.primary();
 
     desc.participants
         .iter()

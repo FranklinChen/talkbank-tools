@@ -1,7 +1,7 @@
 # MWT (Multi-Word Token) Handling
 
 **Status:** Current
-**Last updated:** 2026-05-20 20:19 EDT
+**Last updated:** 2026-10-25 08:14 EDT
 
 ---
 
@@ -82,12 +82,13 @@ wrong POS tags.
   re-segment already-tokenized CJK text unpredictably.
 
 MWT eligibility is **capability-driven**:
-`should_request_mwt(alpha2, get_cached_capability_table())` at
-`batchalign/worker/_stanza_loading.py:40` consults the cached Stanza
+the loader reads the language's catalog entry
+(`language_capability(lang)` in `batchalign/worker/_stanza_loading.py`)
+from the cached Stanza
 catalog (`batchalign/worker/_stanza_capabilities.py`) and requests the
-`mwt` processor only when the table reports `has_mwt=True` for the
-language. The earlier hardcoded `MWT_LANGS` set was deleted, with
-`test_stanza_config_parity.py:82` guarding against reintroduction.
+`mwt` processor only when the table reports `has("mwt")` for the
+language. No list of MWT languages exists anywhere;
+`test_stanza_config_parity.py` forbids one.
 
 ---
 
@@ -251,8 +252,8 @@ expansion for every contraction. `_realign_sentence` overlays
 Stanza's original tuples onto aligner output where lengths match and
 no merging happened, so the hint survives realignment and Stanza's
 MWT processor continues to honor it. Applies to every language for
-which `should_request_mwt()` returns `True` in
-`batchalign/worker/_stanza_loading.py`. See
+whose catalog entry ships `mwt` (`has("mwt")`, read in
+`batchalign/worker/_stanza_loading.py`). See
 [Stanza Limitations, Defect 2](stanza-limitations.md) for the full
 trace and re-evaluation criteria.
 
@@ -286,17 +287,15 @@ if is_clitic(text) {
 ### Thread Safety
 
 The `TokenizerContext` is shared between the Stanza inference host (which sets
-`original_words`) and the postprocessor (which reads them). Both execute under
-the same `nlp_lock`:
+`original_words`) and the postprocessor (which reads them). Both execute inside
+the pipeline's guard, the only route to the pipeline (see
+[One Stanza pipeline is never called concurrently](../architecture/server-architecture.md#one-stanza-pipeline-is-never-called-concurrently)):
 
 ```python
 # batchalign/inference/morphosyntax.py
-with nlp_lock:
-    if tok_ctx is not None:
-        tok_ctx.original_words = word_lists  # Set before nlp()
-        doc = nlp(combined)                       # Postprocessor reads during this call
-    if tok_ctx is not None:
-        tok_ctx.original_words = []           # Clear after
+with entry.calling() as nlp:
+    with _realignment_applied(mode):   # sets original_words, clears after
+        doc = nlp(combined)            # postprocessor reads during this call
 ```
 
 ---
@@ -330,7 +329,7 @@ contractions.  For `Claus'`, it produces two MWT components
 | Stage | Python Master | Our Approach |
 |-------|---------------|--------------|
 | Stanza output | `Claus'` MWT → `[Claus, ']` | Same |
-| Postprocessor | `("Claus'", True)`: English+apostrophe → allow MWT | Same (`_is_contraction` returns True) |
+| Postprocessor | `("Claus'", True)`: English+apostrophe → allow MWT | Same (`RealignLanguage::English` marks it a contraction) |
 | %mor result | `propn\|Claus~punct\|'` | `propn\|Claus~punct\|'` |
 | CHAT validity | Valid | Valid |
 
@@ -384,19 +383,25 @@ treated as a contraction (expand it) or as an accidental split (suppress expansi
 This layer has **no knowledge of CHAT, %mor, POS mapping, or language grammar**.
 It only answers one question per merged token: "is this an MWT?"
 
-The `_is_contraction()` function replicates Python master's rule exactly:
+The rule replicates Python master's exactly, and is Rust's:
+`RealignLanguage::marks_contraction` in
+`crates/batchalign-transform/src/tokenizer_realign.rs`, applied by
+`align_tokens` to every merged token.
 
-```python
-# English tokens containing ' (except o' forms like o'clock) → True (allow MWT)
-# Everything else → False (suppress MWT re-expansion)
-def _is_contraction(text: str, alpha2: str) -> bool:
-    if "'" not in text or alpha2 != "en":
-        return False
-    parts = text.split("'")
-    if len(parts) >= 2 and parts[0].strip().lower() == "o":
-        return False
-    return True
+```rust,ignore
+// English tokens containing ' (except o' forms like o'clock) → true (allow MWT)
+// Every other language, and every other token → false (suppress re-expansion)
+match self {
+    Self::English => text.contains('\'') && prefix_before_first_apostrophe != "o",
+    Self::French | Self::Italian | Self::Other => false,
+}
 ```
+
+The language is a `RealignLanguage` (`English`, `French`, `Italian`,
+`Other`), read once from the pipeline's Stanza code by
+`RealignLanguage.of_stanza_code` when the pipeline's `TokenizerContext` is
+built. The code is required and an empty one is refused, so a pipeline
+cannot be built whose realignment silently has no language.
 
 The rule is tiny (4 lines) because the logic is simple, it's just a knob on
 the neural MWT model, not a grammar.
@@ -488,12 +493,12 @@ Input:   *CHI: I don't know .
 
 | Component | File | Description |
 |-----------|------|-------------|
-| MWT eligibility | `batchalign/worker/_stanza_loading.py:40` | `should_request_mwt(alpha2, capability_table)`: capability-driven, replaces the deleted `MWT_LANGS` static |
-| Stanza capability table | `batchalign/worker/_stanza_capabilities.py` | Cached snapshot of `stanza.resources.common.load_resources_json()`; `_ISO3_OVERRIDES` at `:50` handles Stanza-specific iso3 cases |
+| MWT eligibility | `batchalign/worker/_stanza_loading.py` | `language_capability(lang).has("mwt")`: the language's catalog entry, never a list |
+| Stanza capability table | `batchalign/worker/_stanza_capabilities.py` | Built from `stanza.resources.common.load_resources_json()` and Rust's ISO 639-1 table; `_STANZA_CODE_POLICY` names the Chinese routes |
 | Stanza config builder | `batchalign/worker/_stanza_loading.py:126` | `load_stanza_models()`: chooses tokenizer mode, wires postprocessor |
-| MWT contraction rule | `batchalign/inference/_tokenizer_realign.py:120` | `_is_contraction()`: English+apostrophe → True (replicates BA2 `ud.py:680-685`) |
-| Tokenizer realignment | `batchalign/inference/_tokenizer_realign.py:148` | `_realign_sentence()`: character-position merging; merged tokens get `(text, bool)` tuples |
-| Postprocessor factory | `batchalign/inference/_tokenizer_realign.py:67` | `make_tokenizer_postprocessor()`: creates the Stanza callback; captures `alpha2` in closure |
+| MWT contraction rule | `crates/batchalign-transform/src/tokenizer_realign.rs` | `RealignLanguage::marks_contraction()`: English+apostrophe → true (replicates BA2 `ud.py:680-685`) |
+| Tokenizer realignment | `batchalign/inference/_tokenizer_realign.py` | `_realign_sentence()`: calls Rust's `align_tokens` with the context's `RealignLanguage`; merged tokens get `(text, bool)` tuples |
+| Postprocessor factory | `batchalign/inference/_tokenizer_realign.py` | `make_tokenizer_postprocessor()`: creates the Stanza callback from a `TokenizerContext`, which carries the pipeline's `RealignLanguage` |
 | Batch callback | `batchalign/inference/morphosyntax.py:201` | `batch_infer_morphosyntax()`: sets/clears `TokenizerContext.original_words` |
 
 ### Layer 2: Rust (UD → %mor/%gra)

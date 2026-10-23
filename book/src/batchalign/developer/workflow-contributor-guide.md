@@ -1,7 +1,7 @@
 # Workflow Contributor Guide
 
 **Status:** Current
-**Last updated:** 2026-07-30 18:21 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This is the shortest path for adding a new command, workflow family, or engine
 without fighting the refactor stream.
@@ -13,7 +13,7 @@ jump to:
 
 - `recipe_runner/recipes.rs` for the ordered stages each entry points at
 - `recipe_runner/command_spec.rs` for what a `CommandFamily` implies
-- `crates/batchalign/src/command_family.rs` for the workflow-family metadata
+- `crates/batchalign/src/recipe_runner/command_spec.rs` for the workflow-family metadata
 - `crates/batchalign/src/text_batch.rs` for reusable text-family helpers
 - the family-specific runner/dispatch modules only when the command shape is
   genuinely new

@@ -114,12 +114,10 @@ def test_tcp_sequential_emits_bootstrap_kind(monkeypatch):
     discriminator, and tears the connection down. The orchestrator on
     the other end gets a typed error rather than a closed socket.
     """
-    from batchalign.worker._stanza_capabilities import (
-        StanzaCatalogDownloadError,
-    )
+    from batchalign.worker._language_errors import UnsupportedLanguageError
 
     def fake_dispatch(_message):
-        raise StanzaCatalogDownloadError("network unreachable")
+        raise UnsupportedLanguageError("no Stanza pipeline for 'que'")
 
     monkeypatch.setattr(
         "batchalign.worker._protocol.dispatch_protocol_message",
@@ -148,6 +146,43 @@ def test_tcp_sequential_emits_bootstrap_kind(monkeypatch):
     env = json.loads(lines[0])
     assert env["op"] == "error", f"Expected error op, got {env}"
     assert env["kind"] == "bootstrap", f"Expected kind=bootstrap, got {env}"
+    assert "no Stanza pipeline for 'que'" in env["error"]
+
+
+def test_tcp_sequential_emits_download_kind_and_closes(monkeypatch):
+    """A download that failed in transit over TCP emits ``kind=download``.
+
+    The server retries it (the configuration is sound), so it is not a
+    bootstrap failure; the worker still stops, as after a bootstrap one.
+    """
+    from batchalign.worker._stanza_capabilities import (
+        StanzaCatalogDownloadError,
+    )
+
+    def fake_dispatch(_message):
+        raise StanzaCatalogDownloadError("network unreachable")
+
+    monkeypatch.setattr(
+        "batchalign.worker._protocol.dispatch_protocol_message",
+        fake_dispatch,
+    )
+
+    client, server = _make_connected_pair()
+    t = threading.Thread(
+        target=_handle_tcp_connection_sequential,
+        args=(server, ("127.0.0.1", 0)),
+    )
+    t.start()
+
+    client.sendall(b'{"op": "ensure_task", "request": {"task": "morphosyntax"}}\n')
+    lines = _drain_lines(client)
+    client.close()
+    t.join(timeout=3.0)
+
+    assert lines, "Handler must emit at least one response, not a silent close"
+    env = json.loads(lines[0])
+    assert env["op"] == "error", f"Expected error op, got {env}"
+    assert env["kind"] == "download", f"Expected kind=download, got {env}"
     assert "network unreachable" in env["error"]
 
 
@@ -209,12 +244,10 @@ def test_tcp_concurrent_emits_bootstrap_kind(monkeypatch):
     here must surface identically: the orchestrator can't distinguish
     transports, so behaviour must match.
     """
-    from batchalign.worker._stanza_capabilities import (
-        StanzaCatalogDownloadError,
-    )
+    from batchalign.worker._language_errors import UnsupportedLanguageError
 
     def fake_dispatch(_message):
-        raise StanzaCatalogDownloadError("network unreachable")
+        raise UnsupportedLanguageError("no Stanza pipeline for 'que'")
 
     monkeypatch.setattr(
         "batchalign.worker._protocol.dispatch_prepared_protocol_message",

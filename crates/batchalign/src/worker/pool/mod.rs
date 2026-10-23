@@ -44,6 +44,7 @@ mod discovery;
 mod dispatch;
 mod eviction;
 mod execute_v2;
+pub(crate) use execute_v2::ensure_task_params;
 pub(super) mod gpu_slot;
 mod idle_eviction;
 pub(crate) mod job_tracker;
@@ -104,7 +105,7 @@ use crate::worker::tcp_handle::TcpWorkerHandle;
 /// missing or double-counted worker, which the health checker will reconcile.
 /// Recovering from poison keeps the server alive instead of cascading the
 /// panic into every subsequent request.
-pub(super) fn lock_recovered<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_recovered<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         warn!("Recovering from poisoned std::sync::Mutex in worker pool");
         poisoned.into_inner()
@@ -930,9 +931,10 @@ pub struct WorkerPool {
     /// sweep; `/health` lists them, so an operator sees why a running daemon
     /// is unused rather than finding only a log line.
     refused_registry_workers: std::sync::Mutex<Vec<crate::api::RefusedRegistryWorker>>,
-    /// Per-language Stanza processor registry (populated from first worker's
-    /// stanza_capabilities field). Used for submission validation and dispatch.
-    stanza_registry: std::sync::OnceLock<Box<crate::stanza_registry::StanzaRegistry>>,
+    /// The Stanza language registry, built from the first catalog a worker
+    /// reports (and until then why there is none): the one authority for
+    /// morphosyntax admission.
+    stanza_registry: crate::stanza_registry::StanzaRegistrySlot,
     /// Side-table mapping each active job to the worker PIDs currently
     /// dispatching for it. Populated by `TrackerGuard` instances created
     /// inside the dispatch path; drained by `detach_workers_for_job`
@@ -1075,7 +1077,7 @@ impl WorkerPool {
             first_admitted_capabilities: std::sync::OnceLock::new(),
             admitted_capabilities: std::sync::Mutex::new(HashMap::new()),
             refused_registry_workers: std::sync::Mutex::new(Vec::new()),
-            stanza_registry: std::sync::OnceLock::new(),
+            stanza_registry: crate::stanza_registry::StanzaRegistrySlot::new(),
             job_tracker: job_tracker::JobWorkerTracker::new(),
             rejection_counters: WorkerRejectionCounters::default(),
             spawn_permits,
@@ -1230,11 +1232,11 @@ impl WorkerPool {
         self.config.effective_max_total_workers()
     }
 
-    /// Access the per-language Stanza processor registry.
-    ///
-    /// Returns `None` until the first worker reports its capabilities.
-    pub fn stanza_registry(&self) -> Option<&crate::stanza_registry::StanzaRegistry> {
-        self.stanza_registry.get().map(|b| b.as_ref())
+    /// The admitted Stanza language registry, or why there is none (no
+    /// worker has reported, Stanza is not installed, or the report failed);
+    /// every morphosyntax admission refuses with that reason.
+    pub fn stanza_registry(&self) -> crate::stanza_registry::StanzaRegistryLookup {
+        self.stanza_registry.current()
     }
 
     /// Capability double for deterministic tests; never spawns a model worker.
@@ -1243,9 +1245,12 @@ impl WorkerPool {
         registry: crate::stanza_registry::StanzaRegistry,
     ) -> Self {
         let pool = Self::new(PoolConfig::default());
-        pool.stanza_registry
-            .set(Box::new(registry))
-            .expect("fresh test pool");
+        pool.stanza_registry.record(
+            "test".to_owned(),
+            crate::stanza_registry::StanzaCatalogReport::Catalog {
+                languages: registry.into_catalog(),
+            },
+        );
         pool
     }
 
@@ -1267,7 +1272,7 @@ impl WorkerPool {
         let WorkerCapabilities {
             infer_tasks,
             engine_versions,
-            stanza_capabilities,
+            stanza_catalog,
             ..
         } = caps;
         let admitted = match WorkerEngineReports::admit(&infer_tasks, engine_versions) {
@@ -1283,11 +1288,16 @@ impl WorkerPool {
                 return Err(refusal);
             }
         };
-        if !stanza_capabilities.is_empty() && self.stanza_registry.get().is_none() {
-            let _ = self.stanza_registry.set(Box::new(
-                crate::stanza_registry::StanzaRegistry::from_capabilities(&stanza_capabilities),
-            ));
+        // A catalog becomes the registry; any other report is the reason
+        // there is none, which every morphosyntax refusal then names.
+        if let crate::stanza_registry::StanzaCatalogReport::Failed { reason } = &stanza_catalog {
+            warn!(
+                worker_key = %key.label(),
+                %reason,
+                "The worker could not build its Stanza catalog report"
+            );
         }
+        self.stanza_registry.record(key.label(), stanza_catalog);
         info!(
             target = %key.target.label(),
             lang = %key.language,
@@ -1526,8 +1536,6 @@ impl JobWorkersToTerminate {
 
 #[cfg(test)]
 mod capability_admission_tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::api::{CapabilityAdmissionOutcome, LanguageCode3, ReportedEngineName};
     use crate::engine_reports::EngineReportAdmissionError;
@@ -1546,7 +1554,9 @@ mod capability_admission_tests {
                     )
                 })
                 .collect(),
-            stanza_capabilities: BTreeMap::new(),
+            stanza_catalog: crate::stanza_registry::StanzaCatalogReport::NotInstalled {
+                import_error: crate::stanza_registry::reason("No module named 'stanza'"),
+            },
         }
     }
 
@@ -1594,6 +1604,40 @@ mod capability_admission_tests {
                     infer_tasks: vec![InferTask::Fa],
                 },
             }]
+        );
+    }
+
+    /// RED FIRST: a worker whose Stanza table build failed reported an empty
+    /// map, which the pool read as "no Stanza", so morphotag refused every
+    /// language without a reason. The failure now reaches the registry
+    /// lookup, and so every morphotag refusal, with the worker's reason.
+    #[test]
+    fn a_failed_stanza_report_is_the_registrys_stated_reason() {
+        let pool = WorkerPool::new(PoolConfig::default());
+        let key = WorkerKey::without_engine_selection(
+            WorkerTarget::profile(WorkerProfile::Stanza),
+            WorkerLanguage::from(LanguageCode3::eng()),
+        );
+        let mut failed = report(&[(InferTask::Morphosyntax, None)]);
+        failed.stanza_catalog = crate::stanza_registry::StanzaCatalogReport::Failed {
+            reason: crate::stanza_registry::reason(
+                "ImportError: cannot import name 'ISO_639_1_PAIRS'",
+            ),
+        };
+        pool.record_capabilities(&key, failed)
+            .expect("the engine report itself is admissible");
+        let unavailable = pool
+            .stanza_registry()
+            .map(|_| ())
+            .expect_err("a failed report admits no registry");
+        assert_eq!(
+            unavailable,
+            crate::stanza_registry::StanzaRegistryUnavailable::ReportFailed {
+                worker: key.label(),
+                reason: crate::stanza_registry::reason(
+                    "ImportError: cannot import name 'ISO_639_1_PAIRS'"
+                ),
+            }
         );
     }
 }

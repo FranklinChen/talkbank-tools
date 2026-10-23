@@ -41,17 +41,19 @@ impl CompleteExactEmbeddings {
                 .peek()
                 .is_some_and(|(_, word)| word.address.utterance_index.index() == utterance)
             {
-                let (position, word) = population.next()?;
-                same_source &= info.words.get(count) == Some(&word.text)
-                    && word.address.word_index.fa_word() == talkbank_model::WordIdx::new(count);
+                let (position, unit) = population.next()?;
+                same_source &= info.units.texts().get(count) == Some(&unit.text)
+                    && unit.address.unit_index.index() == count;
                 count += 1;
                 last = Some(position);
             }
             // The census is exact, not a same-length claim. Excluded overlap
-            // turns cannot acquire this capability from another turn's words.
+            // turns cannot acquire this capability from another turn's units.
+            // The envelope names the utterance's WORDS: it bounds forced
+            // alignment, which aligns words.
             if info.retained_timing.is_some()
-                || info.words.is_empty()
-                || count != info.words.len()
+                || info.units.is_empty()
+                || count != info.units.len()
                 || !same_source
             {
                 return None;
@@ -60,7 +62,7 @@ impl CompleteExactEmbeddings {
             let last = last?;
             let (start_ms, end_ms) = ordered.interval(self.earliest[first], self.latest[last])?;
             Some(FaSearchEnvelope::Candidates(CandidateSearchEnvelope {
-                words: info.words.clone(),
+                words: info.words().to_vec(),
                 start_ms,
                 end_ms,
                 scope: SearchScope::Document,

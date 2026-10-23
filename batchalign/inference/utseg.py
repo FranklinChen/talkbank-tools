@@ -10,14 +10,16 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, assert_never, cast
+from typing import TYPE_CHECKING, Annotated, assert_never, cast
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 if TYPE_CHECKING:
     from batchalign.inference.types import ConstituencyTree, StanzaNLP
     from batchalign.models.utterance.infer import BertUtteranceModel
+    from batchalign.worker._pipeline_cache import LoadedPipeline
 
+from batchalign.inference._domain_types import LanguageCode
 from batchalign.models.utterance.evidence import (
     ClassifiedBoundaryEvidence,
     ModelShortCircuit,
@@ -25,13 +27,13 @@ from batchalign.models.utterance.evidence import (
     UtteranceBoundaryPrediction,
 )
 from batchalign.providers import (
-    BatchInferRequest,
     BatchInferResponse,
     InferResponse,
     ItemFailed,
     ItemOutcome,
     ItemProduced,
 )
+from batchalign.worker._model_errors import ModelNotLoadedError
 from batchalign.worker._types import WorkerJSONValue
 from batchalign.worker._types_v2 import (
     UtsegBoundaryModelEvidenceV2,
@@ -40,6 +42,7 @@ from batchalign.worker._types_v2 import (
     UtsegConstituencyItemV2,
     UtsegModelShortCircuitV2,
     UtsegNormalizationOmissionV2,
+    UtsegSegmenterV2,
     UtsegUnattributedItemV2,
     UtsegWordBoundaryEvidenceV2,
 )
@@ -82,23 +85,24 @@ def _serialize_boundary_prediction(
     return cast(dict[str, WorkerJSONValue], result.model_dump(mode="json"))
 
 
-class UtsegModelNotFoundError(RuntimeError):
-    """Raised when this worker has no utterance-boundary model LOADED for
-    the requested language and the Stanza constituency-parser fallback was
-    not authorized for the request.
+class UtsegModelNotFoundError(ModelNotLoadedError):
+    """Raised when a request names the boundary-model segmenter and this
+    worker has no utterance-boundary model LOADED.
 
     This is a worker-local load fact, not a statement about which languages
-    have a model. Whether a boundary model EXISTS for a language is decided
-    in Rust before anything is dispatched
-    (``crates/batchalign/src/utseg_route.rs``), so a job in a language with
-    no model is refused at planning time and never reaches here. Reaching
-    here therefore means the model for a supported language could not be
-    loaded in this process.
+    have a model, and the worker boundary reports it as ``model_unavailable``
+    (it is a :class:`ModelNotLoadedError`). Which segmenter a language takes
+    is decided in Rust before anything is dispatched
+    (``crates/batchalign/src/utseg_route.rs``) and named on the request, and
+    the boundary model's pin is a function of the resolved language, injected
+    when a worker for that language is spawned (``spawn_engine_overrides``).
+    A worker started for ``auto`` or ``per-file`` has no language and so no
+    pin, and loads no boundary model; Rust dispatches a utseg request on the
+    route's resolved language, so a boundary-model request reaches a worker
+    that loaded the pin. Reaching here means that load did not happen.
 
-    It is kept as a backstop rather than as the decision. It mirrors the
-    ``WhisperHubModelNotFoundError`` pattern in
-    ``batchalign/inference/whisper_hub.py``: surface the gap rather than
-    silently substitute one model for another.
+    It is kept as a backstop rather than as the decision: surface the gap
+    rather than silently substitute one model for another.
     """
 
 
@@ -107,47 +111,34 @@ class UtsegModelNotFoundError(RuntimeError):
 # filtering and dedupe; the language goes in user_message, not the stage.
 _STAGE_UTSEG_FALLBACK_OPT_IN = "utseg_unsupported_language_fallback"
 
-# Per-process dedupe: warn once per (requested_lang, pack) pair. Worker
-# processes don't outlive a deploy, so the set never needs eviction.
-_FALLBACK_NOTICE_FIRED: set[tuple[str, str | None]] = set()
+# Per-process dedupe: warn once per requested language. Worker processes
+# don't outlive a deploy, so the set never needs eviction.
+_FALLBACK_NOTICE_FIRED: set[str] = set()
 
 
-def _emit_stanza_fallback_notice(
-    requested_lang: str,
-    pack: str | None,
-) -> None:
+def _emit_stanza_fallback_notice(requested_lang: str) -> None:
     """Surface the BERT-absent → Stanza substitution to the user.
 
-    Only fires when the operator has opted in via
-    ``--utseg-fallback-stanza`` (which sets
-    ``BatchInferRequest.allow_stanza_fallback=True``). The
-    default-refuse path raises ``UtsegModelNotFoundError`` instead and
-    never reaches this helper.
+    Only fires for a request naming the Stanza constituency segmenter,
+    which Rust names only when the operator opted in via
+    ``--utseg-fallback-stanza`` for a language with no boundary model.
     """
     # Avoid a circular import at module load time, the progress
     # protocol pulls in worker config that imports this module
     # transitively in some test setups.
     from batchalign.worker._progress import emit_download_event
 
-    key = (requested_lang, pack)
-    if key in _FALLBACK_NOTICE_FIRED:
+    if requested_lang in _FALLBACK_NOTICE_FIRED:
         return
-    _FALLBACK_NOTICE_FIRED.add(key)
-
-    requested_display = requested_lang or "<unspecified>"
-    pack_display = pack if pack is not None else "<none>"
+    _FALLBACK_NOTICE_FIRED.add(requested_lang)
 
     user_message = (
-        f"No TalkBank utseg model for language '{requested_display}'; "
-        f"using Stanza constituency parsing ({pack_display} pack) "
+        f"No TalkBank utseg model for language '{requested_lang}'; "
+        f"using Stanza constituency parsing "
         f"because --utseg-fallback-stanza was passed. Quality will vary."
     )
 
-    L.warning(
-        "utseg opt-in fallback: lang=%r → Stanza pack %r",
-        requested_display,
-        pack_display,
-    )
+    L.warning("utseg opt-in fallback: lang=%r → Stanza", requested_lang)
 
     emit_download_event(
         stage=_STAGE_UTSEG_FALLBACK_OPT_IN,
@@ -275,15 +266,6 @@ def _single_word_outcome(item: UtsegBatchItem) -> ItemOutcome:
     )
 
 
-def _no_pipeline_outcome(_item: UtsegBatchItem) -> ItemOutcome:
-    """Report that no Stanza pipeline could be built for the request's
-    language: a failure, never an empty parse that reads as one utterance."""
-    return ItemFailed(
-        error="Utseg constituency fallback: no Stanza pipeline could be built "
-        "for the request's language"
-    )
-
-
 def _boundary_outcome(
     model: BertUtteranceModel, index: int, item: UtsegBatchItem
 ) -> ItemOutcome:
@@ -323,42 +305,95 @@ def _constituency_outcome(
     )
 
 
+class UtsegInferenceRequest(BaseModel):
+    """One utseg batch as the Rust control plane admitted it.
+
+    The segmenter is the request's own, never derived here: Rust resolves the
+    language's route (its boundary model, or the operator-authorized Stanza
+    fallback) and admits it against this worker's Stanza catalog before
+    dispatch. The worker used to re-derive the route from whether it happened
+    to have a boundary model loaded plus an ``allow_stanza_fallback`` flag,
+    which was a second decision that could disagree with the first.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    # A real ISO 639-3 code: a request without one has no pipeline to name
+    # (it used to be segmented with an English one).
+    lang: Annotated[
+        LanguageCode,
+        StringConstraints(
+            pattern=r"^[a-z]{3}$", min_length=3, max_length=3, strict=True
+        ),
+    ]
+    segmenter: UtsegSegmenterV2
+    items: tuple[WorkerJSONValue, ...]
+
+
 def batch_infer_utseg(
-    req: BatchInferRequest,
-    build_stanza_config: Callable[
-        [list[str]], tuple[list[str], dict[str, dict[str, str | bool]]]
-    ],
+    req: UtsegInferenceRequest,
+    load_stanza_pipeline: Callable[[LanguageCode], LoadedPipeline],
     utterance_boundary_model: BertUtteranceModel | None = None,
 ) -> BatchInferResponse:
-    """Batch Stanza constituency inference: (words) -> tree strings.
+    """Batch utterance segmentation with the segmenter the request names: a
+    boundary model's evidence, or Stanza constituency trees.
 
     Parameters
     ----------
-    req : BatchInferRequest
-        Batch of UtsegBatchItem payloads.
-    build_stanza_config : callable
-        Function ``(langs) -> (lang_alpha2, configs)`` from the utseg engine.
+    req : UtsegInferenceRequest
+        Batch of UtsegBatchItem payloads, with the request's language and the
+        one segmenter Rust admitted for it.
+    load_stanza_pipeline : callable
+        The worker's ``load_utseg_pipeline``: the language's constituency
+        pipeline, built once and reused across batches, behind its own guard.
+    utterance_boundary_model : BertUtteranceModel | None
+        The loaded boundary model, when this worker has one.
 
     Returns tree bracket notation strings. Assignment computation is done in Rust.
     """
     batch_started_at = time.monotonic()
 
     total = len(req.items)
-    pending, rejected = _admit_batch(req.items)
+    pending, rejected = _admit_batch(list(req.items))
 
-    if utterance_boundary_model is not None:
-        timed = [
-            entry.measure(
-                partial(_boundary_outcome, utterance_boundary_model, entry.index)
+    match req.segmenter:
+        case UtsegSegmenterV2.BOUNDARY_MODEL:
+            if utterance_boundary_model is None:
+                raise UtsegModelNotFoundError(
+                    f"The request names the boundary-model segmenter for language "
+                    f"'{req.lang}', and this worker has no utterance-boundary "
+                    f"model loaded. Rust names that segmenter only for a language "
+                    f"whose model it pinned for this worker, so check this "
+                    f"worker's model download and load logs."
+                )
+            timed = [
+                entry.measure(
+                    partial(_boundary_outcome, utterance_boundary_model, entry.index)
+                )
+                for entry in pending
+            ]
+            L.info(
+                "batch_infer utseg(boundary-model): %d items, %.3fs",
+                total,
+                time.monotonic() - batch_started_at,
             )
-            for entry in pending
-        ]
-        L.info(
-            "batch_infer utseg(boundary-model): %d items, %.3fs",
-            total,
-            time.monotonic() - batch_started_at,
-        )
-        return _assemble(total, timed, rejected)
+            return _assemble(total, timed, rejected)
+        case UtsegSegmenterV2.STANZA_CONSTITUENCY:
+            return _constituency_batch(
+                req, load_stanza_pipeline, pending, rejected, batch_started_at
+            )
+        case _:
+            assert_never(req.segmenter)
+
+
+def _constituency_batch(
+    req: UtsegInferenceRequest,
+    load_stanza_pipeline: Callable[[LanguageCode], LoadedPipeline],
+    pending: list[_PendingItem],
+    rejected: list[_RejectedItem],
+    batch_started_at: float,
+) -> BatchInferResponse:
+    """Segment a batch with the language's Stanza constituency pipeline."""
+    total = len(req.items)
 
     # A single-word item needs no segmenter at all: one word is one utterance.
     short_circuit: list[_Answered] = []
@@ -372,85 +407,17 @@ def batch_infer_utseg(
     if not needs_parse:
         return _assemble(total, short_circuit, rejected)
 
-    # This worker has no boundary model LOADED for the request, which is not
-    # the same question as whether one EXISTS for the language: a worker can
-    # reach here for a language that has a model which this process did not
-    # load. Rust now answers the existence question before dispatch
-    # (`crates/batchalign/src/utseg_route.rs`), from the language alone and
-    # independent of payload content, so this raise is a worker-local backstop
-    # rather than the decision that fails a job after ASR has run.
-    if not req.allow_stanza_fallback:
-        raise UtsegModelNotFoundError(
-            f"This worker has no utterance-boundary model loaded for language "
-            f"'{req.lang or '<unspecified>'}', and the Stanza constituency "
-            f"fallback was not authorized for this request. Whether a model "
-            f"exists for a language is decided before dispatch, in "
-            f"crates/batchalign/src/utseg_route.rs, so a language with no "
-            f"model is refused at planning time and does not reach here: check "
-            f"this worker's model download and load logs first. To segment "
-            f"with the legacy Stanza constituency parser instead, pass "
-            f"--utseg-fallback-stanza (quality will vary, and for a language "
-            f"that does have a model it will mask the load failure)."
-        )
+    pipeline = load_stanza_pipeline(req.lang)
+    _emit_stanza_fallback_notice(req.lang)
 
-    langs: list[str] = [req.lang] if req.lang else ["eng"]
-    lang_alpha2, configs = build_stanza_config(langs)
-
-    import stanza
-    from stanza import DownloadMethod
-
-    from batchalign.worker._progress import emit_download_event
-
-    _emit_stanza_fallback_notice(
-        req.lang,
-        lang_alpha2[0] if lang_alpha2 else None,
-    )
-
-    nlp: StanzaNLP
-    if len(lang_alpha2) > 1:
-        # Multilingual pipeline pulls one language pack per ``lang_alpha2`` plus
-        # the language-id model. First-run cost is a sum across packs; emit a
-        # single event so the user sees the wait, even if intermediate library
-        # progress prints reach only stderr.
-        emit_download_event(
-            stage="downloading_stanza_utseg_multilingual",
-            user_message=(
-                "Downloading Stanza utterance-segmentation pipeline for "
-                f"{', '.join(lang_alpha2)} (one-time, one language pack per "
-                "language; future runs will use the local cache)…"
-            ),
-        )
-        nlp = stanza.MultilingualPipeline(
-            lang_configs=configs,
-            lang_id_config={"langid_lang_subset": lang_alpha2},
-            download_method=DownloadMethod.REUSE_RESOURCES,
-        )
-    elif lang_alpha2:
-        emit_download_event(
-            stage=f"downloading_stanza_utseg_{lang_alpha2[0]}",
-            user_message=(
-                f"Downloading Stanza utterance-segmentation pipeline for "
-                f"{lang_alpha2[0]} (one-time, ~250-500 MB; future runs will "
-                "use the local cache)…"
-            ),
-        )
-        nlp = stanza.Pipeline(
-            lang=lang_alpha2[0],
-            **configs[lang_alpha2[0]],
-            download_method=DownloadMethod.REUSE_RESOURCES,
-        )
-    else:
-        return _assemble(
-            total,
-            short_circuit
-            + [entry.measure(_no_pipeline_outcome) for entry in needs_parse],
-            rejected,
-        )
-
-    parsed = [
-        entry.measure(partial(_constituency_outcome, nlp, entry.index))
-        for entry in needs_parse
-    ]
+    # One pipeline, loaded once per worker and language, called through its
+    # own guard for the whole batch: Stanza does not promise that one
+    # pipeline is safe to call from two threads.
+    with pipeline.calling() as nlp:
+        parsed = [
+            entry.measure(partial(_constituency_outcome, nlp, entry.index))
+            for entry in needs_parse
+        ]
 
     # The batch total is a fact about the batch, so it is reported where a
     # batch fact belongs: this log line. It is deliberately NOT written onto

@@ -11,6 +11,8 @@
 //! environmental problem that requires operator intervention. Each variant's
 //! doc comment notes which category it falls into.
 
+pub use crate::types::worker_v2::WorkerAfterError;
+
 /// Format the `ProcessExited` Display output, including stderr when available.
 fn format_process_exited(code: Option<i32>, stderr: Option<&str>) -> String {
     let header = format!("worker process exited unexpectedly (exit code: {code:?})");
@@ -207,8 +209,8 @@ pub enum WorkerError {
     /// when the underlying cause is per-request (different inputs, transient
     /// resource state).
     ///
-    /// For deterministic bootstrap failures (missing model files, catalog
-    /// download failures, unsupported language), the worker emits the
+    /// For deterministic bootstrap failures (missing model files, an
+    /// unsupported language), the worker emits the
     /// `{"op":"error", "kind":"bootstrap"}` wire shape, which decodes into
     /// the [`Bootstrap`] variant instead; those are non-retryable.
     ///
@@ -217,22 +219,66 @@ pub enum WorkerError {
     WorkerResponse(String),
 
     /// The worker reported a **bootstrap-class** failure: model loading,
-    /// catalog download, package import, or any deterministic failure that
-    /// would recur identically across worker restarts.
+    /// package import, an unsupported language, or any deterministic failure
+    /// that would recur identically across worker restarts.
     ///
-    /// Wire shape: `{"op":"error", "error":"<msg>", "kind":"bootstrap"}`.
-    /// Emitted by the Python worker's request-loop exception handler when
-    /// the underlying error is one of the typed bootstrap errors
-    /// (`StanzaCatalogDownloadError`, `UnsupportedLanguageError`, missing
-    /// HuggingFace model with offline mode on, etc.).
+    /// Two sources: an `{"op":"error", "kind":"bootstrap"}` line (and a
+    /// `runtime` line answering `ensure_task`, since a load that failed fails
+    /// again), and an execute response coded `model_unavailable` or
+    /// `unsupported_language`. `worker` says which: the first stops serving
+    /// (the kind's own [`WorkerErrorKind::worker_after`]), the second answered
+    /// and goes on serving.
     ///
     /// **Terminal** -- retrying a deterministic bootstrap failure 3× with
     /// a full traceback per attempt is the bug shape this variant exists
     /// to prevent. The orchestrator classifies this as non-retryable and
-    /// surfaces the typed message verbatim to the user (network error,
-    /// disk full, authentication failure, etc., all actionable).
-    #[error("worker bootstrap error: {0}")]
-    Bootstrap(String),
+    /// surfaces the typed message verbatim to the user.
+    ///
+    /// [`WorkerErrorKind::worker_after`]: crate::types::worker_v2::WorkerErrorKind::worker_after
+    #[error("worker bootstrap error: {message}")]
+    Bootstrap {
+        /// The worker's own diagnosis.
+        message: String,
+        /// Whether the worker still serves after reporting it.
+        worker: WorkerAfterError,
+    },
+
+    /// A model or catalog download failed in transit (the network, the
+    /// remote host): an `{"op":"error", "kind":"download"}` line, or an
+    /// execute response coded `model_download_failed`.
+    ///
+    /// **Retryable**, unlike [`Self::Bootstrap`]: the worker configuration is
+    /// sound and a later attempt may get the download through. It is the one
+    /// load failure that does not withhold a same-engine UTR fallback. A
+    /// worker that stopped serving after it is retired, so the retry runs on
+    /// a fresh one rather than on a dead handle.
+    #[error("worker model download failed: {message}")]
+    ModelDownload {
+        /// The worker's own diagnosis.
+        message: String,
+        /// Whether the worker still serves after reporting it.
+        worker: WorkerAfterError,
+    },
+
+    /// The accelerator ran out of memory (`torch.OutOfMemoryError`): an
+    /// `{"op":"error", "kind":"out_of_memory"}` line or an execute response
+    /// coded `device_out_of_memory`.
+    ///
+    /// **Retryable** (`MemoryPressure`) after a backoff: the input is not at
+    /// fault, and the request may fit once concurrent work releases memory.
+    #[error("worker ran out of device memory: {message}")]
+    DeviceOutOfMemory {
+        /// The worker's own diagnosis.
+        message: String,
+        /// Whether the worker still serves after reporting it.
+        worker: WorkerAfterError,
+    },
+
+    /// A local model reported an unclassified `RuntimeFailure`.
+    /// The code does not establish a cause or deterministic input defect.
+    /// Retried within the existing budget; the healthy channel remains reusable.
+    #[error("local model failed on this request: {0}")]
+    ModelRuntime(String),
 
     /// The worker refused the request as sent: the line was not JSON, the op
     /// or its `request` mapping was missing, or the payload failed the
@@ -421,8 +467,16 @@ impl WorkerError {
     /// admission failures) answer `Retire`, the conservative choice.
     pub(crate) fn worker_after_failure(&self) -> WorkerAfterFailure {
         match self {
+            // A report the worker answered and went on from, or one after
+            // which it stopped serving: the kind decided which.
+            Self::Bootstrap { worker, .. }
+            | Self::ModelDownload { worker, .. }
+            | Self::DeviceOutOfMemory { worker, .. } => match worker {
+                WorkerAfterError::Serves => WorkerAfterFailure::Reusable,
+                WorkerAfterError::Exits => WorkerAfterFailure::Retire,
+            },
             Self::WorkerResponse(_)
-            | Self::Bootstrap(_)
+            | Self::ModelRuntime(_)
             | Self::RequestRefused(_)
             | Self::MemoryGuard(_)
             | Self::NoWorker { .. }

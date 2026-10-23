@@ -1,6 +1,6 @@
 //! Word matching retains the provider token that owns each timing interval.
 
-use super::evidence::{UtrAsrTokenOrdinal, UtrAsrWordOrdinal};
+use super::evidence::{UtrAsrTokenOrdinal, UtrAsrUnitOrdinal};
 use super::{
     AsrTimingToken, UtrAsrTokenAddress, UtrLexicalRelation, UtrTimingProposal, UtrWordAddress,
     UtrWordMatch, lexical_relation,
@@ -20,18 +20,51 @@ struct UtrLexicalWord<'source> {
     text: &'source str,
     surface: &'source str,
     address: UtrAsrTokenAddress,
+    observation: TokenObservation,
+}
+
+/// One provider token's observation, shared by each of its units: the
+/// token's interval and how many units it holds.
+///
+/// A token of one unit observes that unit's timing; units of a longer token
+/// share only its containing interval, never a timing of their own. Whether a
+/// whole TRANSCRIPT word is observed is decided per word, from all its units
+/// together (`anchors::WordAnchor`).
+#[derive(Clone, Copy)]
+struct TokenObservation {
+    interval: ObservedWordTiming,
+    units: std::num::NonZeroUsize,
+}
+
+impl TokenObservation {
+    fn word(self) -> Option<ObservedWordTiming> {
+        (self.units.get() == 1).then_some(self.interval)
+    }
+
+    fn envelope(self) -> ObservedWordTiming {
+        self.interval
+    }
 }
 
 impl<'source> UtrLexicalWord<'source> {
     /// Remove provider sentence punctuation, never internal punctuation,
     /// apostrophes or hyphens. Keep the source surface and original address.
-    fn from_provider_word(surface: &'source str, address: UtrAsrTokenAddress) -> Option<Self> {
-        let text = surface.trim_end_matches(['.', ',', '!', '?', ';', ':']);
-        (!text.is_empty()).then_some(Self {
-            text,
+    ///
+    /// `surface` is a unit of the token's projection, which holds a letter
+    /// or a digit (`UtrLexicalUnits::split`), so the trimmed text is never
+    /// empty: a punctuation-only piece is no unit, and is neither matched
+    /// nor counted among the token's units.
+    fn from_provider_word(
+        surface: &'source str,
+        address: UtrAsrTokenAddress,
+        observation: TokenObservation,
+    ) -> Self {
+        Self {
+            text: surface.trim_end_matches(['.', ',', '!', '?', ';', ':']),
             surface,
             address,
-        })
+            observation,
+        }
     }
 
     fn relation(&self, chat_text: &str) -> UtrLexicalRelation {
@@ -50,14 +83,13 @@ impl<'source> UtrLexicalWord<'source> {
 pub struct AdmittedUtrWordMatch {
     matched: UtrWordMatch,
     #[serde(skip)]
-    word_timing: Option<ObservedWordTiming>,
+    token_units: std::num::NonZeroUsize,
     #[serde(skip)]
     timing: ObservedWordTiming,
 }
 
-/// Original provider-token timing, bound where correspondence is born.
-/// `word_timing` is present only for a single-word token; `timing` also retains
-/// coarse segments without inventing within-segment word boundaries.
+/// Original provider-token timing, bound where correspondence is born: the
+/// token's whole interval, never a boundary invented inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ObservedWordTiming {
     pub(super) start_ms: u64,
@@ -77,28 +109,23 @@ impl AdmittedUtrWordMatch {
         &self.matched
     }
 
-    pub(super) fn word_timing(&self) -> Option<ObservedWordTiming> {
-        self.word_timing
+    /// How many lexical units the matched provider token holds.
+    pub(super) fn token_units(&self) -> std::num::NonZeroUsize {
+        self.token_units
     }
 
     /// The provider token interval bound into this proof (a segment's whole
-    /// interval for a multi-word token). Search bounds only, never a word
-    /// boundary of its own.
+    /// interval for a multi-unit token). A search bound, and a word anchor's
+    /// interval only when the token is exactly one transcript word.
     pub(super) fn token_timing(&self) -> ObservedWordTiming {
         self.timing
     }
 
     /// The same proof with its CHAT word addressed in the file's census.
     fn placed_after(self, region_start: super::UtrUtteranceOrdinal) -> Self {
-        let Self {
-            matched,
-            word_timing,
-            timing,
-        } = self;
         Self {
-            matched: matched.placed_after(region_start),
-            word_timing,
-            timing,
+            matched: self.matched.placed_after(region_start),
+            ..self
         }
     }
 }
@@ -154,17 +181,22 @@ impl NonEmptyAdmittedUtrWordMatches {
     /// it may match: the endpoint lies inside that extent whichever optimum
     /// is true, so a timing hull including it excludes none of its speech.
     /// An endpoint some optimum leaves unmatched bounds nothing.
+    ///
+    /// Endpoints are the utterance's first and last lexical UNITS: a word
+    /// whose first character is unproved does not bound where the utterance
+    /// starts, even when a later character of it is.
     pub(super) fn admit_endpoints(
         self,
-        word_count: usize,
+        units: &super::token_text::UtrChatUnits,
         extents: EndpointExtents,
     ) -> BoundaryAdmission {
         let proved = |index: usize| {
             self.iter()
-                .any(|word| word.matched.word.word_index.0 == index)
+                .any(|unit| unit.matched.word.unit_index.index() == index)
         };
         let first = proved(0) || extents.first.is_some();
-        let last = word_count
+        let last = units
+            .len()
             .checked_sub(1)
             .is_some_and(|index| proved(index) || extents.last.is_some());
         let missing = match (first, last) {
@@ -279,51 +311,73 @@ pub(super) enum BoundaryAdmission {
 }
 
 impl<'source> UtrLexicalStream<'source> {
-    pub(super) fn from_tokens(tokens: &'source [AsrTimingToken]) -> Self {
-        Self::project(tokens, |_| true)
+    pub(super) fn from_tokens(prepared: &'source super::PreparedUtrTokens) -> Self {
+        Self::project(prepared, |_| true)
     }
 
     /// The tokens an anchored region may match: onsets inside its window,
     /// projected with their original stream ordinals.
     pub(super) fn within_region(
-        tokens: &'source [AsrTimingToken],
+        prepared: &'source super::PreparedUtrTokens,
         region: &super::regions::UtrRegion,
     ) -> Self {
-        Self::project(tokens, |token| region.admits(token))
+        Self::project(prepared, |token| region.admits(token))
     }
 
-    /// Filter in provider coordinates before projecting words, preserving
+    /// Filter in provider coordinates before projecting units, preserving
     /// original token ordinals even in a local overlap-recovery window.
     pub(super) fn within_window(
-        tokens: &'source [AsrTimingToken],
+        prepared: &'source super::PreparedUtrTokens,
         start_ms: u64,
         end_ms: u64,
     ) -> Self {
-        Self::project(tokens, |token| {
+        Self::project(prepared, |token| {
             token.start_ms < end_ms && token.end_ms > start_ms
         })
     }
 
+    /// Each included token's lexical units, in the projection the tokens
+    /// were prepared with; every unit keeps its token's address and interval.
     fn project(
-        tokens: &'source [AsrTimingToken],
+        prepared: &'source super::PreparedUtrTokens,
         include: impl Fn(&AsrTimingToken) -> bool,
     ) -> Self {
+        let tokens = prepared.tokens();
+        let units = prepared.units();
         let words = tokens
             .iter()
             .enumerate()
             .filter(|(_, token)| include(token))
             .flat_map(|(token_index, token)| {
-                token.text.split_whitespace().enumerate().filter_map(
-                    move |(word_index, surface)| {
-                        UtrLexicalWord::from_provider_word(
-                            surface,
-                            UtrAsrTokenAddress {
-                                token_index: UtrAsrTokenOrdinal(token_index),
-                                word_index: UtrAsrWordOrdinal(word_index),
-                            },
-                        )
-                    },
-                )
+                let surfaces = units.split(&token.text);
+                // A token with no unit (punctuation only) offers nothing to
+                // match, so it needs no observation and yields no word.
+                let observation =
+                    std::num::NonZeroUsize::new(surfaces.len()).map(|count| TokenObservation {
+                        interval: ObservedWordTiming {
+                            start_ms: token.start_ms,
+                            end_ms: token.end_ms,
+                        },
+                        units: count,
+                    });
+                observation
+                    .map(|observation| {
+                        surfaces
+                            .into_iter()
+                            .enumerate()
+                            .map(move |(unit_index, surface)| {
+                                UtrLexicalWord::from_provider_word(
+                                    surface,
+                                    UtrAsrTokenAddress {
+                                        token_index: UtrAsrTokenOrdinal(token_index),
+                                        unit_index: UtrAsrUnitOrdinal(unit_index),
+                                    },
+                                    observation,
+                                )
+                            })
+                    })
+                    .into_iter()
+                    .flatten()
             })
             .collect();
         Self { tokens, words }
@@ -421,16 +475,11 @@ impl<'source> UtrLexicalStream<'source> {
         text: &str,
     ) -> AdmittedUtrWordMatch {
         let matched = self.matched_word(index, word, text);
-        let token = &self.tokens[matched.token.token_index()];
-        let timing = ObservedWordTiming {
-            start_ms: token.start_ms,
-            end_ms: token.end_ms,
-        };
-        let word_timing = (token.text.split_whitespace().count() == 1).then_some(timing);
+        let observation = self.words[index].observation;
         AdmittedUtrWordMatch {
             matched,
-            word_timing,
-            timing,
+            token_units: observation.units,
+            timing: observation.envelope(),
         }
     }
 
@@ -457,16 +506,7 @@ impl<'source> UtrLexicalStream<'source> {
             .enumerate()
             .filter(|(_, info)| !info.excluded_from(participation))
             .flat_map(|(utterance, info)| {
-                info.words
-                    .iter()
-                    .enumerate()
-                    .map(move |(word, text)| super::UtrPayloadWord {
-                        text: text.clone(),
-                        address: UtrWordAddress {
-                            utterance_index: super::UtrUtteranceOrdinal(utterance),
-                            word_index: super::UtrWordOrdinal(word),
-                        },
-                    })
+                super::UtrPayloadWord::of_utterance(super::UtrUtteranceOrdinal(utterance), info)
             })
             .collect::<Vec<_>>();
         let reference = self.texts();
@@ -476,7 +516,7 @@ impl<'source> UtrLexicalStream<'source> {
                 let words = if info.excluded_from(participation) {
                     &[][..]
                 } else {
-                    &info.words[..]
+                    info.units.texts()
                 };
                 if info.has_lazy_overlap || info.has_ca_overlap {
                     SpeakerTurn::overlapping_continuation(&info.speaker, words)
@@ -489,19 +529,41 @@ impl<'source> UtrLexicalStream<'source> {
             match LocalInterleaving::observe_controlled(&turns, &reference, mode, control)? {
                 Ok(analysis) => analysis,
                 Err(refusal) => {
-                    let refusal = super::UtrBudgetRefusal {
-                        region,
-                        budget: super::UtrSearchBudget::interleaved(refusal),
+                    use batchalign_transform::dp_align::interleaving::LocalInterleavingRefusal;
+                    let admission = match refusal {
+                        LocalInterleavingRefusal::Budget(budget) => {
+                            let refusal = super::UtrBudgetRefusal {
+                                region,
+                                budget: super::UtrSearchBudget::interleaved(budget),
+                            };
+                            tracing::warn!(
+                                region = %region.describe(),
+                                budget = ?refusal.budget,
+                                "joint UTR correspondence proof refused for this region; \
+                                 other regions are unaffected and no monotonic fallback is taken"
+                            );
+                            super::CorrespondenceProof::BudgetExhausted(refusal)
+                        }
+                        // Not a budget: the search is wrong for this region,
+                        // which an operator must see, not a bound to raise.
+                        LocalInterleavingRefusal::Inconsistent(inconsistency) => {
+                            tracing::error!(
+                                region = %region.describe(),
+                                ?inconsistency,
+                                "joint UTR correspondence search contradicted its own admission \
+                                 for this region and refused it; other regions are unaffected"
+                            );
+                            super::CorrespondenceProof::Inconsistent(
+                                super::evidence::UtrSearchInconsistency {
+                                    region,
+                                    inconsistency,
+                                },
+                            )
+                        }
                     };
-                    tracing::warn!(
-                        region = %region.describe(),
-                        budget = ?refusal.budget,
-                        "joint UTR correspondence proof refused for this region; \
-                         other regions are unaffected and no monotonic fallback is taken"
-                    );
                     let selection = super::UtrMatchSelection {
                         selected: Ok(Vec::new()),
-                        admission: super::CorrespondenceProof::BudgetExhausted(refusal),
+                        admission,
                         per_utterance: searched.map(|_| super::UtteranceSelection::UNSEARCHED),
                     };
                     return Ok(super::build_alignment_plan(
@@ -516,10 +578,10 @@ impl<'source> UtrLexicalStream<'source> {
             };
         let mut positions = source
             .iter()
-            .map(|info| vec![None; info.words.len()])
+            .map(|info| vec![None; info.units.len()])
             .collect::<Vec<_>>();
         for (index, word) in payload.iter().enumerate() {
-            positions[word.address.utterance_index.index()][word.address.word_index.0] =
+            positions[word.address.utterance_index.index()][word.address.unit_index.index()] =
                 Some(index);
         }
         let selected = analysis
@@ -543,25 +605,24 @@ impl<'source> UtrLexicalStream<'source> {
             // contested token (claimed across an anchor by another region) is
             // withdrawn here too: it bounds nothing, so the endpoint does not
             // either, and the withdrawal cannot come back through the hull.
-            let index = word.address.word_index.0;
-            let last = source[ordinal].words.len().saturating_sub(1);
+            let index = word.address.unit_index.index();
+            let last = source[ordinal].units.len().saturating_sub(1);
             if (index == 0 || index == last) && !evidence.can_be_missing() {
                 let extent = evidence.candidates().try_fold(None, |extent, matched| {
                     let lexical = &self.words[matched.reference_index()];
-                    let token = &self.tokens[lexical.address.token_index()];
-                    let usable = token.start_ms < token.end_ms
-                        && token.text.split_whitespace().count() == 1
+                    let timing = lexical.observation.word()?;
+                    let usable = timing.start_ms < timing.end_ms
                         && matched.source_text() == word.text
                         && !contested.contains(lexical.address.token_index);
                     usable.then(|| {
                         Some(extent.map_or(
                             ObservedWordTiming {
-                                start_ms: token.start_ms,
-                                end_ms: token.end_ms,
+                                start_ms: timing.start_ms,
+                                end_ms: timing.end_ms,
                             },
                             |old: ObservedWordTiming| ObservedWordTiming {
-                                start_ms: old.start_ms.min(token.start_ms),
-                                end_ms: old.end_ms.max(token.end_ms),
+                                start_ms: old.start_ms.min(timing.start_ms),
+                                end_ms: old.end_ms.max(timing.end_ms),
                             },
                         ))
                     })
@@ -636,8 +697,8 @@ impl<'source> UtrLexicalStream<'source> {
         }
         let onset_ordered_search = self.onset_ordered_search();
         let envelope = |ordinal: usize, info: &super::UtrUtteranceInfo| {
-            if seen[ordinal] != info.words.len()
-                || info.words.is_empty()
+            if seen[ordinal] != info.units.len()
+                || info.units.is_empty()
                 || info.retained_timing.is_some()
                 || info.excluded_from(participation)
             {
@@ -673,14 +734,14 @@ impl<'source> UtrLexicalStream<'source> {
                     (a, b) => a.or(b),
                 };
                 return Some(super::search::FaSearchEnvelope::order_corridor(
-                    info.words.clone(),
+                    info.words().to_vec(),
                     floor.max(before),
                     ceiling,
                 ));
             }
             let range = ranges[ordinal]?;
             super::search::FaSearchEnvelope::interleaved(
-                info.words.clone(),
+                info.words().to_vec(),
                 range.start_ms,
                 range.end_ms,
                 floor,
@@ -723,17 +784,14 @@ impl OnsetOrderedLexicalSearch<'_, '_> {
             .candidates()
             .try_fold(None::<RequiredWordSearchBounds>, |range, matched| {
                 let lexical = self.0.words.get(matched.reference_index())?;
-                let token = &self.0.tokens[lexical.address.token_index()];
-                if token.text.split_whitespace().count() != 1 {
-                    return None;
-                }
+                let timing = lexical.observation.word()?;
                 let bounds = RequiredWordSearchBounds {
-                    preceding_floor_ms: token.start_ms,
-                    following_ceiling_ms: token.end_ms,
+                    preceding_floor_ms: timing.start_ms,
+                    following_ceiling_ms: timing.end_ms,
                 };
                 Some(Some(range.map_or(bounds, |old| RequiredWordSearchBounds {
-                    preceding_floor_ms: old.preceding_floor_ms.min(token.start_ms),
-                    following_ceiling_ms: old.following_ceiling_ms.max(token.end_ms),
+                    preceding_floor_ms: old.preceding_floor_ms.min(timing.start_ms),
+                    following_ceiling_ms: old.following_ceiling_ms.max(timing.end_ms),
                 })))
             })
             .flatten()

@@ -272,7 +272,7 @@ mod reporting_tests {
                 SecondaryReport::for_test(
                     vec![SecondaryMorphologyFailure {
                         span: address,
-                        cause: SecondaryMorphologyFailureKind::Worker,
+                        cause: SecondaryMorphologyFailureKind::Worker.into(),
                         detail: "model unavailable".into(),
                     }],
                     Vec::new(),

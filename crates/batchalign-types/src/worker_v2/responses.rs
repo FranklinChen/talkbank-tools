@@ -481,6 +481,213 @@ pub struct UdRelationRepairV2 {
     pub to_relation: String,
 }
 
+/// Why a feature value a worker received from Stanza is absent from the
+/// analysis it returned.
+///
+/// Closed, like [`UdRelationRepairKindV2`] and for its reason: a feature
+/// repair must be named here before a worker can report it. Each variant has
+/// ONE name, [`Self::wire_name`], read by both the serde form and the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UdFeatureRepairKindV2 {
+    /// The model emitted padding (`<PAD>`, `<UNK>`) as a feature value, which
+    /// is no value of any feature. The padding value was removed, and the
+    /// feature with it when nothing else was left.
+    PadFeatureValue,
+}
+
+impl UdFeatureRepairKindV2 {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 1] = [Self::PadFeatureValue];
+
+    /// The variant's one name: its wire form and its schema constant.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::PadFeatureValue => "pad_feature_value",
+        }
+    }
+}
+
+impl serde::Serialize for UdFeatureRepairKindV2 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_name())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for UdFeatureRepairKindV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.wire_name() == name)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown UD feature repair {name:?}")))
+    }
+}
+
+impl schemars::JsonSchema for UdFeatureRepairKindV2 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "UdFeatureRepairKindV2".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let variants: Vec<serde_json::Value> = Self::ALL
+            .iter()
+            .map(|kind| serde_json::json!({"type": "string", "const": kind.wire_name()}))
+            .collect();
+        schemars::json_schema!({
+            "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+            "oneOf": variants,
+        })
+    }
+}
+
+/// A feature value that is model padding: an angle-bracketed placeholder
+/// (`<PAD>`, `<UNK>`) a model emits for "no prediction", which is no value of
+/// any Universal Dependencies feature.
+///
+/// [`Self::admit`] is the one test of what padding is: the worker's repair
+/// ([`repair_feats`], through `batchalign_core.repair_feats`) and the
+/// server's FEATS admission both reach it, so neither keeps its own copy, and
+/// the worker never classifies a value itself. A reported repair carries
+/// one, so a repair whose removed value is not padding is refused where the
+/// response is deserialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PaddingValue(String);
+
+impl PaddingValue {
+    /// Whether `value` (one comma-separated part of a feature) is padding:
+    /// angle brackets around text with no line terminator, exactly what the
+    /// schema's `^<.*>$` admits (a JSON Schema `.` matches no `\n`, `\r`,
+    /// U+2028 or U+2029).
+    fn is_padding(value: &str) -> bool {
+        value.len() >= 2
+            && value.starts_with('<')
+            && value.ends_with('>')
+            && !value.contains(['\n', '\r', '\u{2028}', '\u{2029}'])
+    }
+
+    /// `value` as padding, if it is.
+    pub fn admit(value: &str) -> Option<Self> {
+        Self::is_padding(value).then(|| Self(value.to_owned()))
+    }
+
+    /// The padding value, verbatim.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The value is not padding, so no feature repair may claim to remove it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a feature repair removes padding, but {0:?} is not padding")]
+pub struct NotPadding(String);
+
+impl TryFrom<String> for PaddingValue {
+    type Error = NotPadding;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if Self::is_padding(&value) {
+            Ok(Self(value))
+        } else {
+            Err(NotPadding(value))
+        }
+    }
+}
+
+impl From<PaddingValue> for String {
+    fn from(value: PaddingValue) -> Self {
+        value.0
+    }
+}
+
+impl schemars::JsonSchema for PaddingValue {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PaddingValue".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A feature value that is model padding: an angle-bracketed placeholder such as <PAD> or <UNK>.",
+            "type": "string",
+            "pattern": "^<.*>$",
+        })
+    }
+}
+
+/// FEATS with every padding value removed, and each value removed: what the
+/// worker's repair boundary writes into the analysis and reports, decided
+/// here so the worker never classifies a value itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairedFeatures {
+    /// The FEATS left, or `None` when no feature is left (as Stanza writes a
+    /// word with none).
+    pub feats: Option<String>,
+    /// Each removed value, with its feature, in order.
+    pub removed: Vec<RemovedFeatureValue>,
+}
+
+/// One padding value removed from one feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedFeatureValue {
+    /// The feature's name (`Case`).
+    pub feature: String,
+    /// The removed value.
+    pub value: PaddingValue,
+}
+
+/// `feats` without padding values, and one removal per value removed.
+///
+/// Total, and the one place a feature value is removed. Each comma-separated
+/// value is judged on its own, so `Case=Nom,<PAD>` keeps `Case=Nom`; a
+/// feature left with no value is dropped, and FEATS left with no feature is
+/// `None`. A pair without `=` is not a feature and passes through for the
+/// server's admission to skip.
+pub fn repair_feats(feats: &str) -> RepairedFeatures {
+    let mut pairs: Vec<String> = Vec::new();
+    let mut removed = Vec::new();
+    for pair in feats.split('|') {
+        let Some((name, value)) = pair.split_once('=') else {
+            pairs.push(pair.to_owned());
+            continue;
+        };
+        let mut kept: Vec<&str> = Vec::new();
+        for part in value.split(',') {
+            match PaddingValue::admit(part) {
+                Some(padding) => removed.push(RemovedFeatureValue {
+                    feature: name.to_owned(),
+                    value: padding,
+                }),
+                None => kept.push(part),
+            }
+        }
+        if !kept.is_empty() {
+            pairs.push(format!("{name}={}", kept.join(",")));
+        }
+    }
+    let joined = pairs.join("|");
+    RepairedFeatures {
+        feats: (!joined.is_empty()).then_some(joined),
+        removed,
+    }
+}
+
+/// One feature value a worker removed from an analysis it returned.
+///
+/// The worker is the only witness, as for a relation repair: the removed value
+/// is not in the analysis the server receives. Each removed value is its own
+/// repair, so `Case=Nom,<PAD>` losing `<PAD>` is one repair and keeps `Nom`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct UdFeatureRepairV2 {
+    /// Which repair this is.
+    pub kind: UdFeatureRepairKindV2,
+    /// Surface form of the word the value was removed from.
+    pub word: String,
+    /// The feature whose value it was (`Case`).
+    pub feature: String,
+    /// The removed value, verbatim (`<PAD>`): padding, by type.
+    pub removed_value: PaddingValue,
+}
+
 /// One morphosyntax item result returned by Python.
 ///
 /// A tagged union, so an analysis cannot exist without the model that
@@ -502,6 +709,10 @@ pub enum MorphosyntaxItemResultV2 {
         /// worker does not report repairs" the same value on the wire, which
         /// is the shape that let a rewrite live only in a log line.
         repairs: Vec<UdRelationRepairV2>,
+        /// Every feature value the worker removed from `raw_sentences`, in
+        /// the order it removed them. Empty means it removed nothing.
+        /// Required, with no serde default, for `repairs`' reason.
+        feature_repairs: Vec<UdFeatureRepairV2>,
     },
     /// The item had no words, so no model ran and there is nothing to apply.
     NoWords,
@@ -1196,6 +1407,57 @@ pub struct ShutdownRequestV2 {
 #[allow(clippy::expect_used)] // fixture parses and refusals are the assertions themselves
 mod tests {
     use super::*;
+
+    /// RED FIRST: a repair was admitted whatever value it said it removed,
+    /// so a worker could report removing a real feature value (`Nom`) as a
+    /// padding repair. A repair's removed value is padding by type.
+    #[test]
+    fn a_feature_repair_must_remove_padding() {
+        let repair = |value: &str| {
+            serde_json::json!({
+                "kind": "pad_feature_value",
+                "word": "кітап",
+                "feature": "Case",
+                "removed_value": value,
+            })
+        };
+        let admitted: UdFeatureRepairV2 =
+            serde_json::from_value(repair("<PAD>")).expect("padding is a repair");
+        assert_eq!(admitted.removed_value.as_str(), "<PAD>");
+        assert!(serde_json::from_value::<UdFeatureRepairV2>(repair("Nom")).is_err());
+        assert!(PaddingValue::is_padding("<UNK>"));
+        assert!(!PaddingValue::is_padding("<"));
+    }
+
+    /// RED FIRST: the schema's `^<.*>$` refuses a line terminator inside the
+    /// brackets (a JSON Schema `.` matches none) and Rust admitted one, so
+    /// the two disagreed on what padding is.
+    #[test]
+    fn padding_admits_no_line_terminator_as_the_schema_does() {
+        for text in ["<a\nb>", "<a\rb>", "<a\u{2028}b>", "<a\u{2029}b>"] {
+            assert!(PaddingValue::admit(text).is_none(), "{text:?}");
+        }
+        assert!(PaddingValue::admit("<PAD>").is_some());
+    }
+
+    /// The worker's repair, decided in Rust: each value judged alone, an
+    /// emptied feature dropped, empty FEATS `None`, a pair without `=` kept.
+    #[test]
+    fn repair_feats_removes_each_padding_value_alone() {
+        let repaired = repair_feats("Case=Nom,<PAD>|Number=<UNK>|odd");
+        assert_eq!(repaired.feats.as_deref(), Some("Case=Nom|odd"));
+        assert_eq!(
+            repaired
+                .removed
+                .iter()
+                .map(|removed| (removed.feature.as_str(), removed.value.as_str()))
+                .collect::<Vec<_>>(),
+            [("Case", "<PAD>"), ("Number", "<UNK>")]
+        );
+        let emptied = repair_feats("Case=<PAD>");
+        assert_eq!(emptied.feats, None);
+        assert_eq!(repair_feats("Case=Nom").removed, []);
+    }
 
     /// WIRE FORMAT: paid pyannoteAI output crosses the worker boundary before
     /// normalization, so a later normalization revision can replay it without

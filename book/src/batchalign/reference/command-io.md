@@ -1,13 +1,13 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-10-15 13:28 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
 dispatch.
-For implementation details, treat the command-owned entrypoints under
-`crates/batchalign/src/commands/` plus the owning orchestrator modules
+For implementation details, treat the command declarations in
+`crates/batchalign/src/recipe_runner/catalog.rs` plus the owning orchestrator modules
 (`compare.rs`, `benchmark.rs`, `transcribe/`, `fa/`, and `morphosyntax/`) as
 the source of truth for command semantics. The CLI and runner layers should
 stay thin.
@@ -45,10 +45,11 @@ When you are adding a new command or changing an existing one, remember the
 current architecture split:
 
 - CLI args live in `crates/batchalign`
-- released-command identity and top-level orchestration live in
-  `crates/batchalign/src/commands/`
+- command metadata and recipes are declared in
+  `crates/batchalign/src/recipe_runner/catalog.rs`; family execution lives in
+  `execution/` and `runner/dispatch/`
 - shared command-shape metadata lives in
-  `crates/batchalign/src/command_family.rs`
+  `crates/batchalign/src/recipe_runner/command_spec.rs`
 - reusable text-batch helper types live in
   `crates/batchalign/src/text_batch.rs`
 - job lifecycle / queueing live in `crates/batchalign/src/runner/`
@@ -572,7 +573,7 @@ destination contract, not a substitute for command-specific CHAT admission.
 | Direction | `paths_mode=true` (local daemon) | `paths_mode=false` (remote `--server`) |
 |-----------|----------------------------------|----------------------------------------|
 | **Request body** | `JobSubmission { paths_mode: true, source_paths, output_paths, before_paths, display_names, ... }`: path lists only (~KB) | `JobSubmission { paths_mode: false, files: [FilePayload { filename, content }], ... }`: full file bytes inline (can be 100+ MB) |
-| **Server read** | Runner opens each `source_paths[i]` directly via `tokio::fs::read_to_string` (see `crates/batchalign/src/runner/dispatch/infer_batched.rs:112-141`) | Runner reads the staged copy from `staging_dir/input/<filename>` that the POST handler wrote before returning 202 |
+| **Server read** | Runner opens each `source_paths[i]` directly via `tokio::fs::read_to_string` (see `crates/batchalign/src/execution/text_io.rs`) | Runner reads the staged copy from `staging_dir/input/<filename>` that the POST handler wrote before returning 202 |
 | **Server write** | Runner writes command-named artifacts under the admitted `output_paths[i]` parent; CLI copy-back uses those same destinations | Runner writes to `staging_dir/output/`; CLI copy-back uses the source-bound destination plan |
 | **Body limit (`max_body_bytes_mb`)** | Not a factor, body is a path list | Structural ceiling; operators raise `max_body_bytes_mb` for large remote payloads |
 | **Where `DirectHost` fits in** | `DirectHost` is a further optimization used when the CLI falls back to inline in-process execution (no HTTP). It uses the same `source_paths` / `output_paths` convention the local daemon uses, just without the HTTP hop | n/a |
@@ -587,7 +588,7 @@ sequenceDiagram
     participant Paths as "CLI paths builder<br/>(crates/batchalign/src/cli/dispatch/paths.rs)"
     participant Content as "CLI content builder<br/>(crates/batchalign/src/cli/dispatch/single.rs:140-201)"
     participant Srv as "POST /jobs handler<br/>(crates/batchalign/src/routes/jobs/mod.rs:161)"
-    participant Runner as "Runner file read<br/>(crates/batchalign/src/runner/dispatch/infer_batched.rs:112)"
+    participant Runner as "Runner file read<br/>(crates/batchalign/src/execution/text_io.rs)"
 
     CLI->>Gate: choose mode for (command, url)
     alt Local daemon or loopback --server
@@ -623,9 +624,9 @@ Diagram verified against:
 `crates/batchalign/src/cli/dispatch/paths.rs`,
 `crates/batchalign/src/cli/dispatch/mod.rs`,
 `crates/batchalign/src/recipe_runner/command_spec.rs`,
-`crates/batchalign/src/commands/mod.rs`,
+`crates/batchalign/src/command_model/mod.rs`,
 `crates/batchalign/src/routes/jobs/mod.rs`,
-`crates/batchalign/src/runner/dispatch/infer_batched.rs`.
+`crates/batchalign/src/execution/text_io.rs`.
 
 ### Inline (no-HTTP) fallback: `DirectHost`
 

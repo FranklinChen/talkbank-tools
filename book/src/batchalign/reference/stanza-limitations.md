@@ -352,7 +352,7 @@ silent (no error, no warning).
 onto the aligner output for positions where lengths match and no merging
 happened. The hint survives the realignment and reaches Stanza's MWT
 processor intact. Applies to every language for which the runtime
-capability table reports `has_mwt=True` (see Defect 5 for how MWT
+capability table reports `has("mwt")` (see Defect 5 for how MWT
 availability is decided per language).
 
 French native elision splits need a different representation. Merging
@@ -609,7 +609,8 @@ never shipped a Swedish MWT model.
 at every Stanza pipeline construction:
 
 ```python
-has_mwt = should_request_mwt(alpha2, get_cached_capability_table())
+cap = language_capability(lang)  # the language's catalog entry
+has_mwt = cap.has("mwt")
 ```
 
 The capability table (``batchalign/worker/_stanza_capabilities.py``)
@@ -682,7 +683,7 @@ real morphosyntactic structure.
 
 **Estonian no-op.** Stanza ships ``et`` MWT in
 ``resources.json``, so the capability table reports
-``has_mwt=True`` and BA3 requests it. Empirically, Stanza's Estonian
+``has("mwt")`` and BA3 requests it. Empirically, Stanza's Estonian
 MWT model does not split anything on conversational input, including
 the contracted-negation forms (``pole`` = ei+ole, ``polnud`` =
 ei+olnud, ``polegi`` = ei+ole+gi) that UD Estonian-EDT does mark as
@@ -704,11 +705,12 @@ will surface through a test rather than as silent output drift.
 
 ### Tests
 
-* **Pure-function unit tests** (4 tests, GREEN, no Stanza required):
-  ``batchalign/tests/pipelines/morphosyntax/test_stanza_loading.py::TestShouldRequestMwt``
-  pins ``should_request_mwt`` against synthetic capability tables
-  (Swedish-not-supported, English-supported, unknown-language,
-  table-is-None).
+* **Loader tests** (no Stanza required):
+  ``batchalign/tests/pipelines/morphosyntax/test_stanza_loading.py::test_mwt_is_requested_exactly_when_the_entry_ships_it``
+  drives ``load_stanza_models`` with a synthetic capability table and a
+  fake ``stanza`` module and asserts ``mwt`` is requested exactly when
+  the entry ships it; a language with no entry, or no table, is refused
+  with ``UnsupportedLanguageError``.
 * **Live-catalog regression tests** (3 tests, GREEN):
   ``batchalign/tests/pipelines/morphosyntax/test_stanza_config_parity.py::TestMwtCapabilityDriven``
   asserts the runtime decision against the actual installed Stanza
@@ -729,7 +731,7 @@ will surface through a test rather than as silent output drift.
 
 ### Re-evaluation criteria (when Stanza upgrades)
 
-1. Re-run the live-catalog tests. If ``should_request_mwt`` flips
+1. Re-run the live-catalog tests. If an entry's ``has("mwt")`` flips
    for any language, the capability table picked up an upstream
    change automatically; no BA3 code change needed.
 2. Re-run the Hebrew/Greek split tests. If Stanza's splits change

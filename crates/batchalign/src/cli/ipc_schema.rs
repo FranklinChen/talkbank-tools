@@ -102,6 +102,10 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             // Python is never checked against.
             UdRelationRepairV2,
             UdRelationRepairKindV2,
+            // The feature values an analyzed item's worker removed, beside
+            // its relation repairs, for the same reason.
+            UdFeatureRepairV2,
+            UdFeatureRepairKindV2,
             // Pinned ASR model identity. Registered as named types rather than
             // left to appear only as `$defs` inside the request and result
             // schemas, because the Python conformance test reads these FILES:

@@ -16,7 +16,8 @@ use crate::worker::pool::WorkerPool;
 use tracing::warn;
 
 use crate::error::ServerError;
-use crate::runner::util::{classify_worker_error, is_retryable_worker_failure};
+use crate::runner::util::classify_worker_error;
+use crate::types::scheduling::NextAttempt;
 
 /// The cancellation authority available locally to an operation.
 ///
@@ -138,10 +139,9 @@ pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
             Ok(response) => return Ok(response),
             Err(error) => {
                 let category = classify_worker_error(&error);
-                let has_retry_budget = attempt_number < retry_policy.max_attempts;
-
-                if is_retryable_worker_failure(category) && has_retry_budget {
-                    let backoff_ms = retry_policy.backoff_for_retry(attempt_number);
+                if let NextAttempt::RetryAfter(backoff_ms) =
+                    retry_policy.after_failure(attempt_number, category)
+                {
                     warn!(
                         task = ?request.task,
                         lang = %lang,

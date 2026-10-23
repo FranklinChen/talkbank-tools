@@ -16,5 +16,9 @@ expression: caps
   "engine_versions": {
     "morphosyntax": null,
     "fa": "wave2vec-fa-v1"
+  },
+  "stanza_catalog": {
+    "kind": "not_installed",
+    "import_error": "No module named 'stanza'"
   }
 }

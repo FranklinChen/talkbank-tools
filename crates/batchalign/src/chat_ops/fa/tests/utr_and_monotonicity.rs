@@ -31,7 +31,7 @@ fn utr_serialize_reparse_no_internal_bullets() {
         ("words", 5500, 5800),
         ("here", 5900, 6200),
     ]);
-    let result = utr::inject_utr_timing(&mut chat, &tokens);
+    let result = utr::inject_spaced(&mut chat, &tokens);
     assert!(result.injected() > 0, "UTR should inject timing");
 
     // At this point, ChatFile has TierContent.bullet set, but NO InternalBullet items
@@ -70,7 +70,7 @@ fn apply_fa_produces_no_double_bullets_after_utr() {
         ("words", 5500, 5800),
         ("here", 5900, 6200),
     ]);
-    utr::inject_utr_timing(&mut chat, &tokens);
+    utr::inject_spaced(&mut chat, &tokens);
 
     // Group and create synthetic FA timings
     let groups = group_utterances(
@@ -129,7 +129,7 @@ fn test_utr_zero_duration_asr_token_does_not_create_zero_duration_bullet() {
     // Simulate Whisper returning start==end for "mhm" (one 20ms frame).
     let tokens = make_utr_tokens(&[("mhm", 646025, 646025)]);
 
-    let result = utr::inject_utr_timing(&mut chat, &tokens);
+    let result = utr::inject_spaced(&mut chat, &tokens);
 
     // The utterance must NOT receive a zero-duration bullet.
     // Either it stays untimed (unmatched) or gets a non-zero-duration bullet.
@@ -176,7 +176,10 @@ fn test_utr_non_overlap_utterances_get_strictly_increasing_start_times() {
         ("yeah", 1000, 2000), // same start_ms as "mhm", Whisper DTW collision
     ]);
 
-    let _result = utr::TwoPassOverlapUtr::new().inject(&mut chat, &tokens);
+    let _result = utr::TwoPassOverlapUtr::new().inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
 
     let b0 = get_utterance_bullet(&chat, 0);
     let b1 = get_utterance_bullet(&chat, 1);

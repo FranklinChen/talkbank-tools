@@ -103,61 +103,39 @@ the exact value is retained in the submitted job options. Context/hotwords are
 recognition hints, not verified transcript text. Context may itself appear as
 invented speech in recognition output; the default therefore supplies none.
 
-## ISO 639-3 → ISO 639-1 (Stanza)
+## ISO 639-3 → Stanza catalog code
 
-Stanza uses ISO 639-1 alpha-2 codes (with a few non-standard variants
-like `zh-hans`/`zh-hant`/`nb`). Batchalign uses ISO 639-3 internally,
-so the worker has to map one to the other before handing a `lang`
-argument to `stanza.Pipeline`. The conversion lives in
-`batchalign/worker/_stanza_loading.py::iso3_to_alpha2()` and resolves
-in three layers:
+Stanza keys its catalog mostly by ISO 639-1 codes, with exceptions
+(`zh-hans`, three-letter keys such as `grc` and `ckb`). Batchalign uses ISO
+639-3 internally, so the worker maps one to the other before handing a `lang`
+to `stanza.Pipeline`. There is one mapping, the worker's capability table
+(`batchalign/worker/_stanza_capabilities.py`), and the loaders read it
+(`_stanza_loading.py::stanza_code_for`). A code is served by the catalog
+entry found by, in order:
 
-1. **Stanza-specific overrides**: `_ISO3_OVERRIDES` in
-   `_stanza_capabilities.py`. The single source of truth for codes
-   where the standard ISO-1 mapping does **not** correspond to a
-   Stanza catalog key. `iso3_to_alpha2()` imports this dict (it does
-   not redefine its own copy, see "Drift hazard" below).
+1. **`_STANZA_CODE_POLICY`**: `cmn` and `yue` use `zh-hans`, Stanza's
+   Simplified Chinese model. Neither has an ISO 639-1 code or a catalog entry
+   of its own; this is a choice of model, not a fact about codes.
+2. **The ISO 639-1 code**, from Rust's ISO table
+   (`batchalign_types::iso639_part1`, read by the worker as
+   `batchalign_core.ISO_639_1_PAIRS`), looked up in the catalog directly or
+   through the catalog's own alias: `mar` → `mr`, `zho` → `zh` → `zh-hans`,
+   `nor` → `no` → `nb` (Bokmål), `nob` → `nb`, `nno` → `nn`.
+3. **The code itself**, likewise: `grc`, `kmr` and `ckb` are catalog keys;
+   `kaz` is a catalog alias of `kk`.
 
-   | ISO-639-3 | Stanza key | Why not the standard alpha-2 |
-   |-----------|------------|------------------------------|
-   | `yue`     | `zh-hans`  | Cantonese routes through Stanza's Chinese model; `zh-hans` is the catalog key. |
-   | `cmn`     | `zh-hans`  | Mandarin. Same target. |
-   | `zho`     | `zh-hans`  | Chinese (generic). |
-   | `nor`     | `nb`       | Norwegian. pycountry says `no`; Stanza ships `nb` (Bokmål) only. |
-   | `msa`     | `ms`       | Malay. pinned for stability. |
+A code none of these reaches has no entry: the loader raises
+`UnsupportedLanguageError` rather than passing the code to Stanza, and the
+server's registry (built from the same table) refuses it as `NotInCatalog`
+before any worker is asked.
 
-2. **`pycountry`**: for every other code with a standard ISO-639-3 ↔
-   ISO-639-1 counterpart (`mar` → `mr`, `swa` → `sw`, `eng` → `en`,
-   etc.). This must be the fallback rather than a duplicate hardcoded
-   dict, see "Drift hazard."
+Because the loaders and the server's admission read the same table, a
+pipeline can only be requested for a language the server could have
+admitted. Adding a language needs no edit unless the ISO table and the
+catalog cannot connect its code; then it is a `_STANZA_CODE_POLICY` entry,
+which is a decision about which model analyzes it.
 
-3. **Pass-through with warning**: for codes that have no standard
-   alpha-2 (genuinely missing from pycountry). Length-2 codes are
-   assumed to already be alpha-2 and pass through silently; everything
-   else logs a warning before being handed to Stanza.
-
-### Drift hazard
-
-A previous version of this function had its own hardcoded mapping
-dict instead of using `pycountry`. That dict was missing many codes
-(notably Marathi `mar` → `mr`). The capability table built via
-pycountry correctly recognized `mar` as supported, but `iso3_to_alpha2`
-returned `"mar"` verbatim, and `stanza.Pipeline(lang="mar", ...)`
-crashed with "Language mar is currently unsupported" because Stanza's
-catalog is keyed by alpha-2.
-
-This was a **two-table-drift bug**: two independent pieces of code
-had to agree on the iso3 → alpha-2 mapping but didn't. The fix is
-structural, not data-driven: there is now one override dict
-(`_ISO3_OVERRIDES`), and `iso3_to_alpha2` imports it rather than
-maintaining a parallel copy. Adding a new Stanza-specific override
-means editing one dict in one place.
-
-**Do not reintroduce a second override dict here.** If a new
-Stanza-specific iso3 case comes up (e.g. a future Stanza release
-labels Catalan differently), add it to `_ISO3_OVERRIDES` only.
-
-For full architecture and incident history see
+For the whole design see
 [Stanza Capability Registry](../architecture/stanza-capability-registry.md).
 
 ## Model Resolution (ASR)
@@ -244,15 +222,15 @@ flowchart TD
 ## MWT Language Dispatch
 
 Multi-Word Token (MWT) processing is **capability-driven**. The
-loader at `batchalign/worker/_stanza_loading.py:40::should_request_mwt`
-consults the Stanza catalog table built at worker startup from
+loader (`language_capability` in `batchalign/worker/_stanza_loading.py`)
+reads the language's entry in the Stanza catalog table built at worker startup from
 `stanza.resources.common.load_resources_json()` (see
 `batchalign/worker/_stanza_capabilities.py`) and requests the `mwt`
-processor only when that table reports `has_mwt=True` for the
-language. The earlier hardcoded `MWT_LANGS` set was deleted, see
-[Stanza Limitations Defect 5](stanza-limitations.md) for the full
-rewrite rationale, and `test_stanza_config_parity.py:82` for the AST
-scan that prevents reintroduction.
+processor only when that table reports `has("mwt")` for the
+language; no language list decides it. See
+[Stanza Limitations Defect 5](stanza-limitations.md) for the
+rationale, and `test_stanza_config_parity.py` for the AST scan that
+forbids such a list.
 
 See [Non-English Workarounds](../developer/non-english-workarounds.md) §X1 for the
 per-language consequences.
@@ -410,12 +388,13 @@ maintain our own validation tables.
   batchalign queries it at worker startup (`stanza.resources.common.load_resources_json()`)
   and caches a per-language capability table in
   `batchalign/worker/_stanza_capabilities.py`.
-- Our ISO-639-3 → alpha-2 mapping: `iso3_to_alpha2()` in
-  `batchalign/worker/_stanza_loading.py:63`, with Stanza-specific
-  overrides in `_ISO3_OVERRIDES` (`_stanza_capabilities.py:50`).
-- **Validation approach:** Check the cached capability table before
-  attempting to load the pipeline, the same path that drives
-  `should_request_mwt()` and the rest of per-processor availability.
+- Our ISO-639-3 → catalog-code mapping is that same table (see
+  [above](#iso-639-3--stanza-catalog-code)), read by `stanza_code_for()` in
+  `batchalign/worker/_stanza_loading.py`.
+- **Validation approach:** the server's `StanzaRegistry`, admitted from the
+  worker's report of the table, refuses a language before any worker is
+  asked; the worker's `language_capability()` checks the same table before
+  loading a pipeline, and the entry's processors drive MWT and constituency.
 
 #### Tencent (cloud ASR)
 
@@ -513,9 +492,11 @@ This is tracked as a future improvement. The Rev.AI mapping table
 
 To add language-specific behavior for a new language:
 
-1. **Stanza mapping**: Add to `_ISO3_OVERRIDES` in
-   `batchalign/worker/_stanza_capabilities.py` only when the standard
-   alpha-2 mapping does not match Stanza's catalog key.
+1. **Stanza mapping**: Usually nothing: a language is available for
+   morphotag when the installed catalog serves it with tokenize, pos, lemma
+   and depparse. Add to `_STANZA_CODE_POLICY` in
+   `batchalign/worker/_stanza_capabilities.py` only when neither the ISO
+   639-1 table nor the catalog connects the code to an entry.
 2. **Rev.AI mapping**: Add a row to `REV_LANGUAGES` in
    `crates/batchalign/src/types/revai_language.rs` (do NOT rely on a
    truncation fallback; there is none).
@@ -543,7 +524,7 @@ To add language-specific behavior for a new language:
    `crates/batchalign-transform/src/morphosyntax/lang_XX.rs` file if
    Stanza produces systematic errors for this language (see existing
    `lang_en.rs`, `lang_fr.rs`, `lang_it.rs`, `lang_ja.rs`).
-7. **MWT dispatch**: No code change required; capability-driven
-   `should_request_mwt()` picks up Stanza's catalog automatically.
+7. **MWT dispatch**: No code change required; MWT is requested exactly when
+   the language's catalog entry ships it.
 8. **Test with `benchmark`**: Verify the language code is accepted by
    all engines in the pipeline (ASR, morphotag, compare).

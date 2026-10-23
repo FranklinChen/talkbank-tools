@@ -8,7 +8,7 @@ type JudgementBar = components["schemas"]["JudgementBar"];
 type StageRefusalRecord = components["schemas"]["StageRefusalRecord"];
 type OutputShortfallRecord = components["schemas"]["OutputShortfallRecord"];
 type OptionalStage = components["schemas"]["OptionalStage"];
-type UntimedCauseRecord = components["schemas"]["UntimedCauseRecord"];
+type StoredUntimedCause = components["schemas"]["StoredUntimedCause"];
 type OutputExclusionRecord = components["schemas"]["OutputExclusionRecord"];
 type RefusedWindowTrace = components["schemas"]["RefusedWindowTrace"];
 
@@ -392,13 +392,17 @@ function stageName(stage: OptionalStage): string {
   }
 }
 
-/** The server's `UntimedCauseRecord` Display. */
-function untimedCauseText(cause: UntimedCauseRecord): string {
+/** The server's `StoredUntimedCause` Display: a written or a retired cause. */
+function untimedCauseText(cause: StoredUntimedCause): string {
   switch (cause.kind) {
     case "not_placed":
       return "no alignment request, the audio left for it could not contain its words";
     case "localization_unavailable":
       return "no alignment request, no supplied timing or source-bound UTR search evidence";
+    case "requested":
+      return `no positive interval from its requests (${cause.answered} answered, ${cause.unaligned} unaligned, ${cause.unrequested} unrequested)`;
+    case "unrecorded":
+      return "no cause recorded";
     case "no_usable_timing":
       return "no usable timing";
     case "window_refused":

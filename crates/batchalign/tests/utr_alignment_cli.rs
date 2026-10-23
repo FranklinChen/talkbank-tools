@@ -45,7 +45,7 @@ fn offline_utr_reports_inspection_refusal_without_claiming_lexical_absence() {
         .success();
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output).expect("report")).expect("JSON");
-    assert_eq!(report["schema_version"], 11);
+    assert_eq!(report["schema_version"], 13);
     let utterance = &report["plan"]["utterances"][0];
     assert!(utterance.get("matches").is_none());
     assert!(utterance.get("proposal").is_none());
@@ -93,7 +93,7 @@ fn offline_utr_correspondence_separates_selected_path_from_timing_authority() {
         .success();
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output).expect("report")).expect("JSON");
-    assert_eq!(report["schema_version"], 11);
+    assert_eq!(report["schema_version"], 13);
     let utterance = &report["plan"]["utterances"][0];
     assert_eq!(utterance["matches"]["first"]["chat_text"], "hello");
     assert_eq!(utterance["admitted_matches"]["first"]["chat_text"], "now");
@@ -243,7 +243,7 @@ fn offline_utr_replay_checks_declared_original_name_without_debug_suffix_guessin
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output).expect("read admitted report"))
             .expect("report JSON");
-    assert_eq!(report["schema_version"], 11);
+    assert_eq!(report["schema_version"], 13);
     assert_eq!(
         report["source_name"],
         serde_json::json!({
@@ -379,7 +379,7 @@ fn offline_utr_projects_segment_words_and_retains_provider_timing() {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(output).expect("read report"))
                 .expect("report JSON");
-        assert_eq!(report["schema_version"], 11);
+        assert_eq!(report["schema_version"], 13);
         let utterances = report["plan"]["utterances"].as_array().expect("utterances");
         assert_eq!(utterances.len(), 2);
         for utterance in utterances {
@@ -394,16 +394,16 @@ fn offline_utr_projects_segment_words_and_retains_provider_timing() {
         assert_eq!(first["first"]["asr_text"], "hello");
         assert_eq!(
             first["first"]["token"],
-            serde_json::json!({"token_index":1,"word_index":0})
+            serde_json::json!({"token_index":1,"unit_index":0})
         );
         assert_eq!(first["rest"][0]["asr_text"], "world");
         assert_eq!(
             first["rest"][0]["token"],
-            serde_json::json!({"token_index":1,"word_index":1})
+            serde_json::json!({"token_index":1,"unit_index":1})
         );
         assert_eq!(
             utterances[1]["matches"]["first"]["token"],
-            serde_json::json!({"token_index":1,"word_index":2})
+            serde_json::json!({"token_index":1,"unit_index":2})
         );
     }
     assert_eq!(std::fs::read_to_string(chat).expect("read CHAT"), text);

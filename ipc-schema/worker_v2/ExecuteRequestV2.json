@@ -1357,10 +1357,6 @@
       "description": "V2 utterance-segmentation request payload.",
       "type": "object",
       "properties": {
-        "allow_stanza_fallback": {
-          "description": "Operator opt-in to the legacy Stanza constituency-parser\nfallback for unsupported languages. Set by the\n`--utseg-fallback-stanza` CLI flag. Defaults to `false` so\nolder clients (and any non-CLI caller) refuse silent\nsubstitution by default.",
-          "type": "boolean"
-        },
         "item_count": {
           "description": "Number of utterance items frozen into the prepared batch payload.",
           "type": "integer",
@@ -1374,12 +1370,32 @@
         "payload_ref_id": {
           "description": "Reference to the prepared text batch payload.",
           "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "segmenter": {
+          "description": "The segmenter the control plane admitted for this language. The\nworker runs exactly this one: it never chooses between them from what\nit happens to have loaded.",
+          "$ref": "#/$defs/UtsegSegmenterV2"
         }
       },
       "required": [
         "lang",
         "payload_ref_id",
-        "item_count"
+        "item_count",
+        "segmenter"
+      ]
+    },
+    "UtsegSegmenterV2": {
+      "description": "The utterance segmenter a request names, decided by the Rust control\nplane from the language and the operator's fallback policy, and admitted\nagainst the worker's Stanza catalog when it runs Stanza.",
+      "oneOf": [
+        {
+          "description": "The language's pinned TalkBank boundary model, which the worker loaded\nat startup from the pin the control plane sent it.",
+          "type": "string",
+          "const": "boundary_model"
+        },
+        {
+          "description": "Stanza constituency parsing, the operator-authorized fallback for a\nlanguage with no boundary model.",
+          "type": "string",
+          "const": "stanza_constituency"
+        }
       ]
     },
     "WhisperAttentionCaptureRequestV2": {

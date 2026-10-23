@@ -50,15 +50,25 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         // about the protocol, and the same request is refused again.
         WorkerError::RequestRefused(_) => FailureCategory::WorkerProtocol,
         // Bootstrap-class worker errors are deterministic across retries:
-        // a missing model file, a failed catalog download, or an
-        // unsupported language will produce the same failure on every
-        // attempt. The orchestrator must NOT retry these, historically,
-        // 3-attempt retries of a deterministic Stanza catalog miss
-        // produced multi-GB log explosions because each attempt dumped a
-        // full Python traceback before the worker exited.
-        WorkerError::Bootstrap(_) | WorkerError::RuntimeIdentityMismatch => {
+        // a missing model file or an unsupported language produces the same
+        // failure on every attempt. The orchestrator must NOT retry these:
+        // 3-attempt retries of a deterministic Stanza catalog miss once
+        // produced multi-GB log explosions, each attempt dumping a full
+        // Python traceback before the worker exited. A download that failed
+        // in transit is not one of these (below).
+        WorkerError::Bootstrap { .. } | WorkerError::RuntimeIdentityMismatch => {
             FailureCategory::WorkerBootstrap
         }
+        // A download that failed in transit may get through later: the
+        // remote host's transient failure, retried, and not a reason to
+        // withhold a fallback.
+        WorkerError::ModelDownload { .. } => FailureCategory::ProviderTransient,
+        // The device ran out of memory: retried after a backoff, by which
+        // time concurrent work may have released it.
+        WorkerError::DeviceOutOfMemory { .. } => FailureCategory::MemoryPressure,
+        // The generic code does not establish a cause or determinism.
+        // Keep that uncertainty distinct from typed permanent refusals.
+        WorkerError::ModelRuntime(_) => FailureCategory::LocalRuntime,
         WorkerError::MemoryGuard(_) => FailureCategory::MemoryPressure,
         // Deliberately NOT `Cancelled`, which means "cancelled intentionally"
         // by an operator and is a TERMINAL user-intent state. The server
@@ -225,27 +235,24 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         ServerError::ModelAccessDenied(_) => FailureCategory::ModelAccessDenied,
         // The provider's own typed verdict decides this; nothing here re-reads
         // a message to guess. `ProviderTransient` is retryable
-        // (`is_retryable_worker_failure`), which is the whole point: a dropped
+        // (`FailureCategory::retryability`), which is the whole point: a dropped
         // upload should be attempted again rather than reported as bad input.
         ServerError::AsrProvider { disposition, .. } => match disposition {
             AsrProviderDisposition::Transient => FailureCategory::ProviderTransient,
             AsrProviderDisposition::Terminal => FailureCategory::ProviderTerminal,
+            AsrProviderDisposition::AccountRefused => FailureCategory::ProviderAccountRefused,
         },
+        ServerError::ProviderQuotaExhausted(_) => FailureCategory::ProviderQuotaExhausted,
+        // A worker running models other than the pinned ones recurs for every
+        // request it serves, exactly as a runtime-code identity mismatch does
+        // (`WorkerError::RuntimeIdentityMismatch`), and is classified with it:
+        // not retried, and never reported as bad input.
+        ServerError::AsrModelIdentity(_) => FailureCategory::WorkerBootstrap,
         // A deliberate stop, never a transient or infrastructure failure:
         // see `ServerError::Cancelled`'s own doc for why this must stay
         // distinct from `System`.
         ServerError::Cancelled => FailureCategory::Cancelled,
     }
-}
-
-/// Whether a classified worker failure should be retried automatically.
-pub(crate) fn is_retryable_worker_failure(category: FailureCategory) -> bool {
-    matches!(
-        category,
-        FailureCategory::WorkerCrash
-            | FailureCategory::WorkerTimeout
-            | FailureCategory::ProviderTransient
-    )
 }
 
 /// Translate a classified failure into a user-facing error message.
@@ -295,11 +302,33 @@ pub(crate) fn user_facing_error(
             "{command_label} failed for {filename}: the external service returned a \
              temporary error. Try restarting the job."
         ),
+        FailureCategory::LocalRuntime => {
+            let detail = truncate_tail(raw_error, 1000);
+            format!(
+                "{command_label} failed for {filename}: the local processing engine reported a runtime failure.\n{detail}"
+            )
+        }
         FailureCategory::ProviderTerminal => {
             // A provider may be local (Praat, for example). The typed category
             // establishes terminality, not a network or credential diagnosis.
             let detail = truncate_tail(raw_error, 1000);
             format!("{command_label} failed for {filename}: {detail}")
+        }
+        FailureCategory::ProviderQuotaExhausted => {
+            let detail = truncate_tail(raw_error, 1000);
+            format!(
+                "{command_label} failed for {filename}: the provider's quota or resource \
+                 pack is exhausted. Restore it on the provider account, or choose a \
+                 different engine, before retrying.\n{detail}"
+            )
+        }
+        FailureCategory::ProviderAccountRefused => {
+            let detail = truncate_tail(raw_error, 1000);
+            format!(
+                "{command_label} failed for {filename}: the provider refuses this account \
+                 (its key, its permission or its credit). Fix it on the provider account, \
+                 or choose a different engine, before retrying.\n{detail}"
+            )
         }
         FailureCategory::MemoryPressure => format!(
             "{command_label} was deferred for {filename}: the server does not have \
@@ -356,9 +385,10 @@ mod tests {
             "Analysis failed for silent.cs.wav: Praat could not extract voiced intervals"
         );
         assert!(!message.contains("API keys") && !message.contains("external service"));
-        assert!(!is_retryable_worker_failure(
-            FailureCategory::ProviderTerminal
-        ));
+        assert!(
+            !((FailureCategory::ProviderTerminal).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     #[test]
@@ -373,11 +403,11 @@ mod tests {
     fn morphosyntax_capability_refusal_preserves_actionable_source_language() {
         let language = crate::api::LanguageCode3::try_new("que").unwrap();
         let error = ServerError::from(
-            crate::morphosyntax::AnalysisUnavailable::admit_primary(&language).unwrap_err(),
+            crate::morphosyntax::AnalysisUnavailable::primary_refusal_for_test(&language),
         );
         let category = classify_server_error(&error);
         assert_eq!(category, FailureCategory::AnalysisUnavailable);
-        assert!(!is_retryable_worker_failure(category));
+        assert!(!((category).retryability() == crate::types::scheduling::Retryability::Retryable));
         let message = user_facing_error(category, "Morphology", "sample.cha", &error.to_string());
         assert!(message.contains("que") && message.contains("Keep truthful language declarations"));
         assert!(!message.contains("internal error") && !message.contains("Fix the @Languages"));
@@ -421,7 +451,7 @@ mod tests {
             }));
         let category = classify_server_error(&refused);
         assert_eq!(category, FailureCategory::Validation);
-        assert!(!is_retryable_worker_failure(category));
+        assert!(!((category).retryability() == crate::types::scheduling::Retryability::Retryable));
         let message = user_facing_error(category, "Alignment", "empty.cha", &refused.to_string());
         assert!(
             message.contains("/audio/empty.mp3"),
@@ -461,7 +491,7 @@ mod tests {
         });
         let category = classify_server_error(&refused);
         assert_eq!(category, FailureCategory::Validation);
-        assert!(!is_retryable_worker_failure(category));
+        assert!(!((category).retryability() == crate::types::scheduling::Retryability::Retryable));
         let message = user_facing_error(category, "Alignment", "sample.cha", &refused.to_string());
         assert!(
             message.contains("@Media:\tsample, audio, unlinked"),
@@ -487,9 +517,10 @@ mod tests {
     /// terms or holds a valid token.
     #[test]
     fn model_access_denied_is_not_retryable() {
-        assert!(!is_retryable_worker_failure(
-            FailureCategory::ModelAccessDenied
-        ));
+        assert!(
+            !((FailureCategory::ModelAccessDenied).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     /// A recording that produced no words is never retried, and the operator
@@ -507,7 +538,7 @@ mod tests {
         let category = classify_server_error(&error);
 
         assert!(
-            !is_retryable_worker_failure(category),
+            !((category).retryability() == crate::types::scheduling::Retryability::Retryable),
             "a recording with no speech in it says the same thing on every attempt"
         );
 

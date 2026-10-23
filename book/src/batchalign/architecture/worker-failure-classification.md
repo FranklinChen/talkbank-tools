@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-16 09:58 EDT
+**Last updated:** 2026-10-25 08:21 EDT
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -36,17 +36,22 @@ flowchart TD
     py["Python worker dispatch<br/>(_protocol.py:_serve_stdio)"]
     classifyExc{"_classify_dispatch_<br/>exception(exc)"}
     emit_b["_write_error(msg, kind='bootstrap')"]
+    emit_d["_write_error(msg, kind='download')"]
+    emit_o["_write_error(msg, kind='out_of_memory')"]
     emit_r["_write_error(msg, kind='runtime')"]
     exit_b["Worker exits cleanly<br/>(pool spawns replacement)"]
     keepalive["Worker stays alive<br/>(serves next request)"]
     wire["Wire JSON line:<br/>{op:'error', error, kind}"]
     rust["Rust IPC reader<br/>(handle/protocol.rs)"]
     kind{"WorkerErrorKind"}
-    we_b["WorkerError::Bootstrap(msg)"]
+    we_b["WorkerError::Bootstrap { worker: Exits }"]
+    we_d["WorkerError::ModelDownload { worker: Exits }"]
+    we_o["WorkerError::DeviceOutOfMemory { worker: Serves }"]
     we_r["WorkerError::WorkerResponse(msg)"]
     classifyRust["classify_worker_error()<br/>(error_classification.rs)"]
     cat_b["FailureCategory::WorkerBootstrap<br/>(non-retryable)"]
     cat_r["FailureCategory::ProviderTransient<br/>(retryable, 3 attempts)"]
+    cat_o["FailureCategory::MemoryPressure<br/>(retryable after backoff)"]
     retry{"is_retryable_worker_<br/>failure(category)?"}
     user_b["User sees verbatim worker error<br/>(network failure, disk full, …)"]
     user_r_ok["Retry succeeds → user sees result"]
@@ -54,21 +59,33 @@ flowchart TD
 
     py --> classifyExc
     classifyExc -->|"typed bootstrap exception"| emit_b
+    classifyExc -->|"download failed in transit"| emit_d
+    classifyExc -->|"torch.OutOfMemoryError"| emit_o
     classifyExc -->|"any other exception"| emit_r
     emit_b --> wire
+    emit_d --> wire
+    emit_o --> wire
     emit_r --> wire
     emit_b --> exit_b
+    emit_d --> exit_b
+    emit_o --> keepalive
     emit_r --> keepalive
     wire --> rust
     rust --> kind
     kind -->|"bootstrap"| we_b
+    kind -->|"download"| we_d
+    kind -->|"out_of_memory"| we_o
     kind -->|"runtime"| we_r
     we_b --> classifyRust
+    we_d --> classifyRust
+    we_o --> classifyRust
     we_r --> classifyRust
     classifyRust -->|"Bootstrap"| cat_b
-    classifyRust -->|"WorkerResponse"| cat_r
+    classifyRust -->|"ModelDownload, WorkerResponse"| cat_r
+    classifyRust -->|"DeviceOutOfMemory"| cat_o
     cat_b --> retry
     cat_r --> retry
+    cat_o --> retry
     retry -->|"no"| user_b
     retry -->|"yes"| user_r_ok
     retry -.->|"retries exhausted"| user_r_fail
@@ -79,11 +96,20 @@ The key invariants the diagram encodes:
 - **Bootstrap-class exceptions take a separate path on both sides of the
   seam.** Python emits with `kind=bootstrap`; Rust decodes into
   `WorkerError::Bootstrap`; classifier returns
-  `FailureCategory::WorkerBootstrap`; `is_retryable_worker_failure`
-  returns `false`.
+  `FailureCategory::WorkerBootstrap`, whose `retryability()` is `Final`,
+  so the retry policy stops.
 - **The runtime path preserves all pre-2026-05-06 retry semantics.** Any
   exception that isn't a typed bootstrap error stays in the
   `WorkerResponse → ProviderTransient → retry up to 3×` loop.
+- **Whether the worker goes on serving is decided once, by the kind.**
+  `WorkerErrorKind::worker_after` says a `bootstrap` or `download` report
+  ends the worker's service (a model may be half loaded; a stdio worker
+  exits, a TCP daemon closes the connection) and every other kind does
+  not. The Python loops ask it through `batchalign_core.error_kind_ends_worker`
+  before deciding to stop, and the Rust readers record it on the error
+  (`WorkerAfterError`), so `WorkerError::worker_after_failure` retires a
+  worker that stopped serving instead of handing the retry to a dead
+  handle.
 - **The user-facing wording is verbatim for bootstrap errors.** The
   worker's typed error message (e.g., "Failed to download Stanza
   catalog: connection refused") reaches the user with light framing,
@@ -157,7 +183,8 @@ Defined by `WorkerResponse` in the same file. Same tagged-union shape:
 {"op": "health", "response": {...}}
 {"op": "capabilities", "response": {...}}
 {"op": "shutdown"}
-{"op": "error", "error": "<message>", "kind": "runtime" | "bootstrap" | "invalid_request",
+{"op": "error", "error": "<message>",
+ "kind": "runtime" | "bootstrap" | "download" | "out_of_memory" | "invalid_request",
  "request_id": "<id>"}   // request_id present when the failure answers a V2 dispatch
 ```
 
@@ -172,6 +199,14 @@ dispatcher calls it for its own refusals (`invalid_request`), and the Python
 request loops reach it through `batchalign_core.error_envelope`, which raises
 `ValueError` on any other spelling. Python types the argument as the
 `WorkerErrorKind` `Literal` in `batchalign/worker/_protocol.py`.
+
+A stdio worker that cannot load its models at startup writes one such line
+(uncorrelated) in place of its ready line and exits. The Rust ready reader
+(`read_ready_line`) turns it into the startup error
+(`ReportedFailure::into_startup_error`), so a download that failed while a
+worker started is retried like one that failed in `ensure_task`, where an
+unexplained exit before the ready line could only be a system failure. A
+TCP daemon has no reader on its stdout and still exits with its traceback.
 
 #### Why `kind` and not a separate `bootstrap_error` op?
 
@@ -220,11 +255,11 @@ def _serve_stdio() -> None:
         try:
             dispatch = dispatch_protocol_message(message)
         except BaseException as exc:
-            kind = _classify_dispatch_exception(exc)  # 'bootstrap' or 'runtime'
+            kind = _classify_dispatch_exception(exc)
             # Log the full traceback once for diagnostics …
             _write_error(str(exc) or exc.__class__.__name__, kind=kind)
-            if kind == "bootstrap":
-                break        # Worker exits cleanly; pool spawns replacement.
+            if _ends_worker(kind):
+                break        # bootstrap, download: the pool spawns a replacement.
             continue          # Worker stays alive for the next request.
         _write_json(dispatch.payload)
 ```
@@ -236,30 +271,39 @@ through. The price of `BaseException` is one rule for contributors:
 **never raise `SystemExit` from inside a dispatch handler** (use the
 shutdown op instead). The catch will swallow it.
 
-`_classify_dispatch_exception` is the bootstrap-vs-runtime discriminator:
+`_classify_dispatch_exception` decides the wire kind by the exception's
+class:
 
-```python
-def _classify_dispatch_exception(exc: BaseException) -> str:
-    bootstrap_types = []
-    try:
-        from batchalign.worker._stanza_capabilities import StanzaCatalogDownloadError
-        bootstrap_types.append(StanzaCatalogDownloadError)
-    except ImportError:
-        pass
-    try:
-        from batchalign.worker._stanza_loading import UnsupportedLanguageError
-        bootstrap_types.append(UnsupportedLanguageError)
-    except ImportError:
-        pass
-    return "bootstrap" if isinstance(exc, tuple(bootstrap_types)) else "runtime"
-```
+- `download`: a model or catalog download that failed in transit. The
+  question belongs to `batchalign/inference/_transient_failures.py`
+  (`is_model_download_failure`), which the Rust worker boundary's
+  `classify_runner_error` asks too, so a download raised while a worker
+  loads and the same download raised inside a request are classified alike.
+  It recognises the classes the locked dependencies actually raise:
+  `StanzaCatalogDownloadError`; `httpx2`'s network, timeout and
+  remote-protocol errors (Hugging Face Hub downloads through `httpx2`);
+  `requests`' connection, timeout and broken-transfer errors (Stanza's other
+  fetches); a Hub HTTP error whose status says the Hub is briefly unable to
+  serve (408, 429, 5xx); and a Hub `LocalEntryNotFoundError` raised *from*
+  one of those, which is what `hf_hub_download` raises when it cannot reach
+  the Hub. A `LocalEntryNotFoundError` with no such cause (offline mode) and
+  a 401 or 403 stay `ModelAccessDeniedError`. The configuration is sound
+  and a later attempt may get through, so Rust retries it
+  (`WorkerError::ModelDownload`, `ProviderTransient`) and it does not
+  withhold a fallback.
+- `out_of_memory`: `torch.OutOfMemoryError` (`is_device_out_of_memory`,
+  same module), retried after a backoff (`MemoryPressure`). torch 2.14
+  raises a plain `RuntimeError` for an Apple MPS shortfall, which no class
+  distinguishes, so that stays `runtime`.
+- `bootstrap`: the typed deterministic load failures
+  (`UnsupportedLanguageError`), which recur identically.
+- `runtime`: everything else.
 
-The lazy imports are deliberate: a missing optional dependency must not
-crash the classifier itself. If a future ML library introduces typed
-bootstrap errors, append them to the list, the `tuple(...)` dispatch
-handles the type fan-in cleanly.
+The transient-failure module reads library classes from `sys.modules` and
+imports nothing: an exception can only be an instance of a class whose
+module is loaded, so the classifier never imports a model library.
 
-### Why does the worker exit on bootstrap errors?
+### Why does the worker exit on bootstrap and download errors?
 
 A worker that hit a bootstrap failure is in a partially-initialized
 state, model loaders may have allocated GPU memory, opened file
@@ -269,11 +313,12 @@ failure invites silent data corruption (e.g., a request that needed
 language `eng` running against a worker whose `eng` Pipeline never
 finished loading).
 
-The exit is safe because the orchestrator classifies bootstrap errors
-as **non-retryable**: the pool spawns a fresh replacement worker on the
-next request, but it does NOT re-execute the failing request that just
-errored. The user gets the typed bootstrap error verbatim, no retry
-storm, no log explosion.
+The exit is safe because the readers know of it: the error carries
+`WorkerAfterError::Exits`, so the handle is retired and the next request
+goes to a fresh worker. A bootstrap error is **non-retryable**, so the
+failing request is not run again and the user gets the typed error
+verbatim, no retry storm, no log explosion. A download is retried, on that
+fresh worker.
 
 For runtime errors, by contrast, the worker stays alive. A transient
 inference failure on one input is no reason to throw away a fully-loaded
@@ -298,8 +343,8 @@ prevent originally manifested on these workers. Sequential loops wrap
 `dispatch_protocol_message`; concurrent handlers wrap
 `dispatch_prepared_protocol_message`. Both catch `BaseException`, classify via
 `_classify_dispatch_exception`, and emit the structured error envelope.
-TCP handlers also tear the connection down on bootstrap-kind errors after
-emitting that typed error.
+TCP handlers also tear the connection down after a kind that ends the
+worker's service, after emitting that typed error.
 
 ## The Rust side: `WorkerError`, `FailureCategory`, classifier
 
@@ -312,7 +357,8 @@ Source files:
 | Wire `WorkerErrorKind` | `crates/batchalign-types/src/worker_v2/error_envelope.rs` |
 | The one `op=error` envelope builder | `crates/batchalign-pyo3/src/worker_protocol.rs::error_payload` |
 | `FailureCategory` enum | `crates/batchalign/src/types/scheduling.rs` |
-| Classifier (`classify_worker_error`, `is_retryable_worker_failure`) | `crates/batchalign/src/runner/util/error_classification.rs` |
+| Classifier (`classify_worker_error`) | `crates/batchalign/src/runner/util/error_classification.rs` |
+| Retry decision (`FailureCategory::retryability`, `RetryPolicy::after_failure`) | `crates/batchalign/src/types/scheduling.rs` |
 | Retry loop | `crates/batchalign/src/infer_retry.rs` |
 | User-facing message router | `crates/batchalign/src/runner/util/error_classification.rs::user_facing_error` |
 
@@ -330,10 +376,13 @@ Each variant has a documented retryability class.
 | `Timeout { waited_for, limit }` | A wait on the worker ran past its limit: a reply (`WorkerWait` names which op), a model load or a TCP connection | Retryable (`WorkerTimeout`). A sequential worker is retired (its late reply could still arrive), and so is a spawned shared GPU worker (the thread serving the request may still hold one of its slots); a shared GPU daemon connection is kept (replies are routed by request id, and the daemon is not this server's to restart) |
 | `Protocol(String)` | IPC framing or response shape was wrong (on either worker path: a sequential reply that fails to decode, or a shared GPU `execute_v2` line the protocol refuses) | Terminal-for-this-request, protocol desync |
 | `WorkerResponse(String)` | Worker returned `{"op":"error", "kind":"runtime"}` | Retryable, per-request failure |
-| **`Bootstrap(String)`** | Worker returned `{"op":"error", "kind":"bootstrap"}` | **Terminal**: deterministic |
+| **`Bootstrap { message, worker }`** | Worker returned `{"op":"error", "kind":"bootstrap"}` (worker `Exits`), or an execute response coded `model_unavailable` or `unsupported_language` (worker `Serves`) | **Terminal**: deterministic |
+| `ModelDownload { message, worker }` | Worker returned `{"op":"error", "kind":"download"}` (worker `Exits`), or an execute response coded `model_download_failed` (worker `Serves`): a download failed in transit | Retryable (`ProviderTransient`); does not withhold a UTR fallback |
+| `DeviceOutOfMemory { message, worker }` | Worker returned `{"op":"error", "kind":"out_of_memory"}` or an execute response coded `device_out_of_memory` (`torch.OutOfMemoryError`) | Retryable after a backoff (`MemoryPressure`) |
+| `ModelRuntime(String)` | A local model's generic `RuntimeFailure` (see below) | Bounded retries (`LocalRuntime`); the code alone does not identify the cause |
 | `RequestRefused(String)` | Worker returned `{"op":"error", "kind":"invalid_request"}`: the line was not JSON, the op or its `request` mapping was missing, or the payload failed the request model | **Terminal** (`WorkerProtocol`): the same request is refused again; the worker stays in service |
 | `Io(io::Error)` | Pipe-level I/O failure (broken pipe, etc.) | Retryable, pool replaces worker |
-| `MemoryGuard(MemoryGuardError)` | Memory-guard refused to admit the worker (insufficient headroom under the configured budget) | **Not retried** by `is_retryable_worker_failure`: classified as `FailureCategory::MemoryPressure`, which is outside the retry set; the scheduler re-admits later once memory frees |
+| `MemoryGuard(MemoryGuardError)` | Memory-guard refused to admit the worker (insufficient headroom under the configured budget) | Retryable after a backoff (`MemoryPressure`): memory frees as other work ends |
 | `NoWorker { command, lang }` | Reserved variant; unused today | Terminal |
 | `PoolShuttingDown` | The pool is shutting down; dispatch, task loading and a shared worker's in-flight requests are refused | **Terminal** (`System`): nothing will serve the request; the job is recovered at the next start |
 | `WorkerRetired` | The pool retired the shared worker a request was in flight on (its capability report was refused, or it is being replaced) and keeps serving | Retryable (`WorkerCrash`): the retry reaches another worker |
@@ -349,25 +398,95 @@ current variants are defined in `types/scheduling.rs`:
 
 ```text
 Validation, ParseError, InputMissing, EvidenceUnavailable, AnalysisUnavailable, WorkerCrash, WorkerTimeout,
-WorkerProtocol, WorkerBootstrap, ProviderTransient, ProviderTerminal,
-MemoryPressure, Cancelled, System, ModelAccessDenied
+WorkerProtocol, WorkerBootstrap, LocalRuntime, ProviderTransient, ProviderTerminal,
+ProviderQuotaExhausted, ProviderAccountRefused, MemoryPressure, Cancelled, System,
+ModelAccessDenied
 ```
 
-Retry decision in `is_retryable_worker_failure`:
-
-```rust,ignore
-matches!(
-    category,
-    FailureCategory::WorkerCrash
-        | FailureCategory::WorkerTimeout
-        | FailureCategory::ProviderTransient
-)
-```
+A failure moves through three stages, each a transition from the last: the
+`WorkerError` (which already says whether the worker stopped serving,
+`WorkerAfterError`) is classified into a `FailureCategory`
+(`classify_worker_error`); the category's `retryability()`, an exhaustive
+match with no catch-all, says `Retryable` (`WorkerCrash`, `WorkerTimeout`,
+`ProviderTransient`, `LocalRuntime`, `MemoryPressure`) or `Final`; and
+`RetryPolicy::after_failure(attempt, category)` turns that and the budget into
+a `NextAttempt`: `RetryAfter(backoff)` or `Stop(Final | BudgetSpent)`. Every
+retry loop acts on the `NextAttempt`; none combines a retryable flag with a
+budget test of its own. Separately, `WorkerError::worker_after_failure` turns
+the same error into the worker's lifecycle action (`Reusable` or `Retire`).
 
 `WorkerBootstrap` is intentionally absent. That's the load-bearing
 property: a bootstrap-class failure cannot reach the retry loop's
 `continue` branch, so a deterministic failure stops at the first
 attempt instead of echoing through three.
+
+`ProviderQuotaExhausted` is outside it too: the provider account's quota or
+resource pack is used up (`ServerError::ProviderQuotaExhausted`, from the
+worker protocol code of the same name), so no retry succeeds until an account
+holder restores it. `ProviderAccountRefused` is outside it for the same
+reason: the provider refuses the account itself (Rev.AI's 401, 402 or 403
+on a submission: the key, the account's permission, its credit). The same
+status on a job's status or transcript request is a terminal failure of that
+request, since it may refuse only that resource (`RevAiEndpoint` says which
+request a status answers). A 429 (rate limited) is `ProviderTransient` on
+every request. The mapping reads the status and the request only, never the
+body; no recorded Rev.AI response body backs it yet.
+
+### Which failures withhold the same-engine UTR fallback
+
+A first UTR pass that fails or leaves words unmatched grants one fallback
+pass on the SAME engine over a different request (narrower windows). The
+fallback is worth running exactly when the failure belonged to the request,
+so the policy is one exhaustive match over the failure's category
+(`fallback_after` in `provenance/utr.rs`); a new category must choose its
+row there:
+
+| Category | Fallback | Why |
+|----------|----------|-----|
+| `provider_quota_exhausted` | withheld | No request succeeds until an account holder restores the quota. |
+| `provider_account_refused` | withheld | The fallback is sent from the same refused account. |
+| `model_access_denied` | withheld | The fallback asks this machine for the same refused model. |
+| `worker_bootstrap` | withheld | The engine's worker cannot start (a model that will not load, a runtime or model identity mismatch), and the fallback goes to that same worker key. A download that failed in transit is not this category: it is `provider_transient`. |
+| every other category | permitted | The failure was this request's: a terminal provider failure (a 4xx other than an account refusal, a failed job, an undecodable response), a local model failing on this input, a download that failed in transit, a crash, a timeout, memory pressure, a protocol fault. |
+
+A withheld fallback is still recorded: the failed pass appears in the
+file's `utr_unavailable` shortfalls and stamp exactly as a permitted one
+does.
+
+### A worker's protocol failure keeps its code's category
+
+A V2 execute response that reports failure carries a `ProtocolErrorCodeV2`.
+`ExecuteFailureRead::into_server_error` is the one exhaustive mapping from that
+code to a server error, used by the ASR, speaker and forced-alignment adapters,
+and never reads the message. A `RuntimeFailure` is decided by where the
+request's model runs (`ModelLocality`, from the backend the request named by
+an exhaustive match): a local model (Whisper, Qwen, FunASR, pyannote, NeMo,
+every forced-alignment engine) retains `LocalRuntime`; a remote provider
+(Tencent, Aliyun, Rev.AI, pyannoteAI) retains `ProviderTransient`. Both may
+retry within the configured budget. Neither generic code establishes OOM or
+a deterministic input defect. Typed permanent refusals remain terminal.
+
+| Code | Server error | Category |
+|------|--------------|----------|
+| `UnsupportedProtocol`, `InvalidPayload`, `MissingAttachment`, `AttachmentUnreadable` | `Worker(RequestRefused)` | `WorkerProtocol` |
+| `ModelUnavailable`, `UnsupportedLanguage` | `Worker(Bootstrap)` (worker `Serves`) | `WorkerBootstrap` |
+| `ModelDownloadFailed` | `Worker(ModelDownload)` (worker `Serves`) | `ProviderTransient` (retried, wherever the model runs) |
+| `DeviceOutOfMemory` | `Worker(DeviceOutOfMemory)` (worker `Serves`) | `MemoryPressure` (retried after a backoff) |
+| `RuntimeFailure`, from a remote provider | `Worker(WorkerResponse)` | `ProviderTransient` (retried) |
+| `RuntimeFailure`, from a local model | `Worker(ModelRuntime)` | `LocalRuntime` (bounded retries) |
+| `ProviderQuotaExhausted` | `ProviderQuotaExhausted` | `ProviderQuotaExhausted` |
+| `ModelAccessDenied` | `ModelAccessDenied` | `ModelAccessDenied` |
+
+None of them is `Validation`, which the dashboard shows as "Input Refused".
+
+Nor is a successful response the server cannot use. An ASR response whose
+payload cannot be lowered into the ASR domain, and an FA response that does
+not fit its request (another task's result, another word count, another
+engine's shape), are the worker breaking the protocol: `Worker(Protocol)`,
+`WorkerProtocol`. An ASR response that names models other than the ones the
+plan pinned is `ServerError::AsrModelIdentity`, classified `WorkerBootstrap`
+with the runtime-code identity mismatch it resembles: it recurs for every
+request that worker serves, so it is not retried.
 
 `AnalysisUnavailable` is likewise outside the retry set. It reports a valid
 source requesting analysis the configured backend cannot supply, without
@@ -402,7 +521,7 @@ sequenceDiagram
     Py->>Wire: {"op":"error", "error":"X", "kind":"bootstrap"}
     Wire->>Decoder: deserialize
     Decoder->>Mapper: WorkerErrorKind::Bootstrap, "X"
-    Mapper->>Classifier: WorkerError::Bootstrap("X")
+    Mapper->>Classifier: WorkerError::Bootstrap { "X", worker: Exits }
     Classifier->>Retry: FailureCategory::WorkerBootstrap
     Retry-->>Mapper: false (do not retry)
 
@@ -421,9 +540,10 @@ sequenceDiagram
 ```
 
 `ReportedFailure` in `handle/protocol.rs` is the decoded `op=error` line
-(`WorkerResponse::Error(ReportedFailure)`), and its three methods are the only
+(`WorkerResponse::Error(ReportedFailure)`), and its four methods are the only
 mapping from a reported failure to a `WorkerError`: `into_worker_error` for an
-admitted request, `into_ensure_task_error` for the model load, and
+admitted request, `into_ensure_task_error` for the model load,
+`into_startup_error` for a line written in place of the ready line, and
 `into_health_error` for a health probe. The sequential stdio and TCP handles
 share the one `WorkerResponse` envelope, and the shared GPU reader
 (`worker/pool/shared_gpu/reader.rs`) decodes the same `ReportedFailure`, so a
@@ -433,31 +553,15 @@ replies on the two worker paths".
 
 ### One specialization: `ensure_task` errors are forced bootstrap
 
-```rust,ignore
-pub(crate) fn into_ensure_task_error(self) -> WorkerError {
-    match self.kind {
-        WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => {
-            WorkerError::Bootstrap(format!("ensure_task failed: {}", self.message))
-        }
-        WorkerErrorKind::InvalidRequest => {
-            WorkerError::RequestRefused(format!("ensure_task refused: {}", self.message))
-        }
-    }
-}
-```
-
-Why force-bootstrap regardless of a `runtime` kind? Because `ensure_task`
-is the on-demand model-loading IPC, its sole purpose is to bootstrap a
-task into a worker's runtime state. A failure during that operation is
-*always* deterministic across retries, even if the worker's
-`_classify_dispatch_exception` doesn't yet know about the specific error
-type. The orchestrator must not retry; if the cause was actually
-transient, the user can re-submit the job.
-
-This is a defense-in-depth measure: even if a future contributor adds a
-new bootstrap-class error type to Python and forgets to add it to
-`_classify_dispatch_exception`, an ensure_task failure still classifies
-correctly.
+`into_ensure_task_error` reads a `runtime` kind as `Bootstrap`: `ensure_task`
+is the on-demand model-loading IPC, so a failure during it is deterministic
+across retries even if the worker's `_classify_dispatch_exception` does not
+know the specific error type. The orchestrator does not retry it; if the
+cause was transient, the user can re-submit the job. The two kinds a later
+attempt can get past keep their meaning: `download` is `ModelDownload` and
+`out_of_memory` is `DeviceOutOfMemory`. Each carries the kind's
+`worker_after`, so the `runtime` case (the worker went on serving) returns
+the handle to its pool and the `download` case retires it.
 
 ## The user-facing message
 
@@ -519,10 +623,9 @@ for attempt_number in 1..=retry_policy.max_attempts {
         Ok(response) => return Ok(response),
         Err(error) => {
             let category = classify_worker_error(&error);
-            let has_retry_budget = attempt_number < retry_policy.max_attempts;
-
-            if is_retryable_worker_failure(category) && has_retry_budget {
-                let backoff_ms = retry_policy.backoff_for_retry(attempt_number);
+            if let NextAttempt::RetryAfter(backoff_ms) =
+                retry_policy.after_failure(attempt_number, category)
+            {
                 warn!(
                     task = ?request.task,
                     lang = %lang,
@@ -543,9 +646,8 @@ for attempt_number in 1..=retry_policy.max_attempts {
 }
 ```
 
-Here `is_retryable_worker_failure(category)` returns `false` for
-`WorkerBootstrap`, the `if` falls through, and the function returns the
-error immediately.
+Here `after_failure` answers `Stop(Final)` for `WorkerBootstrap`, and the
+function returns the error immediately.
 
 Future enhancement (not yet landed): emit a `progress_v2` event before
 each retry sleep so the UI shows "Retrying after worker error
@@ -562,9 +664,19 @@ Checklist for contributors:
    Document that it is bootstrap-class in the docstring, the type
    itself is the contract.
 
-2. **Register it in the classifier.** Add a lazy import + append to the
-   `bootstrap_types` list in
-   `batchalign/worker/_protocol.py:_classify_dispatch_exception`.
+2. **Register it where it is classified.** A deterministic class goes in
+   the request loop's
+   `batchalign/worker/_protocol.py:_classify_dispatch_exception` (the wire
+   kind of an exception raised while a worker starts or dispatches) and in
+   the Rust worker boundary's `classify_runner_error`
+   (`batchalign-pyo3/src/worker_execute.rs`, the protocol code of one raised
+   by a runner during a request, which needs a `ProtocolErrorCodeV2` variant
+   and its server category in `ExecuteFailureRead::into_server_error`).
+   Define the class in a module that imports nothing heavy, as
+   `batchalign/worker/_language_errors.py` does, so both can import it. A
+   class a later attempt can get past (a download, a device shortfall)
+   goes in `batchalign/inference/_transient_failures.py` instead, the one
+   module both classifiers ask.
 
 3. **Make sure the error message is actionable.** The user will see it
    verbatim. Include: what failed, where (URL, file path), why
@@ -576,11 +688,11 @@ Checklist for contributors:
    - A handler-level test that mocks the underlying failure and
      asserts the worker emits the right wire envelope.
 
-5. **No Rust changes required** for additional bootstrap-class types
-   on the Python side. The wire protocol is type-erased, Python just
-   emits `kind: "bootstrap"`, and Rust's existing
-   `WorkerError::Bootstrap` variant absorbs every such error
-   uniformly.
+5. **No new Rust variant is required** for an additional bootstrap-class
+   type raised by an op: Python emits `kind: "bootstrap"`, and Rust's
+   existing `WorkerError::Bootstrap` absorbs every such error uniformly. A
+   class raised by a runner inside a request still needs its arm in
+   `classify_runner_error` (step 2).
 
 If the new error class needs different orchestrator behavior (e.g.,
 "retry after a delay even though it's deterministic"), that's a deeper
@@ -600,8 +712,8 @@ permission-denied" → distinct user-facing remediation):
    to the new category.
 4. Update `user_facing_error` to render an actionable message for the
    new category.
-5. Update `is_retryable_worker_failure` if the new category is
-   retryable.
+5. Decide the new category's arm in `FailureCategory::retryability`
+   (exhaustive, so the compiler asks).
 6. Update the test in `runner/util/mod.rs::worker_error_classification_is_stable`
    to lock in the classification.
 7. Update this chapter's tables.

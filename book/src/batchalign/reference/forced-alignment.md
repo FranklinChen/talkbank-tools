@@ -407,8 +407,9 @@ A region whose proof work still exceeds a budget is refused **as that region**.
 Each untimed utterance it owns is `refused` with
 `{"budget_exhausted": {"region": ..., "budget": {"kind": ..., "limit": ...}}}`
 and a review decision `correspondence_budget_exhausted` naming the region and
-budget. Each timed utterance it owns is `retained_unsearched`: its bullet is
-kept, and recovery simply observed no word anchors for it. Timing is never
+budget. Each timed utterance it owns is `retained_unsearched`, its `unsearched`
+the same `{"budget_exhausted": ...}`: its bullet is kept, and recovery simply
+observed no word anchors for it. Timing is never
 refused, and no other region is affected. A transcript with no bullets at all
 is one region, so it behaves as before.
 
@@ -519,21 +520,44 @@ matched only as the previous region's context, so it yields no word anchor.
 
 #### UTR alignment evidence and offline replay
 
-Provider tokens may contain whole phrases. `UtrLexicalStream` projects each
-token into nonempty words separated by Unicode whitespace before global or
-local overlap matching. It owns the relationship between those words and the
-original token stream. Matches record the original `token_index` and the
-`word_index` within its text; skipped blank tokens do not renumber later
-provider tokens. This removes the mismatch in which transcript words were
-compared against whole Whisper segments.
+UTR matches in **lexical units**, and both sides are projected into the same
+ones. `UtrLexicalUnits` is chosen once from the transcript's primary
+language, through its Han-script handling (`HanScriptNormalization`), and
+travels with the tokens as `PreparedUtrTokens`, so the transcript cannot be
+projected differently from the tokens it is matched against:
 
-Projection preserves the provider's interval for every word in a segment.
-It does not interpolate word timestamps, remove punctuation, or infer language
-segmentation where whitespace is absent. Two utterances matched within one
-segment can therefore receive the same coarse interval. Forced alignment must
-still establish word boundaries. Existing cached ASR responses remain reusable:
-the projection happens after reading the retained provider response, and no
-new inference is required to replay it.
+| Units | Languages | A provider token | A transcript word |
+|-------|-----------|------------------|-------------------|
+| `space_delimited_words` | every language without Han-script handling, and Taiwanese | its whitespace-separated words that hold a letter or digit | one unit |
+| `han_characters` | Cantonese (`yue`) | each Han character, and each run of other characters that holds a letter or digit; CJK punctuation and punctuation-only runs (`?`, `...`, an ellipsis) are no unit | the same: one unit per Han character |
+
+Punctuation alone is never a unit, on either side. That matters beyond
+matching: a token is exactly one transcript word, and anchors it, only when
+its unit count equals the word's, so `嘢?` is one unit and anchors the word
+`嘢`.
+
+Cantonese is written both ways in the corpora (one character per word, and
+multi-character words; between 0% and 46% of Han-bearing words have more
+than one character, depending on the corpus) and recognizers return both
+phrases and words, so only a shared character space lets any segmentation
+meet any other.
+
+`UtrLexicalStream` owns the relationship between the provider's units and the
+original token stream: a match records the original `token_index` and the
+unit's `unit_index` within the token's text; skipped blank tokens do not
+renumber later provider tokens. On the transcript side each unit's address
+names its `unit_index` in the utterance and the word it belongs to
+(`word_index`, `part` of `parts`). The tokens keep the provider's own text:
+the projection is a reading, so debug dumps and cache rows show what the
+provider said.
+
+Projection preserves the provider's interval for every unit of a token. It
+does not interpolate word timestamps or divide a token's interval among its
+units. Two utterances matched within one segment can therefore receive the
+same coarse interval. Forced alignment must still establish word boundaries.
+The projection is applied when UTR reads retained provider tokens, so it needs
+no inference of its own. An utterance's endpoints are its first and last UNITS: a word
+whose first character is unproved does not bound where the utterance starts.
 
 The global alignment plan is a first-class typed value. It records the chosen
 strategy, participation policy, every utterance state, every monotone
@@ -602,7 +626,15 @@ CHAT. Fuzzy matching keeps its existing layout. See
 Exceeding any limit means `budget_exhausted` for that region, naming the budget
 (`candidate_edges`, `fuzzy_comparisons`, `interleaving_work`,
 `interleaving_memory` or `interleaving_candidates`) and its limit; it is not a
-claim that the words are ambiguous.
+claim that the words are ambiguous. A region whose packed interleaved search
+contradicts its own admission is refused as `inconsistent` instead (never as a
+budget), with the review decision `correspondence_search_inconsistent` and the
+inconsistency named (`no_complete_composition`, `optimum_below_feasible` or
+`reconstruction_mismatch`): the search reached no complete composition, scored
+below the feasible witness admission proved, or reconstructed a different
+number of matches than its optimum. Each is checked in every build. Timing is
+still never refused: a timed utterance in such a region is
+`retained_unsearched` with `{"inconsistent": {...}}`.
 The existing unique full-subsequence fast path needs no sparse proof work.
 Local overlap recovery uses the same common-correspondence admission within
 its selected window; repeated words alone cannot authorize a local hint.
@@ -632,7 +664,14 @@ existing output. Omit
 `--participation exclude-marked-overlap` to
 replay the participation rule used by the first pass of two-pass UTR.
 
-Offline report schema 11 retains the schema-9 plan's `strategy` as the pass's order
+Offline report schema 12 records `lexical_units`, the projection both sides
+were matched in, and addresses each payload unit by `unit_index` and the word
+it belongs to (`word_index`, `part`, `parts`); schema 13 names an ASR token's
+unit `unit_index` too (`UtrAsrUnitOrdinal`; it was `word_index`). The replay
+reads the projection from the
+transcript's primary `@Languages` code and matches the retained tokens as
+they are (they were dumped after script normalization, which is not
+idempotent). Schema 11 retains the schema-9 plan's `strategy` as the pass's order
 model (`monotonic` or `interleaved`), `regions` (each anchored region's
 span and the algorithm it used), named region/budget refusals, and
 `retained_unsearched`. Since schema 4 it retains the
@@ -966,11 +1005,13 @@ usually already heard most of that utterance's words, and grouping cuts the
 utterance at those words.
 
 - **Anchors** (`chat_ops/fa/utr/anchors.rs`). A `WordAnchor` is a transcript
-  word whose correspondence occurs in every optimal alignment, matched EXACTLY
-  or CASE-INSENSITIVELY to an ASR token holding exactly one word; its interval is
-  the original token observation bound into that proof. Ambiguous matches, fuzzy matches and
-  multi-word tokens (provider segments) are not anchors: neither says when
-  this word ended. Anchors come from the global pass only. `AnchorIndex::from_plan`
+  word every one of whose lexical units has a correspondence in every optimal
+  alignment, matched EXACTLY or CASE-INSENSITIVELY, unit for unit, to ONE ASR
+  token that holds exactly those units: the token is exactly the word. Its
+  interval is that token's observation, bound into the proof. Ambiguous
+  matches, fuzzy matches, multi-word tokens (provider segments), and a
+  Cantonese word matched only in part, across tokens, or inside a token
+  holding other characters are not anchors: none says when this word ended. Anchors come from the global pass only. `AnchorIndex::from_plan`
   is the only production constructor of an observed index, called in
   the prepared global pass; it consumes the source-bound plan without an
   independently supplied token stream. Each selected utterance is recorded as anchored, as having no
@@ -1143,13 +1184,12 @@ flowchart TD
     empty{"EmptyAudioSegment?<br/>(0 PCM frames after ffmpeg)"}
     skip_empty["WARN: request decoded no audio samples<br/>Leave words unaligned<br/>→ continue to next request"]
     dispatch["dispatch_execute_v2()<br/>→ Python worker"]
-    parse{"parse_unit_response()<br/>parse_forced_alignment_result_v2()"}
+    parse{"FaUnitEvidenceAdmission::admit()<br/>(admit, then parse)"}
     ok["Request timings resolved"]
-    err_kind{"Error kind?<br/>(is_fa_runtime_failure,<br/>fa_group_retry,<br/>is_whisper_model_unavailable)"}
+    err_kind{"PrimaryStep::after()<br/>(typed FaUnitFailure)"}
     ctc["Wave2Vec CTC fallback<br/>(see diagram below)"]
-    model_unavail["ModelUnavailable: <br/>capability gap<br/>Leave words unaligned<br/>+ WARN in server log"]
-    runtime_fail["RuntimeFailure: <br/>data-driven model error<br/>Leave words unaligned<br/>+ WARN in server log"]
-    other["Other error: <br/>infrastructure failure<br/>→ propagate to file loop"]
+    runtime_fail["Recognized engine constraint<br/>without a fallback<br/>Leave words unaligned<br/>+ WARN in server log"]
+    other["FailFile: unclassified runtime failure,<br/>ModelUnavailable on the primary,<br/>a refusal or protocol fault<br/>→ file fails with the worker's category"]
 
     group --> wor
     wor -->|"yes"| ok
@@ -1164,29 +1204,29 @@ flowchart TD
     empty -->|"no"| dispatch --> parse
     parse -->|"OK"| ok
     parse -->|"error"| err_kind
-    err_kind -->|"Wave2Vec engine<br/>+ CTC overflow"| ctc
-    err_kind -->|"ModelUnavailable:<br/>no whisper FA host"| model_unavail
-    err_kind -->|"RuntimeFailure:<br/>model exception"| runtime_fail
-    err_kind -->|"other"| other
+    err_kind -->|"Retry: engine constraint<br/>+ row has a fallback"| ctc
+    err_kind -->|"LeaveUnaligned: constraint with no fallback"| runtime_fail
+    err_kind -->|"FailFile"| other
 ```
 
 #### Wave2Vec → Whisper CTC fallback
 
-When the FA engine is Wave2Vec and the worker returns one of three specific
-PyTorch CTC errors, `infer_units_v2` retries **that single request** with Whisper
-FA.  No other error triggers this retry.
+When the worker's `RuntimeFailure` names one of three PyTorch engine
+constraints and the engine's row has a fallback target (Wave2Vec and the
+Cantonese wav2vec retry on Whisper), `infer_units_v2` retries **that single
+request** on the target. No other failure triggers this retry.
 
 ```mermaid
 flowchart TD
-    w2v["Wave2Vec worker response<br/>(parse_unit_response fails)"]
-    reason{"fa_group_retry()<br/>(fa/transport.rs)"}
+    w2v["Wave2Vec worker failure<br/>(FaWorkerFailure::classify)"]
+    reason{"FaEngineConstraint<br/>(worker/fa_result_v2.rs)"}
 
     w2v --> reason
 
     r1["Reason: targets length<br/>is too long for CTC<br/>, group has too many words<br/>for CTC context window"]
     r2["Reason: targets Tensor<br/>shouldn't contain blank index<br/>, word contains char that<br/>maps to CTC blank token"]
     r3["Reason: Kernel size<br/>can't be greater than<br/>actual input size<br/>, audio segment &lt; ~25ms<br/>(Wave2Vec conv layer 7<br/>needs ≥ 2 samples after<br/>6 conv layers at 16 kHz)"]
-    none["None, no fallback:<br/>error propagates to<br/>file-level handler"]
+    none["Not a constraint:<br/>PrimaryStep decides<br/>(unaligned or file failure)"]
 
     reason -->|"'targets length is too long<br/>for CTC'"| r1
     reason -->|"'targets Tensor shouldn't<br/>contain blank index'"| r2
@@ -1196,9 +1236,9 @@ flowchart TD
     whisper["Retry group with<br/>FaEngineName::Whisper<br/>(new request namespace<br/>to avoid artifact collision)"]
     fallback_ok["Group timings resolved<br/>+ FaFallbackEventTrace<br/>recorded in job traces"]
     fallback_err{"Whisper response OK?"}
-    model_unavail_err["ModelUnavailable:<br/>no Whisper model loaded: <br/>leave words unaligned<br/>+ WARN in server log<br/>(is_whisper_model_unavailable())"]
-    runtime_fail_err["RuntimeFailure:<br/>model exception on this input, <br/>leave words unaligned<br/>+ WARN in server log<br/>(is_fa_runtime_failure())"]
-    other_whisper_err["Other error<br/>(infrastructure failure)<br/>→ file-level failure"]
+    model_unavail_err["ModelUnavailable:<br/>no fallback model loaded: <br/>leave words unaligned<br/>+ WARN in server log<br/>(FallbackStep::after)"]
+    runtime_fail_err["Recognized engine constraint:<br/>leave words unaligned<br/>+ WARN in server log<br/>(FallbackStep::after)"]
+    other_whisper_err["Other failure<br/>(refused request, protocol fault)<br/>→ file-level failure"]
 
     r1 --> whisper
     r2 --> whisper
@@ -1206,7 +1246,7 @@ flowchart TD
     whisper --> fallback_err
     fallback_err -->|"yes"| fallback_ok
     fallback_err -->|"ModelUnavailable"| model_unavail_err
-    fallback_err -->|"RuntimeFailure"| runtime_fail_err
+    fallback_err -->|"Recognized engine constraint"| runtime_fail_err
     fallback_err -->|"other error"| other_whisper_err
 ```
 
@@ -1233,17 +1273,20 @@ engine, `whisper_fa_model` in `_WorkerState` is `None`.  If Wave2Vec hits a CTC
 overflow and `infer_units_v2` dispatches the Whisper fallback, the worker
 returns `ExecuteOutcomeV2::Error { code: ModelUnavailable }`.
 
-`is_whisper_model_unavailable()` in `crates/batchalign/src/fa/transport.rs`
-detects the distinctive `"ModelUnavailable: no whisper FA host loaded"` substring
-and treats this as a **worker capability gap**, not a data error.  The group's
-words are left unaligned (same treatment as an empty audio segment) and the
-server logs:
+`FallbackStep::after()` in `crates/batchalign/src/fa/transport.rs` reads the
+failure's protocol code (`FaWorkerFailure::ModelUnavailable`) and treats a
+fallback that lands on a worker without the fallback model as a **worker
+capability gap**, not a data error. The request's words are left unaligned
+(same treatment as an empty audio segment) and the server logs:
 
 ```text
-WARN fa_transport: Whisper FA unavailable (worker has no Whisper model loaded);
-     leaving group words unaligned
-     group=24 start_ms=379515 end_ms=381395
+WARN fa_transport: fallback FA engine could not align the request either;
+     leaving request words unaligned
+     request=24 group=24 start_ms=379515 end_ms=381395 retry_engine="whisper"
 ```
+
+On the PRIMARY engine the same code fails the file (`PrimaryStep::FailFile`):
+every later request would meet the same missing model.
 
 The file is written with all other groups aligned normally.
 
@@ -1255,49 +1298,47 @@ When Wave2Vec is the primary engine and CTC overflow occurs, the affected
 utterances lose word-level timing.  Use the default Wave2Vec FA engine
 (`--fa-engine whisper` or omit `--fa-engine`) to avoid this entirely.
 
-#### RuntimeFailure errors are always group-local
+#### Unclassified runtime failures reach bounded file retries
 
-Any `RuntimeFailure` from the FA worker, regardless of the specific Python
-exception, is treated as a group-level skip. This is an architectural
-invariant, not a special case for known patterns.
+A generic `RuntimeFailure` without a recognized engine constraint reaches the
+file retry policy as `LocalRuntime`, on either the primary or fallback engine.
+The existing default budget is three total attempts, with backoff. The code
+alone does not establish OOM, a permanent input defect or that other groups
+will succeed. Exhausting the budget fails the file; it does not publish a
+successful partial alignment.
 
-**Why:** A `RuntimeFailure` means the Python worker successfully received and
-parsed the request, then the model raised an exception while processing
-*this group's specific words and audio*. The failure is data-driven. Other
-groups have different content; they will not trigger the same exception. There
-is no value in aborting the file, the remaining groups can and should be
-aligned normally.
+Typed download failures, device OOM, access refusals and quota failures keep
+their own categories. `torch.OutOfMemoryError` becomes `DeviceOutOfMemory`
+and retries as memory pressure. An MPS failure raised only as generic
+`RuntimeError` retries as `LocalRuntime`, without inventing an OOM diagnosis.
 
-**Contrast:** Infrastructure failures (`ProcessExited` = worker crash,
-`Protocol` = IPC deserialization failure) indicate that the worker or channel
-is broken. Every subsequent call would also fail. Those errors remain
-file-level so the retry loop and fallback UTR path can attempt recovery.
+`FaWorkerFailure::classify` is the sole admission boundary. Its exhaustive
+match over `ProtocolErrorCodeV2` recognizes the three established engine
+constraint phrases through `FaEngineConstraint`. Everything else is either
+`ModelUnavailable` or `FileFailure`; there is no generic group-local runtime
+variant for transport to skip.
 
-**Detection:** `is_fa_runtime_failure()` in `transport.rs` matches any
-`ServerError::Validation` message containing `"RuntimeFailure:"`. This
-substring is inserted by `parse_forced_alignment_result_v2()` when formatting
-a `ProtocolErrorCodeV2::RuntimeFailure` response. It does not appear in
-`ModelUnavailable`, `Protocol`, or IPC parse errors.
+1. `PrimaryStep::after()` retries a recognized constraint on the engine row's
+   fallback target, or leaves it unaligned if there is no fallback. Other
+   failures reach the file policy.
+2. `FallbackStep::after()` leaves a recognized constraint or a missing fallback
+   model unaligned. Other failures reach the file policy. It has no group-retry
+   variant, so fallback engines cannot chain.
 
-**Ordering in `infer_units_v2()`:**
-
-1. `fa_group_retry()` is checked first, Wave2Vec CTC patterns still
-   trigger the Whisper retry (which may produce timings). `is_fa_runtime_failure`
-   is only reached when the fallback logic has already decided no retry is
-   possible.
-2. `is_whisper_model_unavailable()` is checked before `is_fa_runtime_failure`
-   in the Whisper fallback path, the capability-gap path emits a more specific
-   warning message.
+The failure retains its producing category through
+`From<FaUnitFailure> for ServerError` and
+`ExecuteFailureRead::into_server_error`. A response that does not fit its
+request remains a terminal `WorkerProtocol` fault, not invalid input.
 
 **Log lines:**
 ```text
-WARN fa_transport: FA group failed with model RuntimeFailure (data-driven);
+WARN fa_transport: FA engine constraint has no fallback;
      leaving words unaligned
-     group=0 start_ms=0 end_ms=10970 error="..."
+     request=0 group=0 start_ms=0 end_ms=10970 error="..."
 
-WARN fa_transport: Whisper FA fallback also failed with model RuntimeFailure;
-     leaving group words unaligned
-     group=7 start_ms=100000 end_ms=111000 error="..."
+WARN fa_transport: fallback FA engine could not align the request either;
+     leaving request words unaligned
+     request=7 group=7 start_ms=100000 end_ms=111000 error="..."
 ```
 
 #### Summary: all recovery behaviors for a single group
@@ -1308,9 +1349,11 @@ WARN fa_transport: Whisper FA fallback also failed with model RuntimeFailure;
 | Audio extraction produces no frames | Group | Leave words unaligned; continue | `WARN: group decoded no audio samples` |
 | Wave2Vec CTC target overflow (3 patterns) | Group | Retry on the row's fallback engine; record fallback trace | `WARN: retrying group on its fallback engine` |
 | Whisper retry succeeds | Group | Group timings resolved |, |
-| Fallback retry: `ModelUnavailable` (worker has no such model) | Group | Leave words unaligned; continue | `WARN: fallback FA engine unavailable … leaving group words unaligned` |
-| Worker `RuntimeFailure` (any model exception: token overflow, shape error, OOM, etc.) | Group | Leave words unaligned; continue, `is_fa_runtime_failure()` demotes to group-level | `WARN: FA group failed with model RuntimeFailure` |
-| Whisper fallback also hits `RuntimeFailure` | Group | Leave words unaligned; continue | `WARN: Whisper FA fallback also failed with model RuntimeFailure` |
+| Fallback retry: `ModelUnavailable` (worker has no such model) | Group | Leave words unaligned; continue | `WARN: fallback FA engine could not align the request either` |
+| Worker generic `RuntimeFailure` without a recognized constraint | File | Bounded retry as `LocalRuntime` | Original worker details |
+| Typed `DeviceOutOfMemory` or `ModelDownloadFailed` | File | Retry under the memory-pressure or transient-provider policy | Worker failure details |
+| Fallback hits an unclassified `RuntimeFailure` | File | Bounded retry as `LocalRuntime` | Original worker details |
+| Primary `ModelUnavailable`, refused request, protocol fault | File | Fail with the worker's category (never `validation`) |, |
 | Other worker error (retryable) | File | Retry with backoff; fallback UTR if untimed | `WARN: FA error (raw)` |
 | Retry budget exhausted | File | Terminal failure with real error message |, |
 
@@ -1915,7 +1958,8 @@ The file is still written, with every timing that was measured, and is reported
 untimed, and the first utterances with their cause (no request was made
 because the utterance's audio window was refused; no request was made because
 the audio left for a run of untimed utterances could not contain their words;
-or no usable timing resulted). It is never certified as completely aligned, and it is
+requests covered it and no positive interval resulted, with what those
+requests yielded counted; or nothing the run recorded explains it). It is never certified as completely aligned, and it is
 never discarded.
 
 ### One measurement: `wav2vec` and `whisper` on the same file
@@ -2119,6 +2163,13 @@ flowchart LR
         seg_input --> seg_entry["Per-window AsrResponse"]
     end
 ```
+
+Rows are read and written under a namespace (`UtrAsrCacheNamespace`) naming
+their producer, the UTR engine and its pinned models. For stock Whisper the
+producer is its word-timestamp revision plus the decode decision its worker
+is given for the language (`WhisperDecodeLanguageV2`, serialized as on the
+wire), so a change to that decision for a language moves exactly that
+language's rows; Rev.AI and Tencent take no client-side decoding decision.
 
 Full-file keys are used for mostly-untimed files. Segment keys are used when
 partial-window mode activates (>50% timed, audio >60s). Full-file and segment
@@ -2338,7 +2389,7 @@ completion. Read the final job status and structured decisions as well as logs.
 | `fa/transport.rs` | `Worker process exited during FA group` | This request lost its worker. The exit alone does not prove OOM or bad input; review process evidence and the unaligned group. |
 | `fa/transport.rs` | `FA engine hit a recoverable target constraint; retrying group on its fallback engine` | A recognized target constraint triggers the retry. `failed_engine` and `retry_engine` name both ends; the target comes from the failing engine's row, never from a literal in the log call. |
 | `fa/transport.rs` | `fallback FA engine unavailable … leaving group words unaligned` | The retry worker lacks the loaded model named by `retry_engine`; review the group's missing timing. |
-| `fa/transport.rs` | `FA group failed with model RuntimeFailure` / `fallback FA engine also failed with model RuntimeFailure` | The model returned a runtime failure and the group remains unaligned. Inspect the attached error; this category alone does not establish the cause. |
+| `fa/transport.rs` | `FA engine constraint has no fallback` / `fallback FA engine could not align the request either` | Recognized engine constraint or missing fallback model; inspect the attached cause. Unclassified runtime failures instead reach bounded file retries. |
 | `fa/mod.rs`, `fa/incremental.rs` | `FA cache batch lookup failed` | A cache read failed. Inspect the attached error before changing storage; inference may continue through cache misses. |
 | `runner/dispatch/fa_pipeline.rs` | `FA failed with untimed utterances; attempting fallback UTR` | The pipeline attempts fallback UTR before retrying FA. |
 | `runner/dispatch/fa_pipeline.rs` | `Fallback UTR recovered timing` | Fallback UTR produced timing for the FA retry; this is not final alignment success. |

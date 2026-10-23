@@ -51,8 +51,9 @@
 //!   `MorphosyntaxBatchItem`, `CollectedUtterance`, `AlignmentWarning`,
 //!   `PayloadCollection`) and `%mor`/`%gra` mutation passes
 //!   (`clear_morphosyntax`, `validate_mor_alignment`, `prepare_text`, etc.).
-//! - [`pos_hints`]: `apply_pos_hints` + `HintOutcome`, `is_stanza_supported`
-//!   + `supported_iso3_codes`.
+//! - [`pos_hints`]: `apply_pos_hints` + `HintOutcome`. Which languages
+//!   Stanza can analyze is not decided here: the server's runtime registry
+//!   (`batchalign::stanza_registry`) is the one authority.
 //! - [`outcome`]: `MorOutcome`, `MorOutcomeKind`, `NotApplicableReason`,
 //!   `classify_not_applicable`.
 //!
@@ -109,7 +110,6 @@ pub use payload::{
 };
 pub use pos_hints::{
     HintOutcome, PosHintEvidence, apply_pos_hint_evidence, apply_pos_hints, collect_pos_hints,
-    is_stanza_supported, supported_iso3_codes,
 };
 pub use responses::{
     AdmittedUdResponse, MatchedMorphosyntaxResponses, ResponseAdmissionError,

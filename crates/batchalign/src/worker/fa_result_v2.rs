@@ -11,25 +11,167 @@
 //! That keeps model-output interpretation on the Rust side while the transport
 //! migration is still staged.
 
-use crate::chat_ops::fa::coordinates::FaWindow;
-use crate::chat_ops::fa::origin::EngineId;
-use crate::chat_ops::fa::{FaWord, WordTiming, parse_fa_response};
 use crate::chat_ops::nlp::{FaIndexedTiming, FaRawResponse, FaRawToken};
-use crate::worker::execute_result_v2::require_success_result;
+use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
 
-use crate::types::worker_v2::{ExecuteResponseV2, TaskResultV2};
+use crate::types::worker_v2::{ExecuteResponseV2, ProtocolErrorCodeV2, TaskResultV2};
 
-/// Parse one staged V2 FA execute response into the established FA timing
-/// domain.
-pub fn parse_forced_alignment_result_v2(
-    response: &ExecuteResponseV2,
-    original_words: &[FaWord],
-    window: &FaWindow,
-    engine: &EngineId,
-) -> Result<Vec<Option<WordTiming>>, String> {
-    let result = require_success_result(response, "forced-alignment")?;
+/// A recoverable input constraint a CTC forced-alignment engine reported.
+///
+/// Each is a property of THIS request's words and audio that the row's
+/// fallback engine does not share (see `FaFallbackPolicy::RetryGroupOn`), so
+/// it is what decides a retry. Read once, from the worker's failure, by
+/// [`FaWorkerFailure::classify`]; every consumer matches this value.
+///
+/// # The one place engine exception text is read
+///
+/// The engine raises a plain PyTorch `RuntimeError`/`ValueError` with no class
+/// or code that names the constraint, and the worker protocol forwards only
+/// its text under `RuntimeFailure`. So the constraint is recognised by the
+/// engine's own words, HERE, where the response is read, and nowhere else:
+/// the transport used to search the rendered `ServerError::Validation` string
+/// for the same phrases, which classified by whatever prose wrapped them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaEngineConstraint {
+    /// The CTC target sequence is longer than the emissions can carry.
+    CtcTargetsTooLong,
+    /// The targets contain the CTC blank index.
+    CtcBlankIndexInTargets,
+    /// The window is shorter than the feature extractor's receptive field
+    /// (Wave2Vec MMS_FA's seventh conv layer, kernel 2, sees one sample).
+    InputShorterThanKernel,
+}
 
-    let raw_response = match result {
+impl FaEngineConstraint {
+    const ALL: [Self; 3] = [
+        Self::CtcTargetsTooLong,
+        Self::CtcBlankIndexInTargets,
+        Self::InputShorterThanKernel,
+    ];
+
+    /// The phrase the engine's exception carries for this constraint.
+    const fn engine_text(self) -> &'static str {
+        match self {
+            Self::CtcTargetsTooLong => "targets length is too long for CTC",
+            Self::CtcBlankIndexInTargets => "targets Tensor shouldn't contain blank index",
+            Self::InputShorterThanKernel => "Kernel size can't be greater than actual input size",
+        }
+    }
+
+    /// The reason recorded on the fallback event and in fallback evidence.
+    ///
+    /// Unchanged from the strings those records have always carried, so a
+    /// reader of older evidence and newer evidence sees one vocabulary.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::InputShorterThanKernel => {
+                "audio segment too short for Wave2Vec feature extractor"
+            }
+            // The CTC constraints are recorded in the engine's own words.
+            Self::CtcTargetsTooLong | Self::CtcBlankIndexInTargets => self.engine_text(),
+        }
+    }
+
+    fn recognize(message: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|constraint| message.contains(constraint.engine_text()))
+    }
+}
+
+/// A forced-alignment worker's failure report, classified once where it is
+/// read.
+///
+/// Built only by [`Self::classify`], an exhaustive match over the protocol
+/// code, so a new code must choose its class there; the fields are private,
+/// so no caller can pair a report with a class of its own choosing. The
+/// transport decides what a failed request does next (retry, leave
+/// unaligned, fail the file) by matching [`Self::class`], never by reading
+/// message text.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{failure}")]
+pub struct FaWorkerFailure {
+    class: FaFailureClass,
+    failure: ExecuteFailureRead,
+}
+
+/// What a forced-alignment worker failure means for the request: the class
+/// [`FaWorkerFailure::classify`] gave it. Data-free apart from the
+/// constraint, so holding one does not let a caller forge a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaFailureClass {
+    /// The model failed on this request's input with a recognised constraint.
+    EngineConstraint(FaEngineConstraint),
+    /// The worker has no model for the requested engine loaded
+    /// (`ModelUnavailable`).
+    ModelUnavailable,
+    /// A failure without an admitted group-local recovery: an unclassified
+    /// runtime failure, a refusal, download failure or device memory pressure.
+    /// It must reach the file retry policy with its producing category.
+    FileFailure,
+}
+
+impl FaWorkerFailure {
+    /// Classify one worker-reported failure by its protocol code.
+    pub fn classify(failure: ExecuteFailureRead) -> Self {
+        let class = match failure.code() {
+            ProtocolErrorCodeV2::RuntimeFailure => {
+                match FaEngineConstraint::recognize(failure.message()) {
+                    Some(constraint) => FaFailureClass::EngineConstraint(constraint),
+                    None => FaFailureClass::FileFailure,
+                }
+            }
+            ProtocolErrorCodeV2::ModelUnavailable => FaFailureClass::ModelUnavailable,
+            ProtocolErrorCodeV2::UnsupportedProtocol
+            | ProtocolErrorCodeV2::InvalidPayload
+            | ProtocolErrorCodeV2::MissingAttachment
+            | ProtocolErrorCodeV2::AttachmentUnreadable
+            | ProtocolErrorCodeV2::ProviderQuotaExhausted
+            | ProtocolErrorCodeV2::ModelAccessDenied
+            | ProtocolErrorCodeV2::UnsupportedLanguage
+            | ProtocolErrorCodeV2::ModelDownloadFailed
+            | ProtocolErrorCodeV2::DeviceOutOfMemory => FaFailureClass::FileFailure,
+        };
+        Self { class, failure }
+    }
+
+    /// What the failure means for the request.
+    pub fn class(&self) -> FaFailureClass {
+        self.class
+    }
+
+    /// The worker's report this was classified from.
+    pub fn into_report(self) -> ExecuteFailureRead {
+        self.failure
+    }
+}
+
+/// Why a forced-alignment response is not a timing payload.
+#[derive(Debug, thiserror::Error)]
+pub enum FaPayloadRefusal {
+    /// The worker answered with a failure rather than a result.
+    #[error(transparent)]
+    Failed(#[from] FaWorkerFailure),
+    /// A successful response carried another task's result: the worker broke
+    /// the protocol.
+    #[error("worker protocol V2 forced-alignment response returned {0}")]
+    WrongResult(&'static str),
+}
+
+/// Read one forced-alignment execute response into its timing payload: the
+/// one read of an FA response. The evidence admission
+/// (`fa::raw_evidence::FaRawEvidence::admit_requested`) calls it once and
+/// keeps the payload; alignment consumes that payload, never the response
+/// again.
+///
+/// # Errors
+///
+/// [`FaPayloadRefusal`]: a worker failure classified by its protocol code,
+/// or a result for another task.
+pub fn read_fa_payload(response: &ExecuteResponseV2) -> Result<FaRawResponse, FaPayloadRefusal> {
+    let result =
+        require_success_result(response, "forced-alignment").map_err(FaWorkerFailure::classify)?;
+    Ok(match result {
         TaskResultV2::WhisperTokenTimingResult(result) => FaRawResponse::TokenLevel {
             tokens: result
                 .tokens
@@ -54,82 +196,47 @@ pub fn parse_forced_alignment_result_v2(
                 .collect(),
         },
         TaskResultV2::MorphosyntaxResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned morphosyntax data".into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("morphosyntax data"));
         }
         TaskResultV2::UtsegResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned utterance-segmentation data"
-                    .into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("utterance-segmentation data"));
         }
         TaskResultV2::WhisperChunkResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned ASR chunk data".into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("ASR chunk data"));
         }
         TaskResultV2::TranslationResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned translation data".into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("translation data"));
         }
         TaskResultV2::WordSegmentationResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned word-segmentation data"
-                    .into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("word-segmentation data"));
         }
         TaskResultV2::CorefResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned coreference data".into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("coreference data"));
         }
         TaskResultV2::MonologueAsrResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned monologue ASR data".into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("monologue ASR data"));
         }
         TaskResultV2::SpeakerResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned speaker diarization data"
-                    .into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("speaker diarization data"));
         }
         TaskResultV2::SpeakerEmbeddingResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned speaker embedding data"
-                    .into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("speaker embedding data"));
         }
         TaskResultV2::OpensmileResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned openSMILE feature data"
-                    .into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("openSMILE feature data"));
         }
         TaskResultV2::AvqiResult(_) => {
-            return Err(
-                "worker protocol V2 forced-alignment response returned AVQI feature data".into(),
-            );
+            return Err(FaPayloadRefusal::WrongResult("AVQI feature data"));
         }
-    };
-
-    let raw_json = serde_json::to_string(&raw_response).map_err(|error| {
-        format!("failed to serialize staged FA V2 response for parsing: {error}")
-    })?;
-    // Wave 5 consolidation: parse_fa_response returns a typed
-    // FaAlignmentError. The surrounding V2-adapter layer still returns
-    // `Result<_, String>`; convert at this boundary so the adapter
-    // contract stays stable. A future follow-up can propagate the
-    // typed error further up.
-    parse_fa_response(&raw_json, original_words, window, engine).map_err(|e| e.to_string())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat_ops::fa::FaWord;
+    use crate::chat_ops::fa::coordinates::FaWindow;
+    use crate::chat_ops::fa::origin::EngineId;
+    use crate::chat_ops::fa::{FaWord, WordTiming, align_fa_response};
     use crate::chat_ops::{UtteranceIdx, WordIdx};
 
     use crate::api::{AudioPositionSeconds, DurationMs, NonNegativeSeconds};
@@ -155,6 +262,17 @@ mod tests {
 
     fn adapter_engine() -> EngineId {
         EngineId::new("test-fa")
+    }
+
+    /// The production path: the one read, then alignment of its payload.
+    fn parse_forced_alignment_result_v2(
+        response: &ExecuteResponseV2,
+        words: &[FaWord],
+        window: &FaWindow,
+        engine: &EngineId,
+    ) -> Result<Vec<Option<WordTiming>>, String> {
+        let payload = read_fa_payload(response).map_err(|error| error.to_string())?;
+        align_fa_response(payload, words, window, engine).map_err(|error| error.to_string())
     }
 
     /// Build `FaWord` values for small result-adapter tests.
@@ -279,14 +397,11 @@ mod tests {
             NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
-        let error = parse_forced_alignment_result_v2(
-            &response,
-            &make_words(&["hello"]),
-            &window_at(0).1,
-            &adapter_engine(),
-        )
-        .expect_err("translation result should be rejected");
+        let error = read_fa_payload(&response).expect_err("translation result should be rejected");
 
-        assert!(error.contains("translation data"));
+        assert!(matches!(
+            error,
+            FaPayloadRefusal::WrongResult("translation data")
+        ));
     }
 }

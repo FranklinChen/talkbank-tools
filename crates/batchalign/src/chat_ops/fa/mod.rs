@@ -40,7 +40,7 @@ use talkbank_model::model::{
 use talkbank_model::{UtteranceIdx, WordIdx};
 
 // Re-export public API so that `crate::chat_ops::fa::Foo` paths remain unchanged.
-pub use self::alignment::parse_fa_response;
+pub use self::alignment::{align_fa_response, parse_fa_response};
 pub use self::expand_for_fillers::expand_bullets_for_edge_fillers;
 pub use self::extraction::collect_fa_words;
 pub use self::grouping::{

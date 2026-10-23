@@ -38,7 +38,8 @@
             "lang": "fra",
             "pipeline": "standard"
           },
-          "repairs": []
+          "repairs": [],
+          "feature_repairs": []
         }
       },
       "elapsed_s": 0.00016483408398926258
@@ -88,7 +89,8 @@
               "from_relation": "dep",
               "to_relation": "root"
             }
-          ]
+          ],
+          "feature_repairs": []
         }
       },
       "elapsed_s": 0.00007895799353718758
@@ -165,7 +167,8 @@
               "from_relation": "dep",
               "to_relation": "root"
             }
-          ]
+          ],
+          "feature_repairs": []
         }
       },
       "elapsed_s": 0.00012612482532858849

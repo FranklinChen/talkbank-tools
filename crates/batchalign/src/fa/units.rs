@@ -59,10 +59,9 @@ use crate::chat_ops::fa::{
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
-use crate::types::results::FaGroupEvidence;
+use crate::types::results::{FaGroupContents, FaGroupEvidence};
 use crate::types::traces::{
-    FaEvidenceSourceTrace, FaFallbackEventTrace, FaGroupSpanTrace, FaGroupTrace, FaPieceTrace,
-    TimingTrace,
+    FaEvidenceSourceTrace, FaFallbackEventTrace, FaGroupSpanTrace, FaPieceTrace, TimingTrace,
 };
 
 /// A group's position in grouping's output.
@@ -578,7 +577,7 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                 }
             };
             resolved.push(ResolvedGroup {
-                trace: group_trace(planned.group, span),
+                contents: group_contents(planned.group, span),
                 timings,
             });
         }
@@ -680,27 +679,23 @@ fn unrequested_trace(
     }
 }
 
-/// The evidence trace of one group: what it holds and how it was executed.
-fn group_trace(group: &FaGroup, span: FaGroupSpanTrace) -> FaGroupTrace {
-    FaGroupTrace {
+/// The evidence of one group: what it holds and how it was executed.
+fn group_contents(group: &FaGroup, span: FaGroupSpanTrace) -> FaGroupContents {
+    FaGroupContents {
         audio_start_ms: DurationMs(group.audio_start_ms()),
         audio_end_ms: DurationMs(group.audio_end_ms()),
-        utterance_indices: group
-            .utterance_indices()
-            .iter()
-            .map(|idx| idx.raw())
-            .collect(),
+        utterances: group.utterance_indices().to_vec(),
         words: group.words().map(|w| w.text.clone()).collect(),
         word_ids: group.words().map(|word| word.stable_id()).collect(),
         span,
     }
 }
 
-/// One group's assembled timings and its evidence trace.
+/// One group's assembled timings and its evidence.
 #[derive(Debug)]
 pub(super) struct ResolvedGroup {
     timings: Vec<Option<WordTiming>>,
-    trace: FaGroupTrace,
+    contents: FaGroupContents,
 }
 
 /// Everything resolution produced for a file's groups.
@@ -726,7 +721,7 @@ impl ResolvedGroups {
                 (
                     group.timings,
                     FaGroupEvidence {
-                        group: group.trace,
+                        group: group.contents,
                         pre_injection_timings,
                     },
                 )

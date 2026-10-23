@@ -1,171 +1,88 @@
 # Validation
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
-CHAT validation runs at multiple points in the processing pipeline.
-All validation logic is in Rust: `talkbank-model::validation` owns
-CHAT-core validation, and `talkbank_transform::validate`
-(`crates/talkbank-transform/src/validate.rs`) owns the Batchalign-side
-pre/post validation gate functions (`validate_to_level`,
-`validate_output`). This page covers validity levels, pre/post
-validation gates, severity posture, the verification-gate set
-(G0-G14), and how validation failures interact with caches and bug
-reports.
+Chatter owns CHAT parsing and validation. BA3 owns the command-specific
+admission, transformation and output policy that uses those facilities. The
+[command contracts](../../batchalign/architecture/command-contracts.md) are
+the authoritative table of accepted inputs and output states; this page
+explains the boundaries rather than duplicating that table.
 
-For the CHAT-core error-code infrastructure (codes, sinks, severities,
-layers), now owned by chatter, see
-[chat-core-errors](https://talkbank.github.io/chatter/architecture/errors-and-validation/chat-core-errors.html).
-For the diagnostic UX standard, see
-[error-diagnostics-ux](https://talkbank.github.io/chatter/architecture/errors-and-validation/error-diagnostics-ux.html).
+For CHAT error codes, sinks and severity, see
+[Chatter's error infrastructure](https://talkbank.github.io/chatter/architecture/errors-and-validation/chat-core-errors.html).
 
 ## Validity Levels
 
-The `ValidityLevel` enum defines three cumulative validation levels.
-Each level includes all checks from lower levels.
+Legacy `ValidityLevel` checks describe narrower workflow prerequisites. They
+are not a certificate of complete CHAT validity and are not a substitute for
+Chatter's checked document admission. In particular, a recovered AST or a
+successful `parse_lenient` call does not authorize downstream semantic work.
 
-| Level | Name | Checks |
-|---|---|---|
-| L0 | `Parseable` | No parse errors (clean tree-sitter CST) |
-| L1 | `StructurallyComplete` | `@Participants` and `@Languages` present, all speaker codes declared, every utterance has a terminator |
-| L2 | `MainTierValid` | Well-formed words, valid timing bullets if present |
+Morphotag admits the document under its replacement-tier policy, so tiers it
+will replace are distinguished from content it must preserve. Its
+`ParsedFile` transition also resolves the file language and admits Stanza
+capability. The CA honor policy passes CA documents through without
+morphological analysis; explicit analysis is a separate policy.
 
-### Pre-validation gates
+## Input and Output Admission
 
-Each command requires input to meet a minimum level before
-processing:
+- Input admission binds the selected command policy to the parsed document.
+  A consumer receives that admitted state, not a raw AST plus a claim that
+  somebody checked it.
+- A transform must establish the state its output writer requires. The
+  admission boundary includes the applicable semantic and tier-alignment
+  checks; serialization is not itself validation.
+- Generating commands can retain a `DiagnosedOutput` with its findings under
+  their declared contract. A diagnosed transcript is not labeled clean.
+  Optional stages may keep their admitted predecessor when their own output
+  is refused, recording a shortfall.
+- Localized diagnosis can hold affected utterances out of supported
+  per-utterance processing. Document-wide findings have a different effect.
+  Do not infer that every parser-recovery result is safe to process.
 
-| Command | Required level |
-|---|---|
-| `morphotag` | `MainTierValid` |
-| `utseg` | `StructurallyComplete` |
-| `translate` | `StructurallyComplete` |
-| `coref` | `StructurallyComplete` |
-| `align` | `Parseable` (lenient, must handle messy real-world files) |
-
-`validate_to_level()` checks the file against the required level and
-returns all failures found. Invalid files are rejected early with
-diagnostics, before any compute is spent on inference.
-
-## Post-Serialization Validation
-
-After an orchestrator injects results and serializes CHAT output, the
-server runs `validate_output()`:
-
-1. **Alignment validation**: checks that `%mor`/`%gra`/`%wor` tier
-   word counts match the main tier. ParseHealth-aware: utterances
-   flagged as unparseable during lenient parsing are excluded.
-2. **Semantic validation**: full CHAT validation:
-   - **E362**: non-monotonic timestamps (utterance bullets must
-     increase).
-   - **E701** / **E704**: temporal constraints (overlap rules,
-     same-speaker timing).
-   - Header correctness, required headers present and well-formed.
-   - Cross-utterance patterns, speaker code consistency.
-
-Only blocks on `severity="error"`, not warnings.
+The implementation owners are `pipeline/post_validate.rs`,
+`pipeline/morphosyntax/states.rs`, and the command's own pipeline in
+`crates/batchalign/src/`. See
+[CHAT validation failures](../../batchalign/developer/chat-validation-failures.md)
+for the concrete user-visible outcomes and recovery steps.
 
 ## Severity Posture
 
-Validation intentionally distinguishes errors from warnings:
-
-- **Errors** block output. The server will not write CHAT with
-  error-level validation failures.
-- **Warnings** are reported but do not block. Legacy corpora contain
-  widespread minor violations that must remain processable.
-
-This distinction matters especially for `%gra`:
-
-- Existing broken `%gra` in old corpora may be accepted with warnings
-  so files remain processable.
-- Newly generated `%gra` from batchalign3 is validated more strictly
-  before writeback.
+The selected validation policy decides which diagnostics block its admission.
+Warnings, rejected input, diagnosed generated output and incomplete analysis
+are distinct states. There is no blanket rule that all old malformed tiers
+are only warnings or that every file carrying an error is silently discarded.
+Use the command's documented contract and retained diagnostic category.
 
 ## When Validation Fails
 
-When post-serialization validation fails, the file fails with the
-validation errors as its error, and no output is written for it. No report
-file is written and no cache entry is purged: the cache entries behind the
-output stay, so a rerun reuses them (use the command's cache override to
-recompute).
+Read the file's diagnostic findings and shortfalls before deciding whether
+there is an output to inspect. A worker failure, output-admission refusal and
+missing model capability are different causes. A cache hit does not certify
+the resulting CHAT, and a validation failure does not automatically purge
+cached inference. Recompute only when the cache override and evidence justify
+it; see [cache overrides](../../batchalign/architecture/cache-override-guide.md).
 
-## Verification Gates (`make verify`)
+## Verification Gates
 
-The mandatory pre-merge / pre-push gate. All gates must pass before
-any code or doc change ships:
-
-| Gate | What it checks |
-|---|---|
-| G0 | Parser signature guardrail |
-| G1 | Rust workspace compile check |
-| G2 | Spec tools compile check |
-| G3 | Spec runtime tools compile check |
-| G4 | CHAT manual anchor links |
-| G5 | Generated parser corpus equivalence suite |
-| G6 | Golden fragment validity (words + tiers) |
-| G7 | Bare-timestamp regression gate |
-| G8 | Reference corpus semantic equivalence |
-| G9 | `%wor` tier parsing and alignment |
-| G10 | Golden tier roundtrip (`%mor`, `%gra`, `%pho`, `%wor`) |
-| G11 | Reference corpus node coverage |
-| G12 | Generated artifacts match committed sources |
-| G13 | Fuzz workspace isolation |
-| G14 | Imported Batchalign Rust/PyO3 gate |
-
-The reference corpus at `corpus/reference/` is the sacred semantic
-target, every file must be valid CHAT, and `make verify` runs each
-gate against it.
-
-The pre-push hook (`make install-hooks`) runs the fast subset (`fmt`,
-affected compile, parser guardrail, `generated-check`, `fuzz-check`)
-locally before push. CI runs the full set.
+The current publication check is `make gate`, implemented by
+`scripts/gate.sh`. The pre-push hook verifies its receipt against the tree
+being pushed; it does not run an older G0-G14 parser gate matrix. The gate
+checks Rust, Python source typing/lint, build-workflow contracts, generated
+interfaces and the book. It does not run the full Python inference suite.
+PyO3/worker changes also need appropriate Python boundary tests using a
+verified-current extension. See [building](../../batchalign/developer/building.md)
+and the Makefile for exact supported targets.
 
 ## Validation at the PyO3 Boundary
 
-There is no public Python validation API. The `ParsedChat` handle
-that previously exposed `validate()` / `validate_structured()` /
-`validate_chat_structured()` was retired in the 2026-03-21 PyO3
-slimdown to worker-runtime-only. Validation now runs entirely on the
-Rust side; when a worker invocation detects a failure it constructs
-`BatchalignBoundaryError::ChatValidation { entries, … }` which the
-PyO3 boundary lowers into a `CHATValidationException` carrying a
-populated `errors: list[ValidationErrorEntry]` on the Python side.
+The retired `ParsedChat` binding is not a public Python validation API.
+The extension serves typed worker operations; structured boundary failures
+can use `CHATValidationException` and its `ValidationErrorEntry` dictionaries.
+An `execute_v2` operation can also return a typed failure outcome. Neither a
+subprocess exit nor a protocol error should be treated as though it were a
+Python CHAT-validation exception.
 
-Python callers that need structured validation results invoke
-`batchalign3` via subprocess and catch the exception:
-
-```python
-from batchalign_core import CHATValidationException
-
-try:
-    batchalign_core.execute_v2(request)
-except CHATValidationException as exc:
-    for entry in exc.errors:
-        print(entry.code, entry.line, entry.message)
-```
-
-See [Errors, Batchalign Runtime](batchalign-errors.md) and
-[Python ↔ Rust errors](python-rust-errors.md) for the full boundary
-contract.
-
-## Known limitations
-
-- **Validation rules are intentionally permissive on legacy data.**
-  Some checks emit warnings rather than errors so legacy corpora
-  remain processable while still surfacing the issue. Examples: pre-existing
-  malformed `%gra` (warned, not blocked, so files that already shipped
-  with bad `%gra` round-trip cleanly); some bullet-format minor
-  variants. Newly generated tiers from batchalign are validated more
-  strictly before writeback.
-- **`%wor` word counts are not validated against the main tier.** `%wor`
-  is a timing-annotation tier with no downstream positional indexing;
-  legacy files may have `xxx`, fragments, or nonwords in `%wor`
-  without producing alignment errors.
-- **Cross-utterance quotation validation is gated off by default**
-  (`enable_quotation_validation` flag), the cross-utterance walker
-  exists but is not yet wired into the standard validation gate.
-- **Some error-spec / validator pairs are not yet implemented.**
-  Tracked in `spec/errors/` files marked `Status: not_implemented`;
-  these generate `#[ignore]` tests via `make test-gen` rather than
-  failing CI. Run `grep -rl "Status.*not_implemented" spec/errors/`
-  to enumerate.
+See [runtime errors](batchalign-errors.md) and
+[Python ↔ Rust errors](python-rust-errors.md) for those separate contracts.

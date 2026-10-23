@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from types import ModuleType, SimpleNamespace
-from typing import Any
+from types import SimpleNamespace
 
 import pytest
 
 from batchalign.inference.utseg import (
     UtsegBatchItem,
+    UtsegInferenceRequest,
     _assemble,
     _leaf_count,
     _parse_tree_indices,
@@ -22,7 +22,7 @@ from batchalign.models.utterance.evidence import (
     ModelShortCircuit,
     UtteranceBoundaryPrediction,
 )
-from batchalign.providers import BatchInferRequest
+from batchalign.worker._types_v2 import UtsegSegmenterV2
 
 
 class _WorkClock:
@@ -74,19 +74,19 @@ def _leaf(label: str = "W") -> _FakeTree:
     return _FakeTree(label=label)
 
 
-def _install_fake_stanza(
-    monkeypatch,
-    *,
-    pipeline_factory,
-    multilingual_factory=None,
-) -> None:
-    """Install one tiny fake stanza module for utseg tests."""
+def _loader(nlp: object, seen: list[str] | None = None):
+    """A ``load_stanza_pipeline`` that hands out one fixed pipeline entry,
+    recording the languages it was asked for."""
+    from batchalign.worker._pipeline_cache import LoadedPipeline
 
-    module = ModuleType("stanza")
-    module.Pipeline = pipeline_factory
-    module.MultilingualPipeline = multilingual_factory or pipeline_factory
-    module.DownloadMethod = SimpleNamespace(REUSE_RESOURCES="reuse")
-    monkeypatch.setitem(__import__("sys").modules, "stanza", module)
+    entry = LoadedPipeline(nlp=nlp, context=None)
+
+    def load(lang: str) -> LoadedPipeline:
+        if seen is not None:
+            seen.append(lang)
+        return entry
+
+    return load
 
 
 class TestUtsegModels:
@@ -117,21 +117,18 @@ class TestBatchInferUtseg:
 
     def test_short_circuits_invalid_and_single_word_items(self, monkeypatch) -> None:
         _install_clock(monkeypatch)
-        calls: list[list[str]] = []
-
-        def build_stanza_config(
-            langs: list[str],
-        ) -> tuple[list[str], dict[str, dict[str, str | bool]]]:
-            calls.append(langs)
-            return ["en"], {"en": {"processors": "tokenize,constituency"}}
+        calls: list[str] = []
 
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[{"words": ["hello"], "text": "hello"}, {"bad": "shape"}],
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=(
+                    {"words": ["hello"], "text": "hello"},
+                    {"bad": "shape"},
+                ),
             ),
-            build_stanza_config,
+            _loader(object(), calls),
         )
 
         assert calls == []
@@ -147,21 +144,18 @@ class TestBatchInferUtseg:
         # it reports no time at all (null on the wire), never a zero.
         assert response.results[1].elapsed_s is None
 
-    def test_builds_single_language_pipeline_and_serializes_trees(
+    def test_parses_with_the_requests_language_pipeline_and_serializes_trees(
         self, monkeypatch
     ) -> None:
         # The Stanza branch is opt-in via the request-level typed field
         # `allow_stanza_fallback`; the CLI surface is
         # `--utseg-fallback-stanza` on every utseg-invoking subcommand.
-        init_kwargs: list[dict[str, Any]] = []
         seen_texts: list[str] = []
+        loaded: list[str] = []
 
         clock = _install_clock(monkeypatch)
 
         class _FakePipeline:
-            def __init__(self, **kwargs) -> None:
-                init_kwargs.append(kwargs)
-
             def __call__(self, text: str):
                 seen_texts.append(text)
                 clock.work()
@@ -172,59 +166,41 @@ class TestBatchInferUtseg:
                     ]
                 )
 
-        _install_fake_stanza(monkeypatch, pipeline_factory=_FakePipeline)
-
-        def build_stanza_config(
-            langs: list[str],
-        ) -> tuple[list[str], dict[str, dict[str, str | bool]]]:
-            assert langs == ["eng"]
-            return ["en"], {"en": {"processors": "tokenize,constituency"}}
-
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
-                lang="",
-                items=[{"words": ["I", "eat", "cookies"], "text": "I eat cookies"}],
-                allow_stanza_fallback=True,
+            UtsegInferenceRequest(
+                lang="eng",
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=({"words": ["I", "eat", "cookies"], "text": "I eat cookies"},),
             ),
-            build_stanza_config,
+            _loader(_FakePipeline(), loaded),
         )
 
-        assert init_kwargs == [
-            {
-                "lang": "en",
-                "processors": "tokenize,constituency",
-                "download_method": "reuse",
-            }
-        ]
+        assert loaded == ["eng"]
         assert seen_texts == ["I eat cookies"]
         assert response.results[0].result == {
             "kind": "constituency",
             "trees": ["(S (NP I eat) (VP cookies))"],
         }
-        # This item's own span, not the batch's. Building the Stanza pipeline
+        # This item's own span, not the batch's. Loading the Stanza pipeline
         # happens outside any item's measurement and is charged to no item.
         assert response.results[0].elapsed_s == 1.0
 
-    def test_refuses_when_no_bert_model_and_fallback_not_opted_in(
+    def test_a_boundary_model_request_without_a_loaded_model_is_refused(
         self, monkeypatch
     ) -> None:
-        """Default behavior: no BERT for language + no opt-in → typed raise.
+        """The request names the boundary model; this worker loaded none.
 
-        Mirrors `whisper_hub.py`'s `WhisperHubModelNotFoundError`
-        pattern. Silent substitution is the foot-gun this raise exists
-        to prevent.
+        A typed raise naming the language, never a silent substitution of
+        Stanza for the model the control plane chose.
         """
         from batchalign.inference.utseg import UtsegModelNotFoundError
 
         with pytest.raises(UtsegModelNotFoundError) as exc_info:
             batch_infer_utseg(
-                BatchInferRequest(
-                    task="utseg",
-                    lang="spa",
-                    items=[
-                        {"words": ["hola", "como", "estas"], "text": "hola como estas"}
-                    ],
+                UtsegInferenceRequest(
+                    lang="eng",
+                    segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
+                    items=({"words": ["hi", "there", "you"], "text": "hi there you"},),
                 ),
                 lambda langs: (_ for _ in ()).throw(
                     AssertionError(f"refusal must skip Stanza load: {langs}")
@@ -233,20 +209,65 @@ class TestBatchInferUtseg:
             )
 
         message = str(exc_info.value)
-        assert "spa" in message
-        # The CLI flag is the primary user-facing remediation; the
-        # resolver-entry path is the developer fix.
-        assert "--utseg-fallback-stanza" in message
-        # Env var must NOT appear; it was removed in favor of the
-        # typed protocol field + CLI flag.
-        assert "BA3_UTSEG_FALLBACK_STANZA" not in message
+        assert "eng" in message
+        assert "boundary-model segmenter" in message
+
+    def test_the_named_segmenter_runs_whatever_this_worker_loaded(
+        self, monkeypatch
+    ) -> None:
+        """RED FIRST: the worker chose its own segmenter. With a boundary
+        model loaded it ran the model whatever the request said, and without
+        one it fell back to Stanza on an ``allow_stanza_fallback`` flag: a
+        second route decision beside Rust's. The request now names the
+        segmenter and the worker runs that one.
+        """
+        _install_clock(monkeypatch)
+        loaded: list[str] = []
+
+        class _UnusedBoundaryModel:
+            def predict_boundary_evidence(self, words: list[str]) -> object:
+                raise AssertionError(
+                    f"the request named Stanza, not the model: {words}"
+                )
+
+        class _FakePipeline:
+            def __call__(self, text: str):
+                return SimpleNamespace(
+                    sentences=[SimpleNamespace(constituency="(S a b)")]
+                )
+
+        response = batch_infer_utseg(
+            UtsegInferenceRequest(
+                lang="spa",
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=({"words": ["a", "b"], "text": "a b"},),
+            ),
+            _loader(_FakePipeline(), loaded),
+            utterance_boundary_model=_UnusedBoundaryModel(),
+        )
+
+        assert loaded == ["spa"]
+        assert response.results[0].result == {
+            "kind": "constituency",
+            "trees": ["(S a b)"],
+        }
+
+    def test_an_unknown_segmenter_is_refused(self) -> None:
+        """The segmenter is a closed set: a spelling Rust never sends fails
+        validation rather than choosing a default."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            UtsegInferenceRequest.model_validate(
+                {"lang": "eng", "segmenter": "bert", "items": []}
+            )
 
     def test_emits_loud_fallback_notice_when_opted_in(self, monkeypatch) -> None:
         """Opt-in fallback path: request field set → Stanza loads, notice fires."""
-        emit_calls: list[tuple[str, str | None]] = []
+        emit_calls: list[str] = []
 
-        def _capture_emit(requested_lang: str, pack: str | None) -> None:
-            emit_calls.append((requested_lang, pack))
+        def _capture_emit(requested_lang: str) -> None:
+            emit_calls.append(requested_lang)
 
         monkeypatch.setattr(
             "batchalign.inference.utseg._emit_stanza_fallback_notice",
@@ -254,39 +275,29 @@ class TestBatchInferUtseg:
         )
 
         class _FakePipeline:
-            def __init__(self, **kwargs) -> None:
-                pass
-
             def __call__(self, text: str):
                 return SimpleNamespace(sentences=[])
 
-        _install_fake_stanza(monkeypatch, pipeline_factory=_FakePipeline)
-
-        def build_stanza_config(
-            langs: list[str],
-        ) -> tuple[list[str], dict[str, dict[str, str | bool]]]:
-            assert langs == ["spa"]
-            return ["es"], {"es": {"processors": "tokenize,constituency"}}
-
         batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="spa",
-                items=[{"words": ["hola", "como", "estas"], "text": "hola como estas"}],
-                allow_stanza_fallback=True,
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=(
+                    {"words": ["hola", "como", "estas"], "text": "hola como estas"},
+                ),
             ),
-            build_stanza_config,
+            _loader(_FakePipeline()),
             utterance_boundary_model=None,
         )
 
-        assert emit_calls == [("spa", "es")], (
+        assert emit_calls == ["spa"], (
             "Stanza fallback must announce the substitution; see BUG-032"
         )
 
     def test_fallback_notice_dedupes_per_language_pack_pair(self, monkeypatch) -> None:
         """A worker processing N batches in the same language must not
-        emit N identical fallback warnings, one warn per (lang, pack)
-        per process is enough; more is dashboard noise.
+        emit N identical fallback warnings, one warn per language per
+        process is enough; more is dashboard noise.
         """
         from batchalign.inference import utseg as utseg_module
 
@@ -302,27 +313,20 @@ class TestBatchInferUtseg:
             _count_emit,
         )
 
-        utseg_module._emit_stanza_fallback_notice("spa", "es")
-        utseg_module._emit_stanza_fallback_notice("spa", "es")
-        utseg_module._emit_stanza_fallback_notice("spa", "es")
+        utseg_module._emit_stanza_fallback_notice("spa")
+        utseg_module._emit_stanza_fallback_notice("spa")
+        utseg_module._emit_stanza_fallback_notice("spa")
         assert emit_count[0] == 1
 
-        utseg_module._emit_stanza_fallback_notice("deu", "de")
+        utseg_module._emit_stanza_fallback_notice("deu")
         assert emit_count[0] == 2
 
-    def test_builds_multilingual_pipeline_and_handles_runtime_failure(
-        self, monkeypatch
-    ) -> None:
-        # Multilingual Stanza pipeline is also opt-in, no BERT was loaded here.
-        init_kwargs: list[dict[str, Any]] = []
+    def test_a_parse_that_raises_fails_at_its_own_position(self, monkeypatch) -> None:
         seen_texts: list[str] = []
 
         clock = _install_clock(monkeypatch)
 
-        class _FakeMultilingualPipeline:
-            def __init__(self, **kwargs) -> None:
-                init_kwargs.append(kwargs)
-
+        class _FakePipeline:
             def __call__(self, text: str):
                 seen_texts.append(text)
                 clock.work()
@@ -332,47 +336,18 @@ class TestBatchInferUtseg:
                     sentences=[SimpleNamespace(constituency="(S good path)")]
                 )
 
-        _install_fake_stanza(
-            monkeypatch,
-            pipeline_factory=_FakeMultilingualPipeline,
-            multilingual_factory=_FakeMultilingualPipeline,
-        )
-
-        def build_stanza_config(
-            langs: list[str],
-        ) -> tuple[list[str], dict[str, dict[str, str | bool]]]:
-            assert langs == ["eng"]
-            return [
-                "en",
-                "es",
-            ], {
-                "en": {"processors": "tokenize,constituency"},
-                "es": {"processors": "tokenize,constituency"},
-            }
-
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=(
                     {"words": ["good", "path"], "text": "good path"},
                     {"words": ["boom", "now"], "text": "boom now"},
-                ],
-                allow_stanza_fallback=True,
+                ),
             ),
-            build_stanza_config,
+            _loader(_FakePipeline()),
         )
 
-        assert init_kwargs == [
-            {
-                "lang_configs": {
-                    "en": {"processors": "tokenize,constituency"},
-                    "es": {"processors": "tokenize,constituency"},
-                },
-                "lang_id_config": {"langid_lang_subset": ["en", "es"]},
-                "download_method": "reuse",
-            }
-        ]
         assert seen_texts == ["good path", "boom now"]
         assert response.results[0].result == {
             "kind": "constituency",
@@ -394,54 +369,35 @@ class TestBatchInferUtseg:
         clock = _install_clock(monkeypatch)
 
         class _FakeTreelessPipeline:
-            def __init__(self, **kwargs) -> None:
-                pass
-
             def __call__(self, text: str):
                 clock.work()
                 return SimpleNamespace(sentences=[SimpleNamespace(constituency=None)])
 
-        _install_fake_stanza(
-            monkeypatch,
-            pipeline_factory=_FakeTreelessPipeline,
-            multilingual_factory=_FakeTreelessPipeline,
-        )
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[{"words": ["no", "tree"], "text": "no tree"}],
-                allow_stanza_fallback=True,
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=({"words": ["no", "tree"], "text": "no tree"},),
             ),
-            lambda langs: (["en"], {"en": {"processors": "tokenize,constituency"}}),
+            _loader(_FakeTreelessPipeline()),
         )
 
         assert response.results[0].result is None
         assert response.results[0].error is not None
         assert "produced no tree" in response.results[0].error
 
-    def test_reports_a_failure_when_no_language_pipeline_is_available(
-        self, monkeypatch
-    ) -> None:
-        # Empty-langs path is reachable only when the operator opted in
-        # to the Stanza fallback; otherwise the dispatcher refuses earlier.
-        _install_clock(monkeypatch)
-        response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
-                lang="",
-                items=[{"words": ["still", "works"], "text": "still works"}],
-                allow_stanza_fallback=True,
-            ),
-            lambda langs: ([], {}),
-        )
+    def test_a_request_without_a_language_is_refused(self) -> None:
+        """A request with no language was segmented with an English pipeline
+        (``["eng"]`` when ``lang`` was empty). The request type now refuses
+        it before any pipeline is named."""
+        from pydantic import ValidationError
 
-        # No pipeline is a failure, never an empty parse.
-        assert response.results[0].result is None
-        assert response.results[0].error is not None
-        assert "no Stanza pipeline" in response.results[0].error
-        # Still this item's own measured span: no simulated work ran.
-        assert response.results[0].elapsed_s == 0.0
+        with pytest.raises(ValidationError):
+            UtsegInferenceRequest(
+                lang="",
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
+                items=({"words": ["still", "works"], "text": "still works"},),
+            )
 
     def test_uses_boundary_model_assignments_when_available(self) -> None:
         class _FakeBoundaryModel:
@@ -479,15 +435,15 @@ class TestBatchInferUtseg:
                 )
 
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[
+                segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
+                items=(
                     {
                         "words": ["On", "television", "Have", "you"],
                         "text": "On television Have you",
-                    }
-                ],
+                    },
+                ),
             ),
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
@@ -545,10 +501,10 @@ class TestBatchInferUtseg:
                 )
 
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[{"words": ["hello"], "text": "hello"}],
+                segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
+                items=({"words": ["hello"], "text": "hello"},),
             ),
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
@@ -576,10 +532,10 @@ class TestBatchInferUtseg:
                 raise ValueError(f"deliberate model failure for {words!r}")
 
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[{"words": ["hello", "there"], "text": "hello there"}],
+                segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
+                items=({"words": ["hello", "there"], "text": "hello there"},),
             ),
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
@@ -624,14 +580,14 @@ class TestBatchInferUtseg:
                 )
 
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[
+                segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
+                items=(
                     {"words": ["one", "two"], "text": "one two"},
                     {"words": ["three", "four"], "text": "three four"},
                     {"words": ["five", "six"], "text": "five six"},
-                ],
+                ),
             ),
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
@@ -672,14 +628,14 @@ class TestBatchInferUtseg:
                 )
 
         response = batch_infer_utseg(
-            BatchInferRequest(
-                task="utseg",
+            UtsegInferenceRequest(
                 lang="eng",
-                items=[
+                segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
+                items=(
                     {"words": ["good", "one"], "text": "good one"},
                     {"words": ["bad", "item"], "text": "bad item"},
                     {"words": ["good", "two"], "text": "good two"},
-                ],
+                ),
             ),
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")

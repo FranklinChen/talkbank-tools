@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-10-06 21:38 EDT
+**Last updated:** 2026-10-24 21:32 EDT
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
@@ -413,8 +413,10 @@ batchalign3 replay --lang yue path/to/failed_ipc_*.json
 
 Replay a captured failed IPC request against a fresh worker. Takes a
 dump file from `~/.batchalign3/debug/` and sends the exact request to
-a new worker, reporting the response. Useful for reproducing field
-failures locally.
+a new worker, reporting the response. The worker is the one the dump
+records: the same profile or task, language, engine overrides and device
+flags. `--lang` replays under another language. Useful for reproducing
+field failures locally.
 
 ### `eval`
 

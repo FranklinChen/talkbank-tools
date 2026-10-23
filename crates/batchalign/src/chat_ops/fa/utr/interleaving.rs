@@ -12,10 +12,12 @@ use batchalign_transform::dp_align::interleaving::{
 use serde::Serialize;
 use talkbank_model::model::ChatFile;
 
-use super::evidence::{UtrUtteranceOrdinal, UtrWordOrdinal};
+#[cfg(test)]
+use super::AsrTimingToken;
+use super::evidence::UtrUtteranceOrdinal;
 use super::{
-    AsrTimingToken, GlobalUtrParticipation, UtrMatchMode, UtrWordAddress, UtrWordMatch,
-    collect_utr_utterance_info, lexical::UtrLexicalStream,
+    GlobalUtrParticipation, UtrMatchMode, UtrWordAddress, UtrWordMatch, collect_utr_utterance_info,
+    lexical::UtrLexicalStream,
 };
 
 /// Adjacent different-speaker source pair, bound by the observation producer.
@@ -53,11 +55,11 @@ struct WordObservation {
 /// and not producer-admitted UTR timing authority. Refused analysis is explicit.
 pub fn observe(
     chat: &ChatFile,
-    tokens: &[AsrTimingToken],
+    tokens: &super::PreparedUtrTokens,
     mode: UtrMatchMode,
     participation: GlobalUtrParticipation,
 ) -> Vec<InterleavedUtrPair> {
-    let census = collect_utr_utterance_info(chat);
+    let census = collect_utr_utterance_info(chat, tokens.units());
     let lexical = UtrLexicalStream::from_tokens(tokens);
     let reference = lexical.texts();
     census.windows(2).enumerate().filter_map(|(index, pair)| {
@@ -67,26 +69,29 @@ pub fn observe(
         let first_utterance = UtrUtteranceOrdinal(index);
         let second_utterance = UtrUtteranceOrdinal(index + 1);
         let observation = match TwoSpeakerAlignment::observe(
-            &pair[0].words, &pair[1].words, &reference, mode.to_dp_match_mode(),
+            pair[0].units.texts(), pair[1].units.texts(), &reference, mode.to_dp_match_mode(),
         ) {
             Err(InterleavingRefusal::CellBudgetExceeded) => PairObservation::CellBudgetExceeded,
             Ok(analysis) => {
-                let address = |chain, word_index| UtrWordAddress {
-                    utterance_index: match chain {
-                        SpeakerChain::First => first_utterance,
-                        SpeakerChain::Second => second_utterance,
-                    },
-                    word_index: UtrWordOrdinal(word_index),
+                // The analysis ran over these units, so every position it
+                // names is one of them.
+                let addresses = [
+                    pair[0].units.addresses(first_utterance),
+                    pair[1].units.addresses(second_utterance),
+                ];
+                let address = |chain, unit_index: usize| match chain {
+                    SpeakerChain::First => addresses[0][unit_index],
+                    SpeakerChain::Second => addresses[1][unit_index],
                 };
                 let project = |matched: batchalign_transform::dp_align::interleaving::InterleavingMatch<'_>| {
                     lexical.matched_word(matched.reference_index(),
                         address(matched.chain(), matched.word_index()), matched.source_text())
                 };
                 let selected = analysis.selected().map(project).collect();
-                let mut words = Vec::with_capacity(pair[0].words.len() + pair[1].words.len());
+                let mut words = Vec::with_capacity(pair[0].units.len() + pair[1].units.len());
                 for chain in [SpeakerChain::First, SpeakerChain::Second] {
-                    words.extend(analysis.words(chain).enumerate().map(|(word_index, evidence)| WordObservation {
-                        word: address(chain, word_index),
+                    words.extend(analysis.words(chain).enumerate().map(|(unit_index, evidence)| WordObservation {
+                        word: address(chain, unit_index),
                         can_be_missing: evidence.can_be_missing(),
                         common: evidence.common().map(|common| project(common.matched())),
                         candidates: evidence.candidates().map(project).collect(),
@@ -141,7 +146,7 @@ mod tests {
             .collect::<Vec<_>>();
         let observed = observe(
             &chat,
-            &tokens,
+            &super::super::PreparedUtrTokens::spaced(&tokens),
             UtrMatchMode::Exact,
             GlobalUtrParticipation::AllUtterances,
         );
@@ -184,7 +189,7 @@ mod tests {
         assert!(
             observe(
                 &admitted_pair("one two", "yes", "PAR"),
-                &tokens,
+                &super::super::PreparedUtrTokens::spaced(&tokens),
                 UtrMatchMode::Exact,
                 GlobalUtrParticipation::AllUtterances
             )

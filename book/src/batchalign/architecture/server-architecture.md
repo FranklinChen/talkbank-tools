@@ -576,8 +576,8 @@ derive its own.
 
 | Serving | When | How the pool dispatches |
 |---|---|---|
-| `SharedConcurrent { in_flight }` | GPU profile, not `force_cpu`, `gpu_thread_pool_size` above 1; Stanza on free-threaded Python | One process per key (`gpu_workers` / `SharedGpuWorker`), up to `in_flight` requests multiplexed into it |
-| `OneRequestPerProcess` | GPU profile with `force_cpu` or a pool size of 1; Stanza on GIL Python; IO | Exclusive checkout from up to `max_workers_per_key` processes per key |
+| `SharedConcurrent { in_flight }` | GPU profile, not `force_cpu`, `gpu_thread_pool_size` above 1 | One process per key (`gpu_workers` / `SharedGpuWorker`), up to `in_flight` requests multiplexed into it |
+| `OneRequestPerProcess` | GPU profile with `force_cpu` or a pool size of 1; Stanza in every runtime; IO | Exclusive checkout from up to `max_workers_per_key` processes per key |
 
 The two halves used to have separate owners. The pool treated every
 GPU-profile worker as shared and kept one per key; the worker probed CUDA and,
@@ -588,6 +588,24 @@ Forced-CPU work is one request per process because
 each CPU PyTorch request already uses every core; threads in one process only
 oversubscribe them, while separate processes let the configured capacity and
 the memory gate decide how many run.
+
+### One Stanza pipeline is never called concurrently
+
+Within a worker, a loaded Stanza pipeline is reachable only through its cache
+entry's guard (`LoadedPipeline.calling` in `batchalign/worker/_pipeline_cache.py`),
+which holds that entry's own lock for the call, under the GIL and on
+free-threaded Python alike. Stanza does not promise that one pipeline may be
+called from several threads at once, and its processors keep state across
+calls: the lemmatizer's results cache in Stanza's development branch (on by
+default) is an unsynchronized `OrderedDict` LRU, which concurrent calls would
+corrupt. That is why a Stanza worker serves one request per process in every
+runtime: requests multiplexed into one process would only take turns on the
+pipeline of their language, so parallelism comes from more worker processes
+per key (up to `max_workers_per_key`), never from sharing one pipeline. Its
+memory budget is therefore a process budget in every runtime
+(`GilProcessNeed::Always`). The guard is reentrant only
+for its own thread: the Italian MWT policy reads its pipeline's lexicon from
+inside the tokenizer postprocessor, during a call that already holds it.
 
 ### Concurrent dispatch for shared workers
 

@@ -33,7 +33,10 @@ fn local_overlap_hint_remains_provisional_through_final_word_injection() {
             max_exclusion_density: "1.0".parse().expect("checked density"),
             ..TwoPassConfig::default()
         })
-        .inject(&mut chat, &tokens);
+        .inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
     let utr::UtrAlignmentEvidence::TwoPass {
         overlap_recoveries, ..
     } = recovered.alignment()

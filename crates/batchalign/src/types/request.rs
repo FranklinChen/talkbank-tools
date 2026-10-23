@@ -506,28 +506,6 @@ impl JobSubmission {
             )));
         }
 
-        // Commands that use Stanza AND carry a job-level language to check.
-        //
-        // Morphotag and coref are NOT listed, and listing them was dead code:
-        // both are per-file commands, so `validate_lang_command_pairing` above
-        // has already required them to be `LanguageSpec::PerFile`, and the
-        // `let lang = ...` match at the top of this function returns early for
-        // `PerFile`. Their arms could therefore never be reached. Their
-        // languages are checked per file instead, against each file's own
-        // `@Languages:` header, which is the only honest place to check them.
-        let uses_stanza = matches!(
-            &self.options,
-            CommandOptions::Utseg(_) | CommandOptions::Compare(_)
-        );
-        if uses_stanza && !is_stanza_supported_language(lang)? {
-            return Err(ValidationError(format!(
-                "Language '{}' is not supported by Stanza. Supported languages:\n\
-                 {}",
-                lang,
-                stanza_supported_languages_help()
-            )));
-        }
-
         // Check HK ASR engine language constraints
         if let Some(engine) = &asr_engine {
             let chinese_codes = ["zho", "yue", "wuu", "nan", "hak", "cmn"];
@@ -943,109 +921,87 @@ fn utr_engine_supports_language(engine: &UtrEngine, lang: &LanguageCode3) -> boo
 #[error("{0}")]
 pub struct ValidationError(pub String);
 
-// ---------------------------------------------------------------------------
-// Stanza language support: hardcoded fallback table
-// ---------------------------------------------------------------------------
-
-/// Hardcoded fallback table of ISO 639-3 codes supported by Stanza.
+/// Refuse at submission a job-level language that the admitted Stanza
+/// registry cannot serve for the command's own requirement, listing the
+/// languages it can.
 ///
-/// **DEPRECATED as the primary check.** The authoritative source is now
-/// the `StanzaRegistry` built from Stanza's `resources.json` at worker
-/// startup. This table is ONLY used as a pre-validation safety net when
-/// the registry hasn't been populated yet (before first worker spawn).
+/// The registry is the one authority; there is no static list behind it. It
+/// is consulted only once admitted (a fresh server has none until its first
+/// worker reports a catalog). Before that, submission accepts, and the job
+/// meets the same registry after its capability probe: morphotag's per-file
+/// admission refuses with a typed `AnalysisUnavailable`, and a worker asked
+/// to load a language its catalog lacks refuses with
+/// `UnsupportedLanguageError`.
 ///
-/// Check whether an ISO 639-3 language code is supported by Stanza.
-///
-/// Single Rust source of truth: delegates to
-/// `crate::chat_ops::morphosyntax_ops::is_stanza_supported`.
-/// A previous hardcoded `STANZA_SUPPORTED_ISO3` list duplicated that data
-/// and silently drifted from it (see the 2026-04-24 Malayalam crash
-/// audit at `stanza_languages.rs` module docs). The authoritative
-/// truth ultimately lives in the Python capability table built from
-/// Stanza's installed `resources.json`; this Rust function is a fast
-/// preflight that uses the most-recently-audited approximation.
-///
-/// Fallible only because `LanguageCode` construction became fallible in
-/// chatter 0.3.0 (rejects empty input); `LanguageCode3` guarantees three
-/// ASCII letters, so the error arm is unreachable in practice but
-/// propagated rather than panicked on. The error is stringified because
-/// chatter v0.3.0 does not re-export `LanguageCodeError` (upstream
-/// defect, reported).
-fn is_stanza_supported_language(lang: &LanguageCode3) -> Result<bool, ValidationError> {
-    let code = crate::chat_ops::LanguageCode::new(lang.as_ref()).map_err(|e| {
-        ValidationError(format!(
-            "Language '{lang}' is not a usable language code: {e}"
-        ))
-    })?;
-    Ok(crate::chat_ops::morphosyntax_ops::is_stanza_supported(
-        &code,
-    ))
-}
-
-/// Format a help string listing supported Stanza languages for error messages.
-fn stanza_supported_languages_help() -> String {
-    crate::chat_ops::morphosyntax_ops::supported_iso3_codes()
-        .chunks(10)
-        .map(|chunk| chunk.join(", "))
-        .collect::<Vec<_>>()
-        .join(",\n  ")
-}
-
-/// Validate a job's language support using the runtime Stanza registry.
-///
-/// This is the **authoritative** language validation, called from
-/// `materialize_submission_job()` where the registry is available.
-/// It supersedes the hardcoded `is_stanza_supported_language()` check
-/// in `validate_language_support()`, which acts as a conservative
-/// pre-filter only.
-///
-/// Returns `Ok(())` when:
-/// - The command doesn't use Stanza
-/// - The language is auto-detect
-/// - The registry confirms the language has required processors
-/// - The registry is not populated (fallback to hardcoded table)
+/// Exhaustive over the commands with no catch-all, so a new command states
+/// whether it uses Stanza. `compare` morphotags its main transcript. `utseg`
+/// runs Stanza only on its constituency route, so it is admitted by the
+/// route: a boundary-model language needs no Stanza, and a language with no
+/// route at all is refused here with the remedy. `transcribe` runs its Stanza
+/// stages only optionally and records one the registry cannot serve as not
+/// applied (`pipeline::transcribe`), so its submission is not refused here.
+/// `coref` has no Stanza admission: it is English-only by construction.
 pub fn validate_language_with_registry(
     submission: &JobSubmission,
-    registry: Option<&crate::stanza_registry::StanzaRegistry>,
+    registry: &std::sync::Arc<crate::stanza_registry::StanzaRegistry>,
 ) -> Result<(), ValidationError> {
+    use crate::stanza_registry::{Morphosyntax, UtteranceSegmentation};
     // Auto: can't validate until ASR resolves the language.
-    // PerFile: morphotag/translate/coref resolve per-file from @Languages:;
-    // the registry validation happens per-file in stage_parse.
+    // PerFile: morphotag/translate/coref resolve per-file from @Languages:,
+    // admitted per file against this same registry.
     let lang = match &submission.lang {
         LanguageSpec::Auto | LanguageSpec::PerFile => return Ok(()),
         // A pair's Stanza stages run under its primary language.
         LanguageSpec::Pair(pair) => pair.primary(),
         LanguageSpec::Resolved(code) => code,
     };
-
-    let uses_stanza = matches!(
-        &submission.options,
-        CommandOptions::Morphotag(_)
-            | CommandOptions::Utseg(_)
-            | CommandOptions::Coref(_)
-            | CommandOptions::Compare(_)
-    );
-
-    if !uses_stanza {
-        return Ok(());
+    match &submission.options {
+        CommandOptions::Morphotag(_) | CommandOptions::Compare(_) => registry
+            .admit::<Morphosyntax>(lang)
+            .map(drop)
+            .map_err(|gap| stanza_refusal(lang, &gap, registry)),
+        CommandOptions::Utseg(utseg) => {
+            let route = crate::utseg_route::UtsegRoute::resolve(lang, utseg.utseg_fallback)
+                .map_err(|unavailable| ValidationError(unavailable.to_string()))?;
+            route
+                .admit_by(registry)
+                .map(drop)
+                .map_err(|gap| stanza_refusal::<UtteranceSegmentation>(lang, &gap, registry))
+        }
+        CommandOptions::Coref(_)
+        | CommandOptions::Align(_)
+        | CommandOptions::Transcribe(_)
+        | CommandOptions::TranscribeS(_)
+        | CommandOptions::Translate(_)
+        | CommandOptions::Benchmark(_)
+        | CommandOptions::Opensmile(_)
+        | CommandOptions::Avqi(_)
+        | CommandOptions::Diarize(_)
+        | CommandOptions::SpeakerIdentify(_)
+        | CommandOptions::Convert(_) => Ok(()),
     }
+}
 
-    let Some(reg) = registry else {
-        // Registry not populated: the hardcoded table in validate() already
-        // caught obviously unsupported languages.
-        return Ok(());
-    };
-
-    if !reg.supports_morphosyntax(lang.as_ref()) {
-        let supported = reg.supported_languages().join(", ");
-        return Err(ValidationError(format!(
-            "Language '{}' is not supported by Stanza on this server. \
-             Supported languages: {}",
-            lang, supported
-        )));
-    }
-
-    Ok(())
+/// The refusal for a language the registry does not serve for `R`, with the
+/// languages it does serve, ten to a line.
+fn stanza_refusal<R: crate::stanza_registry::Requirement>(
+    lang: &LanguageCode3,
+    gap: &crate::stanza_registry::StanzaGap<R>,
+    registry: &crate::stanza_registry::StanzaRegistry,
+) -> ValidationError {
+    let available = registry
+        .languages_for::<R>()
+        .map(AsRef::as_ref)
+        .collect::<Vec<&str>>()
+        .chunks(10)
+        .map(|chunk| chunk.join(", "))
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    ValidationError(format!(
+        "Language '{lang}' is not supported by Stanza on this server: {gap}. \
+         Languages with a {} pipeline:\n  {available}",
+        R::REQUIREMENT.purpose(),
+    ))
 }
 
 #[cfg(test)]
@@ -1173,7 +1129,9 @@ mod tests {
             .validate()
             .expect_err("native boundaries do not add Rev language support");
         assert!(error.to_string().contains("'rev'"), "{error}");
-        assert!(utseg_submission("nan").validate().is_err());
+        // Taiwanese has no Stanza model: the registry refuses it for utseg.
+        let registry = crate::stanza_registry::StanzaRegistry::admitting(&["eng"]).shared();
+        assert!(validate_language_with_registry(&utseg_submission("nan"), &registry).is_err());
     }
 
     /// Timing recovery asks stock Whisper's token table, and the refusal
@@ -1265,7 +1223,8 @@ mod tests {
             options: CommandOptions::Utseg(UtsegOptions {
                 common: CommonOptions::default(),
                 merge_abbrev: Default::default(),
-                utseg_fallback: Default::default(),
+                // The Stanza route, which is what the registry admits.
+                utseg_fallback: crate::params::UtsegFallbackPolicy::AllowStanza,
             }),
             paths_mode: false,
             source_paths: vec![],
@@ -1783,12 +1742,83 @@ mod tests {
 
     #[test]
     fn utseg_with_unsupported_language_fails() {
+        // The registry is the one authority: the request alone carries no
+        // static list to refuse with.
         let submission = utseg_submission("xyz");
-        let err = submission.validate().unwrap_err();
+        submission
+            .validate()
+            .expect("no static Stanza list refuses a language at request validation");
+
+        use crate::stanza_registry::StanzaProcessor::{Constituency, Pos, Tokenize};
+        let registry = crate::stanza_registry::StanzaRegistry::serving(&[(
+            "kaz",
+            &[Tokenize, Pos, Constituency],
+        )])
+        .shared();
+        let err = validate_language_with_registry(&submission, &registry).unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("not supported by Stanza"),
-            "expected Stanza error, got: {err}"
+            message.contains("'xyz' is not supported by Stanza") && message.contains("no model"),
+            "{message}"
         );
+        assert!(
+            message.contains("kaz"),
+            "the help lists the registry's languages: {message}"
+        );
+        validate_language_with_registry(&utseg_submission("kaz"), &registry)
+            .expect("a language the registry admits passes");
+    }
+
+    /// RED FIRST: utseg was held to the Stanza requirement whatever its
+    /// route, and a language with no segmenter at all passed submission and
+    /// failed at dispatch. The requirement is now the route's: a boundary
+    /// model needs no Stanza catalog entry, and a language with no route is
+    /// refused at submission with the remedy.
+    #[test]
+    fn utseg_submission_is_held_to_its_routes_requirement() {
+        let no_stanza = crate::stanza_registry::StanzaRegistry::admitting(&[]).shared();
+        let mut english = utseg_submission("eng");
+        let CommandOptions::Utseg(options) = &mut english.options else {
+            unreachable!("utseg fixture")
+        };
+        options.utseg_fallback = crate::params::UtsegFallbackPolicy::Refuse;
+        validate_language_with_registry(&english, &no_stanza)
+            .expect("the boundary-model route reads no Stanza output");
+
+        let mut spanish = utseg_submission("spa");
+        let CommandOptions::Utseg(options) = &mut spanish.options else {
+            unreachable!("utseg fixture")
+        };
+        options.utseg_fallback = crate::params::UtsegFallbackPolicy::Refuse;
+        let refusal = validate_language_with_registry(&spanish, &no_stanza)
+            .expect_err("no boundary model and no authorized fallback");
+        assert!(
+            refusal.to_string().contains("--utseg-fallback-stanza"),
+            "{refusal}"
+        );
+
+        use crate::stanza_registry::StanzaProcessor::{Pos, Tokenize};
+        let without_constituency =
+            crate::stanza_registry::StanzaRegistry::serving(&[("spa", &[Tokenize, Pos])]).shared();
+        let refusal =
+            validate_language_with_registry(&utseg_submission("spa"), &without_constituency)
+                .expect_err("the Stanza route needs a constituency parser");
+        assert!(refusal.to_string().contains("constituency"), "{refusal}");
+    }
+
+    /// RED FIRST: utseg was admitted by morphotag's requirement, so a
+    /// language whose catalog entry ships constituency but no lemmatizer
+    /// (Vietnamese) was refused for utseg, which never loads one.
+    #[test]
+    fn utseg_is_admitted_by_its_own_requirement() {
+        use crate::stanza_registry::StanzaProcessor::{Constituency, Depparse, Pos, Tokenize};
+        let registry = crate::stanza_registry::StanzaRegistry::serving(&[(
+            "vie",
+            &[Tokenize, Pos, Depparse, Constituency],
+        )])
+        .shared();
+        validate_language_with_registry(&utseg_submission("vie"), &registry)
+            .expect("utseg needs no lemmatizer");
     }
 
     #[test]

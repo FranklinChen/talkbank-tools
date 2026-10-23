@@ -22,7 +22,13 @@ pub(crate) async fn run_morphosyntax_pipeline(
     let parsed = observe_stage(
         "morphotag",
         StageId::Parse,
-        Box::pin(async { ParsedFile::parse(chat_text, params.policy.ca_policy) }),
+        Box::pin(async {
+            ParsedFile::parse(
+                chat_text,
+                params.policy.ca_policy,
+                &services.pool.stanza_registry(),
+            )
+        }),
     )
     .await?;
     run_admitted_morphosyntax(parsed, services, params).await
@@ -84,7 +90,11 @@ pub(crate) async fn run_localized_morphosyntax(
     params: &crate::params::MorphosyntaxParams<'_>,
 ) -> Result<LocalizedMorphosyntax, ServerError> {
     let options = RunOptions::new(services, params);
-    match ParsedFile::from_localized(localized, params.policy.ca_policy)? {
+    match ParsedFile::from_localized(
+        localized,
+        params.policy.ca_policy,
+        &services.pool.stanza_registry(),
+    )? {
         LocalizedParse::Declined(diagnosed) => Ok(LocalizedMorphosyntax::Declined(diagnosed)),
         LocalizedParse::Analyze(parsed) => Ok(LocalizedMorphosyntax::Analyzed(
             analyze_in_scope(*parsed, &options).await?,

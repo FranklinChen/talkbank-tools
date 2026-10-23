@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from batchalign.inference.asr import (
     AsrElement,
@@ -287,6 +289,91 @@ def test_executes_provider_media_asr_v2_request() -> None:
         "lang": "yue",
         "diarization": IntegratedDiarizationV2(speakers=2),
     }
+
+
+class TencentRefusalStage(Enum):
+    SUBMISSION = "submission"
+    POLLING = "polling"
+
+
+@pytest.mark.parametrize(
+    ("stage", "error_code", "expected"),
+    [
+        (
+            TencentRefusalStage.SUBMISSION,
+            "FailedOperation.UserHasNoAmount",
+            ProtocolErrorCodeV2.PROVIDER_QUOTA_EXHAUSTED,
+        ),
+        (
+            TencentRefusalStage.POLLING,
+            "FailedOperation.UserHasNoAmount",
+            ProtocolErrorCodeV2.PROVIDER_QUOTA_EXHAUSTED,
+        ),
+        (
+            TencentRefusalStage.SUBMISSION,
+            "InternalError",
+            ProtocolErrorCodeV2.RUNTIME_FAILURE,
+        ),
+    ],
+)
+@worker_loaded(AsrBackendV2.HK_TENCENT)
+def test_tencent_refusal_crosses_real_adapter_and_rust_bridge(
+    monkeypatch,
+    stage: TencentRefusalStage,
+    error_code: str,
+    expected: ProtocolErrorCodeV2,
+) -> None:
+    """SDK codes survive Python -> Rust -> protocol without a paid call."""
+    from types import SimpleNamespace
+
+    from tencentcloud.common.exception.tencent_cloud_sdk_exception import (
+        TencentCloudSDKException,
+    )
+
+    from batchalign.inference.languages.cantonese import _tencent_asr
+    from batchalign.inference.languages.cantonese._tencent_api import TencentRecognizer
+
+    # Deliberately contradictory text: only the SDK's structured code decides.
+    refusal = TencentCloudSDKException(error_code, "Resource pack exhausted!")
+    cleaned: list[str] = []
+
+    class Bucket:
+        def upload_file(self, **_kwargs) -> None:
+            pass
+
+        def delete_object(self, *, Bucket: str, Key: str) -> None:
+            cleaned.append(Key)
+
+    class Client:
+        def CreateRecTask(self, _request):
+            match stage:
+                case TencentRefusalStage.SUBMISSION:
+                    raise refusal
+                case TencentRefusalStage.POLLING:
+                    return SimpleNamespace(Data=SimpleNamespace(TaskId=123))
+
+        def DescribeTaskStatus(self, _request):
+            raise refusal
+
+    recognizer = TencentRecognizer.__new__(TencentRecognizer)
+    recognizer.lang_code = "yue"
+    recognizer.engine_model_type = "16k_zh_large"
+    recognizer._poll_interval_s = 0.0
+    recognizer._bucket_name = "test-bucket"
+    recognizer._region = "ap-guangzhou"
+    recognizer._bucket = Bucket()
+    recognizer._asr_client = Client()
+    monkeypatch.setattr(_tencent_asr, "_recognizer", recognizer)
+    response = execute_asr_request_v2(
+        _make_provider_request(),
+        AsrExecutionHostV2(hk_tencent_runner=_tencent_asr.infer_tencent_asr_v2),
+    )
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code is expected
+    assert error_code in response.outcome.message
+    assert len(cleaned) == 1, "the uploaded media is cleaned up on refusal"
+    if expected is ProtocolErrorCodeV2.PROVIDER_QUOTA_EXHAUSTED:
+        assert "before retrying" in response.outcome.message
 
 
 def test_invalid_local_whisper_host_output_becomes_runtime_failure(

@@ -549,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn speaker_worker_failures_reach_the_existing_retry_and_memory_boundary() {
         use crate::error::ServerError;
-        use crate::runner::util::{classify_server_error, is_retryable_worker_failure};
+        use crate::runner::util::classify_server_error;
         use crate::scheduling::FailureCategory;
         use crate::worker::error::WorkerError;
         use crate::worker::memory_guard::MemoryGuardError;
@@ -570,7 +570,10 @@ mod tests {
         // retry policy. Memory pressure retains the original reservation data.
         for (worker, expected, retryable) in [
             (
-                WorkerError::Bootstrap("same detail".into()),
+                WorkerError::Bootstrap {
+                    message: "same detail".into(),
+                    worker: crate::worker::error::WorkerAfterError::Serves,
+                },
                 FailureCategory::WorkerBootstrap,
                 false,
             ),
@@ -611,7 +614,7 @@ mod tests {
                     total_mb: 3,
                 }),
                 FailureCategory::MemoryPressure,
-                false,
+                true,
             ),
             (
                 WorkerError::PoolShuttingDown,
@@ -632,7 +635,10 @@ mod tests {
             .expect_err("no evidence on dispatch failure");
             let server = ServerError::from(error);
             assert_eq!(classify_server_error(&server), expected);
-            assert_eq!(is_retryable_worker_failure(expected), retryable);
+            assert_eq!(
+                ((expected).retryability() == crate::types::scheduling::Retryability::Retryable),
+                retryable
+            );
             // The shared audio shell requires this variant as well as category.
             assert!(matches!(&server, ServerError::Worker(_)));
             if expected == FailureCategory::MemoryPressure {

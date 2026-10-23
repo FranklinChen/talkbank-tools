@@ -14,8 +14,8 @@ mod media;
 pub(super) use auto_tune::compute_job_workers;
 
 pub(crate) use error_classification::classify_server_error;
+pub(crate) use error_classification::classify_worker_error;
 pub(super) use error_classification::user_facing_error;
-pub(crate) use error_classification::{classify_worker_error, is_retryable_worker_failure};
 
 pub(crate) use file_status::{
     FileRunTracker, FileStage, FileTaskOutcome, ProgressSender, ProgressUpdate, RunnerEventSink,
@@ -256,9 +256,8 @@ mod tests {
         use batchalign_types::api::ReleasedCommand;
         use batchalign_types::command_spec::command_spec_for;
 
-        // In test environment PYTHON_GIL is not set to "0", so the process
-        // (conservative) budget table is used by default (not free-threaded).
-        let free_threaded = false;
+        // The GIL-enabled (process) budgets.
+        let free_threaded = batchalign_types::command_spec::PythonRuntime::Gil;
 
         let morphotag = command_spec_for(ReleasedCommand::Morphotag);
         assert_eq!(
@@ -287,7 +286,7 @@ mod tests {
             command: crate::api::ReleasedCommand::Align,
         });
         assert_eq!(native, FailureCategory::System);
-        assert!(!is_retryable_worker_failure(native));
+        assert!(!((native).retryability() == crate::types::scheduling::Retryability::Retryable));
         assert_eq!(
             classify_worker_error(&WorkerError::ProcessExited {
                 code: Some(9),
@@ -324,15 +323,31 @@ mod tests {
             classify_worker_error(&WorkerError::WorkerResponse("temporary".into())),
             FailureCategory::ProviderTransient
         );
-        assert!(is_retryable_worker_failure(FailureCategory::WorkerCrash));
-        assert!(is_retryable_worker_failure(FailureCategory::WorkerTimeout));
-        assert!(is_retryable_worker_failure(
-            FailureCategory::ProviderTransient
-        ));
-        assert!(!is_retryable_worker_failure(
-            FailureCategory::WorkerProtocol
-        ));
-        assert!(!is_retryable_worker_failure(FailureCategory::Validation));
+        assert!(
+            ((FailureCategory::WorkerCrash).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
+        assert!(
+            ((FailureCategory::WorkerTimeout).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
+        assert!(
+            ((FailureCategory::ProviderTransient).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
+        // A refused spawn and a device shortfall clear when memory frees.
+        assert!(
+            ((FailureCategory::MemoryPressure).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
+        assert!(
+            !((FailureCategory::WorkerProtocol).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
+        assert!(
+            !((FailureCategory::Validation).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     #[test]
@@ -368,14 +383,12 @@ mod tests {
     /// stops retrying.
     #[test]
     fn bootstrap_errors_are_non_retryable() {
-        let category = classify_worker_error(&WorkerError::Bootstrap(
-            "Failed to download Stanza resource catalog from \
-             https://raw.githubusercontent.com/stanfordnlp/stanza-resources/main: \
-             connection refused"
-                .into(),
-        ));
+        let category = classify_worker_error(&WorkerError::Bootstrap {
+            message: "Stanza has no pipeline for 'que': its catalog lacks the language".into(),
+            worker: crate::worker::error::WorkerAfterError::Exits,
+        });
         assert!(
-            !is_retryable_worker_failure(category),
+            !((category).retryability() == crate::types::scheduling::Retryability::Retryable),
             "Bootstrap-class errors must be terminal at the worker layer; \
              retrying a deterministic config error 3× is the bug shape this \
              test is pinning. Got category: {category:?}"

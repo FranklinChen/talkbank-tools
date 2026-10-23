@@ -5,7 +5,8 @@
 //! UTR matches every transcript word it can to a token of the ASR stream, and
 //! the token carries the time the recognizer heard it. A correspondence common
 //! to EVERY optimal lexical alignment, EXACT or CASE-INSENSITIVE, to a token
-//! holding exactly one word, is an admitted lexical observation. It is not an
+//! holding exactly that word (all its lexical units and nothing else), is an
+//! admitted lexical observation. It is not an
 //! independent proof of acoustic truth or transcript accuracy.
 //! That is a [`WordAnchor`]. Forced-alignment grouping uses anchors to cut an
 //! utterance whose window is longer than the engine's budget into pieces that
@@ -20,7 +21,11 @@
 //! * a match to a multi-word token (a provider SEGMENT rather than a word):
 //!   the token's interval covers all its words, so it does not say when THIS
 //!   word ended, and a cut at the token's end could fall after the next
-//!   transcript word had already begun.
+//!   transcript word had already begun;
+//! * in a language matched in characters, a word only some of whose
+//!   characters matched, or whose characters matched across tokens or inside
+//!   a token holding other characters too. A word is anchored only when one
+//!   token holds exactly its characters.
 //!
 //! Anchors come from the GLOBAL pass only. The two-pass strategy's second
 //! pass matches excluded overlap utterances inside local windows to recover
@@ -108,23 +113,58 @@ impl WordAnchor {
         self.end
     }
 
-    /// The anchor one UTR match provides: `None` for a fuzzy match or a
-    /// multi-word token (see the module docs). Original timing is owned by
-    /// the correspondence proof; no independent stream needs checking.
-    fn from_match(admitted: &AdmittedUtrWordMatch) -> Option<Self> {
-        let matched = admitted.matched();
-        match matched.relation {
-            UtrLexicalRelation::Exact
-            | UtrLexicalRelation::CaseInsensitive
-            | UtrLexicalRelation::TerminalPunctuation => {}
-            UtrLexicalRelation::Fuzzy { .. } => return None,
+    /// The anchors one utterance's admitted matches observe, in word order.
+    ///
+    /// A transcript word is anchored when EVERY one of its lexical units was
+    /// admitted, by exact, case-folded or terminal-punctuation equality, to
+    /// the units of ONE provider token, unit for unit in order, and that token
+    /// holds no other unit: the token is exactly the word. Its interval is
+    /// the token's. A word matched only in part, across tokens, inside a
+    /// longer token, or fuzzily, is not anchored: none of those says when
+    /// THIS word began and ended. For a word of one unit this is a single
+    /// exact match to a single-unit token. Original timing is owned by the
+    /// correspondence proof; no independent stream needs checking.
+    fn of_utterance<'m>(admitted: impl Iterator<Item = &'m AdmittedUtrWordMatch>) -> Vec<Self> {
+        let mut by_word: BTreeMap<usize, Vec<&AdmittedUtrWordMatch>> = BTreeMap::new();
+        for unit in admitted {
+            by_word
+                .entry(unit.matched().word.word_index())
+                .or_default()
+                .push(unit);
         }
-        let word = matched.word.word_index.fa_word();
-        // The producer bound original single-word timing into the proof.
-        admitted.word_timing().map(|timing| Self {
-            word,
-            start: FileMs::new(timing.start_ms),
-            end: FileMs::new(timing.end_ms),
+        by_word
+            .into_values()
+            .filter_map(|units| Self::of_word(&units))
+            .collect()
+    }
+
+    /// The anchor of one word's admitted units, if they observe the word.
+    fn of_word(units: &[&AdmittedUtrWordMatch]) -> Option<Self> {
+        let first = units.first()?;
+        let of_word = first.matched().word.of_word;
+        let token = first.matched().token.token_index;
+        let exactly_the_token = units.len() == of_word.parts().get()
+            && first.token_units() == of_word.parts()
+            && units.iter().enumerate().all(|(part, unit)| {
+                let matched = unit.matched();
+                let equal = match matched.relation {
+                    UtrLexicalRelation::Exact
+                    | UtrLexicalRelation::CaseInsensitive
+                    | UtrLexicalRelation::TerminalPunctuation => true,
+                    UtrLexicalRelation::Fuzzy { .. } => false,
+                };
+                equal
+                    && matched.word.of_word.part() == part
+                    && matched.token.token_index == token
+                    && matched.token.unit_index() == part
+            });
+        exactly_the_token.then(|| {
+            let timing = first.token_timing();
+            Self {
+                word: of_word.word_index().fa_word(),
+                start: FileMs::new(timing.start_ms),
+                end: FileMs::new(timing.end_ms),
+            }
         })
     }
 
@@ -337,10 +377,7 @@ impl AnchorIndex {
                 } => (
                     utterance_index,
                     alignable_words,
-                    admitted_matches
-                        .iter()
-                        .filter_map(WordAnchor::from_match)
-                        .collect::<Vec<_>>(),
+                    WordAnchor::of_utterance(admitted_matches.iter()),
                 ),
                 UtrUtteranceAlignmentEvidence::InteriorOnly {
                     utterance_index,
@@ -350,10 +387,7 @@ impl AnchorIndex {
                 } => (
                     utterance_index,
                     alignable_words,
-                    admitted_matches
-                        .iter()
-                        .filter_map(WordAnchor::from_match)
-                        .collect::<Vec<_>>(),
+                    WordAnchor::of_utterance(admitted_matches.iter()),
                 ),
                 // No match, so no observation to anchor at.
                 UtrUtteranceAlignmentEvidence::SelectedOnly {

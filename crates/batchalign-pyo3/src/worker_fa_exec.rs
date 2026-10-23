@@ -182,11 +182,10 @@ fn run_whisper(
             capture,
         })
         .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-        runner.bind(py).call1((audio_array, text.as_str(), context))
+        runner.call1(py, (audio_array, text.as_str(), context))?
     } else {
-        runner.bind(py).call1((audio_array, text.as_str()))
-    }
-    .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+        runner.call1(py, (audio_array, text.as_str()))?
+    };
     let mut result = parse_whisper_tokens(&response)?;
     if let Some(capture) = &fa_request.attention_capture {
         // The callback returns only timings. The bridge creates the receipt
@@ -256,8 +255,7 @@ fn run_indexed_fa(
         fa_request.audio_ref_id.as_ref(),
         "forced-alignment V2",
     )?;
-    let runner = runner
-        .ok_or_else(|| ExecuteFailure::ModelUnavailable(flavor.unavailable_message().to_owned()))?;
+    let runner = require_runner(runner, flavor.unavailable_message())?;
     let audio_array = audio.samples()?.into_pyarray(py);
     let response = match flavor {
         IndexedFaFlavor::Cantonese => {
@@ -265,15 +263,14 @@ fn run_indexed_fa(
                 .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
             let request_json = serde_json::to_string(fa_request)
                 .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-            runner
-                .bind(py)
-                .call1((audio_array, payload_json.as_str(), request_json.as_str()))
-                .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?
+            runner.call1(
+                py,
+                (audio_array, payload_json.as_str(), request_json.as_str()),
+            )?
         }
-        IndexedFaFlavor::Wave2vec | IndexedFaFlavor::Qwen3 => runner
-            .bind(py)
-            .call1((audio_array, payload.words.clone()))
-            .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?,
+        IndexedFaFlavor::Wave2vec | IndexedFaFlavor::Qwen3 => {
+            runner.call1(py, (audio_array, payload.words.clone()))?
+        }
     };
     Ok(TaskResultV2::IndexedWordTimingResult(
         parse_indexed_timings(&response, payload.words.len())?,

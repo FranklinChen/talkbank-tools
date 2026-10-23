@@ -1,7 +1,7 @@
 # Language Routing
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:56 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 How language information flows from CHAT headers through the entire
 batchalign3 pipeline. Covers resolution (precode → header → CLI),
@@ -95,7 +95,7 @@ Language is determined per utterance in this priority:
    declared.
 
 Implementation: `declared_languages()` in
-`crates/talkbank-transform/src/morphosyntax/payload.rs`. The job-level
+`crates/batchalign-transform/src/morphosyntax/payload.rs`. The job-level
 `lang` parameter
 serves only as a fallback when a file has no `@Languages` header.
 

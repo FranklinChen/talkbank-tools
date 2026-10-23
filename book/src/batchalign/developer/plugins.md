@@ -1,7 +1,7 @@
 # Plugin Architecture (Removed)
 
 **Status:** Current
-**Last updated:** 2026-03-26 14:05 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 > **Status: Removed (March 2026).** The plugin system (`batchalign.plugins`,
 > `PluginDescriptor`, `InferenceProvider`, `discover_plugins()`) was deleted.
@@ -38,7 +38,7 @@ To add a new inference engine, use the built-in engine pattern documented in
    of the supported built-in surface
 
 If you are adding a new command, do not reach for a plugin system. Put the
-released command in `crates/batchalign/src/commands/` and keep any
+released command in `crates/batchalign/src/recipe_runner/catalog.rs` and keep any
 algorithmic or orchestration logic in the owning Rust module (`compare.rs`,
 `benchmark.rs`, `transcribe/`, `fa/`, `morphosyntax/`, etc.). Engines remain
 providers for Rust-owned command flows; command composition does not happen

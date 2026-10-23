@@ -30,17 +30,14 @@ from batchalign.inference.coref import (
 )
 from batchalign.inference.morphosyntax import MorphosyntaxBatchItem
 from batchalign.inference.translate import TranslateBatchItem, TranslateInferenceRequest
-from batchalign.inference.utseg import UtsegBatchItem
+from batchalign.inference.utseg import UtsegBatchItem, UtsegInferenceRequest
 from batchalign.worker._infer_hosts import (
     build_morphosyntax_batch_infer_handler,
     build_translate_inference_handler,
-    build_utseg_batch_infer_handler,
+    build_utseg_inference_handler,
 )
 from batchalign.worker._types import BatchInferRequest, BatchInferResponse, InferTask
-from batchalign.worker._types_v2 import (
-    ExecuteRequestV2,
-    ExecuteResponseV2,
-)
+from batchalign.worker._types_v2 import ExecuteRequestV2, ExecuteResponseV2
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -76,7 +73,7 @@ class TextExecutionHostV2:
     """Injected text-task execution hooks for the live V2 path."""
 
     morphosyntax_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
-    utseg_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
+    utseg_runner: Callable[[UtsegInferenceRequest], BatchInferResponse] | None = None
     translate_runner: (
         Callable[[TranslateInferenceRequest], BatchInferResponse] | None
     ) = None
@@ -88,7 +85,7 @@ def build_default_text_execution_host_v2() -> TextExecutionHostV2:
 
     return TextExecutionHostV2(
         morphosyntax_runner=build_morphosyntax_batch_infer_handler(),
-        utseg_runner=build_utseg_batch_infer_handler(),
+        utseg_runner=build_utseg_inference_handler(),
         translate_runner=build_translate_inference_handler(),
         coref_runner=batch_infer_coref,
     )
@@ -100,9 +97,8 @@ def _morphosyntax_adapter(
     """Adapt one loaded morphosyntax runner to the Rust control plane's call.
 
     Owns the two things the Rust side cannot: parsing the frozen batch into
-    the typed batch items (pydantic ``ValidationError`` subclasses
-    ``ValueError``, which the Rust taxonomy reports as ``invalid_payload``,
-    preserving the old ladder), and the throttled progress callback the
+    the typed batch items (a pydantic ``ValidationError``, which the Rust
+    taxonomy reports as ``invalid_payload``), and the throttled progress callback the
     morphosyntax handler reads from worker state (thread-local-safe because
     the sequential stdio loop is single-threaded).
     """
@@ -142,20 +138,26 @@ def _morphosyntax_adapter(
 
 
 def _utseg_adapter(
-    runner: Callable[[BatchInferRequest], BatchInferResponse],
-) -> Callable[[str, str, bool], BatchInferResponse]:
-    """Adapt one loaded utseg runner to the Rust control plane's call."""
+    runner: Callable[[UtsegInferenceRequest], BatchInferResponse],
+) -> Callable[[str, str, str], BatchInferResponse]:
+    """Adapt one loaded utseg runner to the Rust control plane's call.
 
-    def _run(
-        lang: str, batch_json: str, allow_stanza_fallback: bool
-    ) -> BatchInferResponse:
+    ``segmenter`` is the wire spelling of the request's
+    ``UtsegSegmenterV2``; an unknown spelling fails pydantic validation here
+    (``ValidationError``, reported as ``invalid_payload``).
+    """
+
+    def _run(lang: str, batch_json: str, segmenter: str) -> BatchInferResponse:
         batch = UtsegPreparedBatchV2.model_validate_json(batch_json)
         return runner(
-            BatchInferRequest(
-                task=InferTask.UTSEG,
-                lang=lang,
-                items=[item.model_dump(mode="json") for item in batch.items],
-                allow_stanza_fallback=allow_stanza_fallback,
+            UtsegInferenceRequest.model_validate(
+                {
+                    "lang": lang,
+                    "segmenter": segmenter,
+                    "items": tuple(
+                        item.model_dump(mode="json") for item in batch.items
+                    ),
+                }
             )
         )
 

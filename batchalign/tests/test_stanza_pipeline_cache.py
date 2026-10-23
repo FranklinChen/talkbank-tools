@@ -51,12 +51,14 @@ def test_installing_within_capacity_evicts_nothing() -> None:
     first = _FakePipeline("eng")
     second = _FakePipeline("fra")
 
-    assert isinstance(cache.install("eng", first), InstalledWithoutEviction)
-    assert isinstance(cache.install("fra", second), InstalledWithoutEviction)
+    installed_first = cache.install("eng", first)
+    installed_second = cache.install("fra", second)
+    assert isinstance(installed_first, InstalledWithoutEviction)
+    assert isinstance(installed_second, InstalledWithoutEviction)
 
     assert len(cache) == 2
-    assert cache.get("eng") is first
-    assert cache.get("fra") is second
+    assert cache.get("eng") is installed_first.entry
+    assert cache.get("fra") is installed_second.entry
 
 
 def test_installing_a_third_pipeline_evicts_the_least_recently_used() -> None:
@@ -72,18 +74,18 @@ def test_installing_a_third_pipeline_evicts_the_least_recently_used() -> None:
     fra = _FakePipeline("fra")
     spa = _FakePipeline("spa")
 
-    cache.install("eng", eng)
+    eng_entry = cache.install("eng", eng).entry
     cache.install("fra", fra)
     # Use `eng` again, so `fra` is now the least recently used of the two.
-    assert cache.get("eng") is eng
+    assert cache.get("eng") is eng_entry
 
     outcome = cache.install("spa", spa)
 
     assert isinstance(outcome, InstalledEvicting)
     assert outcome.evicted == "fra"
     assert cache.get("fra") is None
-    assert cache.get("eng") is eng
-    assert cache.get("spa") is spa
+    assert cache.get("eng") is eng_entry
+    assert cache.get("spa") is outcome.entry
     assert len(cache) == STANZA_PIPELINE_CAPACITY
 
 
@@ -153,7 +155,8 @@ def test_loaded_returns_the_pipeline_and_its_context_together() -> None:
 
     entry = cache.loaded("eng")
     assert entry is not None
-    assert entry.nlp is nlp
+    with entry.calling() as called:
+        assert called is nlp
     assert entry.context is context
     assert cache.loaded("fra") is None
 
@@ -240,4 +243,19 @@ def test_load_slot_yields_an_already_resident_entry() -> None:
 
     with cache.load_slot("eng") as already:
         assert already is not None
-        assert already.nlp is nlp
+        with already.calling() as called:
+            assert called is nlp
+
+
+def test_a_pipeline_has_one_guard_and_the_cache_hands_out_that_one() -> None:
+    """The entry an install returns is the entry every lookup returns, so no
+    caller can wrap the same pipeline in a second guard and call it alongside
+    another thread holding the first. A reload is a NEW pipeline with its own
+    guard: two threads may run two instances, never one."""
+    cache = StanzaPipelineCache()
+    installed = cache.install("eng", _FakePipeline("eng"))
+    assert cache.loaded("eng") is installed.entry
+    assert cache["eng"] is installed.entry
+    reloaded = cache.install("eng", _FakePipeline("eng"))
+    assert cache.loaded("eng") is reloaded.entry
+    assert reloaded.entry is not installed.entry

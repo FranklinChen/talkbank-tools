@@ -1,7 +1,7 @@
 # eval
 
 **Status:** Current
-**Last updated:** 2026-10-14 10:48 EDT
+**Last updated:** 2026-10-24 21:57 EDT
 
 `batchalign3 eval` contains offline evaluators. They consume retained artifacts
 and never submit ordinary processing jobs.
@@ -39,7 +39,10 @@ nonpositive timing proposal.
 Schema 5 distinguishes `interior_only`: common-to-every-optimum words remain
 anchor evidence, but an unresolved first or last word prevents a whole-utterance
 timing proposal. `missing_endpoints` records `first`, `last` or `both`.
-In schema 11 the selected path is separately bounded: `inspection_refusal`
+Schema 12 records `lexical_units`, the projection both sides were matched in
+(characters for Cantonese, space-delimited words otherwise), and addresses
+each transcript unit by `unit_index` and its word (`word_index`, `part`,
+`parts`). Schema 13 names an ASR token's unit `unit_index` as well. In schema 11 the selected path is separately bounded: `inspection_refusal`
 replaces `matches` when diagnostic work or score storage is refused. Admitted
 common matches and timing proposals remain available independently. With no
 admitted match and unavailable inspection, `uninspected` does not claim lexical

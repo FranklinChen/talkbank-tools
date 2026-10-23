@@ -10,6 +10,7 @@ prepared handlers instead of re-deriving engine policy on every call.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from batchalign.inference.translate import TranslateInferenceRequest
 from batchalign.worker._types import (
@@ -20,6 +21,9 @@ from batchalign.worker._types import (
     ItemFailed,
     _state,
 )
+
+if TYPE_CHECKING:
+    from batchalign.inference.utseg import UtsegInferenceRequest
 
 
 def unsupported_batch_infer(message: str) -> BatchInferHandler:
@@ -42,7 +46,6 @@ def unsupported_batch_infer(message: str) -> BatchInferHandler:
 def build_morphosyntax_batch_infer_handler() -> BatchInferHandler:
     """Build the morphosyntax batch handler from loaded Stanza runtime state."""
     from batchalign.inference.morphosyntax import batch_infer_morphosyntax
-    from batchalign.runtime import FREE_THREADED
     from batchalign.worker._stanza_loading import load_stanza_models
 
     def _handler(req: BatchInferRequest) -> BatchInferResponse:
@@ -63,8 +66,6 @@ def build_morphosyntax_batch_infer_handler() -> BatchInferHandler:
         return batch_infer_morphosyntax(
             req=req,
             pipelines=cache,
-            nlp_lock=_state.stanza_nlp_lock,
-            free_threaded=FREE_THREADED,
             mwt_lexicon=req.mwt,
             progress_callback=_state.active_progress_callback,
             # The cache is bounded, so a batch spanning more languages than it
@@ -76,21 +77,39 @@ def build_morphosyntax_batch_infer_handler() -> BatchInferHandler:
     return _handler
 
 
-def build_utseg_batch_infer_handler() -> BatchInferHandler:
-    """Build the utterance-segmentation batch handler from loaded builder state."""
-    from batchalign.inference.utseg import batch_infer_utseg
+def build_utseg_inference_handler() -> Callable[
+    [UtsegInferenceRequest], BatchInferResponse
+]:
+    """Build the utterance-segmentation handler from loaded state.
 
-    def _handler(req: BatchInferRequest) -> BatchInferResponse:
-        """Run utterance segmentation using the configured Stanza config builder."""
-        if _state.utseg_config_builder is None:
-            return unsupported_batch_infer("No utseg config builder loaded")(req)
+    The request names its segmenter; the handler supplies what each one
+    reads: the loaded boundary model, and the Stanza pipeline loader (which
+    builds the language's constituency pipeline on first use).
+    """
+    from batchalign.inference.utseg import batch_infer_utseg
+    from batchalign.worker._stanza_loading import load_utseg_pipeline
+
+    def _handler(req: UtsegInferenceRequest) -> BatchInferResponse:
         return batch_infer_utseg(
             req=req,
-            build_stanza_config=_state.utseg_config_builder,
+            load_stanza_pipeline=load_utseg_pipeline,
             utterance_boundary_model=_state.utterance_boundary_model,
         )
 
     return _handler
+
+
+def build_utseg_batch_infer_handler() -> BatchInferHandler:
+    """The legacy batch-infer entry for utseg, which refuses.
+
+    A legacy ``BatchInferRequest`` cannot name a segmenter, and choosing one
+    here (from whatever this worker loaded) is the second decision the V2
+    request exists to remove. Utterance segmentation runs only through
+    worker protocol V2, whose request names the segmenter Rust admitted.
+    """
+    return unsupported_batch_infer(
+        "utseg runs only through worker protocol V2, whose request names its segmenter"
+    )
 
 
 def build_translate_inference_handler() -> Callable[
@@ -146,5 +165,6 @@ __all__ = [
     "build_translate_batch_infer_handler",
     "build_translate_inference_handler",
     "build_utseg_batch_infer_handler",
+    "build_utseg_inference_handler",
     "unsupported_batch_infer",
 ]

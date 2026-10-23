@@ -130,10 +130,12 @@ impl<'graph, 'source> RefusedBand<'graph, 'source> {
                 .map(|witness| witness.score())
                 .unwrap_or(0),
             },
-            refusal: LocalInterleavingRefusal::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::BandedSearch,
-                required_at_least: WORK_CELLS + 1,
-            },
+            refusal: LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::WorkBudgetExceeded {
+                    phase: LocalInterleavingWorkPhase::BandedSearch,
+                    required_at_least: WORK_CELLS + 1,
+                },
+            ),
         }
     }
 }
@@ -205,10 +207,10 @@ impl<'graph, 'source> Band<'graph, 'source> {
         // the complete required-work diagnostic, not the first over-limit row.
         if work > WORK_CELLS {
             return Ok(Err(refused(
-                LocalInterleavingRefusal::WorkBudgetExceeded {
+                LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
                     phase: LocalInterleavingWorkPhase::BandedSearch,
                     required_at_least: work,
-                },
+                }),
                 preparation,
                 witness.score(),
             )));
@@ -218,7 +220,7 @@ impl<'graph, 'source> Band<'graph, 'source> {
             .saturating_add(band.capacity.as_ref().map_or(0, ReferenceCapacity::cells));
         if band.scoring_cells > SCORE_CELLS {
             return Ok(Err(refused(
-                LocalInterleavingRefusal::MemoryBudgetExceeded,
+                LocalInterleavingRefusal::Budget(LocalInterleavingBudget::MemoryBudgetExceeded),
                 preparation,
                 witness.score(),
             )));
@@ -362,10 +364,12 @@ fn witness<C: WorkControl + ?Sized>(
     control: &C,
 ) -> Result<Result<(usize, usize), LocalInterleavingRefusal>, C::Error> {
     if m.max(n) > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-            phase: LocalInterleavingWorkPhase::FeasibleWitness,
-            required_at_least: m.max(n),
-        }));
+        return Ok(Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::WorkBudgetExceeded {
+                phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                required_at_least: m.max(n),
+            },
+        )));
     }
     let mut prefix = 0;
     while prefix < m.min(n) && relation.matches(prefix, prefix) {
@@ -385,13 +389,17 @@ fn witness<C: WorkControl + ?Sized>(
     let b = n - prefix - suffix;
     let work = a.saturating_mul(b).saturating_add(prefix + suffix + 2);
     if work > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-            phase: LocalInterleavingWorkPhase::FeasibleWitness,
-            required_at_least: work,
-        }));
+        return Ok(Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::WorkBudgetExceeded {
+                phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                required_at_least: work,
+            },
+        )));
     }
     if b.saturating_add(1) > SCORE_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
+        return Ok(Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::MemoryBudgetExceeded,
+        )));
     }
     let mut row = vec![0usize; b + 1];
     for i in prefix..m - suffix {

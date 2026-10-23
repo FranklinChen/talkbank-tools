@@ -10,6 +10,7 @@ use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::error::ServerError;
 use crate::infer_retry::Cancellation;
 use crate::pipeline::PipelineServices;
+use crate::stanza_registry::{Admitted, Morphosyntax};
 
 /// Owns the unchanged CHAT spans throughout secondary inference. There is no
 /// retokenizing transition: secondary analysis has no authority to rewrite CHAT.
@@ -49,7 +50,7 @@ impl FixedSpanBatch {
     async fn infer(
         self,
         services: PipelineServices<'_>,
-        lang: &crate::api::LanguageCode3,
+        lang: &Admitted<Morphosyntax>,
         cancellation: Cancellation<'_>,
     ) -> Result<SpanBatchOutcome, ServerError> {
         let items = self.items();
@@ -99,13 +100,6 @@ impl FixedSpanBatch {
                 .collect(),
         )
     }
-}
-
-fn secondary_dispatch_supported(
-    registry: Option<&crate::stanza_registry::StanzaRegistry>,
-    target_lang: &LanguageCode,
-) -> bool {
-    registry.is_some_and(|reg| reg.supports_morphosyntax(target_lang.as_ref()))
 }
 
 /// Retains identity and source until installation, not merely merge success.
@@ -224,6 +218,7 @@ fn install_spans(
 pub(crate) async fn dispatch_secondary_l2(
     chat_file: &mut ChatFile,
     deferred: Vec<l2::L2DeferredPosition>,
+    primary: &Admitted<Morphosyntax>,
     services: PipelineServices<'_>,
     filename: &str,
     cancellation: Cancellation<'_>,
@@ -232,6 +227,7 @@ pub(crate) async fn dispatch_secondary_l2(
         .supervise(Box::pin(dispatch_secondary_l2_active(
             chat_file,
             deferred,
+            primary,
             services,
             filename,
             cancellation,
@@ -242,6 +238,7 @@ pub(crate) async fn dispatch_secondary_l2(
 async fn dispatch_secondary_l2_active(
     chat_file: &mut ChatFile,
     deferred: Vec<l2::L2DeferredPosition>,
+    primary: &Admitted<Morphosyntax>,
     services: PipelineServices<'_>,
     filename: &str,
     cancellation: Cancellation<'_>,
@@ -291,31 +288,31 @@ async fn dispatch_secondary_l2_active(
             }
         };
 
-        let registry = services.pool.stanza_registry();
-        if !secondary_dispatch_supported(registry, &target_lang) {
-            tracing::info!(
-                lang = %lang3,
-                words = total_words,
-                registry_available = services.pool.stanza_registry().is_some(),
-                "L2 morphotag: unsupported or unavailable language"
-            );
-            for span in lang_spans {
-                let address = span_address(chat_file, &span);
-                if registry.is_some() {
-                    applied.secondary_mut().excluded(address);
-                } else {
-                    applied.secondary_mut().failed(
-                        address,
-                        Failure::RegistryUnavailable,
-                        "runtime language registry unavailable",
-                    );
+        // The registry that admitted the file's primary language decides,
+        // under the same requirement. A language it has no morphotag
+        // pipeline for is an exclusion (the words stay `L2|xxx`, reported as
+        // unsupported). There is no "no registry" case: the primary's proof
+        // holds the registry.
+        let secondary = match primary.sibling(&lang3) {
+            Ok(secondary) => secondary,
+            Err(gap) => {
+                tracing::info!(
+                    lang = %lang3,
+                    words = total_words,
+                    %gap,
+                    "L2 morphotag: no Stanza pipeline for this language; words stay L2|xxx"
+                );
+                for span in lang_spans {
+                    applied
+                        .secondary_mut()
+                        .excluded(span_address(chat_file, &span));
                 }
+                continue;
             }
-            continue;
-        }
+        };
 
         let outcome = FixedSpanBatch { spans: lang_spans }
-            .infer(services, &lang3, cancellation)
+            .infer(services, &secondary, cancellation)
             .await?;
         merge_responses(chat_file, outcome, &mut applied, &mut merged);
     }
@@ -326,12 +323,15 @@ async fn dispatch_secondary_l2_active(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use super::dispatch_secondary_l2;
 
-    use crate::stanza_registry::StanzaRegistry;
-    use crate::types::worker::StanzaLanguageProcessors;
-
-    use super::{dispatch_secondary_l2, secondary_dispatch_supported};
+    /// The file's admitted primary language, from a registry double.
+    fn english() -> crate::stanza_registry::Admitted<crate::stanza_registry::Morphosyntax> {
+        crate::stanza_registry::StanzaRegistry::admitting(&["eng"])
+            .shared()
+            .admit(&crate::api::LanguageCode3::eng())
+            .expect("the double admits English")
+    }
 
     fn planned_fixture() -> (crate::chat_ops::ChatFile, Vec<super::l2::L2SpanPlan>) {
         use crate::chat_ops::morphosyntax_ops::*;
@@ -359,7 +359,7 @@ mod tests {
             vec![response],
             &lang,
             TokenizationMode::Preserve,
-            &BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
         )
         .unwrap();
         let (_, deferred) = injection.into_parts();
@@ -401,6 +401,7 @@ mod tests {
                 } else {
                     super::Failure::ResponseCount
                 }
+                .into()
             );
             assert_eq!(
                 batchalign_transform::serialize::to_chat_string(&chat),
@@ -459,6 +460,7 @@ mod tests {
         let result = dispatch_secondary_l2(
             &mut chat,
             Vec::new(),
+            &english(),
             PipelineServices::new(&pool, &cache),
             "test.cha",
             Cancellation::Token(&token),
@@ -490,6 +492,7 @@ mod tests {
         let result = dispatch_secondary_l2(
             &mut chat,
             Vec::new(),
+            &english(),
             PipelineServices::new(&pool, &cache),
             "test.cha",
             Cancellation::NotWired {
@@ -502,55 +505,5 @@ mod tests {
             batchalign_transform::serialize::to_chat_string(&chat),
             before
         );
-    }
-
-    fn registry_with_caps() -> StanzaRegistry {
-        let mut caps = BTreeMap::new();
-        caps.insert(
-            "eng".to_string(),
-            StanzaLanguageProcessors {
-                alpha2: "en".to_string(),
-                processors: vec![
-                    "tokenize".to_string(),
-                    "pos".to_string(),
-                    "lemma".to_string(),
-                    "depparse".to_string(),
-                ],
-            },
-        );
-        caps.insert(
-            "pan".to_string(),
-            StanzaLanguageProcessors {
-                alpha2: "pa".to_string(),
-                processors: vec!["tokenize".to_string()],
-            },
-        );
-        StanzaRegistry::from_capabilities(&caps)
-    }
-
-    #[test]
-    fn secondary_dispatch_requires_runtime_registry() {
-        let lang = crate::chat_ops::LanguageCode::new("eng").expect("valid test language code");
-        assert!(
-            !secondary_dispatch_supported(None, &lang),
-            "without runtime Stanza capabilities, L2 dispatch must skip conservatively"
-        );
-    }
-
-    #[test]
-    fn secondary_dispatch_rejects_partial_processor_language() {
-        let registry = registry_with_caps();
-        let lang = crate::chat_ops::LanguageCode::new("pan").expect("valid test language code");
-        assert!(
-            !secondary_dispatch_supported(Some(&registry), &lang),
-            "tokenize-only languages must not reach L2 morphotag worker bootstrap"
-        );
-    }
-
-    #[test]
-    fn secondary_dispatch_accepts_full_morphosyntax_language() {
-        let registry = registry_with_caps();
-        let lang = crate::chat_ops::LanguageCode::new("eng").expect("valid test language code");
-        assert!(secondary_dispatch_supported(Some(&registry), &lang));
     }
 }

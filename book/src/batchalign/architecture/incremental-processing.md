@@ -1,7 +1,7 @@
 # Incremental Processing
 
 **Status:** Current
-**Last updated:** 2026-10-08 18:56 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Incremental processing allows batchalign to reprocess only the utterances that
 changed after a user edits a CHAT file, preserving cached dependent tiers
@@ -329,4 +329,4 @@ For FA with 8 groups where 1 contains a changed utterance:
 | `diff/preserve.rs` | talkbank-transform | `copy_dependent_tiers()` |
 | `morphosyntax/` | batchalign | `process_morphosyntax_incremental()` |
 | `fa/` | batchalign | `process_fa_incremental()` |
-| `runner/dispatch/infer_batched.rs`, `fa_pipeline.rs` | batchalign | Dispatch routing for incremental paths |
+| `execution/morphotag/mod.rs`, `fa_pipeline.rs` | batchalign | Dispatch routing for incremental paths |

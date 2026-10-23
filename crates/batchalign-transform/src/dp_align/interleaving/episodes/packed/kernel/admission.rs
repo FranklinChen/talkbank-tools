@@ -37,10 +37,10 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
     ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
         if !matches!(
             refused.refusal(),
-            LocalInterleavingRefusal::WorkBudgetExceeded {
+            LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
                 phase: LocalInterleavingWorkPhase::BandedSearch,
                 ..
-            }
+            })
         ) {
             return Ok(Err(refused.refusal()));
         }

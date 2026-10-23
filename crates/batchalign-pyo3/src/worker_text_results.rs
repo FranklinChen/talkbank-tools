@@ -4,6 +4,7 @@
 //! - Python caller: `batchalign/worker/_text_v2.py`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
+use batchalign_transform::tokenizer_realign::RealignLanguage;
 use batchalign_types::worker::{BatchInferResponse, InferResponse, ItemOutcome};
 use batchalign_types::worker_v2::{
     CorefItemResultV2, CorefResultV2, MorphosyntaxItemResultV2, MorphosyntaxResultV2,
@@ -116,6 +117,7 @@ mod cue_projection_tests {
                 raw_sentences,
                 model,
                 repairs,
+                feature_repairs,
             } = item
             else {
                 return Err("projected model result was not analyzed".into());
@@ -132,6 +134,7 @@ mod cue_projection_tests {
             )?;
             assert_eq!(mor.len(), 2, "two lexical tokens even with MWT components");
             assert!(gra.len() >= 3, "relations include the synthetic terminator");
+            assert!(feature_repairs.is_empty());
             if index == 0 {
                 assert!(repairs.is_empty());
             } else {
@@ -189,6 +192,67 @@ pub(crate) fn normalize_coref_result(
 // Token alignment (used by Python morphosyntax tokenizer realignment)
 // ---------------------------------------------------------------------------
 
+/// Python's view of [`RealignLanguage`]: the same four values, read from a
+/// pipeline's Stanza code by `RealignLanguage.of_stanza_code`, the one
+/// mapping from code to language (Rust's). Python holds one per pipeline in
+/// its `TokenizerContext` and hands it back to [`align_tokens`].
+///
+/// A mirror rather than the transform crate's enum itself, because that crate
+/// does not depend on PyO3; both conversions are exhaustive matches, so a
+/// variant added on either side fails to compile until the other has it.
+#[pyclass(
+    eq,
+    frozen,
+    from_py_object,
+    module = "batchalign_core",
+    name = "RealignLanguage"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PyRealignLanguage {
+    /// Stanza `en`.
+    English,
+    /// Stanza `fr`.
+    French,
+    /// Stanza `it`.
+    Italian,
+    /// Every other Stanza language.
+    Other,
+}
+
+impl From<RealignLanguage> for PyRealignLanguage {
+    fn from(language: RealignLanguage) -> Self {
+        match language {
+            RealignLanguage::English => Self::English,
+            RealignLanguage::French => Self::French,
+            RealignLanguage::Italian => Self::Italian,
+            RealignLanguage::Other => Self::Other,
+        }
+    }
+}
+
+impl From<PyRealignLanguage> for RealignLanguage {
+    fn from(language: PyRealignLanguage) -> Self {
+        match language {
+            PyRealignLanguage::English => Self::English,
+            PyRealignLanguage::French => Self::French,
+            PyRealignLanguage::Italian => Self::Italian,
+            PyRealignLanguage::Other => Self::Other,
+        }
+    }
+}
+
+#[pymethods]
+impl PyRealignLanguage {
+    /// The realignment language of a Stanza language code; an empty code
+    /// raises `ValueError`.
+    #[staticmethod]
+    fn of_stanza_code(code: &str) -> PyResult<Self> {
+        RealignLanguage::of_stanza_code(code)
+            .map(Self::from)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    }
+}
+
 /// Align Stanza tokenizer output back to original CHAT words.
 ///
 /// Returns a Python list: plain `str` for unchanged tokens,
@@ -198,13 +262,14 @@ pub(crate) fn align_tokens(
     py: Python<'_>,
     original_words: Vec<String>,
     stanza_tokens: Vec<String>,
-    alpha2: String,
+    language: PyRealignLanguage,
 ) -> PyResult<Py<pyo3::types::PyList>> {
     use batchalign_transform::tokenizer_realign::{self, PatchedToken};
     use pyo3::types::{PyBool, PyList, PyString, PyTuple};
 
+    let language = RealignLanguage::from(language);
     let patched = py
-        .detach(|| tokenizer_realign::align_tokens(&original_words, &stanza_tokens, &alpha2))
+        .detach(|| tokenizer_realign::align_tokens(&original_words, &stanza_tokens, language))
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
     let result = PyList::empty(py);

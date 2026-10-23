@@ -106,9 +106,31 @@ pub fn lookup(alpha_3: &str) -> Iso639Part1Lookup {
     }
 }
 
+/// Every pair the registry defines, in three-letter-code order.
+///
+/// For a consumer that must enumerate the standard rather than look one code
+/// up: the Python worker's Stanza capability table, which reads it through
+/// the PyO3 extension (`batchalign_core.ISO_639_1_PAIRS`) so that its ISO
+/// 639-3 to Stanza mapping rests on this table and not on a second copy.
+pub fn pairs() -> impl ExactSizeIterator<Item = (&'static str, Iso639Part1)> {
+    table::ISO_639_3_TO_PART1
+        .iter()
+        .map(|&(alpha_3, alpha_2)| (alpha_3, Iso639Part1(alpha_2)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enumeration and lookup are the same table: every enumerated pair is
+    /// what the lookup answers for its code.
+    #[test]
+    fn every_enumerated_pair_is_what_the_lookup_answers() {
+        for (alpha_3, part1) in pairs() {
+            assert_eq!(lookup(alpha_3), Iso639Part1Lookup::Paired(part1));
+        }
+        assert_eq!(pairs().count(), table::ISO_639_3_TO_PART1.len());
+    }
 
     /// The generator emits the table sorted; the binary search is only correct
     /// if that holds, and a hand edit is exactly what would break it.

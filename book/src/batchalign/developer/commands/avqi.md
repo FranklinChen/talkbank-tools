@@ -1,7 +1,7 @@
 # avqi: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-05-02 08:18 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Implementation guide for the `avqi` command. For user-facing documentation,
 see [User Guide: avqi](../../user-guide/commands/avqi.md).
@@ -13,10 +13,10 @@ see [User Guide: avqi](../../user-guide/commands/avqi.md).
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
 | CLI args | `crates/batchalign/src/cli/args/commands.rs`: `AvqiArgs` | Positional input/output dirs, lang |
-| Command definition | `crates/batchalign/src/commands/avqi.rs` | `CommandDefinition` impl, paired file discovery |
+| Command declaration | `crates/batchalign/src/recipe_runner/catalog.rs` | Catalog entry and `AVQI_RECIPE` |
 | Audio prep | Shared media prep | Converts `.cs.*` and `.sv.*` to typed PCM artifacts |
 | Worker IPC | `batchalign/inference/avqi.py`: `calculate_avqi()` | parselmouth + torchaudio analysis |
-| Output writer | `crates/batchalign/src/commands/avqi.rs` | Writes `.avqi.txt` from typed metrics struct |
+| Pair admission and output | `crates/batchalign/src/runner/dispatch/media_analysis_v2.rs` | `AvqiSourcePair` resolves the pair; `AdmittedAvqiReport` admits the response and formats `.avqi.txt` |
 
 ---
 

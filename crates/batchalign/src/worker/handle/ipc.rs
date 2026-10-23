@@ -298,7 +298,7 @@ impl WorkerHandle {
                     };
                     dump_failed_ipc_request(
                         self.pid,
-                        &self.config.bootstrap_label(),
+                        &self.config,
                         &request_json_for_dump,
                         &err,
                         None,
@@ -328,7 +328,7 @@ impl WorkerHandle {
                     let err = failure.into_worker_error();
                     dump_failed_ipc_request(
                         self.pid,
-                        &self.config.bootstrap_label(),
+                        &self.config,
                         &request_json_for_dump,
                         &err,
                         None,
@@ -344,7 +344,7 @@ impl WorkerHandle {
                     ));
                     dump_failed_ipc_request(
                         self.pid,
-                        &self.config.bootstrap_label(),
+                        &self.config,
                         &request_json_for_dump,
                         &err,
                         Some(&format!("{other:?}")),

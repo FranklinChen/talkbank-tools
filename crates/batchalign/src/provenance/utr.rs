@@ -132,6 +132,84 @@ impl UtrFallbackPermit {
 enum RecoveryNeed {
     Satisfied,
     Remaining,
+    /// The failure is one no request to the same engine can get past, so
+    /// this attempt grants no fallback permission.
+    Withheld(FallbackWithheld),
+}
+
+/// Why a failed UTR pass withholds the same-engine fallback.
+///
+/// The fallback is the SAME engine over a different request (narrower
+/// windows), so it is worth running exactly when the failure belonged to the
+/// request. These are the failures that belong to the engine or the machine
+/// instead, where retrying cannot succeed and would only spend a second
+/// paid call or a second model load to report the same thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackWithheld {
+    /// The provider account's quota is exhausted until an account holder
+    /// restores it.
+    QuotaExhausted,
+    /// The provider refuses the account itself (key, permission, credit);
+    /// the fallback is sent from the same account.
+    AccountRefused,
+    /// This machine is refused the engine's pinned model (a gated repository,
+    /// a missing token); the fallback asks for the same model.
+    ModelAccessDenied,
+    /// The engine's worker cannot start: a model that will not load, a
+    /// catalog that will not download, a runtime or model identity that
+    /// disagrees with the server's. Deterministic across retries, and the
+    /// fallback is dispatched to that same worker key.
+    WorkerBootstrap,
+}
+
+impl std::fmt::Display for FallbackWithheld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::QuotaExhausted => "the provider quota is exhausted",
+            Self::AccountRefused => "the provider refuses the account",
+            Self::ModelAccessDenied => "this machine is refused the engine's model",
+            Self::WorkerBootstrap => "the engine's worker cannot start",
+        })
+    }
+}
+
+/// The fallback policy, stated once as one exhaustive match over the
+/// failure's category, so a new category must decide here whether it
+/// belongs to the request (fallback permitted) or to the engine (withheld).
+fn fallback_after(category: FailureCategory) -> RecoveryNeed {
+    match category {
+        FailureCategory::ProviderQuotaExhausted => {
+            RecoveryNeed::Withheld(FallbackWithheld::QuotaExhausted)
+        }
+        FailureCategory::ProviderAccountRefused => {
+            RecoveryNeed::Withheld(FallbackWithheld::AccountRefused)
+        }
+        FailureCategory::ModelAccessDenied => {
+            RecoveryNeed::Withheld(FallbackWithheld::ModelAccessDenied)
+        }
+        FailureCategory::WorkerBootstrap => {
+            RecoveryNeed::Withheld(FallbackWithheld::WorkerBootstrap)
+        }
+        // A failure of THIS request says nothing about the fallback's
+        // different one: a terminal provider failure (a 4xx, a failed job,
+        // an undecodable response, invalid intervals), a refused or
+        // malformed exchange, a crash, a timeout, memory pressure (narrower
+        // windows need less), a transient fault.
+        FailureCategory::ProviderTerminal
+        | FailureCategory::Validation
+        | FailureCategory::ParseError
+        | FailureCategory::InputMissing
+        | FailureCategory::EvidenceUnavailable
+        | FailureCategory::AnalysisUnavailable
+        | FailureCategory::WorkerCrash
+        | FailureCategory::WorkerTimeout
+        | FailureCategory::WorkerProtocol
+        | FailureCategory::ProviderTransient
+        | FailureCategory::LocalRuntime
+        | FailureCategory::MemoryPressure
+        | FailureCategory::Cancelled
+        | FailureCategory::System => RecoveryNeed::Remaining,
+    }
 }
 
 impl UtrContribution {
@@ -151,6 +229,17 @@ impl UtrContribution {
     ) -> Result<UtrFallback, UtrCancelled> {
         Ok(match self.record(engine, UtrPass::Initial, result)? {
             RecoveryNeed::Satisfied => UtrFallback::Unavailable,
+            RecoveryNeed::Withheld(reason) => {
+                use crate::options::EngineBackend;
+                // The failed pass is already in the shortfalls; this says why
+                // no second pass follows it.
+                tracing::info!(
+                    engine = engine.wire_name(),
+                    %reason,
+                    "same-engine UTR fallback withheld"
+                );
+                UtrFallback::Unavailable
+            }
             RecoveryNeed::Remaining => UtrFallback::Available(UtrFallbackPermit {
                 engine: engine.clone(),
             }),
@@ -188,10 +277,12 @@ impl UtrContribution {
             }
             Err(ServerError::Cancelled) => Err(UtrCancelled),
             Err(error) => {
+                let category = crate::runner::util::classify_server_error(&error);
+                let need = fallback_after(category);
                 let failure = UtrFailure {
                     engine: engine.clone(),
                     pass,
-                    category: crate::runner::util::classify_server_error(&error),
+                    category,
                     detail: error.to_string().chars().take(500).collect(),
                 };
                 match self {
@@ -204,7 +295,7 @@ impl UtrContribution {
                         });
                     }
                 }
-                Ok(RecoveryNeed::Remaining)
+                Ok(need)
             }
         }
     }

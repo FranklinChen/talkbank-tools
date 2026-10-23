@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import pytest
 
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._tokenizer_realign import (
     TokenizerContext,
     make_tokenizer_postprocessor,
@@ -419,8 +420,8 @@ class TestPostprocessorEmitsMWTHint:
         ],
     )
     def test_contraction_receives_hint_true(self, contracted, stanza_split):
-        ctx = TokenizerContext()
-        pp = make_tokenizer_postprocessor(ctx, alpha2="en")
+        ctx = TokenizerContext(StanzaCode("en"))
+        pp = make_tokenizer_postprocessor(ctx)
         ctx.original_words = [[contracted]]
         try:
             out = pp([stanza_split])
@@ -487,7 +488,6 @@ class TestBatchInferPreservePayloadToRust:
         bug). After the fix, Range tokens survive, so the assertion is
         inverted.
         """
-        import threading
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax
         from batchalign.tests._morphosyntax_batch_items import (
@@ -512,8 +512,6 @@ class TestBatchInferPreservePayloadToRust:
         response = batch_infer_morphosyntax(
             req,
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
-            nlp_lock=threading.Lock(),
-            free_threaded=False,
         )
 
         first_sent = first_raw_sentence(response)

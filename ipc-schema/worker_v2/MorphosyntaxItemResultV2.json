@@ -7,6 +7,13 @@
       "description": "Stanza analyzed the item.",
       "type": "object",
       "properties": {
+        "feature_repairs": {
+          "description": "Every feature value the worker removed from `raw_sentences`, in\nthe order it removed them. Empty means it removed nothing.\nRequired, with no serde default, for `repairs`' reason.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UdFeatureRepairV2"
+          }
+        },
         "kind": {
           "type": "string",
           "const": "analyzed"
@@ -32,7 +39,8 @@
         "kind",
         "raw_sentences",
         "model",
-        "repairs"
+        "repairs",
+        "feature_repairs"
       ]
     },
     {
@@ -112,10 +120,52 @@
         }
       ]
     },
+    "PaddingValue": {
+      "description": "A feature value that is model padding: an angle-bracketed placeholder such as <PAD> or <UNK>.",
+      "type": "string",
+      "pattern": "^<.*>$"
+    },
     "ReportedEngineName": {
       "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
       "type": "string",
       "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "UdFeatureRepairKindV2": {
+      "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_feature_value"
+        }
+      ]
+    },
+    "UdFeatureRepairV2": {
+      "description": "One feature value a worker removed from an analysis it returned.\n\nThe worker is the only witness, as for a relation repair: the removed value\nis not in the analysis the server receives. Each removed value is its own\nrepair, so `Case=Nom,<PAD>` losing `<PAD>` is one repair and keeps `Nom`.",
+      "type": "object",
+      "properties": {
+        "feature": {
+          "description": "The feature whose value it was (`Case`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which repair this is.",
+          "$ref": "#/$defs/UdFeatureRepairKindV2"
+        },
+        "removed_value": {
+          "description": "The removed value, verbatim (`<PAD>`): padding, by type.",
+          "$ref": "#/$defs/PaddingValue"
+        },
+        "word": {
+          "description": "Surface form of the word the value was removed from.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "feature",
+        "removed_value"
+      ]
     },
     "UdRelationRepairKindV2": {
       "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",

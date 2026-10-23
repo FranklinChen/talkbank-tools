@@ -116,20 +116,35 @@ pub enum FailureCategory {
     WorkerTimeout,
     /// Worker IPC or protocol framing failed.
     WorkerProtocol,
-    /// Worker reported a deterministic bootstrap-class failure (model load,
-    /// catalog download, missing language pack, package import) that will
+    /// Worker reported a deterministic bootstrap-class failure (a model that
+    /// will not load, a missing language pack, a package import) that will
     /// recur identically across retries. Non-retryable; the user-facing
-    /// message is the verbatim error from the worker (network unreachable,
-    /// disk full, authentication required, etc., all actionable). The
-    /// historical reason this category exists: deterministic bootstrap
-    /// failures classified as transient crashes produced multi-GB log
-    /// explosions when retried 3× with a full traceback per attempt.
+    /// message is the verbatim error from the worker (all actionable). A
+    /// download that failed in transit is not this category: it is
+    /// `ProviderTransient`, retried. The historical reason this category
+    /// exists: deterministic bootstrap failures classified as transient
+    /// crashes produced multi-GB log explosions when retried 3× with a full
+    /// traceback per attempt.
     WorkerBootstrap,
+    /// A local model reported an unclassified runtime failure. The cause is
+    /// unknown, so retry within the existing budget without claiming memory
+    /// pressure, a remote outage or a deterministic input defect.
+    LocalRuntime,
     /// Provider/backend returned a failure that may succeed on retry.
     ProviderTransient,
     /// Provider/backend returned a failure that should not be retried.
     ProviderTerminal,
-    /// Scheduling was blocked by memory pressure.
+    /// The provider's account quota or resource pack is exhausted: no request
+    /// succeeds until an account holder restores it. Not retried, and it
+    /// withholds the same-engine UTR fallback.
+    ProviderQuotaExhausted,
+    /// The provider refuses the account itself: its key is not accepted, the
+    /// account is not permitted, or it has no credit left. Not retried, and
+    /// it withholds the same-engine UTR fallback, as an exhausted quota does.
+    ProviderAccountRefused,
+    /// Memory ran short: a worker spawn the memory guard refused, or a
+    /// device that ran out of memory running a request. Retried after a
+    /// backoff, since memory frees as concurrent work ends.
     MemoryPressure,
     /// Work was cancelled intentionally.
     Cancelled,
@@ -147,6 +162,29 @@ pub enum FailureCategory {
 }
 
 impl FailureCategory {
+    /// Every category, so the spelling table below is the only one: parsing
+    /// reads it, and a test holds serde's spelling to it.
+    pub const ALL: [Self; 18] = [
+        Self::Validation,
+        Self::ParseError,
+        Self::InputMissing,
+        Self::EvidenceUnavailable,
+        Self::AnalysisUnavailable,
+        Self::WorkerCrash,
+        Self::WorkerTimeout,
+        Self::WorkerProtocol,
+        Self::WorkerBootstrap,
+        Self::LocalRuntime,
+        Self::ProviderTransient,
+        Self::ProviderTerminal,
+        Self::ProviderQuotaExhausted,
+        Self::ProviderAccountRefused,
+        Self::MemoryPressure,
+        Self::Cancelled,
+        Self::System,
+        Self::ModelAccessDenied,
+    ];
+
     /// Stable wire spelling, suitable for bounded structured provenance.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -159,8 +197,11 @@ impl FailureCategory {
             Self::WorkerTimeout => "worker_timeout",
             Self::WorkerProtocol => "worker_protocol",
             Self::WorkerBootstrap => "worker_bootstrap",
+            Self::LocalRuntime => "local_runtime",
             Self::ProviderTransient => "provider_transient",
             Self::ProviderTerminal => "provider_terminal",
+            Self::ProviderQuotaExhausted => "provider_quota_exhausted",
+            Self::ProviderAccountRefused => "provider_account_refused",
             Self::MemoryPressure => "memory_pressure",
             Self::Cancelled => "cancelled",
             Self::System => "system",
@@ -179,24 +220,10 @@ impl std::str::FromStr for FailureCategory {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "validation" => Ok(Self::Validation),
-            "parse_error" => Ok(Self::ParseError),
-            "input_missing" => Ok(Self::InputMissing),
-            "evidence_unavailable" => Ok(Self::EvidenceUnavailable),
-            "analysis_unavailable" => Ok(Self::AnalysisUnavailable),
-            "worker_crash" => Ok(Self::WorkerCrash),
-            "worker_timeout" => Ok(Self::WorkerTimeout),
-            "worker_protocol" => Ok(Self::WorkerProtocol),
-            "worker_bootstrap" => Ok(Self::WorkerBootstrap),
-            "provider_transient" => Ok(Self::ProviderTransient),
-            "provider_terminal" => Ok(Self::ProviderTerminal),
-            "memory_pressure" => Ok(Self::MemoryPressure),
-            "cancelled" => Ok(Self::Cancelled),
-            "system" => Ok(Self::System),
-            "model_access_denied" => Ok(Self::ModelAccessDenied),
-            other => Err(format!("unknown FailureCategory: {other}")),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|category| category.as_str() == s)
+            .ok_or_else(|| format!("unknown FailureCategory: {s}"))
     }
 }
 
@@ -329,6 +356,80 @@ impl RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self::conservative()
+    }
+}
+
+/// Whether another attempt could succeed after a failure of a category: the
+/// one statement of the retry set, matched exhaustively, so a new category
+/// must decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retryability {
+    /// Another attempt may succeed: a crash, a timeout, a transient provider
+    /// or download failure, memory pressure (it clears as concurrent work
+    /// releases memory).
+    Retryable,
+    /// The same attempt fails the same way again.
+    Final,
+}
+
+impl FailureCategory {
+    /// Whether another attempt could succeed after a failure of this
+    /// category.
+    pub const fn retryability(self) -> Retryability {
+        match self {
+            Self::WorkerCrash
+            | Self::WorkerTimeout
+            | Self::ProviderTransient
+            | Self::LocalRuntime
+            | Self::MemoryPressure => Retryability::Retryable,
+            Self::Validation
+            | Self::ParseError
+            | Self::InputMissing
+            | Self::EvidenceUnavailable
+            | Self::AnalysisUnavailable
+            | Self::WorkerProtocol
+            | Self::WorkerBootstrap
+            | Self::ProviderTerminal
+            | Self::ProviderQuotaExhausted
+            | Self::ProviderAccountRefused
+            | Self::Cancelled
+            | Self::System
+            | Self::ModelAccessDenied => Retryability::Final,
+        }
+    }
+}
+
+/// What a retry policy decides after a failed attempt: the transition from a
+/// classified failure to the next step, so a caller acts on the decision
+/// rather than combining a retryable flag with a budget test of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextAttempt {
+    /// Attempt again after this backoff.
+    RetryAfter(DurationMs),
+    /// Stop: the failure is final, or the retry budget is spent.
+    Stop(StopReason),
+}
+
+/// Why a retry policy stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// The failure's category is final.
+    Final,
+    /// The category is retryable and every attempt the policy allows is spent.
+    BudgetSpent,
+}
+
+impl RetryPolicy {
+    /// The decision after attempt `attempt_number` (1-based) failed with
+    /// `category`.
+    pub fn after_failure(&self, attempt_number: u32, category: FailureCategory) -> NextAttempt {
+        match category.retryability() {
+            Retryability::Final => NextAttempt::Stop(StopReason::Final),
+            Retryability::Retryable if attempt_number < self.max_attempts => {
+                NextAttempt::RetryAfter(self.backoff_for_retry(attempt_number))
+            }
+            Retryability::Retryable => NextAttempt::Stop(StopReason::BudgetSpent),
+        }
     }
 }
 
@@ -514,24 +615,33 @@ mod tests {
         assert!(serde_json::from_str::<LeaseRecord>(&inverted).is_err());
     }
 
+    /// The transition from a classified failure to the next step: retry
+    /// after the policy's backoff while budget remains, stop when the
+    /// category is final or the budget is spent.
+    #[test]
+    fn a_retry_policy_decides_the_next_attempt() {
+        let policy = RetryPolicy::conservative();
+        assert_eq!(
+            policy.after_failure(1, FailureCategory::WorkerCrash),
+            NextAttempt::RetryAfter(policy.backoff_for_retry(1))
+        );
+        assert_eq!(
+            policy.after_failure(2, FailureCategory::MemoryPressure),
+            NextAttempt::RetryAfter(policy.backoff_for_retry(2))
+        );
+        assert_eq!(
+            policy.after_failure(3, FailureCategory::ProviderTransient),
+            NextAttempt::Stop(StopReason::BudgetSpent)
+        );
+        assert_eq!(
+            policy.after_failure(1, FailureCategory::WorkerBootstrap),
+            NextAttempt::Stop(StopReason::Final)
+        );
+    }
+
     #[test]
     fn failure_category_roundtrip() {
-        for category in [
-            FailureCategory::Validation,
-            FailureCategory::ParseError,
-            FailureCategory::InputMissing,
-            FailureCategory::EvidenceUnavailable,
-            FailureCategory::AnalysisUnavailable,
-            FailureCategory::WorkerCrash,
-            FailureCategory::WorkerTimeout,
-            FailureCategory::WorkerProtocol,
-            FailureCategory::ProviderTransient,
-            FailureCategory::ProviderTerminal,
-            FailureCategory::MemoryPressure,
-            FailureCategory::Cancelled,
-            FailureCategory::System,
-            FailureCategory::ModelAccessDenied,
-        ] {
+        for category in FailureCategory::ALL {
             let json = serde_json::to_string(&category).unwrap();
             let back: FailureCategory = serde_json::from_str(&json).unwrap();
             assert_eq!(category, back);

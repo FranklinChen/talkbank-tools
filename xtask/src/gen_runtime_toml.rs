@@ -7,7 +7,7 @@
 //! reads at import time. The `make generated-check` target invokes
 //! this with `--check` to fail CI on drift.
 
-use batchalign_types::command_spec::{COMMAND_SPECS, GilProcessNeed};
+use batchalign_types::command_spec::{COMMAND_SPECS, PythonRuntime};
 use batchalign_types::worker_profile::WorkerProfile;
 use std::path::PathBuf;
 
@@ -50,8 +50,8 @@ keys = [\"asr\", \"batch_size\", \"fa\", \"feature_set\", \"utr\"]
 ///   3. `[worker_caps]`, `[memory]`      (verbatim from template)
 ///   4. `[gpu_heavy_commands]`           (filter `CommandSpec.profile == Gpu`)
 ///   5. `[process_commands]`             (filter `CommandSpec.gil_process_need`)
-///   6. `[command_base_mb.process]`      (from `CommandSpec.base_mb_process`)
-///   7. `[command_base_mb.threaded]`     (from `CommandSpec.base_mb_threaded`)
+///   6. `[command_base_mb.process]`      (`CommandSpec::base_mb_for_runtime(PythonRuntime::Gil)`)
+///   7. `[command_base_mb.threaded]`     (`CommandSpec::base_mb_for_runtime(PythonRuntime::FreeThreaded)`)
 ///   8. `[known_engine_keys]`            (verbatim)
 pub fn generate_runtime_toml() -> String {
     let mut out = String::new();
@@ -80,48 +80,40 @@ pub fn generate_runtime_toml() -> String {
 
     // [process_commands]
     out.push_str("\n[process_commands]\n");
-    out.push_str("# Non-free-threaded: CPU-bound commands needing process isolation.\n");
-    let gil_list: Vec<String> = COMMAND_SPECS
+    out.push_str(
+        "# Commands needing process isolation in every runtime: native-code commands,\n\
+         # and the Stanza commands, whose workers serve one request per process.\n",
+    );
+    let process_list: Vec<String> = COMMAND_SPECS
         .iter()
-        .filter(|s| {
-            matches!(
-                s.gil_process_need,
-                GilProcessNeed::Always | GilProcessNeed::OnlyInGilRuntime
-            )
-        })
+        .filter(|s| s.gil_process_need.needs_process())
         .map(|s| format!("\"{}\"", s.name.as_str()))
         .collect();
-    out.push_str(&format!("gil = [{}]\n", gil_list.join(", ")));
+    out.push_str(&format!("commands = [{}]\n", process_list.join(", ")));
 
-    out.push_str("# Free-threaded: only native-code commands need process isolation.\n");
-    let ft_list: Vec<String> = COMMAND_SPECS
-        .iter()
-        .filter(|s| matches!(s.gil_process_need, GilProcessNeed::Always))
-        .map(|s| format!("\"{}\"", s.name.as_str()))
-        .collect();
-    out.push_str(&format!("free_threaded = [{}]\n", ft_list.join(", ")));
-
-    // [command_base_mb.process]
+    // [command_base_mb.process] and [command_base_mb.threaded]: both from
+    // `CommandSpec::base_mb_for_runtime`, so a process-isolated command's
+    // threaded figure is its process budget, the one it runs with.
     out.push_str("\n# Per-command base memory (MB) for process workers (non-free-threaded).\n");
     out.push_str("[command_base_mb.process]\n");
     for spec in COMMAND_SPECS {
         out.push_str(&format!(
             "{} = {}\n",
             spec.name.as_str(),
-            spec.base_mb_process.0
+            spec.base_mb_for_runtime(PythonRuntime::Gil).0
         ));
     }
 
-    // [command_base_mb.threaded]
     out.push_str(
-        "\n# Per-command base memory (MB) for thread workers (free-threaded, shared models).\n",
+        "\n# Per-command base memory (MB) in a free-threaded runtime: thread workers\n\
+         # sharing models, and process workers for the process-isolated commands.\n",
     );
     out.push_str("[command_base_mb.threaded]\n");
     for spec in COMMAND_SPECS {
         out.push_str(&format!(
             "{} = {}\n",
             spec.name.as_str(),
-            spec.base_mb_threaded.0
+            spec.base_mb_for_runtime(PythonRuntime::FreeThreaded).0
         ));
     }
 

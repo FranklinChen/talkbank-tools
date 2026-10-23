@@ -29,17 +29,21 @@ impl<'source> SearchProjection<'source> {
         // Even entirely empty projected turns need their boundary nodes.
         // Refuse this shape before allocating either layout or lifting maps.
         if turns.len().saturating_add(1) > SCORE_CELLS / 6 {
-            return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
+            return Ok(Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::MemoryBudgetExceeded,
+            )));
         }
         let source_len = turns
             .iter()
             .fold(0usize, |len, turn| len.saturating_add(turn.words.len()));
         let input = source_len.max(reference.len());
         if input > WORK_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                required_at_least: input,
-            }));
+            return Ok(Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::WorkBudgetExceeded {
+                    phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                    required_at_least: input,
+                },
+            )));
         }
         let literal = !matches!(mode, MatchMode::Fuzzy { .. });
         // This is exactly the existing equality relation, not Unicode folding
@@ -169,12 +173,19 @@ impl<'source> SearchProjection<'source> {
                             &mut evidence,
                         );
                         if candidate_count > CANDIDATES {
-                            return Ok(Err(LocalInterleavingRefusal::CandidateBudgetExceeded));
+                            return Ok(Err(LocalInterleavingRefusal::Budget(
+                                LocalInterleavingBudget::CandidateBudgetExceeded,
+                            )));
                         }
                     }
                     end = block.start();
                 }
-                (evidence, forward.traceback(control)?)
+                match forward.traceback(control)? {
+                    Ok(selected) => (evidence, selected),
+                    Err(inconsistency) => {
+                        return Ok(Err(LocalInterleavingRefusal::Inconsistent(inconsistency)));
+                    }
+                }
             }
             Err(refused) => {
                 let observed = match packed::observe(refused, control)? {

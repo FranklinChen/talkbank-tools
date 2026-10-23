@@ -1,6 +1,7 @@
 //! Paired numeric edge observation. No graph or lexical certificate is issued.
 
 use super::{HIGH, LOW, ONES, PACK, RANKS, WorkControl};
+use crate::dp_align::zero_padded::{PackedBits, WindowStart};
 
 #[derive(Clone, Copy)]
 pub(in crate::dp_align) enum CutBoundary {
@@ -26,24 +27,26 @@ fn equal_byte(a: usize, b: usize, delta: i64) -> u64 {
 /// F+B=L establishes possible deletion. With suffix decline b(k), matching
 /// requires F+B=L when b(k)=1, or F+B=L-1 when b(k)=0. Both share one scan.
 pub(in crate::dp_align) fn observe_edge_cuts<C: WorkControl + ?Sized>(
-    forward: &[u64],
-    declines: &[u64],
+    forward: &PackedBits,
+    declines: &PackedBits,
     span: usize,
     mut delta: i64,
     boundary: CutBoundary,
     control: &C,
 ) -> Result<NumericEdgeCuts, C::Error> {
     control.check()?;
+    let declines = declines.padded();
     let mut matched = vec![0u64; (span + 1).div_ceil(64)];
     let mut can_be_missing = delta == 0;
-    let first_decline = declines.first().copied().unwrap_or(0) & 1;
+    let first_decline = declines.window_word(WindowStart::At(0), 0) & 1;
     matched[0] = u64::from(delta == 1 - first_decline as i64);
-    for (block, &a) in forward.iter().enumerate() {
+    for (block, &a) in forward.words().iter().enumerate() {
         if block % 1024 == 0 {
             control.check()?;
         }
-        let b = declines.get(block).copied().unwrap_or(0);
-        let following = (b >> 1) | (declines.get(block + 1).copied().unwrap_or(0) << 63);
+        let b = declines.window_word(WindowStart::At(0), block);
+        // The declines one bit on: b(k + 1) beside each cut k.
+        let following = declines.window_word(WindowStart::At(1), block);
         for byte in 0..8 {
             let start = block * 64 + byte * 8;
             if start >= span {
@@ -102,9 +105,15 @@ mod tests {
                 }
                 for delta in -(span as i64 + 1)..=span as i64 + 1 {
                     for boundary in [CutBoundary::MatchingAllowed, CutBoundary::DeletionOnly] {
-                        let observed =
-                            observe_edge_cuts(&a, &b, span, delta, boundary, &Uninterrupted)
-                                .unwrap();
+                        let observed = observe_edge_cuts(
+                            &PackedBits::from_words(a.clone(), span).unwrap(),
+                            &PackedBits::from_words(b.clone(), span + 1).unwrap(),
+                            span,
+                            delta,
+                            boundary,
+                            &Uninterrupted,
+                        )
+                        .unwrap();
                         assert_eq!(
                             observed.can_be_missing,
                             (0..=span).any(|k| score(&a, k) - score(&b, k) == delta)

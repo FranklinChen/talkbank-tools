@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-10-06 15:09 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 ## Overview
 
@@ -126,8 +126,8 @@ batchalign3 [--server http://<your-server>:8001] align input/ output/ --lang eng
   │  ┌──── For each .cha file (sequential, each has its own audio) ────┐
   │  │                                                                   │
   │  │  1. PARSE                                                         │
-  │  │     parse_lenient() → ChatFile AST                                │
-  │  │     pre-validate (MainTierValid)                                  │
+  │  │     Source-bound adaptive word-timing admission                                │
+  │  │     Validate retained CHAT; carry pending timing obligation                                  │
   │  │                                                                   │
   │  │  2. MEDIA RESOLUTION                                              │
   │  │     paths_mode:                                                   │

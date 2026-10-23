@@ -938,8 +938,13 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
         .into_transcript(&[lang.to_string()], args.media_name.as_deref(), args.wor)
         .map_err(|error| UtsegReplayRefusal::Rebuild(error.to_string()))?;
     let language_invalid_words = transcript.language_invalid.len();
-    let built = build_chat::build_chat(&transcript.description)
-        .map_err(|error| UtsegReplayRefusal::Rebuild(error.to_string()))?;
+    // The replay compares documents, and a document cannot say how an
+    // utterance ended: a synthesized end and an observed period both print
+    // `.`. So the comparison does not cover end provenance, and the
+    // synthesized-end report is set aside rather than compared.
+    let built = build_chat::build_chat(transcript.description)
+        .map_err(|error| UtsegReplayRefusal::Rebuild(error.to_string()))?
+        .into_file();
 
     let recomputed = comparison_basis(&built, "rebuilt transcript")?;
     // Before any line is compared: the two properties the evidence cannot

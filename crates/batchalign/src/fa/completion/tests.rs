@@ -79,6 +79,11 @@ fn result(file: talkbank_model::ChatFile) -> FaResult<talkbank_model::ChatFile> 
 /// One timed word out of nine is a partial result: written, with the
 /// account of the eight untimed words as the file's shortfall, never a
 /// refusal and never a clean success.
+///
+/// RED FIRST for the cause: this result carries no grouping decision and no
+/// request, so nothing the run recorded explains the eight words. The cause
+/// was `no_usable_timing`, a claim about an aligner that was never asked; it
+/// is now `unrecorded`.
 #[test]
 fn eight_missing_timings_are_written_with_their_account() {
     let (mut file, admission) = attempt("one two three four five six seven eight nine");
@@ -100,14 +105,74 @@ fn eight_missing_timings_are_written_with_their_account() {
             "words": 9,
             "untimed_words": 8,
             "cause": {
-              "kind": "no_usable_timing"
+              "kind": "unrecorded"
             }
           }
         ]
       }
     ]
     "#);
-    insta::assert_snapshot!(shortfalls[0].to_string(), @"timing incomplete: 8 of 9 words in 1 utterance(s) have no timing and were written without it (first: utterance 1, 8 of 9 words, no usable timing)");
+    insta::assert_snapshot!(shortfalls[0].to_string(), @"timing incomplete: 8 of 9 words in 1 utterance(s) have no timing and were written without it (first: utterance 1, 8 of 9 words, no cause recorded)");
+}
+
+/// A request that covered the utterance is what explains its untimed words,
+/// and the account counts what the requests yielded instead of naming a
+/// cause: here one answered request and one left unaligned.
+#[test]
+fn requested_untimed_words_count_what_their_requests_yielded() {
+    use crate::types::traces::{FaEvidenceSourceTrace, FaGroupSpanTrace};
+    let (mut file, admission) = attempt("one two three");
+    assert_eq!(time_words(&mut file, true), 3);
+    let mut output = result(file);
+    for source in [
+        FaEvidenceSourceTrace::Inference,
+        FaEvidenceSourceTrace::Unaligned,
+    ] {
+        output
+            .group_evidence
+            .push(crate::types::results::FaGroupEvidence {
+                group: crate::types::results::FaGroupContents {
+                    audio_start_ms: crate::api::DurationMs(0),
+                    audio_end_ms: crate::api::DurationMs(20_000),
+                    utterances: vec![talkbank_model::UtteranceIdx::new(0)],
+                    words: Vec::new(),
+                    word_ids: Vec::new(),
+                    span: FaGroupSpanTrace::Single {
+                        source,
+                        cache_key: "key".to_owned(),
+                    },
+                },
+                pre_injection_timings: Vec::new(),
+            });
+    }
+    let shortfalls = admission
+        .finish(output)
+        .expect("partial timing is written")
+        .into_document()
+        .shortfalls;
+    insta::assert_json_snapshot!(shortfalls, @r#"
+    [
+      {
+        "kind": "timing_incomplete",
+        "required_words": 3,
+        "untimed_words": 2,
+        "untimed_utterances": 1,
+        "first_untimed": [
+          {
+            "utterance": 1,
+            "words": 3,
+            "untimed_words": 2,
+            "cause": {
+              "kind": "requested",
+              "answered": 1,
+              "unaligned": 1,
+              "unrequested": 0
+            }
+          }
+        ]
+      }
+    ]
+    "#);
 }
 
 /// No timed word at all is still a partial result, written with its

@@ -127,7 +127,11 @@ pub(crate) async fn process_morphosyntax_incremental(
     use batchalign_transform::diff::{DiffSummary, diff_chat};
 
     let parser = crate::chat_parser();
-    let parsed = ParsedFile::parse(after_text, params.policy.ca_policy)?;
+    let parsed = ParsedFile::parse(
+        after_text,
+        params.policy.ca_policy,
+        &services.pool.stanza_registry(),
+    )?;
     let after = match parsed {
         ParsedFile::PassThrough(_) => {
             return run_admitted_morphosyntax(parsed, services, params).await;
@@ -160,7 +164,8 @@ pub(crate) async fn process_morphosyntax_incremental(
     let input = after.into_incremental();
     let mut after_file = input.chat;
     let primary_lang = input.language;
-    let primary_api_language = input.api_language;
+    let primary_admitted = input.admitted;
+    let primary_api_language = primary_admitted.language().clone();
     // The retained input already passed complete admission. Decision tiers
     // produced by an earlier run are stripped only once analysis is selected.
     batchalign_transform::decisions::strip_decision_tiers(&mut after_file);
@@ -247,7 +252,7 @@ pub(crate) async fn process_morphosyntax_incremental(
         match infer_batch(
             services.pool,
             &misses,
-            &primary_api_language,
+            &primary_admitted,
             params.mwt,
             retokenize,
             params.progress,
@@ -286,6 +291,7 @@ pub(crate) async fn process_morphosyntax_incremental(
                                 dispatch_secondary_l2(
                                     &mut after_file,
                                     l2_deferred,
+                                    &primary_admitted,
                                     services,
                                     "incremental",
                                     params.cancellation,
@@ -516,10 +522,12 @@ mod tests {
             talkbank_model::model::TranscriptName::Anonymous,
         )
         .expect("prior fixture must be fully valid CHAT");
-        let ParsedFile::Analyze(after) =
-            ParsedFile::parse(after_text, crate::options::CaMorphotagPolicy::Honor)
-                .expect("working fixture must pass command admission")
-        else {
+        let ParsedFile::Analyze(after) = ParsedFile::parse(
+            after_text,
+            crate::options::CaMorphotagPolicy::Honor,
+            &Ok(crate::stanza_registry::StanzaRegistry::admitting(&["eng", "spa"]).shared()),
+        )
+        .expect("working fixture must pass command admission") else {
             panic!("test requires actual analysis");
         };
         let deltas = batchalign_transform::diff::diff_chat(before.document(), after.document());
@@ -751,7 +759,14 @@ mod tests {
         let items = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll)
             .batch_items;
         assert!(!items.is_empty());
-        assert!(ParsedFile::parse(chat, crate::options::CaMorphotagPolicy::Honor).is_err());
+        assert!(
+            ParsedFile::parse(
+                chat,
+                crate::options::CaMorphotagPolicy::Honor,
+                &Ok(crate::stanza_registry::StanzaRegistry::admitting(&["eng"]).shared()),
+            )
+            .is_err()
+        );
     }
 
     #[test]

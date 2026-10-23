@@ -96,6 +96,7 @@ mod comparison;
 pub mod control;
 mod correspondence;
 mod packed_literal;
+mod zero_padded;
 use control::{Uninterrupted, WorkControl, uninterrupted};
 pub mod interleaving;
 use comparison::{Alignable, FuzzyComparison, LiteralMatchMode, PreparedFuzzyWord};

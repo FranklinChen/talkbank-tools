@@ -370,11 +370,17 @@ mod tests {
             asr_postprocess::Utterance {
                 speaker: SpeakerIndex(0),
                 words: vec![],
+                end: asr_postprocess::UtteranceEnd::Synthesized(
+                    asr_postprocess::SynthesisCause::NoMark,
+                ),
                 lang: None,
             },
             asr_postprocess::Utterance {
                 speaker: SpeakerIndex(1),
                 words: vec![],
+                end: asr_postprocess::UtteranceEnd::Synthesized(
+                    asr_postprocess::SynthesisCause::NoMark,
+                ),
                 lang: None,
             },
         ];
@@ -395,6 +401,9 @@ mod tests {
         let utterances = vec![asr_postprocess::Utterance {
             speaker: SpeakerIndex(9),
             words: vec![],
+            end: asr_postprocess::UtteranceEnd::Synthesized(
+                asr_postprocess::SynthesisCause::NoMark,
+            ),
             lang: None,
         }];
         let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
@@ -744,7 +753,9 @@ mod tests {
             .into_transcript(&[response.lang.to_string()], media_name, false)
             .expect("test: transcript_from_asr_utterances should succeed")
             .description;
-        let chat_file = build_chat::build_chat(&desc).expect("build_chat must succeed");
+        let chat_file = build_chat::build_chat(desc)
+            .expect("build_chat must succeed")
+            .into_file();
         to_chat_string(&chat_file)
     }
 
@@ -943,15 +954,25 @@ mod tests {
             utterances.len()
         );
 
-        // Every utterance must end with a terminator
+        // Every utterance split at an embedded period ends with the period
+        // the recognizer gave, as its observed end; no terminator is a word.
         for (i, utt) in utterances.iter().enumerate() {
-            let last = utt.words.last().expect("utterance should have words");
             assert!(
-                matches!(last.text.as_str(), "." | "?" | "!"),
-                "utterance {i} should end with a terminator, got: {:?}",
-                last.text
+                utt.words
+                    .iter()
+                    .all(|word| !matches!(word.text.as_str(), "." | "?" | "!")),
+                "utterance {i} holds a terminator as a word: {:?}",
+                utt.words
             );
         }
+        assert!(
+            utterances
+                .iter()
+                .filter(|utt| matches!(utt.end, asr_postprocess::UtteranceEnd::Observed(_)))
+                .count()
+                >= 2,
+            "\"program.\" and \"ago.\" end their utterances as observed periods: {utterances:?}"
+        );
     }
 
     /// Task 6 (b), end to end: an ASR word mixing letters and digits ("B2")
@@ -988,7 +1009,9 @@ mod tests {
             .into_transcript(&[response.lang.to_string()], Some("test.mp3"), false)
             .expect("transcript")
             .description;
-        let chat_file = build_chat::build_chat(&desc).expect("build_chat");
+        let chat_file = build_chat::build_chat(desc)
+            .expect("build_chat")
+            .into_file();
         let produced = crate::pipeline::post_validate::PostValidated::produced(
             chat_file,
             crate::api::ReleasedCommand::Transcribe,

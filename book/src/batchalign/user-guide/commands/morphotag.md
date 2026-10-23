@@ -179,7 +179,8 @@ See the [Options reference](../../reference/chat-options.md) for the separate
 - `%gra` tier added or replaced with dependency relations
 - A provenance `@Comment` naming the Stanza models that ran, and counting any
   dependency relations that had to be repaired because Stanza produced a label
-  outside Universal Dependencies (`ud_repairs=`, absent when there were none).
+  outside Universal Dependencies, and any padding feature values (`Case=<PAD>`)
+  that were removed (`ud_repairs=`, absent when there were none).
   See [Provenance](../provenance.md#repaired-relations)
 - Main tier text may be retokenized when `--retokenize` is set
 - Special `@Options: dummy` notation is auto-detected and preserved

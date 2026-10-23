@@ -17,19 +17,17 @@ use crate::worker::error::WorkerError;
 
 use super::protocol::WorkerRequest;
 
-/// True when a JSON line is a worker-emitted progress event that may
-/// arrive before the ready signal during bootstrap (model download,
-/// model load, etc.). Worker IPC tags these lines with
-/// `"op": "progress_v2"`. We do a cheap untyped peek rather than full
-/// deserialization because the response-side types do not include a
-/// `"ready"` field, and a typed parse would either accept the line as a
-/// silent no-op or fail in a confusing way.
-fn is_pre_ready_progress_event(json_line: &str) -> bool {
-    let value: serde_json::Value = match serde_json::from_str(json_line) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    value.get("op").and_then(|v| v.as_str()) == Some("progress_v2")
+/// A JSON line a worker may write before its ready signal that is not the
+/// signal itself, told apart by its `op` tag.
+#[derive(serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum PreReadyLine {
+    /// A bootstrap-time progress event (model download, model load, etc.),
+    /// logged as written; its fields are not read.
+    ProgressV2 {},
+    /// The worker could not load its models and says why, in place of its
+    /// ready line, then exits.
+    Error(super::protocol::ReportedFailure),
 }
 
 impl WorkerHandle {
@@ -89,27 +87,34 @@ impl WorkerHandle {
                 continue;
             }
 
-            // Pre-ready progress events: a JSON object tagged
-            // `"op": "progress_v2"` is the worker telling us about a
-            // bootstrap-time wait (model download, model load, etc.).
-            // Forward to the preamble for failure diagnostics AND emit
-            // as `info!` so bootstrap timing reaches the daemon log
-            // live: the Python worker's stderr is buffered until the
-            // process exits, so without this surface, per-task timing
-            // events emitted during model load are invisible until
-            // the worker dies.
-            if is_pre_ready_progress_event(trimmed) {
-                tracing::info!(event = %trimmed, "Pre-ready progress event");
-                preamble.push(trimmed.to_owned());
-                if preamble.len() > MAX_READY_STDOUT_PREAMBLE_LINES {
-                    let mut detail = format!(
-                        "worker emitted more than {MAX_READY_STDOUT_PREAMBLE_LINES} pre-ready event(s) without sending ready signal"
-                    );
-                    detail.push_str("; pre-ready stdout: ");
-                    detail.push_str(&preamble.join(" | "));
-                    return Err(WorkerError::ReadyParseFailed(detail));
+            match serde_json::from_str::<PreReadyLine>(trimmed) {
+                // Pre-ready progress events: the worker telling us about a
+                // bootstrap-time wait (model download, model load, etc.).
+                // Forward to the preamble for failure diagnostics AND emit
+                // as `info!` so bootstrap timing reaches the daemon log
+                // live: the Python worker's stderr is buffered until the
+                // process exits, so without this surface, per-task timing
+                // events emitted during model load are invisible until
+                // the worker dies.
+                Ok(PreReadyLine::ProgressV2 {}) => {
+                    tracing::info!(event = %trimmed, "Pre-ready progress event");
+                    preamble.push(trimmed.to_owned());
+                    if preamble.len() > MAX_READY_STDOUT_PREAMBLE_LINES {
+                        let mut detail = format!(
+                            "worker emitted more than {MAX_READY_STDOUT_PREAMBLE_LINES} pre-ready event(s) without sending ready signal"
+                        );
+                        detail.push_str("; pre-ready stdout: ");
+                        detail.push_str(&preamble.join(" | "));
+                        return Err(WorkerError::ReadyParseFailed(detail));
+                    }
+                    continue;
                 }
-                continue;
+                // The worker's own classified reason for not starting: a
+                // download that failed in transit is retried like any other,
+                // where an unexplained exit could only be a system failure.
+                Ok(PreReadyLine::Error(failure)) => return Err(failure.into_startup_error()),
+                // Not a tagged pre-ready line: it must be the ready signal.
+                Err(_) => {}
             }
 
             return serde_json::from_str::<ReadySignal>(&line).map_err(|e| {
@@ -442,6 +447,38 @@ mod ready_signal_tests {
 
         assert_eq!(runtime.python_version(), "3.13.12");
         assert_eq!(runtime.python_executable_sha256().as_str(), "a".repeat(64));
+    }
+
+    /// RED FIRST: a worker whose startup download failed exited before its
+    /// ready line, which read as `ReadyParseFailed`, a system failure never
+    /// retried. Its classified error line in place of the ready line is now
+    /// the error: a download, retried, from a worker that has exited.
+    #[tokio::test]
+    async fn read_ready_line_reads_a_classified_startup_failure() {
+        let stdout = concat!(
+            "{\"op\": \"progress_v2\", \"event\": {\"request_id\": \"\", \"completed\": 0, \"total\": 0, \"stage\": \"downloading\"}}\n",
+            "{\"op\": \"error\", \"error\": \"no cached copy\", \"kind\": \"download\"}\n",
+        );
+        let mut r = buf(stdout);
+
+        let error = WorkerHandle::read_ready_line(&mut r)
+            .await
+            .expect_err("an error line is not a ready signal");
+
+        assert!(
+            matches!(
+                &error,
+                WorkerError::ModelDownload {
+                    message,
+                    worker: crate::worker::error::WorkerAfterError::Exits,
+                } if message.contains("no cached copy")
+            ),
+            "{error:?}"
+        );
+        assert!(
+            ((crate::runner::util::classify_worker_error(&error)).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     /// 2026-05-06 morphotag protocol-ordering bug: a `progress_v2` event

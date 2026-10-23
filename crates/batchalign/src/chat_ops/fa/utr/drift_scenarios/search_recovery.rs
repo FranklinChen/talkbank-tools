@@ -8,7 +8,7 @@ use super::fixture::{DriftParams, OverlapConvention, build_scenario};
 use crate::chat_ops::fa::coordinates::{Ms, Recording};
 use crate::chat_ops::fa::group_utterances;
 use crate::chat_ops::fa::grouping::{GroupUnit, GroupUnits};
-use crate::chat_ops::fa::utr::{collect_utr_utterance_info, inject_utr_timing};
+use crate::chat_ops::fa::utr::{collect_utr_utterance_info, inject_spaced};
 
 #[test]
 #[ignore = "manual long request-crop recovery assessment; retained red until repair"]
@@ -36,7 +36,10 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
             stopword_only: false,
         });
         let mut chat = scenario.source.into_valid_file().into_unchecked();
-        let census = collect_utr_utterance_info(&chat);
+        let census = collect_utr_utterance_info(
+            &chat,
+            crate::chat_ops::fa::utr::UtrLexicalUnits::SpaceDelimitedWords,
+        );
         assert_eq!(census.len(), scenario.expected.len(), "fixture population");
         let end = scenario
             .expected
@@ -45,7 +48,7 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
             .max()
             .unwrap();
         let recording = Recording::of_duration(Ms(end)).expect("nonempty fixture recording");
-        let mut observed = inject_utr_timing(&mut chat, &scenario.tokens);
+        let mut observed = inject_spaced(&mut chat, &scenario.tokens);
         let anchors = observed.take_anchors();
         let plan = match &observed.alignment {
             super::super::UtrAlignmentEvidence::Global { plan } => Some(plan),
@@ -55,7 +58,7 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
         let grouping = group_utterances(&chat, 15_000, &recording, &anchors);
         let mut requested: Vec<Vec<usize>> = census
             .iter()
-            .map(|utterance| vec![0; utterance.words.len()])
+            .map(|utterance| vec![0; utterance.words().len()])
             .collect();
         let mut contained = 0usize;
         let mut outside = 0usize;
@@ -64,7 +67,8 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
                 let utterance = word.utterance_index.raw();
                 let index = word.utterance_word_index.raw();
                 assert_eq!(
-                    word.text, census[utterance].words[index],
+                    word.text,
+                    census[utterance].words()[index],
                     "source-bound word census"
                 );
                 requested[utterance][index] += 1;
@@ -72,9 +76,9 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
                 // The fixture producer spaces words evenly, retaining the last
                 // word's exact end. Missing ASR words do not change this oracle.
                 let step = (expected.expected_end_ms - expected.expected_start_ms)
-                    / census[utterance].words.len() as u64;
+                    / census[utterance].words().len() as u64;
                 let start = expected.expected_start_ms + index as u64 * step;
-                let end = if index + 1 == census[utterance].words.len() {
+                let end = if index + 1 == census[utterance].words().len() {
                     expected.expected_end_ms
                 } else {
                     start + step

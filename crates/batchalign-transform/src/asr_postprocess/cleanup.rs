@@ -680,10 +680,26 @@ mod tests {
         AsrWord::new(text, Some(0), Some(100))
     }
 
+    /// An utterance of `words`, whose last one is its end when it is a CHAT
+    /// terminator (as retokenization makes it) and otherwise a word.
     fn make_utt(speaker: usize, words: &[&str]) -> Utterance {
+        let (end, content) = match words.split_last() {
+            Some((last, rest)) => match super::super::UtteranceEnd::observed(last) {
+                Some(end) => (end, rest),
+                None => (
+                    super::super::UtteranceEnd::Synthesized(super::super::SynthesisCause::NoMark),
+                    words,
+                ),
+            },
+            None => (
+                super::super::UtteranceEnd::Synthesized(super::super::SynthesisCause::NoMark),
+                words,
+            ),
+        };
         Utterance {
             speaker: SpeakerIndex(speaker),
-            words: words.iter().map(|w| make_word(w)).collect(),
+            words: content.iter().map(|w| make_word(w)).collect(),
+            end,
             lang: None,
         }
     }
@@ -741,7 +757,7 @@ mod tests {
         let mut utts = vec![make_utt(0, &["I", "I", "went", "."])];
         apply_retrace_detection(&mut utts, "eng");
         let texts: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(texts, vec!["I", "I", "went", "."]);
+        assert_eq!(texts, vec!["I", "I", "went"]);
         assert_eq!(utts[0].words[0].kind, WordKind::Retrace);
         assert_eq!(utts[0].words[1].kind, WordKind::Regular);
         assert_eq!(utts[0].words[2].kind, WordKind::Regular);
@@ -752,7 +768,7 @@ mod tests {
         let mut utts = vec![make_utt(0, &["I", "am", "I", "am", "going", "."])];
         apply_retrace_detection(&mut utts, "eng");
         let texts: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(texts, vec!["I", "am", "I", "am", "going", "."]);
+        assert_eq!(texts, vec!["I", "am", "I", "am", "going"]);
         assert_eq!(utts[0].words[0].kind, WordKind::Retrace);
         assert_eq!(utts[0].words[1].kind, WordKind::Retrace);
         assert_eq!(utts[0].words[2].kind, WordKind::Regular);
@@ -765,7 +781,7 @@ mod tests {
         apply_retrace_detection(&mut utts, "eng");
         let texts: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
         // BA2's algorithm: unigram "go" repeats, so first two marked as retrace.
-        assert_eq!(texts, vec!["go", "go", "go", "home", "."]);
+        assert_eq!(texts, vec!["go", "go", "go", "home"]);
         assert_eq!(utts[0].words[0].kind, WordKind::Retrace);
         assert_eq!(utts[0].words[1].kind, WordKind::Retrace);
         assert_eq!(utts[0].words[2].kind, WordKind::Regular);
@@ -776,7 +792,7 @@ mod tests {
         let mut utts = vec![make_utt(0, &["I", "went", "home", "."])];
         apply_retrace_detection(&mut utts, "eng");
         let texts: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(texts, vec!["I", "went", "home", "."]);
+        assert_eq!(texts, vec!["I", "went", "home"]);
         assert!(utts[0].words.iter().all(|w| w.kind == WordKind::Regular));
     }
 
@@ -809,7 +825,7 @@ mod tests {
         apply_disfluency_replacements(&mut utts, "eng");
         apply_retrace_detection(&mut utts, "eng");
         let texts: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(texts, vec!["&-um", "&-um", "I", "went", "."]);
+        assert_eq!(texts, vec!["&-um", "&-um", "I", "went"]);
         assert_eq!(utts[0].words[0].kind, WordKind::Regular);
         assert_eq!(utts[0].words[1].kind, WordKind::Regular);
     }
@@ -920,21 +936,21 @@ mod tests {
     fn i_cap_rewrites_bare_pronoun() {
         let mut utts = vec![make_utt(0, &["i", "went", "home", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["I", "went", "home", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["I", "went", "home"]);
     }
 
     #[test]
     fn i_cap_rewrites_contractions() {
         let mut utts = vec![make_utt(0, &["i'll", "i'm", "i've", "i'd", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["I'll", "I'm", "I've", "I'd", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["I'll", "I'm", "I've", "I'd"]);
     }
 
     #[test]
     fn i_cap_is_idempotent() {
         let mut utts = vec![make_utt(0, &["I", "said", "I'll", "go", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["I", "said", "I'll", "go", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["I", "said", "I'll", "go"]);
     }
 
     #[test]
@@ -944,14 +960,14 @@ mod tests {
         // sole guard.
         let mut utts = vec![make_utt(0, &["ho", "visto", "i", "bambini", "."])];
         apply_english_transcribe_rules(&mut utts, "ita");
-        assert_eq!(text_of(&utts[0]), vec!["ho", "visto", "i", "bambini", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["ho", "visto", "i", "bambini"]);
     }
 
     #[test]
     fn title_period_strip_covers_titles() {
         let mut utts = vec![make_utt(0, &["Dr.", "Smith", "arrived", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["Dr", "Smith", "arrived", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["Dr", "Smith", "arrived"]);
     }
 
     #[test]
@@ -999,7 +1015,7 @@ mod tests {
         // cap rule from touching the decimal context.
         let mut utts = vec![make_utt(0, &["Pi", "is", "3.14", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["Pi", "is", "3.14", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["Pi", "is", "3.14"]);
     }
 
     #[test]
@@ -1009,7 +1025,7 @@ mod tests {
         // does not contain a bare `.` entry, so it passes through.
         let mut utts = vec![make_utt(0, &["I", "saw", "him", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["I", "saw", "him", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["I", "saw", "him"]);
     }
 
     #[test]
@@ -1019,21 +1035,21 @@ mod tests {
         // closed-set design.
         let mut utts = vec![make_utt(0, &["Hello.", "world", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["Hello.", "world", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["Hello.", "world"]);
     }
 
     #[test]
     fn utterance_initial_cap_capitalizes_first_word() {
         let mut utts = vec![make_utt(0, &["hello", "world", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["Hello", "world", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["Hello", "world"]);
     }
 
     #[test]
     fn utterance_initial_cap_is_idempotent() {
         let mut utts = vec![make_utt(0, &["Hello", "world", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["Hello", "world", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["Hello", "world"]);
     }
 
     #[test]
@@ -1042,7 +1058,7 @@ mod tests {
         apply_english_transcribe_rules(&mut utts, "eng");
         // `xxx` stays lowercase; the rule walks past it to the
         // first capitalizable word.
-        assert_eq!(text_of(&utts[0]), vec!["xxx", "Said", "something", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["xxx", "Said", "something"]);
     }
 
     #[test]
@@ -1050,10 +1066,7 @@ mod tests {
         let mut utts = vec![make_utt(0, &["&-um", "&+go", "&~uh", "hello", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
         // The `&`-prefixed family is skipped; `hello` gets the cap.
-        assert_eq!(
-            text_of(&utts[0]),
-            vec!["&-um", "&+go", "&~uh", "Hello", "."]
-        );
+        assert_eq!(text_of(&utts[0]), vec!["&-um", "&+go", "&~uh", "Hello"]);
     }
 
     #[test]
@@ -1062,7 +1075,7 @@ mod tests {
         // first (becomes `I`), so utterance-initial cap is a no-op.
         let mut utts = vec![make_utt(0, &["i", "went", "home", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["I", "went", "home", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["I", "went", "home"]);
     }
 
     #[test]
@@ -1071,10 +1084,7 @@ mod tests {
         // first word uppercases.
         let mut utts = vec![make_utt(0, &["i", "saw", "Dr.", "Smith", "today", "."])];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(
-            text_of(&utts[0]),
-            vec!["I", "saw", "Dr", "Smith", "today", "."]
-        );
+        assert_eq!(text_of(&utts[0]), vec!["I", "saw", "Dr", "Smith", "today"]);
     }
 
     /// Specifically verifies that period-strip, running at the
@@ -1126,7 +1136,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
-        assert_eq!(words, vec!["I", "said", "Dr", "Smith", "arrived", "."]);
+        assert_eq!(words, vec!["I", "said", "Dr", "Smith", "arrived"]);
     }
 
     #[test]
@@ -1136,7 +1146,7 @@ mod tests {
             make_utt(0, &["i", "said", "Dr.", "Smith", "."]),
         ];
         apply_english_transcribe_rules(&mut utts, "eng");
-        assert_eq!(text_of(&utts[0]), vec!["Hello", "world", "."]);
-        assert_eq!(text_of(&utts[1]), vec!["I", "said", "Dr", "Smith", "."]);
+        assert_eq!(text_of(&utts[0]), vec!["Hello", "world"]);
+        assert_eq!(text_of(&utts[1]), vec!["I", "said", "Dr", "Smith"]);
     }
 }

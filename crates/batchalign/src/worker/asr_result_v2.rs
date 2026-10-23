@@ -29,32 +29,52 @@ pub enum AsrResponseAdmissionError {
     /// The worker answered with a failure rather than a result.
     ///
     /// Carried whole, not flattened into a message: it holds the protocol
-    /// code, which is the part a caller can route on.
-    #[error("{0}")]
-    Failure(ExecuteFailureRead),
+    /// code, which is the part a caller can route on, beside the backend
+    /// that failed, which says whether a runtime failure is worth retrying.
+    #[error("{failure}")]
+    Failure {
+        /// The worker's report.
+        failure: ExecuteFailureRead,
+        /// The backend the request named.
+        backend: AsrBackendV2,
+    },
     /// The response could not be lowered into the established ASR domain.
     #[error("{0}")]
     Lowering(String),
+    /// A successful response carried another task's result.
+    #[error("worker protocol V2 ASR response returned {0}")]
+    WrongResult(&'static str),
     /// The worker reported models that are not the ones the plan pinned.
     #[error(transparent)]
     Identity(#[from] AsrIdentityMismatchV2),
 }
 
-impl From<ExecuteFailureRead> for AsrResponseAdmissionError {
-    fn from(failure: ExecuteFailureRead) -> Self {
-        Self::Failure(failure)
-    }
-}
-
-impl From<String> for AsrResponseAdmissionError {
-    fn from(message: String) -> Self {
-        Self::Lowering(message)
-    }
-}
-
-impl From<&str> for AsrResponseAdmissionError {
-    fn from(message: &str) -> Self {
-        Self::Lowering(message.to_owned())
+impl From<AsrResponseAdmissionError> for crate::error::ServerError {
+    /// Consume the admission failure once. A worker-reported failure keeps
+    /// the category its protocol code names
+    /// ([`ExecuteFailureRead::into_server_error`]) instead of being retyped
+    /// as invalid input.
+    ///
+    /// Neither of the other two is invalid input either: a response this
+    /// build cannot lower is the worker breaking the protocol, and a response
+    /// naming other models than the pinned ones is a provenance fault of its
+    /// own ([`crate::error::ServerError::AsrModelIdentity`]). Both used to be
+    /// `Validation`, which the dashboard reports as "Input Refused".
+    fn from(error: AsrResponseAdmissionError) -> Self {
+        match error {
+            AsrResponseAdmissionError::Failure { failure, backend } => failure.into_server_error(
+                crate::worker::execute_result_v2::ModelLocality::of_asr(backend),
+            ),
+            AsrResponseAdmissionError::Lowering(message) => {
+                Self::Worker(crate::worker::error::WorkerError::Protocol(format!(
+                    "ASR V2 response could not be lowered: {message}"
+                )))
+            }
+            AsrResponseAdmissionError::WrongResult(_) => Self::Worker(
+                crate::worker::error::WorkerError::Protocol(error.to_string()),
+            ),
+            AsrResponseAdmissionError::Identity(mismatch) => Self::AsrModelIdentity(mismatch),
+        }
     }
 }
 
@@ -84,17 +104,20 @@ pub fn parse_asr_response_v2(
     pinned: &AsrRequestedModelsV2,
     backend: AsrBackendV2,
 ) -> Result<AsrResponse, AsrResponseAdmissionError> {
-    let result = require_success_result(response, "ASR")?;
+    let result = require_success_result(response, "ASR")
+        .map_err(|failure| AsrResponseAdmissionError::Failure { failure, backend })?;
 
     match result {
         TaskResultV2::WhisperChunkResult(result) => {
             result.model.admit(pinned, backend)?;
-            Ok(whisper_chunk_result_to_asr_response(result, fallback_lang)?)
+            whisper_chunk_result_to_asr_response(result, fallback_lang)
+                .map_err(AsrResponseAdmissionError::Lowering)
         }
         TaskResultV2::MonologueAsrResult(result) => {
             result.model.admit(pinned, backend)?;
             Ok(AsrResponse {
-                lang: resolve_worker_lang(&result.lang, fallback_lang)?,
+                lang: resolve_worker_lang(&result.lang, fallback_lang)
+                    .map_err(AsrResponseAdmissionError::Lowering)?,
                 // Carried from the wire result only after the admission above,
                 // so what lands here, and in `asr_model=`, is what the worker
                 // reported loading AND what this side asked for, rather than
@@ -166,38 +189,38 @@ pub fn parse_asr_response_v2(
                 ),
             })
         }
-        TaskResultV2::WhisperTokenTimingResult(_) => {
-            Err("worker protocol V2 ASR response returned forced-alignment token data".into())
-        }
-        TaskResultV2::IndexedWordTimingResult(_) => {
-            Err("worker protocol V2 ASR response returned indexed timing data".into())
-        }
+        TaskResultV2::WhisperTokenTimingResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "forced-alignment token data",
+        )),
+        TaskResultV2::IndexedWordTimingResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "indexed timing data",
+        )),
         TaskResultV2::MorphosyntaxResult(_) => {
-            Err("worker protocol V2 ASR response returned morphosyntax data".into())
+            Err(AsrResponseAdmissionError::WrongResult("morphosyntax data"))
         }
-        TaskResultV2::UtsegResult(_) => {
-            Err("worker protocol V2 ASR response returned utterance-segmentation data".into())
-        }
+        TaskResultV2::UtsegResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "utterance-segmentation data",
+        )),
         TaskResultV2::TranslationResult(_) => {
-            Err("worker protocol V2 ASR response returned translation data".into())
+            Err(AsrResponseAdmissionError::WrongResult("translation data"))
         }
         TaskResultV2::CorefResult(_) => {
-            Err("worker protocol V2 ASR response returned coreference data".into())
+            Err(AsrResponseAdmissionError::WrongResult("coreference data"))
         }
-        TaskResultV2::WordSegmentationResult(_) => {
-            Err("worker protocol V2 ASR response returned word-segmentation data".into())
-        }
-        TaskResultV2::SpeakerResult(_) => {
-            Err("worker protocol V2 ASR response returned speaker diarization data".into())
-        }
-        TaskResultV2::SpeakerEmbeddingResult(_) => {
-            Err("worker protocol V2 ASR response returned speaker embedding data".into())
-        }
-        TaskResultV2::OpensmileResult(_) => {
-            Err("worker protocol V2 ASR response returned openSMILE feature data".into())
-        }
+        TaskResultV2::WordSegmentationResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "word-segmentation data",
+        )),
+        TaskResultV2::SpeakerResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "speaker diarization data",
+        )),
+        TaskResultV2::SpeakerEmbeddingResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "speaker embedding data",
+        )),
+        TaskResultV2::OpensmileResult(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "openSMILE feature data",
+        )),
         TaskResultV2::AvqiResult(_) => {
-            Err("worker protocol V2 ASR response returned AVQI feature data".into())
+            Err(AsrResponseAdmissionError::WrongResult("AVQI feature data"))
         }
     }
 }
@@ -679,5 +702,147 @@ mod tests {
         let rendered = refusal.to_string();
         assert!(rendered.contains(OTHER), "{rendered}");
         assert!(rendered.contains(PINNED), "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod provider_failure_tests {
+    use super::*;
+    use crate::api::{NonNegativeSeconds, OutputShortfallRecord};
+    use crate::error::ServerError;
+    use crate::options::UtrEngine;
+    use crate::provenance::UtrRecovery;
+    use crate::scheduling::FailureCategory;
+    use crate::types::worker_v2::{ProtocolErrorCodeV2, WorkerRequestIdV2};
+
+    #[test]
+    fn quota_refusal_survives_wire_admission_and_cannot_authorize_fallback() {
+        let response = ExecuteResponseV2::failure(
+            WorkerRequestIdV2::from("quota-request"),
+            ProtocolErrorCodeV2::ProviderQuotaExhausted,
+            "controlled provider refusal with no quota keywords".to_owned(),
+            NonNegativeSeconds::ZERO,
+        );
+        let wire = serde_json::to_vec(&response).unwrap();
+        let received: ExecuteResponseV2 = serde_json::from_slice(&wire).unwrap();
+        let models = crate::model_manifest::resolve_asr_models(
+            AsrBackendV2::HkTencent,
+            Some(&LanguageCode3::try_new("yue").unwrap()),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let error = parse_asr_response_v2(&received, None, &models, AsrBackendV2::HkTencent)
+            .expect_err("the provider returned no result");
+        let mapped = ServerError::from(error);
+        assert!(matches!(mapped, ServerError::ProviderQuotaExhausted(_)));
+        assert_eq!(
+            crate::runner::util::classify_server_error(&mapped),
+            FailureCategory::ProviderQuotaExhausted
+        );
+        let mut recovery = UtrRecovery::from_initial(&UtrEngine::HkTencent, Err(mapped)).unwrap();
+        assert!(recovery.fallback().is_none(), "no same-engine retry permit");
+        assert!(recovery.contribution().completed_engine().is_none());
+        let shortfalls = recovery.contribution().shortfalls();
+        assert!(matches!(
+            shortfalls.as_slice(),
+            [OutputShortfallRecord::UtrUnavailable {
+                category: FailureCategory::ProviderQuotaExhausted,
+                ..
+            }]
+        ));
+        let summary = crate::cli::progress::diagnosed_summary(Some(
+            &crate::api::FileOutputDiagnostics::of_findings(Vec::new(), shortfalls),
+        ));
+        assert!(summary.contains("provider_quota_exhausted"), "{summary}");
+        assert!(summary.contains("controlled provider refusal"), "{summary}");
+    }
+
+    /// RED FIRST: every terminal provider failure withheld the UTR fallback,
+    /// so a Rev.AI 4xx, a failed job or an undecodable response for one
+    /// request silently cost the fallback's different request too. Only an
+    /// exhausted quota withholds it now.
+    #[test]
+    fn a_terminal_provider_failure_of_one_request_keeps_the_utr_fallback() {
+        let terminal = ServerError::AsrProvider {
+            disposition: crate::error::AsrProviderDisposition::Terminal,
+            message: "Rev.AI job failed: unsupported audio".to_owned(),
+        };
+        let mut recovery = UtrRecovery::from_initial(&UtrEngine::RevAi, Err(terminal)).unwrap();
+        assert!(
+            recovery.fallback().is_some(),
+            "a request-specific terminal failure keeps the same-engine fallback"
+        );
+    }
+
+    /// RED FIRST: a success response this build cannot lower, and a model
+    /// identity that disagrees with the pinned plan, both became
+    /// `Validation`, "Input Refused". The first is the worker breaking the
+    /// protocol; the second is a provenance fault classified with the
+    /// runtime identity mismatch. Neither is retried, neither is bad input.
+    #[test]
+    fn lowering_and_identity_faults_are_not_validation_failures() {
+        let wrong_task = ExecuteResponseV2::success(
+            WorkerRequestIdV2::from("wrong-task-request"),
+            TaskResultV2::IndexedWordTimingResult(
+                crate::types::worker_v2::IndexedWordTimingResultV2 {
+                    indexed_timings: Vec::new(),
+                },
+            ),
+            NonNegativeSeconds::ZERO,
+        );
+        let models = crate::model_manifest::resolve_asr_models(
+            AsrBackendV2::HkTencent,
+            Some(&LanguageCode3::try_new("yue").unwrap()),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let lowering = parse_asr_response_v2(&wrong_task, None, &models, AsrBackendV2::HkTencent)
+            .expect_err("an FA payload is not an ASR result");
+        assert!(matches!(
+            lowering,
+            AsrResponseAdmissionError::WrongResult("indexed timing data")
+        ));
+        assert_eq!(
+            crate::runner::util::classify_server_error(&ServerError::from(lowering)),
+            FailureCategory::WorkerProtocol
+        );
+
+        let identity = ServerError::from(AsrResponseAdmissionError::Identity(
+            crate::types::worker_v2::AsrIdentityMismatchV2::Composition {
+                requested: crate::types::worker_v2::AsrCompositionShapeV2::Tencent,
+                reported: crate::types::worker_v2::AsrCompositionShapeV2::Whisper,
+            },
+        ));
+        assert!(matches!(identity, ServerError::AsrModelIdentity(_)));
+        assert_eq!(
+            crate::runner::util::classify_server_error(&identity),
+            FailureCategory::WorkerBootstrap
+        );
+    }
+
+    /// RED FIRST: an ASR worker's runtime failure (a provider SDK's internal
+    /// error) became `Validation`, "Input Refused". It is a worker response,
+    /// retried like one, never a verdict on the input.
+    #[test]
+    fn an_asr_runtime_failure_is_not_a_validation_failure() {
+        let response = ExecuteResponseV2::failure(
+            WorkerRequestIdV2::from("runtime-request"),
+            ProtocolErrorCodeV2::RuntimeFailure,
+            "TencentCloudSDKException: InternalError".to_owned(),
+            NonNegativeSeconds::ZERO,
+        );
+        let models = crate::model_manifest::resolve_asr_models(
+            AsrBackendV2::HkTencent,
+            Some(&LanguageCode3::try_new("yue").unwrap()),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let error = parse_asr_response_v2(&response, None, &models, AsrBackendV2::HkTencent)
+            .expect_err("the provider returned no result");
+        let mapped = ServerError::from(error);
+        assert_eq!(
+            crate::runner::util::classify_server_error(&mapped),
+            FailureCategory::ProviderTransient
+        );
     }
 }

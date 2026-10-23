@@ -197,6 +197,116 @@ impl WorkerConfig {
     }
 }
 
+/// Which worker a spawn made: every launch input that decides what the
+/// worker serves and on what device, as a failed-request dump records it and
+/// `batchalign3 replay` rebuilds the worker from.
+///
+/// Built only from a [`WorkerConfig`] ([`Self::of`]), so a dump records the
+/// worker that actually ran rather than a label a reader re-parses; and turned
+/// back into one only by [`Self::into_config`], so the replay spawns through
+/// the pool's own command builder. A Qwen3 ASR or Cantonese FA dump replays on
+/// a worker with the same engine overrides, profile and device flags, not on
+/// a default-engine worker for the request's task.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorkerLaunch {
+    /// The profile the worker was spawned for.
+    profile: WorkerProfile,
+    /// The infer task it was bootstrapped for, when task-targeted.
+    task: Option<InferTask>,
+    /// The worker language, in its worker-argument spelling.
+    #[serde(with = "worker_language_arg")]
+    lang: WorkerLanguage,
+    /// Speakers it was told to expect.
+    num_speakers: NumSpeakers,
+    /// The `--engine-overrides` JSON (empty for none).
+    engine_overrides: String,
+    /// `--force-cpu`.
+    force_cpu: bool,
+    /// `--allow-mps`.
+    allow_mps: bool,
+    /// Whether it loaded its models eagerly or on demand.
+    bootstrap_mode: WorkerBootstrapMode,
+    /// Its concurrent-request capacity.
+    gpu_thread_pool_size: u32,
+}
+
+impl WorkerLaunch {
+    /// The launch inputs of a worker spawned from `config`.
+    pub(crate) fn of(config: &WorkerConfig) -> Self {
+        Self {
+            profile: config.profile,
+            task: config.task,
+            lang: config.lang.clone(),
+            num_speakers: config.num_speakers,
+            engine_overrides: config.engine_overrides.clone(),
+            force_cpu: config.runtime.force_cpu,
+            allow_mps: config.runtime.allow_mps,
+            bootstrap_mode: config.runtime.bootstrap_mode,
+            gpu_thread_pool_size: config.runtime.gpu_thread_pool_size,
+        }
+    }
+
+    /// Whether the worker loads a task's models only on `ensure_task`, as
+    /// the pool asks before it dispatches.
+    pub(crate) fn loads_on_demand(&self) -> bool {
+        match self.bootstrap_mode {
+            WorkerBootstrapMode::LazyProfile => true,
+            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => false,
+        }
+    }
+
+    /// The worker's language.
+    pub(crate) fn lang(&self) -> &WorkerLanguage {
+        &self.lang
+    }
+
+    /// The same launch under another language: the operator's explicit
+    /// choice on replay.
+    pub(crate) fn with_lang(self, lang: WorkerLanguage) -> Self {
+        Self { lang, ..self }
+    }
+
+    /// A worker config that spawns this worker again with `python_path`;
+    /// everything not recorded (timeouts, verbosity, credentials) is this
+    /// process's own.
+    pub(crate) fn into_config(self, python_path: String) -> WorkerConfig {
+        let mut runtime = WorkerRuntimeConfig::default().with_bootstrap_mode(self.bootstrap_mode);
+        runtime.force_cpu = self.force_cpu;
+        runtime.allow_mps = self.allow_mps;
+        runtime.gpu_thread_pool_size = self.gpu_thread_pool_size;
+        WorkerConfig {
+            python_path,
+            profile: self.profile,
+            task: self.task,
+            lang: self.lang,
+            num_speakers: self.num_speakers,
+            engine_overrides: self.engine_overrides,
+            runtime,
+            ..WorkerConfig::default()
+        }
+    }
+}
+
+/// [`WorkerLanguage`] as its worker-argument string, refused on the way in
+/// when it is not one.
+mod worker_language_arg {
+    use crate::api::WorkerLanguage;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        lang: &WorkerLanguage,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(lang.as_worker_arg())
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<WorkerLanguage, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        WorkerLanguage::parse_untrusted(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{WorkerConfig, WorkerRuntimeConfig};

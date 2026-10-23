@@ -22,7 +22,12 @@ from batchalign.worker import (
     InferResponse,
     InferTask,
 )
-from batchalign.worker._types import ItemFailed, ItemProduced
+from batchalign.worker._types import (
+    ItemFailed,
+    ItemProduced,
+    StanzaCatalogFailed,
+    StanzaNotInstalledReport,
+)
 
 
 def test_health_response() -> None:
@@ -47,6 +52,9 @@ def test_capabilities_response() -> None:
         free_threaded=True,
         infer_tasks=[],
         engine_versions={},
+        stanza_catalog=StanzaNotInstalledReport(
+            import_error="No module named 'stanza'"
+        ),
     )
     data = json.loads(resp.model_dump_json())
     assert data["commands"] == ["align", "morphotag", "opensmile"]
@@ -64,6 +72,9 @@ def test_capabilities_response_with_infer_fields() -> None:
             InferTask.MORPHOSYNTAX: None,
             InferTask.FA: "wave2vec-fa-v1",
         },
+        stanza_catalog=StanzaNotInstalledReport(
+            import_error="No module named 'stanza'"
+        ),
     )
     data = json.loads(resp.model_dump_json())
     assert data["infer_tasks"] == ["morphosyntax", "fa"]
@@ -77,6 +88,9 @@ def test_capabilities_response_reports_an_unnamed_engine_as_null() -> None:
         free_threaded=False,
         infer_tasks=[InferTask.ASR],
         engine_versions={InferTask.ASR: None},
+        stanza_catalog=StanzaNotInstalledReport(
+            import_error="No module named 'stanza'"
+        ),
     )
     data = json.loads(resp.model_dump_json())
     assert data["engine_versions"] == {"asr": None}
@@ -94,7 +108,34 @@ def test_capabilities_response_refuses_an_unreportable_engine_name(name: str) ->
             free_threaded=False,
             infer_tasks=[InferTask.FA],
             engine_versions={InferTask.FA: name},
+            stanza_catalog=StanzaNotInstalledReport(
+                import_error="No module named 'stanza'"
+            ),
         )
+
+
+def test_capabilities_response_requires_a_stanza_catalog_report() -> None:
+    """A response without a Stanza report is malformed, never an empty catalog."""
+    with pytest.raises(ValidationError):
+        CapabilitiesResponse(
+            commands=[], free_threaded=False, infer_tasks=[], engine_versions={}
+        )
+
+
+def test_a_failed_stanza_report_travels_with_its_reason() -> None:
+    """The wire shape the Rust ``StanzaCatalogReport::Failed`` parses."""
+    resp = CapabilitiesResponse(
+        commands=[],
+        free_threaded=False,
+        infer_tasks=[],
+        engine_versions={},
+        stanza_catalog=StanzaCatalogFailed(reason="ImportError: no ISO table"),
+    )
+    data = json.loads(resp.model_dump_json())
+    assert data["stanza_catalog"] == {
+        "kind": "failed",
+        "reason": "ImportError: no ISO table",
+    }
 
 
 def test_capabilities_response_missing_infer_fields_is_rejected() -> None:
@@ -252,3 +293,26 @@ def test_python_can_parse_rust_infer_response() -> None:
     assert resp.result is not None
     assert resp.error is None
     assert resp.elapsed_s == 0.123
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_stanza_report_without_a_reason_is_refused(blank: str) -> None:
+    """RED FIRST: "not installed" carried no reason at all and a failure's
+    reason could be empty, so the server's refusal could say nothing about
+    what to fix. Both now carry a statement that cannot be blank, as the
+    Rust ``StanzaReportReason`` requires."""
+    with pytest.raises(ValidationError):
+        StanzaNotInstalledReport(import_error=blank)
+    with pytest.raises(ValidationError):
+        StanzaCatalogFailed(reason=blank)
+
+
+def test_not_installed_travels_with_its_import_error() -> None:
+    """The wire shape the Rust ``StanzaCatalogReport::NotInstalled`` parses."""
+    report = StanzaNotInstalledReport(
+        import_error="ModuleNotFoundError: No module named 'stanza'"
+    )
+    assert json.loads(report.model_dump_json()) == {
+        "kind": "not_installed",
+        "import_error": "ModuleNotFoundError: No module named 'stanza'",
+    }

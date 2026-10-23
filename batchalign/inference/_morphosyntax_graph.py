@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from batchalign.inference.morphosyntax import (
         JSONObject,
-        RelationRepair,
         RepairedSentence,
+        UdRepair,
     )
 
 
@@ -219,7 +219,7 @@ class AnalyzableSentence:
     """Only the owning graph can issue an immutable emission capability."""
 
     _rows: tuple[JSONObject, ...]
-    repairs: tuple[RelationRepair, ...]
+    repairs: tuple[UdRepair, ...]
 
     def __init__(self) -> None:
         raise TypeError("analyzable sentences are issued by DependencyGraph")
@@ -228,7 +228,7 @@ class AnalyzableSentence:
     def _owned(
         cls,
         rows: tuple[JSONObject, ...],
-        repairs: tuple[RelationRepair, ...],
+        repairs: tuple[UdRepair, ...],
     ) -> AnalyzableSentence:
         instance = object.__new__(cls)
         object.__setattr__(instance, "_rows", rows)

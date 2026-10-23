@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-10-15 13:28 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -17,18 +17,19 @@ small set of sibling crates inside this workspace:
 
 | Crate | Role |
 |-------|------|
-| `crates/batchalign/` | The runtime crate: Clap CLI, dispatch router, direct-host bootstrap, Axum HTTP server, job store, worker pool, cache, and command-owned orchestration. The `chat_ops/` module owns CHAT extraction, injection, validation, ASR post-processing, and DP alignment that is batchalign-specific. |
-| `crates/batchalign/src/commands/` | (submodule) released-command definitions, author-facing constructors, and the command catalog |
+| `crates/batchalign/` | The runtime crate: Clap CLI, dispatch router, direct-host bootstrap, Axum HTTP server, job store, worker pool, cache, and command-owned orchestration. The runtime orchestrates the analysis transforms in `batchalign-transform`. |
+| `crates/batchalign/src/recipe_runner/catalog.rs` | Declarative command catalog: metadata, recipe and materialization policy |
 | `crates/batchalign-types/` | Domain newtypes, worker IPC types (V2), shared between the runtime crate and the PyO3 bridge |
-| `crates/batchalign-pyo3/` | PyO3 bridge crate (`batchalign_core`); workspace member, slim dep tree (`batchalign-types` + `talkbank-transform` + pyo3/numpy/serde/tracing) |
-| `crates/talkbank-{model,parser,transform,clan,...}` | CHAT data model, parser, pipelines, CLAN tools, shared across the workspace; `batchalign` depends on the first three by workspace path |
+| `crates/batchalign-pyo3/` | PyO3 bridge crate (`batchalign_core`); workspace member, slim dep tree (`batchalign-types` + `batchalign-transform` + pyo3/numpy/serde/tracing) |
+| `crates/batchalign-transform/` | BA3 analysis transforms shared by runtime and bridge |
+| Chatter dependencies (`talkbank-model`, `talkbank-parser`, `talkbank-transform`) | Generic CHAT model, parsing, validation and transforms, consumed at the pinned Git revision |
 
 ## Common Developer Commands
 
 ```bash
 cargo check --workspace
 cargo test --workspace
-cargo check --manifest-path crates/batchalign-pyo3/Cargo.toml    # PyO3 crate (separate)
+cargo check --manifest-path crates/batchalign-pyo3/Cargo.toml    # PyO3 workspace member
 cargo test --manifest-path crates/batchalign-pyo3/Cargo.toml
 ```
 
@@ -160,7 +161,7 @@ That is an intentional contributor contract:
 - server mode may opt into a different host/backend, but it should reuse the
   same generated command definition
 
-`command_family.rs` keeps the small family enum used by command metadata,
+`recipe_runner/command_spec.rs` keeps the small family enum used by command metadata,
 `text_batch.rs` keeps reusable text-family helpers, and `runner/dispatch/`
 keeps shared execution helpers. `crates/batchalign/src/runner/` should stay
 focused on job lifecycle, queueing, and policy rather than becoming a second
@@ -269,7 +270,7 @@ ID and here are the files to inspect."
 
 For day-to-day command work, prefer the command layer first:
 
-1. add or extend `crates/batchalign/src/commands/<name>.rs`
+1. add or extend the entry in `crates/batchalign/src/recipe_runner/catalog.rs` and its recipe
 2. choose the existing runner family it should reuse
 3. keep the CLI argument plumbing thin
 4. let runner/dispatch handle lifecycle and resource policy, not semantics
@@ -368,11 +369,12 @@ of trying to race a second connection.
 A checked-out TCP handle is a `TcpCheckout` (`worker/pool/dispatch.rs`), which
 owns the handle and its group slot together. When the exchange ends, the
 handle goes back to its group unless `WorkerError::worker_after_failure()`
-(`worker/error.rs`) answers `Retire`. Only `WorkerResponse`, `Bootstrap`,
-`RequestRefused`, `MemoryGuard`, `NoWorker` and `PoolShuttingDown` leave the
-worker reusable;
-every other error (a dead process, a protocol or I/O failure,
-`CapabilitiesRefused`, and the rest) retires the handle. Retiring drops the
+(`worker/error.rs`) answers `Retire`. Bootstrap, download and device-OOM
+errors carry `WorkerAfterError`: `Serves` permits reuse and `Exits` retires
+the handle. Request-level runtime failures and control-plane refusals that
+leave the channel intact are reusable. A dead process, a protocol or I/O
+failure, or a refused capability report retires the handle. The exhaustive
+match in `worker_after_failure` owns that classification. Retiring drops the
 handle, which closes the connection, and releases the slot; a checkout dropped
 without finishing (a cancelled exchange) does the same, because a half-read
 stream could hand a later exchange a stale reply. The daemon itself is left
@@ -430,13 +432,10 @@ and `crates/batchalign/src/planning/` for `build_job_plan()`.
 
 ### 6. Orchestrator module
 
-**`crates/batchalign/src/commands/foo.rs`**: The command-owned wrapper that
-owns the command's semantic shape, shared plan selection, and materialization
-policy.
-
-**`crates/batchalign/src/foo.rs`** or `runner/dispatch/*`: Keep shared
-algorithmic code and reusable runner families here when it improves clarity, but
-do not make them the only obvious home of the released command.
+Declare the command in `crates/batchalign/src/recipe_runner/catalog.rs` and
+its stages in `recipe_runner/recipes.rs`. Extend the existing family executor
+in `execution/` or `runner/dispatch/`; keep algorithmic logic in its owning
+module. Do not recreate a per-command wrapper that duplicates the catalog.
 
 For batch text workflows, prefer the named wrappers in
 `crates/batchalign/src/text_batch.rs` over raw tuples:

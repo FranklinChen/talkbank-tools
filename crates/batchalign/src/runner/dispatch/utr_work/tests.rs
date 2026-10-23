@@ -10,19 +10,23 @@ fn source() -> ChatFile {
         .expect("valid input").into_valid_file().into_unchecked()
 }
 
-fn tokens() -> Vec<AsrTimingToken> {
-    vec![
-        AsrTimingToken {
-            text: "hello".into(),
-            start_ms: 100,
-            end_ms: 400,
-        },
-        AsrTimingToken {
-            text: "world".into(),
-            start_ms: 400,
-            end_ms: 800,
-        },
-    ]
+fn tokens() -> PreparedUtrTokens {
+    PreparedUtrTokens::prepare(
+        vec![
+            AsrTimingToken {
+                text: "hello".into(),
+                start_ms: 100,
+                end_ms: 400,
+            },
+            AsrTimingToken {
+                text: "world".into(),
+                start_ms: 400,
+                end_ms: 800,
+            },
+        ],
+        &crate::api::LanguageCode3::eng(),
+    )
+    .expect("English has no script normalization to refuse")
 }
 
 #[tokio::test]
@@ -60,7 +64,11 @@ async fn long_document_owned_execution_preserves_recovery_and_budget_results() {
     for anchored in [false, true] {
         let (mut document, tokens) = long_turn_fixture(anchored);
         let mut expected = document.clone();
-        let expected_result = GlobalUtr.inject(&mut expected, &tokens);
+        let expected_result = GlobalUtr.inject(
+            &mut expected,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
+        let tokens = PreparedUtrTokens::spaced(&tokens);
         let result = PendingUtr::new(&mut document, Box::new(GlobalUtr), tokens)
             .run()
             .await
@@ -86,13 +94,13 @@ async fn long_document_owned_execution_preserves_recovery_and_budget_results() {
 }
 
 impl UtrStrategy for HeldSearch {
-    fn inject(&self, _: &mut ChatFile, _: &[AsrTimingToken]) -> UtrResult {
+    fn inject(&self, _: &mut ChatFile, _: &PreparedUtrTokens) -> UtrResult {
         panic!("dispatch must use the controlled entry point")
     }
     fn inject_controlled(
         &self,
         candidate: &mut ChatFile,
-        _: &[AsrTimingToken],
+        _: &PreparedUtrTokens,
         control: &dyn WorkControl<Error = UtrCancelled>,
     ) -> Result<UtrResult, UtrCancelled> {
         assert_eq!(GlobalUtr.inject(candidate, &tokens()).injected(), 1);
@@ -143,13 +151,13 @@ async fn dropping_pending_work_stops_the_search_and_preserves_source() {
 
 struct Panics;
 impl UtrStrategy for Panics {
-    fn inject(&self, _: &mut ChatFile, _: &[AsrTimingToken]) -> UtrResult {
+    fn inject(&self, _: &mut ChatFile, _: &PreparedUtrTokens) -> UtrResult {
         panic!("not dispatched")
     }
     fn inject_controlled(
         &self,
         candidate: &mut ChatFile,
-        _: &[AsrTimingToken],
+        _: &PreparedUtrTokens,
         _: &dyn WorkControl<Error = UtrCancelled>,
     ) -> Result<UtrResult, UtrCancelled> {
         assert_eq!(GlobalUtr.inject(candidate, &tokens()).injected(), 1);
@@ -227,14 +235,14 @@ impl Drop for NeverStarted {
     }
 }
 impl UtrStrategy for NeverStarted {
-    fn inject(&self, _: &mut ChatFile, _: &[AsrTimingToken]) -> UtrResult {
+    fn inject(&self, _: &mut ChatFile, _: &PreparedUtrTokens) -> UtrResult {
         self.1.store(true, Ordering::Relaxed);
         panic!("queued work must not start")
     }
     fn inject_controlled(
         &self,
         _: &mut ChatFile,
-        _: &[AsrTimingToken],
+        _: &PreparedUtrTokens,
         _: &dyn WorkControl<Error = UtrCancelled>,
     ) -> Result<UtrResult, UtrCancelled> {
         self.1.store(true, Ordering::Relaxed);

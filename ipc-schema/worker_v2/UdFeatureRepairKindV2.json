@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdFeatureRepairKindV2",
+  "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+  "oneOf": [
+    {
+      "type": "string",
+      "const": "pad_feature_value"
+    }
+  ]
+}

@@ -475,7 +475,7 @@ fn assert_current_gra_matches_adjudicated_gold(
 fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResult {
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "wake".to_string(),
                 lemma: "wake".to_string(),
@@ -486,8 +486,9 @@ fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResul
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "up".to_string(),
                 lemma: "up".to_string(),
@@ -498,8 +499,9 @@ fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResul
                 deprel: "compound:prt".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: ".".to_string(),
                 lemma: ".".to_string(),
@@ -510,7 +512,8 @@ fn current_e316_compound_prt_surface_must_use_chat_relation_label() -> TestResul
                 deprel: "punct".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let ctx = MappingContext {

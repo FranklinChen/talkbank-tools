@@ -14,10 +14,13 @@ from __future__ import annotations
 import pytest
 
 from batchalign.inference.morphosyntax import (
+    FeatureRepair,
+    FeatureRepairKind,
     RelationRepair,
     RelationRepairKind,
     RepairedSentence,
     UdWord,
+    _repaired_features,
     _repaired_relation,
 )
 
@@ -120,6 +123,55 @@ def test_pad_relation_is_repaired_to_dep_and_reported() -> None:
         from_relation="<PAD>",
         to_relation="dep",
     )
+
+
+def _pad_feature(word: str, feature: str, value: str) -> FeatureRepair:
+    return FeatureRepair(
+        kind=FeatureRepairKind.PAD_FEATURE_VALUE,
+        word=word,
+        feature=feature,
+        removed_value=value,
+    )
+
+
+def test_padding_feature_value_is_removed_and_reported() -> None:
+    """``Case=<PAD>`` is no feature value: removed, the rest kept, reported."""
+    sentence = RepairedSentence(
+        [
+            {
+                "id": 1,
+                "text": "кітап",
+                "lemma": "кітап",
+                "upos": "NOUN",
+                "feats": "Case=<PAD>|Number=Sing",
+                "head": 0,
+                "deprel": "root",
+            }
+        ]
+    )
+    assert sentence.words[0]["feats"] == "Number=Sing"
+    assert sentence.repairs == (_pad_feature("кітап", "Case", "<PAD>"),)
+
+
+@pytest.mark.parametrize(
+    ("feats", "kept", "removed"),
+    [
+        # One part of a multi-valued feature: the other parts stay.
+        ("Case=Nom,<UNK>|Number=Sing", "Case=Nom|Number=Sing", [("Case", "<UNK>")]),
+        # Every feature padding: FEATS is absent, as Stanza writes none.
+        ("Case=<PAD>|Number=<PAD>", None, [("Case", "<PAD>"), ("Number", "<PAD>")]),
+        # Not padding: a bracket inside a value, and a pair without `=`.
+        ("Foo=a<b>|Bogus", "Foo=a<b>|Bogus", []),
+        (None, None, []),
+        ("_", "_", []),
+    ],
+)
+def test_repaired_features_judges_each_value(
+    feats: str | None, kept: str | None, removed: list[tuple[str, str]]
+) -> None:
+    result, repairs = _repaired_features(feats, "w")
+    assert result == kept
+    assert repairs == tuple(_pad_feature("w", name, value) for name, value in removed)
 
 
 def test_any_angle_bracketed_relation_is_repaired() -> None:

@@ -672,10 +672,7 @@ impl HostMemoryCoordinator {
             // and `batchalign_types::memory::estimate_per_worker_peak_mb_with_profile`.
             let tier = runtime::MemoryTier::from_total_mb(system.total_mb.0);
             let spec = batchalign_types::command_spec::command_spec_for(command);
-            let runtime_is_free_threaded = runtime::is_free_threaded_runtime();
-            let base = spec.base_mb_for_runtime(runtime_is_free_threaded);
-            let worst_case_mb = (base.0 as f64 * spec.loading_overhead.0) as u64;
-            let worst_case = batchalign_types::api::MemoryMb(worst_case_mb);
+            let worst_case = spec.execution_budget_mb(runtime::python_runtime());
             let per_worker_budget = match spec.profile {
                 Some(profile) => {
                     batchalign_types::memory::estimate_per_worker_peak_mb_with_profile(

@@ -12,16 +12,18 @@ use crate::worker::{InferTask, WorkerBootstrapMode, WorkerTarget};
 
 use super::{EngineSelection, WorkerKey};
 
-/// Map a V2 inference task enum to the pool's infer-task vocabulary.
-pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> Result<InferTask, WorkerError> {
+/// Map a V2 inference task enum to the pool's infer-task vocabulary: the
+/// task a worker serving it is bootstrapped for. Total: every V2 task has a
+/// host.
+pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> InferTask {
     match task {
-        InferenceTaskV2::Morphosyntax => Ok(InferTask::Morphosyntax),
-        InferenceTaskV2::Utseg => Ok(InferTask::Utseg),
-        InferenceTaskV2::Translate => Ok(InferTask::Translate),
-        InferenceTaskV2::Coref => Ok(InferTask::Coref),
-        InferenceTaskV2::Asr => Ok(InferTask::Asr),
-        InferenceTaskV2::ForcedAlignment => Ok(InferTask::Fa),
-        InferenceTaskV2::Speaker => Ok(InferTask::Speaker),
+        InferenceTaskV2::Morphosyntax => InferTask::Morphosyntax,
+        InferenceTaskV2::Utseg => InferTask::Utseg,
+        InferenceTaskV2::Translate => InferTask::Translate,
+        InferenceTaskV2::Coref => InferTask::Coref,
+        InferenceTaskV2::Asr => InferTask::Asr,
+        InferenceTaskV2::ForcedAlignment => InferTask::Fa,
+        InferenceTaskV2::Speaker => InferTask::Speaker,
         // Deliberately the SAME pool task as diarization, not a new one.
         //
         // A worker-pool key names which model HOST a request needs, and both
@@ -33,10 +35,10 @@ pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> Result<InferTa
         // lazy, so a worker that only ever sees embedding requests never
         // constructs the diarization pipeline, and therefore never reaches the
         // gated calibration artifact that pipeline pulls in.
-        InferenceTaskV2::SpeakerEmbedding => Ok(InferTask::Speaker),
-        InferenceTaskV2::Opensmile => Ok(InferTask::Opensmile),
-        InferenceTaskV2::Avqi => Ok(InferTask::Avqi),
-        InferenceTaskV2::WordSegmentation => Ok(InferTask::WordSegmentation),
+        InferenceTaskV2::SpeakerEmbedding => InferTask::Speaker,
+        InferenceTaskV2::Opensmile => InferTask::Opensmile,
+        InferenceTaskV2::Avqi => InferTask::Avqi,
+        InferenceTaskV2::WordSegmentation => InferTask::WordSegmentation,
     }
 }
 
@@ -50,7 +52,7 @@ pub(super) fn execute_v2_worker_key(
     request: &ExecuteRequestV2,
     bootstrap_mode: WorkerBootstrapMode,
 ) -> Result<WorkerKey, WorkerError> {
-    let infer_task = infer_task_for_execute_v2(request.task)?;
+    let infer_task = infer_task_for_execute_v2(request.task);
     if super::GpuTask::of(infer_task).is_some() {
         return Err(WorkerError::UnroutedGpuRequest { task: infer_task });
     }
@@ -116,7 +118,7 @@ pub(super) fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOve
 ///
 /// Returns `None` for tasks that don't need model loading (e.g., text tasks in
 /// eager-profile mode). Used by the LazyProfile dispatch path.
-pub(super) fn ensure_task_params(
+pub(crate) fn ensure_task_params(
     request: &ExecuteRequestV2,
 ) -> Result<
     (
@@ -125,7 +127,7 @@ pub(super) fn ensure_task_params(
     ),
     WorkerError,
 > {
-    let task = infer_task_for_execute_v2(request.task)?;
+    let task = infer_task_for_execute_v2(request.task);
 
     // A lazy worker's identity is the task's own keys, whatever its target
     // would preload eagerly.
@@ -171,7 +173,7 @@ mod tests {
     #[test]
     fn maps_forced_alignment_execute_v2_to_fa_worker_profile() {
         assert_eq!(
-            infer_task_for_execute_v2(InferenceTaskV2::ForcedAlignment).unwrap(),
+            infer_task_for_execute_v2(InferenceTaskV2::ForcedAlignment),
             InferTask::Fa
         );
     }
@@ -478,7 +480,7 @@ mod tests {
                     lang: LanguageCode3::eng(),
                     payload_ref_id: text_payload_id(),
                     item_count: 1,
-                    allow_stanza_fallback: false,
+                    segmenter: crate::types::worker_v2::UtsegSegmenterV2::BoundaryModel,
                 }),
             ),
         );

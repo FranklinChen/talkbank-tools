@@ -45,7 +45,7 @@
 //! | `short_file_baseline`           | `⌊⌋`             | 30   | sanity check: should align cleanly |
 //! | `anchor_sparse_stopword_heavy`  | none              | 500  | transcript is ALL <4-char tokens  |
 
-use crate::chat_ops::fa::utr::{inject_utr_timing, overlap_markers};
+use crate::chat_ops::fa::utr::{inject_spaced, overlap_markers};
 use batchalign_transform::parse_source_with_parser;
 use talkbank_model::model::{ChatFile, Line, TranscriptName};
 use talkbank_parser::TreeSitterParser;
@@ -80,7 +80,10 @@ fn run_and_check_with(
         expected,
     } = scenario;
     let mut chat = source.into_valid_file().into_unchecked();
-    let result = strategy.inject(&mut chat, &tokens);
+    let result = strategy.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     let mut violations = Vec::new();
     check_bullet_integrity(&chat, &mut violations);
     check_utterance_monotonicity(&chat, &mut violations);
@@ -227,7 +230,7 @@ mod helper_self_tests {
             tokens.len()
         );
         let mut chat = source.into_valid_file().into_unchecked();
-        let result = inject_utr_timing(&mut chat, &tokens);
+        let result = inject_spaced(&mut chat, &tokens);
         // Deliberately corrupt the OUTPUT to test the scorer. The algorithm
         // above receives only completely admitted source and acoustic tokens.
         let mut utterances = chat
@@ -413,13 +416,14 @@ fn short_file_baseline() {
         stopword_only: false,
     });
     let observation = run_and_check(scenario);
-    let complete = observation.try_complete().unwrap_or_else(|observation| {
-        panic!(
+    let complete = match observation.try_complete() {
+        Ok(complete) => complete,
+        Err(observation) => panic!(
             "short baseline did not establish complete recovery: {}\n{:?}",
             observation.summary(),
             observation.violations()
-        )
-    });
+        ),
+    };
     println!("{}", complete.summary());
 }
 

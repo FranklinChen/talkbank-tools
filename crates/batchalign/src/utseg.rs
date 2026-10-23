@@ -16,6 +16,7 @@ use crate::types::worker_v2::{
     UtsegAdjacencyPolicyRevisionV2, UtsegBoundaryModelEvidenceV2, UtsegItemResultV2,
 };
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
+use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_utseg_request_v2};
 use crate::worker::text_result_v2::parse_utseg_result_v2;
@@ -39,10 +40,10 @@ use tracing::info;
 
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
-use crate::params::UtsegFallbackPolicy;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::text_infer::{TextBatchHooks, TextPipelineHooks, run_text_batch_pipeline};
 use crate::text_batch::{EngineItemFailure, ItemFailure, TextBatchFileInput, TextBatchFileResults};
+use crate::utseg_route::ServableUtsegRoute;
 
 /// How admitted utterance-boundary decisions enter the local transform.
 ///
@@ -225,9 +226,9 @@ impl LocalUtsegDecisionReceipt {
 pub(crate) struct EvidenceRetainingUtsegRequest<'a, Document> {
     /// The document to segment.
     pub(crate) document: Document,
-    pub(crate) lang: &'a LanguageCode3,
+    /// The admitted route: the language and the one segmenter it runs.
+    pub(crate) route: &'a ServableUtsegRoute,
     pub(crate) services: PipelineServices<'a>,
-    pub(crate) fallback_policy: UtsegFallbackPolicy,
     pub(crate) decision_policy: UtsegDecisionPolicy,
     pub(crate) evidence_filename: &'a str,
     pub(crate) evidence_sink: &'a crate::utseg_evidence::UtsegEvidenceSink,
@@ -252,9 +253,8 @@ pub(crate) async fn process_utseg_with_evidence(
 ) -> Result<crate::pipeline::post_validate::PostValidated, ServerError> {
     let EvidenceRetainingUtsegRequest {
         document,
-        lang,
+        route,
         services,
-        fallback_policy,
         decision_policy,
         evidence_filename,
         evidence_sink,
@@ -262,12 +262,11 @@ pub(crate) async fn process_utseg_with_evidence(
     } = request;
     run_utseg_impl_observed(
         document,
-        lang,
+        route,
         services,
-        fallback_policy.is_allowed(),
         decision_policy,
         cancellation,
-        post_chat_evidence_observer(lang, evidence_filename, evidence_sink),
+        post_chat_evidence_observer(route.language(), evidence_filename, evidence_sink),
     )
     .await
 }
@@ -280,32 +279,23 @@ pub(crate) async fn process_localized_utseg_with_evidence(
 ) -> Result<crate::pipeline::post_validate::ProducedOutput, ServerError> {
     let EvidenceRetainingUtsegRequest {
         document,
-        lang,
+        route,
         services,
-        fallback_policy,
         decision_policy,
         evidence_filename,
         evidence_sink,
         cancellation,
     } = request;
-    let allow_stanza_fallback = fallback_policy.is_allowed();
     crate::pipeline::text_infer::run_localized_text_pipeline(
         document,
-        lang,
+        route.language(),
         services,
         utseg_hooks(),
-        async move |pool, items, lang| {
-            infer_admitted_batch_with_policy(
-                pool,
-                items,
-                lang,
-                allow_stanza_fallback,
-                decision_policy,
-                cancellation,
-            )
-            .await
+        async move |pool, items, _lang| {
+            infer_admitted_batch_with_policy(pool, items, route, decision_policy, cancellation)
+                .await
         },
-        post_chat_evidence_observer(lang, evidence_filename, evidence_sink),
+        post_chat_evidence_observer(route.language(), evidence_filename, evidence_sink),
     )
     .await
 }
@@ -340,9 +330,8 @@ fn post_chat_evidence_observer<'a>(
 /// evidence under a closed local policy.
 pub(crate) async fn infer_utseg_predictions_with_policy(
     pool: &WorkerPool,
-    lang: &LanguageCode3,
+    route: &ServableUtsegRoute,
     items: &[UtsegBatchItem],
-    allow_stanza_fallback: bool,
     decision_policy: UtsegDecisionPolicy,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<AdmittedUtsegPrediction>, ServerError> {
@@ -350,8 +339,7 @@ pub(crate) async fn infer_utseg_predictions_with_policy(
     let item_results = infer_admitted_batch_with_policy(
         pool,
         &indexed_items,
-        lang,
-        allow_stanza_fallback,
+        route,
         decision_policy,
         cancellation,
     )
@@ -370,12 +358,11 @@ pub(crate) async fn infer_utseg_predictions_with_policy(
 /// Returns `(filename, Ok(output_text) | Err(error_msg))` for each file.
 pub(crate) async fn process_utseg_batch(
     files: &[TextBatchFileInput],
-    lang: &LanguageCode3,
+    route: &ServableUtsegRoute,
     pool: &WorkerPool,
-    allow_stanza_fallback: bool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    run_utseg_batch_impl(files, lang, pool, allow_stanza_fallback, cancellation).await
+    run_utseg_batch_impl(files, route, pool, cancellation).await
 }
 
 /// The single-file text-pipeline hooks for utterance segmentation.
@@ -395,9 +382,8 @@ fn utseg_hooks() -> TextPipelineHooks<UtsegBatchItem, Vec<usize>, AdmittedUtsegP
 
 async fn run_utseg_impl_observed<Observe>(
     document: crate::pipeline::post_validate::PostValidated,
-    lang: &LanguageCode3,
+    route: &ServableUtsegRoute,
     services: PipelineServices<'_>,
-    allow_stanza_fallback: bool,
     decision_policy: UtsegDecisionPolicy,
     cancellation: Cancellation<'_>,
     observe: Observe,
@@ -408,23 +394,15 @@ where
 {
     crate::pipeline::text_infer::run_admitted_text_pipeline(
         document,
-        lang,
+        route.language(),
         services,
         utseg_hooks(),
         // The generic pipeline's `infer` signature doesn't carry
-        // command-specific state, so capture the operator opt-in (and
-        // now the cancellation) here and bind it onto each
-        // `infer_batch` invocation.
-        async move |pool, items, lang| {
-            infer_admitted_batch_with_policy(
-                pool,
-                items,
-                lang,
-                allow_stanza_fallback,
-                decision_policy,
-                cancellation,
-            )
-            .await
+        // command-specific state, so capture the admitted route and the
+        // cancellation here and bind them onto each `infer_batch` invocation.
+        async move |pool, items, _lang| {
+            infer_admitted_batch_with_policy(pool, items, route, decision_policy, cancellation)
+                .await
         },
         observe,
     )
@@ -433,14 +411,13 @@ where
 
 async fn run_utseg_batch_impl(
     files: &[TextBatchFileInput],
-    lang: &LanguageCode3,
+    route: &ServableUtsegRoute,
     pool: &WorkerPool,
-    allow_stanza_fallback: bool,
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
     run_text_batch_pipeline(
         files,
-        lang,
+        route.language(),
         pool,
         TextBatchHooks {
             command: crate::api::ReleasedCommand::Utseg,
@@ -451,8 +428,8 @@ async fn run_utseg_batch_impl(
         // The batch keeps the admitted predictions rather than projecting them
         // to bare responses: the evidence they carry is what names the
         // boundary model in this file's stamp.
-        async move |pool, items, lang| {
-            infer_admitted_batch(pool, items, lang, allow_stanza_fallback, cancellation).await
+        async move |pool, items, _lang| {
+            infer_admitted_batch(pool, items, route, cancellation).await
         },
     )
     .await
@@ -793,22 +770,18 @@ fn admit_worker_item(
 
 /// Dispatch and admit a batch without erasing its inference-source state.
 ///
-/// `allow_stanza_fallback` propagates the operator opt-in
-/// (`--utseg-fallback-stanza`) to the worker so it can engage the
-/// legacy Stanza constituency-parser fallback when no
-/// language-specific BERT utseg model is configured.
+/// The request names the route's segmenter, so the worker runs exactly the
+/// one admitted here.
 async fn infer_admitted_batch(
     pool: &WorkerPool,
     items: &[(usize, UtsegBatchItem)],
-    lang: &LanguageCode3,
-    allow_stanza_fallback: bool,
+    route: &ServableUtsegRoute,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<Result<AdmittedUtsegPrediction, EngineItemFailure>>, ServerError> {
     infer_admitted_batch_with_policy(
         pool,
         items,
-        lang,
-        allow_stanza_fallback,
+        route,
         UtsegDecisionPolicy::WorkerDeclared,
         cancellation,
     )
@@ -818,11 +791,11 @@ async fn infer_admitted_batch(
 async fn infer_admitted_batch_with_policy(
     pool: &WorkerPool,
     items: &[(usize, UtsegBatchItem)],
-    lang: &LanguageCode3,
-    allow_stanza_fallback: bool,
+    route: &ServableUtsegRoute,
     decision_policy: UtsegDecisionPolicy,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<Result<AdmittedUtsegPrediction, EngineItemFailure>>, ServerError> {
+    let lang = route.language();
     let payload_items: Vec<_> = items.iter().map(|(_, item)| item.clone()).collect();
     let artifacts = PreparedArtifactRuntimeV2::new("utseg_v2").map_err(|error| {
         ServerError::Validation(format!(
@@ -830,16 +803,10 @@ async fn infer_admitted_batch_with_policy(
         ))
     })?;
     let request_ids = PreparedTextRequestIdsV2::for_task("utseg");
-    let request = build_utseg_request_v2(
-        artifacts.store(),
-        &request_ids,
-        lang,
-        &payload_items,
-        allow_stanza_fallback,
-    )
-    .map_err(|error| {
-        ServerError::Validation(format!("failed to build utseg V2 worker request: {error}"))
-    })?;
+    let request = build_utseg_request_v2(artifacts.store(), &request_ids, route, &payload_items)
+        .map_err(|error| {
+            ServerError::Validation(format!("failed to build utseg V2 worker request: {error}"))
+        })?;
 
     info!(
         num_items = items.len(),
@@ -849,7 +816,7 @@ async fn infer_admitted_batch_with_policy(
 
     let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
     let result = parse_utseg_result_v2(&response)
-        .map_err(|error| ServerError::Validation(format!("invalid utseg V2 result: {error}")))?;
+        .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     if result.items.len() != items.len() {
         return Err(ServerError::Validation(format!(
             "utseg V2 returned {} items for {} requests",

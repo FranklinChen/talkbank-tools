@@ -52,7 +52,7 @@ fn inspection_storage_refusal_preserves_proof_projection_and_honest_unknowns() {
     let mut document = admitted_chat("needle");
     let result = PreparedGlobalUtr::plan(
         &mut document,
-        &reference,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&reference),
         GlobalUtrParticipation::AllUtterances,
         MatchMode::Exact,
     )
@@ -102,7 +102,7 @@ fn inspection_storage_refusal_preserves_proof_projection_and_honest_unknowns() {
     let before = batchalign_transform::serialize::to_chat_string(&document);
     let kept = PreparedGlobalUtr::plan(
         &mut document,
-        &reference,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&reference),
         GlobalUtrParticipation::AllUtterances,
         MatchMode::Exact,
     )
@@ -119,7 +119,7 @@ fn inspection_storage_refusal_preserves_proof_projection_and_honest_unknowns() {
     let mut document = admitted_chat("needle");
     let result = PreparedGlobalUtr::plan(
         &mut document,
-        &reference,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&reference),
         GlobalUtrParticipation::AllUtterances,
         MatchMode::Exact,
     )
@@ -168,7 +168,7 @@ fn admitted_dialogue(turns: &str) -> ChatFile {
 #[test]
 fn joint_source_composition_recovers_unmarked_backchannel_inside_host() {
     let mut chat = admitted_dialogue("*PAR:\tone two three .\n*INV:\tyes .");
-    let result = inject_utr_timing(&mut chat, &tokens("one yes two three"));
+    let result = inject_spaced(&mut chat, &tokens("one yes two three"));
     assert_eq!(result.injected, 2);
     let bullets = super::super::utterances_indexed(&chat)
         .map(|(_, _, utterance)| {
@@ -203,7 +203,7 @@ fn whole_source_composition_reserves_the_following_turns_repeat() {
     let mut chat = admitted_dialogue(
         "*PAR:\tanchor .\n*PAR:\tone two three .\n*INV:\tyes .\n*PAR:\ttail yes .",
     );
-    let result = inject_utr_timing(&mut chat, &tokens("anchor one yes two three tail yes"));
+    let result = inject_spaced(&mut chat, &tokens("anchor one yes two three tail yes"));
     assert_eq!(result.injected, 4);
     let UtrAlignmentEvidence::Global { plan } = result.alignment else {
         panic!("global plan");
@@ -232,7 +232,7 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
     let mut chat =
         admitted_dialogue("*PAR:\tbefore .\n*PAR:\thost missing .\n*INV:\tyes .\n*INV:\tafter .");
     let observed = tokens("before host yes after");
-    let result = inject_utr_timing(&mut chat, &observed);
+    let result = inject_spaced(&mut chat, &observed);
     assert_eq!(
         result.injected(),
         3,
@@ -298,7 +298,7 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
 #[test]
 fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time() {
     let mut chat = admitted_dialogue("*PAR:\thost missing .\n*INV:\tyes .");
-    let result = inject_utr_timing(&mut chat, &tokens("host yes"));
+    let result = inject_spaced(&mut chat, &tokens("host yes"));
     assert_eq!(result.injected(), 1);
     let words: Vec<_> = ["host", "missing"]
         .into_iter()
@@ -374,7 +374,7 @@ fn partial_search_bounds_only_the_endpoint_actually_observed() {
         let mut observed = tokens("before red blue after");
         observed[3].start_ms = 60_000;
         observed[3].end_ms = 60_080;
-        let result = inject_utr_timing(&mut chat, &observed);
+        let result = inject_spaced(&mut chat, &observed);
         assert!(
             chat.utterances()
                 .nth(1)
@@ -444,7 +444,7 @@ fn obligatory_ambiguous_boundaries_keep_every_candidate_and_nested_provider_end(
     provider[2].end_ms = 460;
     let plan = plan_global_utr_alignment(
         &chat,
-        &provider,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&provider),
         MatchMode::Exact,
         GlobalUtrParticipation::AllUtterances,
     );
@@ -464,7 +464,7 @@ fn obligatory_ambiguous_boundaries_keep_every_candidate_and_nested_provider_end(
     provider[3].start_ms = 50;
     let reversed = plan_global_utr_alignment(
         &chat,
-        &provider,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&provider),
         MatchMode::Exact,
         GlobalUtrParticipation::AllUtterances,
     );
@@ -502,7 +502,7 @@ fn ambiguous_interleaving_search_keeps_all_candidates_across_host_crop() {
             end_ms,
         })
         .collect::<Vec<_>>();
-    let result = inject_utr_timing(&mut chat, &source);
+    let result = inject_spaced(&mut chat, &source);
     assert_eq!(
         result.injected, 1,
         "ambiguous backchannel receives no selected-repeat hint"
@@ -586,7 +586,7 @@ fn interleaved_search_refuses_candidate_hulls_outside_retained_same_speaker_boun
         })
         .collect::<Vec<_>>();
     let unmodified = chat.clone();
-    let result = inject_utr_timing(&mut chat, &source);
+    let result = inject_spaced(&mut chat, &source);
     assert_eq!(result.skipped, 2);
     for (index, original) in originals {
         let retained = super::super::utterances_indexed(&chat)
@@ -611,7 +611,7 @@ fn interleaved_search_refuses_candidate_hulls_outside_retained_same_speaker_boun
     conflicting[2].end_ms = 1400;
     let plan = plan_global_utr_alignment(
         &unmodified,
-        &conflicting,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&conflicting),
         MatchMode::CaseInsensitive,
         GlobalUtrParticipation::AllUtterances,
     );
@@ -637,7 +637,7 @@ fn interleaved_search_refuses_candidate_hulls_outside_retained_same_speaker_boun
 fn joint_budget_refusal_grants_no_fallback_timing_or_absence_claim() {
     let words = vec!["hello"; 1000].join(" ");
     let mut chat = admitted_dialogue(&format!("*PAR:\t{words} .\n*INV:\t{words} ."));
-    let result = inject_utr_timing(&mut chat, &tokens("hello"));
+    let result = inject_spaced(&mut chat, &tokens("hello"));
     assert_eq!((result.injected, result.unmatched), (0, 2));
     let UtrAlignmentEvidence::Global { plan } = result.alignment else {
         panic!("global plan");
@@ -660,7 +660,7 @@ fn joint_budget_refusal_grants_no_fallback_timing_or_absence_claim() {
 fn complete_ambiguous_embeddings_bound_search_without_selecting_timings() {
     let mut chat = admitted_chat("hello now");
     let source = tokens("hello now noise now tail");
-    let result = inject_utr_timing(&mut chat, &source);
+    let result = inject_spaced(&mut chat, &source);
     assert_eq!(result.injected, 0, "ambiguous end remains unhinted");
     let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
         panic!("global plan");
@@ -773,7 +773,7 @@ fn incomplete_or_disordered_provider_evidence_cannot_narrow_search() {
         }
         let plan = plan_global_utr_alignment(
             &admitted_chat(words),
-            &source,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&source),
             MatchMode::CaseInsensitive,
             GlobalUtrParticipation::AllUtterances,
         );
@@ -789,7 +789,7 @@ fn provider_segments_bound_search_but_do_not_become_word_anchors() {
         start_ms: 100,
         end_ms: 900,
     }];
-    let result = inject_utr_timing(&mut chat, &source);
+    let result = inject_spaced(&mut chat, &source);
     assert_eq!(result.injected, 0);
     assert!(matches!(
         result.anchors.lookup(talkbank_model::UtteranceIdx::new(0)),
@@ -807,7 +807,7 @@ fn search_envelopes_use_global_order_and_do_not_replace_original_bullets() {
     let source = tokens("now hello now now");
     let plan = plan_global_utr_alignment(
         &chat,
-        &source,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&source),
         MatchMode::CaseInsensitive,
         GlobalUtrParticipation::AllUtterances,
     );
@@ -817,10 +817,10 @@ fn search_envelopes_use_global_order_and_do_not_replace_original_bullets() {
         "earlier now cannot follow hello in a complete embedding"
     );
     assert_eq!(envelope["end_ms"], 480);
-    let _ = inject_utr_timing(&mut chat, &tokens("hello now"));
+    let _ = inject_spaced(&mut chat, &tokens("hello now"));
     let plan = plan_global_utr_alignment(
         &chat,
-        &source,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&source),
         MatchMode::CaseInsensitive,
         GlobalUtrParticipation::AllUtterances,
     );
@@ -833,7 +833,7 @@ fn search_envelopes_use_global_order_and_do_not_replace_original_bullets() {
 #[test]
 fn terminal_asr_punctuation_keeps_source_evidence_and_word_anchors() {
     let mut chat = admitted_chat("who are paving the way for all of you");
-    let result = inject_utr_timing(
+    let result = inject_spaced(
         &mut chat,
         &tokens("who are paving the way for all of you. tail"),
     );
@@ -855,11 +855,14 @@ fn terminal_asr_punctuation_keeps_source_evidence_and_word_anchors() {
     {
       "word": {
         "utterance_index": 0,
-        "word_index": 8
+        "unit_index": 8,
+        "word_index": 8,
+        "part": 0,
+        "parts": 1
       },
       "token": {
         "token_index": 8,
-        "word_index": 0
+        "unit_index": 0
       },
       "chat_text": "you",
       "asr_text": "you.",
@@ -878,7 +881,7 @@ fn terminal_asr_punctuation_keeps_source_evidence_and_word_anchors() {
 #[test]
 fn punctuation_normalization_cannot_resolve_repeated_word_ambiguity() {
     let mut chat = admitted_chat("hello");
-    let result = inject_utr_timing(&mut chat, &tokens("hello hello."));
+    let result = inject_spaced(&mut chat, &tokens("hello hello."));
     assert_eq!(result.injected, 0);
     assert!(matches!(
         result.anchors.lookup(talkbank_model::UtteranceIdx::new(0)),
@@ -888,17 +891,12 @@ fn punctuation_normalization_cannot_resolve_repeated_word_ambiguity() {
 
 #[test]
 fn provider_lexical_admission_preserves_internal_punctuation_and_addresses() {
-    let source = tokens(". it's well-known. U.S. !");
+    let source = PreparedUtrTokens::spaced(&tokens(". it's well-known. U.S. !"));
     let lexical = lexical::UtrLexicalStream::from_tokens(&source);
     assert_eq!(lexical.texts(), vec!["it's", "well-known", "U.S"]);
-    let selected = lexical.matched_word(
-        1,
-        UtrWordAddress {
-            utterance_index: evidence::UtrUtteranceOrdinal(0),
-            word_index: evidence::UtrWordOrdinal(0),
-        },
-        "well-known",
-    );
+    let address = token_text::UtrChatUnits::spaced(&["well-known".to_owned()])
+        .addresses(evidence::UtrUtteranceOrdinal(0))[0];
+    let selected = lexical.matched_word(1, address, "well-known");
     assert_eq!(selected.token.token_index(), 2);
     assert_eq!(selected.asr_text, "well-known.");
     assert_eq!(selected.relation, UtrLexicalRelation::TerminalPunctuation);
@@ -907,7 +905,7 @@ fn provider_lexical_admission_preserves_internal_punctuation_and_addresses() {
 #[test]
 fn correspondence_ambiguous_repeated_word_keeps_selection_but_no_hint_or_anchor() {
     let mut chat = admitted_chat("hello");
-    let result = inject_utr_timing(&mut chat, &tokens("hello hello"));
+    let result = inject_spaced(&mut chat, &tokens("hello hello"));
     assert_eq!((result.injected, result.unmatched), (0, 1));
     assert!(matches!(
         result.anchors.lookup(talkbank_model::UtteranceIdx::new(0)),
@@ -928,7 +926,7 @@ fn correspondence_ambiguous_repeated_word_keeps_selection_but_no_hint_or_anchor(
 fn correspondence_partial_certainty_retains_anchor_and_complete_candidate_range() {
     let mut chat = admitted_chat("hello now");
     let mut source = tokens("hello hello now");
-    let result = inject_utr_timing(&mut chat, &source);
+    let result = inject_spaced(&mut chat, &source);
     assert_eq!((result.injected, result.unmatched), (0, 1));
     // A later independently changed stream cannot redirect the proof's timing.
     source[2].start_ms = 9000;
@@ -1011,7 +1009,7 @@ fn correspondence_endpoint_matrix_keeps_unhinted_recovery_and_unique_controls() 
     ] {
         let mut chat = admitted_chat(words);
         let source = tokens(asr);
-        let result = inject_utr_timing(&mut chat, &source);
+        let result = inject_spaced(&mut chat, &source);
         assert_eq!(
             result.injected,
             usize::from(missing.is_none()),
@@ -1026,11 +1024,13 @@ fn correspondence_endpoint_matrix_keeps_unhinted_recovery_and_unique_controls() 
             );
             assert_eq!(
                 two_pass::recover_overlap_timing(
-                    &words
-                        .split_whitespace()
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>(),
-                    &source,
+                    &token_text::UtrChatUnits::spaced(
+                        &words
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>(),
+                    ),
+                    &PreparedUtrTokens::spaced(&source),
                     0,
                     1000,
                     MatchMode::CaseInsensitive
@@ -1040,11 +1040,13 @@ fn correspondence_endpoint_matrix_keeps_unhinted_recovery_and_unique_controls() 
         } else {
             assert!(
                 two_pass::recover_overlap_timing(
-                    &words
-                        .split_whitespace()
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>(),
-                    &source,
+                    &token_text::UtrChatUnits::spaced(
+                        &words
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>(),
+                    ),
+                    &PreparedUtrTokens::spaced(&source),
                     0,
                     1000,
                     MatchMode::CaseInsensitive
@@ -1061,8 +1063,8 @@ fn correspondence_local_overlap_abstains_on_repetition_and_retains_unique_contro
     let words = vec!["hello".to_owned()];
     assert_eq!(
         two_pass::recover_overlap_timing(
-            &words,
-            &tokens("hello hello"),
+            &token_text::UtrChatUnits::spaced(&words),
+            &PreparedUtrTokens::spaced(&tokens("hello hello")),
             0,
             1000,
             MatchMode::CaseInsensitive
@@ -1070,8 +1072,8 @@ fn correspondence_local_overlap_abstains_on_repetition_and_retains_unique_contro
         None
     );
     let recovered = two_pass::recover_overlap_timing(
-        &words,
-        &tokens("noise hello tail"),
+        &token_text::UtrChatUnits::spaced(&words),
+        &PreparedUtrTokens::spaced(&tokens("noise hello tail")),
         0,
         1000,
         MatchMode::CaseInsensitive,
@@ -1083,7 +1085,7 @@ fn correspondence_local_overlap_abstains_on_repetition_and_retains_unique_contro
 #[test]
 fn correspondence_missing_word_does_not_destroy_unique_remaining_recovery() {
     let mut chat = admitted_chat("hello missing now");
-    let result = inject_utr_timing(&mut chat, &tokens("hello now"));
+    let result = inject_spaced(&mut chat, &tokens("hello now"));
     assert_eq!((result.injected, result.unmatched), (1, 0));
     let UtrAlignmentEvidence::Global { plan } = result.alignment else {
         panic!("global plan");
@@ -1107,7 +1109,7 @@ fn correspondence_missing_word_does_not_destroy_unique_remaining_recovery() {
 fn an_endpoint_matched_in_every_optimum_bounds_its_hint_by_every_candidate() {
     let mut chat = admitted_dialogue("*PAR:\tthe had .\n*INV:\thad was .");
     // the 100-180, had 200-280, had 300-380, was 400-480.
-    let result = inject_utr_timing(&mut chat, &tokens("the had had was"));
+    let result = inject_spaced(&mut chat, &tokens("the had had was"));
     let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
         panic!("global proof")
     };

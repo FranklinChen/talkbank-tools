@@ -170,11 +170,10 @@ Three categories of `new_unchecked` usage have been addressed:
 
 **A. ASR transcript construction**
 (`crates/batchalign-transform/src/build_chat/`):
-ASR engines return raw text that must become CHAT words. The code
-tries `DirectParser::parse_word()` first and only falls back to
-`new_unchecked` with a `warn!` if parsing fails. Entry points:
-`build_chat()` in `build_chat/mod.rs:41` and `build_chat_from_json()`
-in `build_chat/bridge.rs:10`.
+ASR engines return raw text that must become CHAT words. Each token is
+admitted as a `ChatWordText` in the ASR bridge (`build_chat/bridge.rs`),
+which parses it once and keeps the parsed word; a token the parser refuses
+fails the build there. Entry point: `build_chat()` in `build_chat/mod.rs`.
 
 **B. Retokenization fallback**
 (`crates/batchalign-transform/src/retokenize/`):

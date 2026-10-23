@@ -441,7 +441,7 @@ impl WorkerPool {
         language: impl Into<WorkerLanguage>,
         request: &ExecuteRequestV2,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        let task = execute_v2::infer_task_for_execute_v2(request.task)?;
+        let task = execute_v2::infer_task_for_execute_v2(request.task);
         let gpu_task = super::GpuTask::of(task).ok_or_else(|| {
             WorkerError::Protocol(format!("a {task:?} request is not a GPU-profile request"))
         })?;
@@ -805,13 +805,14 @@ mod tcp_checkout_tests {
         (pool, key, options)
     }
 
-    /// `ensure_task` failing with a complete error response leaves the
-    /// connection in step: the handle goes back to its group. Before the owned
-    /// checkout, the `?` returned early and the handle was lost for good.
+    /// `ensure_task` failing with a complete error response the worker goes
+    /// on serving after (`runtime`) leaves the connection in step: the handle
+    /// goes back to its group. Before the owned checkout, the `?` returned
+    /// early and the handle was lost for good.
     #[tokio::test]
     async fn a_worker_error_response_returns_the_handle_to_its_group() {
         let port = fake_daemon(Some(
-            "{\"op\":\"error\",\"error\":\"model load failed\",\"kind\":\"bootstrap\"}\n",
+            "{\"op\":\"error\",\"error\":\"model load failed\",\"kind\":\"runtime\"}\n",
         ))
         .await;
         let (pool, key, options) = pool_with_one_tcp_handle(port).await;
@@ -826,13 +827,51 @@ mod tcp_checkout_tests {
             )
             .await
             .expect_err("the fake daemon refuses to load the task");
-        assert!(matches!(error, WorkerError::Bootstrap(_)), "{error:?}");
+        assert!(matches!(error, WorkerError::Bootstrap { .. }), "{error:?}");
 
         let group = pool.get_or_create_group(&key);
         assert_eq!(lock_recovered(&group.tcp_workers).len(), 1);
         assert_eq!(group.tcp_available.available_permits(), 1);
         assert_eq!(group.total.load(Ordering::Relaxed), 1);
         assert_eq!(pool.spawn_permits.available_permits(), permits_before);
+    }
+
+    /// RED FIRST: a `download` (or `bootstrap`) report ends the worker's
+    /// service on that connection (the daemon closes it), so the handle is
+    /// retired, not returned. It was returned as reusable, and the retry the
+    /// download's category grants landed on the closed connection as a
+    /// worker crash, spending the retry budget on a dead handle.
+    #[tokio::test]
+    async fn a_report_after_which_the_worker_stops_serving_retires_the_handle() {
+        let port = fake_daemon(Some(
+            "{\"op\":\"error\",\"error\":\"connection reset\",\"kind\":\"download\"}\n",
+        ))
+        .await;
+        let (pool, key, options) = pool_with_one_tcp_handle(port).await;
+
+        let error = pool
+            .ensure_command_capabilities(
+                ReleasedCommand::Morphotag,
+                WorkerLanguage::from(LanguageCode3::eng()),
+                &options,
+                &super::super::GpuModelPlan::without_engines(),
+            )
+            .await
+            .expect_err("the fake daemon's download failed");
+        assert!(
+            matches!(
+                error,
+                WorkerError::ModelDownload {
+                    worker: crate::worker::error::WorkerAfterError::Exits,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        let group = pool.get_or_create_group(&key);
+        assert_eq!(lock_recovered(&group.tcp_workers).len(), 0);
+        assert_eq!(group.total.load(Ordering::Relaxed), 0);
     }
 
     /// An `ensure_task` reply about another task does not load the asked

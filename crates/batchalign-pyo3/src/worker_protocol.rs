@@ -47,9 +47,8 @@ fn refusal_payload<'py>(
 
 /// Build an `{"op":"error",...}` envelope for the Python request loops.
 ///
-/// `kind` must be one of the wire spellings (`runtime`, `bootstrap`,
-/// `invalid_request`); anything else raises `ValueError` rather than
-/// reaching the wire.
+/// `kind` must be one of the wire spellings (`WorkerErrorKind::wire_name`);
+/// anything else raises `ValueError` rather than reaching the wire.
 #[pyfunction]
 #[pyo3(signature = (message, kind, request_id=None))]
 pub(crate) fn error_envelope(
@@ -64,6 +63,25 @@ pub(crate) fn error_envelope(
         )));
     };
     Ok(error_payload(py, kind, message, request_id)?.unbind())
+}
+
+/// Whether a worker stops serving after reporting an error of `kind`.
+///
+/// The Python request loops call this rather than keep their own list, so
+/// they stop serving for exactly the kinds after which the Rust readers
+/// retire the worker (`WorkerErrorKind::worker_after`).
+#[pyfunction]
+pub(crate) fn error_kind_ends_worker(kind: &str) -> PyResult<bool> {
+    use batchalign_types::worker_v2::WorkerAfterError;
+    let Some(kind) = WorkerErrorKind::from_wire(kind) else {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown worker error kind {kind:?}"
+        )));
+    };
+    Ok(match kind.worker_after() {
+        WorkerAfterError::Exits => true,
+        WorkerAfterError::Serves => false,
+    })
 }
 
 /// Extract a `request_id` field from a request payload dict, if present

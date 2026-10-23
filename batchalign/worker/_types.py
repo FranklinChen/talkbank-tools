@@ -29,9 +29,11 @@ from pydantic import (
     ConfigDict,
     Field,
     FiniteFloat,
+    StringConstraints,
     field_validator,
 )
 
+import batchalign_core
 from batchalign.device import DevicePolicy
 from batchalign.inference._domain_types import (
     CommandName,
@@ -223,11 +225,72 @@ ReportedEngineName: TypeAlias = Annotated[str, AfterValidator(reported_engine_na
 """A string admitted by ``reported_engine_name``, checked when a model is built."""
 
 
-class StanzaLanguageProcessors(BaseModel):
-    """Per-language Stanza processor availability."""
+if TYPE_CHECKING:
+    from batchalign_core.batchalign_core import (
+        StanzaProcessorName as StanzaProcessorName,
+    )
+else:
+    # Read from Rust's closed set at runtime, so the catalog model below
+    # validates exactly the names the server's registry parses; mypy reads
+    # the extension stub's spelling, held to the same list by
+    # ``test_stanza_names_match_rust``.
+    StanzaProcessorName = Literal[tuple(batchalign_core.STANZA_PROCESSORS)]
+"""A processor a Stanza catalog entry can ship: Rust's ``StanzaProcessor``."""
 
-    alpha2: str
-    processors: list[str]
+
+class StanzaCatalog(BaseModel):
+    """The installed Stanza catalog as this worker read it.
+
+    ``languages`` maps each ISO 639-3 code the catalog can serve to the
+    processors of the entry serving it. The Rust server parses the keys and
+    processor names when it deserializes the report
+    (``StanzaCatalogReport`` in ``batchalign-types``).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["catalog"] = "catalog"
+    languages: dict[str, list[StanzaProcessorName]]
+
+
+StanzaReportReason: TypeAlias = Annotated[
+    str, StringConstraints(min_length=1, pattern=r"\S", strict=True)
+]
+"""A worker's statement of why it reports no catalog: never blank, as
+``StanzaReportReason`` refuses in ``batchalign-types``."""
+
+
+class StanzaNotInstalledReport(BaseModel):
+    """The ``stanza`` package does not import in this worker.
+
+    ``import_error`` says why, as the worker saw it, so an operator reading
+    the server's refusal knows what to fix.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["not_installed"] = "not_installed"
+    import_error: StanzaReportReason
+
+
+class StanzaCatalogFailed(BaseModel):
+    """Stanza imported, but this worker could not build its catalog report.
+
+    ``reason`` is the failure as the worker saw it, so the server can say why
+    it has no registry instead of reading an empty catalog.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["failed"] = "failed"
+    reason: StanzaReportReason
+
+
+StanzaCatalogReport: TypeAlias = Annotated[
+    StanzaCatalog | StanzaNotInstalledReport | StanzaCatalogFailed,
+    Field(discriminator="kind"),
+]
+"""A worker's account of its Stanza catalog: one of three outcomes by type."""
 
 
 class CapabilitiesResponse(BaseModel):
@@ -246,9 +309,8 @@ class CapabilitiesResponse(BaseModel):
     when this response is built, so a bad one fails the capabilities operation
     here rather than being refused by the Rust gate.
     """
-    stanza_capabilities: dict[str, StanzaLanguageProcessors] = Field(
-        default_factory=dict
-    )
+    stanza_catalog: StanzaCatalogReport
+    """Required: a worker that cannot report a catalog says why."""
 
 
 class InferRequest(BaseModel):
@@ -371,14 +433,6 @@ class BatchInferRequest(BaseModel):
     items: list[WorkerJSONValue] = Field(default_factory=list)
     mwt: dict[str, list[str]] = Field(default_factory=dict)
     retokenize: bool = False
-    # Operator opt-in to the legacy Stanza constituency-parser fallback
-    # for utseg when no language-specific TalkBank BERT model is
-    # configured. Surfaced as `--utseg-fallback-stanza` on every
-    # utseg-invoking CLI subcommand (transcribe, transcribe_s, utseg).
-    # Default-refuse mirrors the WhisperHubModelNotFoundError pattern:
-    # silent substitution between models is the foot-gun this flag
-    # exists to prevent.
-    allow_stanza_fallback: bool = False
 
 
 class BatchInferResponse(BaseModel):
@@ -422,20 +476,10 @@ class _WorkerState:
         # they belong to; they used to be a second dict keyed alike, which
         # nothing kept in step.
         self.stanza_pipelines: StanzaPipelineCache | None = None
-        # ONE lock for the life of the process, created here and never
-        # replaced: a handler captures it before inference, and a mid-batch
-        # reload (the bounded cache can evict a language and bring it back)
-        # must not hand a second handler a different lock, or two threads enter
-        # Stanza at once.
-        self.stanza_nlp_lock: threading.Lock = threading.Lock()
+        # There is no process-wide Stanza lock: every pipeline in the cache
+        # carries its own guard (`LoadedPipeline.calling`), so one pipeline is
+        # never called by two threads at once, in any interpreter mode.
 
-        # Utseg config builder (callable from StanzaUtteranceEngine). Its
-        # presence is also the "utseg has loaded" fact the capability report
-        # reads; there is no separate version field to keep in step with it.
-        self.utseg_config_builder: (
-            Callable[[list[str]], tuple[list[str], dict[str, dict[str, str | bool]]]]
-            | None
-        ) = None
         self.utterance_boundary_model: BertUtteranceModel | None = None
         self.utterance_model_name: str = ""
 

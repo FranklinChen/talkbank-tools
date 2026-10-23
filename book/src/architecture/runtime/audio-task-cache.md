@@ -152,7 +152,7 @@ The typed tasks:
 | Task constant | Namespace type | Namespace bytes |
 |---|---|---|
 | `FORCED_ALIGNMENT`, `FORCED_ALIGNMENT_RAW_EVIDENCE` | `FaCacheNamespace` | the FA engine name the worker reported, byte for byte |
-| `UTR_ASR` | `UtrAsrCacheNamespace` | `utr-asr-v1:<UTR engine wire name>:<composition>` then one `\|<role>=<id>@<revision>` per model |
+| `UTR_ASR` | `UtrAsrCacheNamespace` | `<producer>:<UTR engine wire name>:<composition>` (producer `utr-asr-v1`, or for stock Whisper `utr-asr-open-begin-v5:decode=<decode decision JSON>`) then one `\|<role>=<id>@<revision>` per model |
 | `REV_ASR_EVIDENCE` | `RevAsrModelRevision` | the Rev provider revision |
 | `SPEAKER_DIARIZATION_RAW_EVIDENCE` | `SpeakerEvidenceModelRevision` | the speaker model revision |
 | `SPEAKER_DIARIZATION_SEGMENTS` | `SpeakerNormalizationRevision` | the local normalization revision |

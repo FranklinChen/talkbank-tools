@@ -214,18 +214,17 @@ pub(crate) mod tasks {
 
 /// The namespace UTR ASR responses are cached under: the UTR engine's own.
 ///
-/// It used to be the FORCED-ALIGNMENT engine version, so changing the FA model
-/// invalidated every UTR ASR response while changing the UTR engine did not.
-/// The bytes are `utr-asr-v1:<engine wire name>`, with a version prefix so a
-/// later change to what a UTR engine identity includes can move to a new
-/// namespace instead of colliding with this one. Written as a match on the
-/// closed engine set, so each namespace is a `'static` string and a new engine
-/// must state its own.
+/// The bytes are `<producer>:<engine wire name>:<pinned models>`. The
+/// producer part is a revision (and, for stock Whisper, its decode decision),
+/// so a change to what produces a row moves it to a new namespace instead of
+/// colliding with this one. Written as a match on the closed engine set, so a
+/// new engine must state its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UtrAsrCacheNamespace(BuildOwnedNamespace);
 
 impl UtrAsrCacheNamespace {
-    /// The namespace for one UTR engine running one pinned plan.
+    /// The namespace for one UTR engine running one pinned plan for
+    /// `language`.
     ///
     /// The engine name alone said only WHICH engine produced a row, never which
     /// weights it produced it with, so a row written before a checkpoint moved
@@ -233,24 +232,57 @@ impl UtrAsrCacheNamespace {
     /// makes that distinction structural: change any model and rows written
     /// under the old one are unreadable rather than silently reused.
     ///
-    /// Stock Whisper's word-timestamp producer has its own revision: segment
-    /// rows cannot be replayed as acoustic word evidence. Other engines retain
-    /// their existing namespaces.
+    /// The producer part names what else decides a row. Stock Whisper's names
+    /// its word-timestamp producer revision and the decode decision its worker
+    /// is spawned with for the request `language`, serialized as on the wire
+    /// (`WhisperDecodeLanguageV2`), so a change to that policy for any
+    /// language moves that language's rows by derivation, with no list of
+    /// languages to keep. Rev.AI and Tencent take no client-side decoding
+    /// decision and keep their revision.
+    ///
+    /// The decision is the spawn's own: the request is routed to a worker
+    /// keyed by `WorkerLanguage::from(language)`, and the spawn decides by
+    /// `WhisperDecodeLanguageV2::for_worker_language` on that key
+    /// (`worker::pool::lifecycle`); this applies the same function to the
+    /// same value, so a row cannot be filed under a decision its worker did
+    /// not decode with.
     pub(crate) fn for_pinned_plan(
         engine: &UtrEngine,
         models: &crate::types::worker_v2::AsrRequestedModelsV2,
-    ) -> UtrAsrCacheEligibility {
-        let revision = match engine {
-            UtrEngine::Whisper => "utr-asr-open-begin-v5",
-            UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1",
+        language: &crate::transcribe::SingleAsrLanguage,
+    ) -> Result<UtrAsrCacheEligibility, UtrAsrProducerError> {
+        let producer = match engine {
+            UtrEngine::Whisper => {
+                let decision =
+                    crate::types::worker_v2::WhisperDecodeLanguageV2::for_worker_language(
+                        &crate::api::WorkerLanguage::from(language),
+                    )
+                    .map_err(UtrAsrProducerError::Undecodable)?;
+                let decision =
+                    serde_json::to_string(&decision).map_err(UtrAsrProducerError::Encoding)?;
+                format!("utr-asr-open-begin-v5:decode={decision}")
+            }
+            UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1".to_owned(),
         };
-        match models.pinned_namespace_text() {
+        Ok(match models.pinned_namespace_text() {
             Some(pin) => UtrAsrCacheEligibility::Pinned(Self(BuildOwnedNamespace::derived(
-                format!("{revision}:{}:{pin}", engine.as_wire_name()),
+                format!("{producer}:{}:{pin}", engine.as_wire_name()),
             ))),
             None => UtrAsrCacheEligibility::Floating,
-        }
+        })
     }
+}
+
+/// Why a UTR ASR producer could not be named, so no row may be read or
+/// written for the plan.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UtrAsrProducerError {
+    /// Stock Whisper cannot be told this language.
+    #[error("no Whisper decode decision for the UTR language: {0}")]
+    Undecodable(crate::types::worker_v2::WhisperDecodeLanguageError),
+    /// The decode decision could not be serialized into the namespace.
+    #[error("the Whisper decode decision could not be serialized: {0}")]
+    Encoding(serde_json::Error),
 }
 
 /// Whether one UTR ASR plan may use the cache at all.
@@ -464,12 +496,82 @@ mod typed_cache_tests {
     /// The namespace one engine resolves, which must be the pinned arm.
     fn namespace_for(engine: &UtrEngine) -> UtrAsrCacheNamespace {
         let lang = crate::api::LanguageCode3::eng();
-        let models = crate::model_manifest::utr_pinned_models(engine, &lang)
+        namespace_for_language(engine, &lang)
+    }
+
+    fn namespace_for_language(
+        engine: &UtrEngine,
+        lang: &crate::api::LanguageCode3,
+    ) -> UtrAsrCacheNamespace {
+        let models = crate::model_manifest::utr_pinned_models(engine, lang)
             .expect("a UTR engine resolves a pinned composition");
-        match UtrAsrCacheNamespace::for_pinned_plan(engine, &models) {
+        match UtrAsrCacheNamespace::for_pinned_plan(
+            engine,
+            &models,
+            &crate::transcribe::SingleAsrLanguage::One(lang.clone()),
+        )
+        .expect("the engine can decode this language")
+        {
             super::UtrAsrCacheEligibility::Pinned(namespace) => namespace,
             super::UtrAsrCacheEligibility::Floating => {
                 panic!("every UTR engine composition is fully pinned in this build")
+            }
+        }
+    }
+
+    /// RED FIRST: the namespace named Cantonese's decision through a hand
+    /// `yue` arm and every other language's not at all, so a policy change
+    /// for another language would have replayed rows decoded the old way.
+    /// Every Whisper namespace now carries its language's decode decision,
+    /// and a row written under any other producer is not read.
+    #[tokio::test]
+    async fn whisper_namespaces_carry_their_languages_decode_decision() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cache = super::UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+            .await
+            .expect("cache");
+        for (language, decision) in [
+            (
+                crate::api::LanguageCode3::yue(),
+                r#"{"kind":"force","token":"yue"}"#,
+            ),
+            (
+                crate::api::LanguageCode3::eng(),
+                r#"{"kind":"force","token":"en"}"#,
+            ),
+        ] {
+            let current = namespace_for_language(&UtrEngine::Whisper, &language);
+            assert!(
+                current.namespace().starts_with(&format!(
+                    "utr-asr-open-begin-v5:decode={decision}:whisper_utr:"
+                )),
+                "{}",
+                current.namespace()
+            );
+            let data = serde_json::json!({"segments": []});
+            for old_producer in ["utr-asr-cantonese-token-v6", "utr-asr-open-begin-v5"] {
+                let old = UtrAsrCacheNamespace(super::BuildOwnedNamespace::derived(
+                    current.namespace().replace(
+                        &format!("utr-asr-open-begin-v5:decode={decision}"),
+                        old_producer,
+                    ),
+                ));
+                cache
+                    .put(
+                        "same-media-and-language",
+                        super::tasks::UTR_ASR,
+                        &old,
+                        &data,
+                    )
+                    .await
+                    .expect("retained older response");
+                assert_eq!(
+                    cache
+                        .get("same-media-and-language", super::tasks::UTR_ASR, &current)
+                        .await
+                        .expect("current lookup"),
+                    None
+                );
             }
         }
     }
@@ -481,7 +583,9 @@ mod typed_cache_tests {
         for engine in [UtrEngine::RevAi, UtrEngine::Whisper, UtrEngine::HkTencent] {
             let bytes = namespace_for(&engine).namespace().to_owned();
             let revision = match engine {
-                UtrEngine::Whisper => "utr-asr-open-begin-v5",
+                UtrEngine::Whisper => {
+                    r#"utr-asr-open-begin-v5:decode={"kind":"force","token":"en"}"#
+                }
                 UtrEngine::RevAi | UtrEngine::HkTencent => "utr-asr-v1",
             };
             let prefix = format!("{revision}:{}:", engine.wire_name());
@@ -519,9 +623,10 @@ mod typed_cache_tests {
             "utr-asr-owned-windows-v4:",
         ] {
             let old = UtrAsrCacheNamespace(super::BuildOwnedNamespace::derived(
-                whisper
-                    .namespace()
-                    .replace("utr-asr-open-begin-v5:", old_revision),
+                whisper.namespace().replace(
+                    r#"utr-asr-open-begin-v5:decode={"kind":"force","token":"en"}:"#,
+                    old_revision,
+                ),
             ));
             cache
                 .put("old-producer", super::tasks::UTR_ASR, &old, &data)

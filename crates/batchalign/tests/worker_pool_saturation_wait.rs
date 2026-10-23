@@ -33,7 +33,6 @@ fn request(lang: &LanguageCode3) -> BatchInferRequest {
         lang: lang.clone(),
         items: vec![json!({"words": ["hello"], "lang": lang.as_ref()})],
         mwt: BTreeMap::new(),
-        allow_stanza_fallback: false,
     }
 }
 

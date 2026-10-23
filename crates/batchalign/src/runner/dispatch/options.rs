@@ -123,7 +123,7 @@ pub(crate) struct TranscribeDispatchParams {
     /// fallback for utseg when no language-specific TalkBank BERT
     /// utseg model is configured. Surfaced as
     /// `--utseg-fallback-stanza` on the transcribe / transcribe-s CLI.
-    pub allow_stanza_fallback_utseg: bool,
+    pub utseg_fallback: crate::params::UtsegFallbackPolicy,
     /// Per-engine configuration extras drawn from
     /// `CommonOptions.engine_overrides.extras` (e.g. `qwen_model`,
     /// `qwen_device`, `funaudio_model`). The transcribe-engine selector
@@ -154,7 +154,7 @@ pub(crate) fn extract_transcribe_dispatch_params(
                 batch_size: t.batch_size,
                 merge_abbrev: t.merge_abbrev,
                 cache_policies,
-                allow_stanza_fallback_utseg: t.utseg_fallback.is_allowed(),
+                utseg_fallback: t.utseg_fallback,
                 engine_extras: t.common.engine_overrides.extras.clone(),
             })
         }

@@ -1,7 +1,7 @@
 # Server Model Loading and Caching
 
 **Status:** Current
-**Last updated:** 2026-09-16 08:18 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This document describes every ML model loaded by batchalign3 workers,
 when each model is loaded into memory, and how results are cached.
@@ -59,7 +59,10 @@ The server auto-chains forced alignment + UTR + disfluency + retrace.
 **Result caching:**
 - Forced alignment: SQLite. Key = `BLAKE3(audio identity + time window + words + gap-healing policy + engine)`.
 - UTR: SQLite. Key = `BLAKE3(realpath + filesize)`, under the namespace
-  `utr-asr-v1:<UTR engine>:<the models that plan pinned>`. The engine name
+  `<producer>:<UTR engine>:<the models that plan pinned>`, where the producer
+  is `utr-asr-v1` for Rev.AI and Tencent and, for stock Whisper, its
+  word-timestamp producer revision with the decode decision its worker is
+  given for the language (`utr-asr-open-begin-v5:decode=<decision>`). The engine name
   alone said only which engine wrote a row, never which weights it wrote it
   with, so a row from before a checkpoint moved was indistinguishable from one
   after; naming the pinned models makes rows written under an older
@@ -143,7 +146,7 @@ count are part of the evidence identity.
 
 | Module | Model | Source | Size | Loaded When | HF Hub |
 |--------|-------|--------|------|-------------|--------|
-| `inference/utseg.py` | `BertUtteranceModel` for `eng` / `cmn` / `zho` / `yue`; otherwise Stanza pipeline (tokenize, pos, lemma, constituency) | HF Hub / stanza | ~400 MB for BERT model or 300-500 MB per Stanza language | First batch (lazy factory) | Yes |
+| `inference/utseg.py` | `BertUtteranceModel` for `eng` / `cmn` / `zho` / `yue`; otherwise Stanza pipeline (tokenize, pos, constituency) | HF Hub / stanza | ~400 MB for BERT model or 300-500 MB per Stanza language | First batch (lazy factory) | Yes |
 
 **Result caching:** SQLite utterance cache. Key = `BLAKE3(text + lang)`.
 
@@ -165,7 +168,7 @@ Same engines as `transcribe` plus a Rust-side WER step:
 
 | Module | Model | Source | Size | Loaded When | HF Hub |
 |--------|-------|--------|------|-------------|--------|
-| `crates/batchalign-transform/src/benchmark.rs` | None (Rust Hirschberg DP alignment via the allowlisted `dp_align::align` call site) | local | negligible | N/A | No |
+| `crates/batchalign/src/benchmark.rs` | None (Rust Hirschberg DP alignment via the allowlisted `dp_align::align` call site) | local | negligible | N/A | No |
 
 ---
 
@@ -183,15 +186,17 @@ Feature sets: `eGeMAPSv02`, `GeMAPSv01b`, `ComParE_2016`, `eGeMAPSv01b`.
 
 ## Device Placement
 
-All torch-based inference modules auto-detect the compute device at load time:
+ASR and forced-alignment loaders resolve `DevicePolicy` at load time.
+`--force-cpu` selects CPU before any accelerator check; otherwise:
 
 | Priority | Device | Notes |
 |----------|--------|-------|
 | 1 | CUDA | If `torch.cuda.is_available()` and not `--force-cpu` |
-| 2 | MPS | macOS Metal (Apple Silicon). Used on Apple Silicon server/client machines when available |
+| 2 | MPS | Apple Silicon, only with explicit `--allow-mps` and when available |
 | 3 | CPU | Fallback |
 
-Stanza manages its own device internally (typically CPU).
+Local speaker engines exclude MPS even with the opt-in. Stanza manages its own
+device internally (typically CPU). See [device policy](../developer/apple-mps-workarounds.md).
 
 ## Speaker engine credentials
 

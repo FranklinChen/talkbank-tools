@@ -87,7 +87,27 @@ pub fn parse_fa_response(
         serde_json::from_str(json_str).map_err(|e| FaAlignmentError::JsonParse {
             message: e.to_string(),
         })?;
+    align_fa_response(raw_resp, original_words, window, engine)
+}
 
+/// Align an already-typed FA response with the words it answers about.
+///
+/// The JSON-free half of [`parse_fa_response`], for a caller that holds the
+/// typed worker response: the worker-protocol V2 adapter used to serialize
+/// its typed value to JSON only for this function to deserialize it again,
+/// which added a failure (an unserializable response) the data could not
+/// actually have.
+///
+/// # Errors
+///
+/// [`FaAlignmentError::IndexedCountMismatch`] when an indexed response does
+/// not carry exactly one slot per word.
+pub fn align_fa_response(
+    raw_resp: FaRawResponse,
+    original_words: &[FaWord],
+    window: &FaWindow,
+    engine: &EngineId,
+) -> Result<Vec<Option<WordTiming>>, FaAlignmentError> {
     match raw_resp {
         FaRawResponse::IndexedWordLevel { indexed_timings } => {
             let paired = IndexedWordTimings::pair(original_words, &indexed_timings)?;

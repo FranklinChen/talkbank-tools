@@ -110,7 +110,7 @@ when re-running over an existing corpus.
 | `lang` | Language code |
 | `retokenize` | Present if CJK retokenization was applied |
 | `incremental` | Present if `--before` incremental mode was used |
-| `ud_repairs` | How many dependency relations had to be repaired. Present only when at least one was |
+| `ud_repairs` | How many dependency relations and feature values had to be repaired. Present only when at least one was |
 
 The pipeline names which analysis ran: `standard`, `mandarin_retokenize`
 (Mandarin with retokenization), or `cantonese_pycantonese_pos` (Cantonese with
@@ -131,13 +131,18 @@ non-UD spelling is replaced by the UD relation it means (`iob` becomes
 `iobj`). Subtypes are never touched: `nmod:poss` and `acl:relcl` are
 legitimate and language-specific.
 
+A model can also emit padding as a morphological feature value (`Case=<PAD>`).
+That value is removed rather than written into `%mor`, and the rest of the
+word's features are kept.
+
 Those repairs are counted in the comment:
 
 ```text
 [fc-ba3 morphotag | engine=stanza-1.11.1:ita:standard ; lang=ita ; ud_repairs=3 | ...]
 ```
 
-`ud_repairs=3` means three relations in this file were repaired. The key is
+`ud_repairs=3` means three relations or feature values in this file were
+repaired. The key is
 absent when nothing was repaired, so there is no `ud_repairs=0` to read: no
 key means no repairs. A file tagged by a build from before this key existed
 says nothing either way.

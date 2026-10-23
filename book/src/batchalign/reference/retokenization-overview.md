@@ -1,7 +1,7 @@
 # Retokenization: Overview
 
 **Status:** Current
-**Last updated:** 2026-05-19 14:18 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Retokenization in BA3 refers to **two distinct transformations** that
 happen to share the name. A reader encountering "retokenization" in
@@ -56,7 +56,7 @@ flowchart LR
         Disfl --> CHAT["CHAT file on disk"]
     end
     subgraph MorphotagTime["morphotag --retokenize (opt-in)"]
-        CHAT2["CHAT file on disk"] --> Parse["parse_lenient()"]
+        CHAT2["CHAT file on disk"] --> Parse["ParsedFile::parse(): admit retained input"]
         Parse --> Worker["Stanza worker:<br/>tokenize, pos, lemma, mwt"]
         Worker --> MorphRetok["talkbank-transform<br/>retokenize_utterance()<br/>reshape CHAT to match Stanza"]
         MorphRetok --> Inject["inject %mor / %gra"]

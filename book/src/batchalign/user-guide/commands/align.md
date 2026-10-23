@@ -41,6 +41,18 @@ when no word could be timed. Existing valid word timing counts as timing.
 Complete timing coverage is not a guarantee of acoustic accuracy; assumptions
 and review evidence remain visible.
 
+When Tencent refuses UTR with `FailedOperation.UserHasNoAmount`, its ASR
+resource pack is exhausted. Restore the account's ASR quota/resource pack
+before retrying, or explicitly select a different supported UTR engine.
+BA3 reports this as `provider_quota_exhausted`, retains any existing timing,
+and does not grant a same-engine fallback retry (any other provider failure
+of the first UTR pass keeps it, since the fallback is a different request). Without existing timing or
+successful recovery, output can remain entirely untimed and diagnosed (exit 7).
+
+Whisper UTR decodes in the transcript's resolved language, Cantonese
+included, with the transcription task. That fixes what Whisper is asked to
+recognize; it does not guarantee recognition or alignment accuracy.
+
 **Missing localization:** speech without supplied timing or source-bound UTR
 search evidence receives no alignment request and is reported as
 `localization_unavailable`. Grouping no longer guesses positions from word

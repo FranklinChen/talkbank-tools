@@ -472,7 +472,7 @@ export interface components {
          *     error strings.
          * @enum {string}
          */
-        FailureCategory: "validation" | "parse_error" | "input_missing" | "evidence_unavailable" | "analysis_unavailable" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "provider_transient" | "provider_terminal" | "memory_pressure" | "cancelled" | "system" | "model_access_denied";
+        FailureCategory: "validation" | "parse_error" | "input_missing" | "evidence_unavailable" | "analysis_unavailable" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "local_runtime" | "provider_transient" | "provider_terminal" | "provider_quota_exhausted" | "provider_account_refused" | "memory_pressure" | "cancelled" | "system" | "model_access_denied";
         /**
          * @description What a file written with diagnostics reports.
          *
@@ -1594,6 +1594,24 @@ export interface components {
          */
         ResultContent: string | components["schemas"]["BinaryResultDescriptor"];
         /**
+         * @description A secondary-morphology cause earlier builds wrote and this one only reads.
+         * @enum {string}
+         */
+        RetiredSecondaryMorphologyFailureKind: "registry_unavailable";
+        /**
+         * @description A cause earlier builds wrote and this one only reads, from records they
+         *     stored.
+         */
+        RetiredUntimedCause: {
+            /** @enum {string} */
+            kind: "no_usable_timing";
+        } | {
+            /** @enum {string} */
+            kind: "not_in_recording";
+            /** @description The postcode that marks it. */
+            postcode: components["schemas"]["OffRecordPostcode"];
+        };
+        /**
          * @description Why secondary positions could not be established from primary injection.
          * @enum {string}
          */
@@ -1601,7 +1619,7 @@ export interface components {
         /** @description One secondary span's failure, distinct from an unsupported-language exclusion. */
         SecondaryMorphologyFailure: {
             /** @description Typed producer boundary. */
-            cause: components["schemas"]["SecondaryMorphologyFailureKind"];
+            cause: components["schemas"]["StoredSecondaryMorphologyFailureKind"];
             /** @description Bounded explanation from that boundary. */
             detail: string;
             /** @description Where the retained placeholders belong. */
@@ -1611,7 +1629,7 @@ export interface components {
          * @description Which producer boundary could not supply secondary morphology.
          * @enum {string}
          */
-        SecondaryMorphologyFailureKind: "invalid_language" | "registry_unavailable" | "worker" | "response_count" | "empty_analysis" | "merge" | "splice";
+        SecondaryMorphologyFailureKind: "invalid_language" | "worker" | "response_count" | "empty_analysis" | "merge" | "splice";
         /** @description Address of a secondary-language span in the post-injection document. */
         SecondaryMorphologySpan: {
             /**
@@ -1694,7 +1712,26 @@ export interface components {
              */
             status: string;
         };
-        /** @description Why an utterance's words have no timing. */
+        /**
+         * @description Why a secondary span failed, as a record holds it: a cause this build
+         *     writes, or one only earlier builds wrote and stored records still carry.
+         *
+         *     Untagged over two string enums, so either reads by its own spelling. The
+         *     writer produces a [`SecondaryMorphologyFailureKind`], which has no
+         *     retired cause to produce.
+         */
+        StoredSecondaryMorphologyFailureKind: components["schemas"]["SecondaryMorphologyFailureKind"] | components["schemas"]["RetiredSecondaryMorphologyFailureKind"];
+        /**
+         * @description Why an utterance's words have no timing, as a record holds it: a cause
+         *     this build writes, or one only earlier builds wrote and stored records
+         *     still carry.
+         *
+         *     Untagged over two tagged enums, so either reads by its own `kind` and the
+         *     wire shape is the cause's. The writer produces an [`UntimedCauseRecord`]
+         *     (`fa::completion`), which has no retired cause to produce.
+         */
+        StoredUntimedCause: components["schemas"]["UntimedCauseRecord"] | components["schemas"]["RetiredUntimedCause"];
+        /** @description Why an utterance's words have no timing: the causes this build writes. */
         UntimedCauseRecord: {
             /** @enum {string} */
             kind: "window_refused";
@@ -1707,18 +1744,33 @@ export interface components {
             /** @enum {string} */
             kind: "localization_unavailable";
         } | {
+            /**
+             * Format: int64
+             * @description Requests that returned timing evidence (a worker's answer, the
+             *     cache, a replayed response, or reused `%wor`).
+             */
+            answered: number;
             /** @enum {string} */
-            kind: "no_usable_timing";
+            kind: "requested";
+            /**
+             * Format: int64
+             * @description Requests left unaligned: no worker evidence was obtained.
+             */
+            unaligned: number;
+            /**
+             * Format: int64
+             * @description Word ranges left unrequested: an anchored piece whose window
+             *     could not be sent.
+             */
+            unrequested: number;
         } | {
             /** @enum {string} */
-            kind: "not_in_recording";
-            /** @description The postcode that marks it. */
-            postcode: components["schemas"]["OffRecordPostcode"];
+            kind: "unrecorded";
         };
         /** @description One utterance forced alignment left with untimed words. */
         UntimedUtteranceRecord: {
             /** @description Why. */
-            cause: components["schemas"]["UntimedCauseRecord"];
+            cause: components["schemas"]["StoredUntimedCause"];
             /**
              * Format: int64
              * @description How many of them are untimed, at least one.

@@ -51,7 +51,10 @@ fn exhausted_global_and_two_pass_projection_leave_no_manufactured_hint() {
                 FixtureTiming::PartiallyTimed,
             );
             let tokens = make_utr_tokens(&[("hello", 0, 1_500), ("world", 1_000, end_ms)]);
-            let result = strategy.inject(&mut chat, &tokens);
+            let result = strategy.inject(
+                &mut chat,
+                &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            );
             assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 1_500)));
             assert_eq!(get_utterance_bullet(&chat, 1), None);
             assert_eq!(
@@ -76,7 +79,10 @@ fn surviving_projection_preserves_the_observed_end() {
         FixtureTiming::PartiallyTimed,
     );
     let tokens = make_utr_tokens(&[("hello", 0, 1_500), ("world", 1_000, 2_000)]);
-    let result = GlobalUtr.inject(&mut chat, &tokens);
+    let result = GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 1_500)));
     assert_eq!(get_utterance_bullet(&chat, 1), Some((1_500, 2_000)));
     assert_eq!(
@@ -96,7 +102,10 @@ fn exhausted_new_hint_does_not_move_the_floor_for_later_evidence() {
         ("world", 1_000, 1_500),
         ("again", 1_500, 2_000),
     ]);
-    let result = GlobalUtr.inject(&mut chat, &tokens);
+    let result = GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 1_500)));
     assert_eq!(get_utterance_bullet(&chat, 1), None);
     assert_eq!(get_utterance_bullet(&chat, 2), Some((1_500, 2_000)));
@@ -125,7 +134,10 @@ fn marked_overlap_keeps_its_interval_and_does_not_advance_the_floor() {
         ("world", 1_000, 3_000),
         ("again", 1_500, 2_000),
     ]);
-    let result = GlobalUtr.inject(&mut chat, &tokens);
+    let result = GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(get_utterance_bullet(&chat, 1), Some((1_000, 3_000)));
     assert_eq!(get_utterance_bullet(&chat, 2), Some((1_500, 2_000)));
     assert_eq!(
@@ -141,7 +153,10 @@ fn ca_bottom_overlap_remains_exempt_from_non_overlap_clipping() {
         FixtureTiming::PartiallyTimed,
     );
     let tokens = make_utr_tokens(&[("hello", 0, 1_500), ("world", 500, 900)]);
-    let result = GlobalUtr.inject(&mut chat, &tokens);
+    let result = GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 1_500)));
     assert_eq!(get_utterance_bullet(&chat, 1), Some((500, 900)));
     assert_eq!(
@@ -158,7 +173,10 @@ fn two_pass_cannot_write_a_nonpositive_local_overlap_interval() {
             FixtureTiming::PartiallyTimed,
         );
         let tokens = make_utr_tokens(&[("hello", 0, 1_500), ("world", 500, end_ms)]);
-        let result = TwoPassOverlapUtr::new().inject(&mut chat, &tokens);
+        let result = TwoPassOverlapUtr::new().inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
         assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 1_500)));
         assert_eq!(get_utterance_bullet(&chat, 1), None);
         assert_eq!(
@@ -176,7 +194,10 @@ fn repeated_word_conflict_is_refused_without_hiding_the_selected_plan() {
             FixtureTiming::PartiallyTimed,
         );
         let tokens = make_utr_tokens(&[("hello", 200, 300)]);
-        let result = strategy.inject(&mut chat, &tokens);
+        let result = strategy.inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
         assert_eq!(get_utterance_bullet(&chat, 0), None);
         assert_eq!(get_utterance_bullet(&chat, 1), Some((200, 300)));
         assert_eq!(
@@ -222,7 +243,10 @@ fn retained_neighbors_bound_hints_without_extending_provider_evidence() {
                 ("world", start, end),
                 ("again", 500, 600),
             ]);
-            let result = strategy.inject(&mut chat, &tokens);
+            let result = strategy.inject(
+                &mut chat,
+                &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            );
             assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 100)));
             assert_eq!(get_utterance_bullet(&chat, 1), expected);
             assert_eq!(get_utterance_bullet(&chat, 2), Some((500, 600)));
@@ -252,7 +276,10 @@ fn marked_overlap_hints_remain_exempt_from_the_following_retained_bound() {
         FixtureTiming::PartiallyTimed,
     );
     let tokens = make_utr_tokens(&[("hello", 0, 100), ("world", 50, 550), ("again", 500, 600)]);
-    let result = GlobalUtr.inject(&mut chat, &tokens);
+    let result = GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(get_utterance_bullet(&chat, 1), Some((50, 550)));
     assert_eq!(
         (result.injected(), result.skipped(), result.unmatched()),
@@ -267,7 +294,10 @@ fn retained_marked_overlap_does_not_supply_a_non_overlap_ceiling() {
         FixtureTiming::PartiallyTimed,
     );
     let tokens = make_utr_tokens(&[("hello", 0, 300), ("world", 100, 200)]);
-    let result = GlobalUtr.inject(&mut chat, &tokens);
+    let result = GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(get_utterance_bullet(&chat, 0), Some((0, 300)));
     assert_eq!(get_utterance_bullet(&chat, 1), Some((100, 200)));
     assert_eq!(

@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-10-03 08:50 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -18,10 +18,10 @@ mode, UTR pre-pass behavior, and incremental processing.
 ```mermaid
 flowchart TD
     start([align invoked]) --> read[Read CHAT file]
-    read --> resolve_audio[Resolve audio file]
+    read --> admit[Admit source-bound word-timing plan\nand active incremental prior]
+    admit --> resolve_audio[Resolve audio file]
     resolve_audio --> ensure_wav[ensure_wav: convert mp4→wav if needed]
-    ensure_wav --> parse[parse_lenient → ChatFile]
-    parse --> reuse_check{Complete reusable\n%wor timing?}
+    ensure_wav --> reuse_check{Complete reusable\n%wor timing?}
     reuse_check -->|Yes| reuse[Refresh main-tier bullets from %wor\nmechanically, resolve overlap, THEN\noptionally regenerate %wor from the\nresolved state]
     reuse_check -->|No| count[count_utterance_timing → timed, untimed]
     reuse --> done([Output .cha file])
@@ -31,7 +31,7 @@ flowchart TD
     utr_check -->|Yes| utr_engine_check{--utr engine\nconfigured?}
 
     utr_engine_check -->|Yes: --utr| run_utr_pass["run_utr_pass()"]
-    utr_engine_check -->|No: --no-utr| warn_interp[Log warning\nFall back to interpolation]
+    utr_engine_check -->|No: --no-utr| warn_interp[Refuse unsupported localization\nwhen timing is unavailable]
 
     run_utr_pass --> utr_done[Re-serialize CHAT\nwith recovered timing]
     utr_done --> group
@@ -589,8 +589,8 @@ flowchart TD
     discover --> pair[Pair FILE.cha with FILE.gold.cha]
     pair --> found{Gold companion found?}
     found -->|No| fail[Report file error]
-    found -->|Yes| morph[process_morphosyntax\nmain transcript only]
-    pair --> parse_gold[parse_lenient raw gold\n→ gold AST]
+    found -->|Yes| parse_gold[Admit gold source\n→ AdmittedComparisonReference]
+    parse_gold --> morph[process_morphosyntax\nmain transcript only]
     morph --> parse_main[MorphotaggedMain::from_proof\n→ the judged main document\n(never re-parsed from text)]
     parse_main --> bundle[compare()\nconform + one whole-file alignment\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
     parse_gold --> bundle

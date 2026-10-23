@@ -325,6 +325,18 @@ async fn dispatch_batched_text_command(
                     return Ok(());
                 }
             };
+            // The Stanza route reads constituency trees, so a language whose
+            // installed catalog entry has no constituency parser is refused
+            // here, before any file is read, instead of failing every
+            // multi-word item at the worker. The capability probe above has
+            // reported the catalog this reads.
+            let route = match route.admit(&execution.pool.stanza_registry()) {
+                Ok(route) => route,
+                Err(unservable) => {
+                    fail_job(job, host, unservable.to_string()).await;
+                    return Ok(());
+                }
+            };
             dispatch_utseg_job(
                 job,
                 host,

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdFeatureRepairV2",
+  "description": "One feature value a worker removed from an analysis it returned.\n\nThe worker is the only witness, as for a relation repair: the removed value\nis not in the analysis the server receives. Each removed value is its own\nrepair, so `Case=Nom,<PAD>` losing `<PAD>` is one repair and keeps `Nom`.",
+  "type": "object",
+  "properties": {
+    "feature": {
+      "description": "The feature whose value it was (`Case`).",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Which repair this is.",
+      "$ref": "#/$defs/UdFeatureRepairKindV2"
+    },
+    "removed_value": {
+      "description": "The removed value, verbatim (`<PAD>`): padding, by type.",
+      "$ref": "#/$defs/PaddingValue"
+    },
+    "word": {
+      "description": "Surface form of the word the value was removed from.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "word",
+    "feature",
+    "removed_value"
+  ],
+  "$defs": {
+    "PaddingValue": {
+      "description": "A feature value that is model padding: an angle-bracketed placeholder such as <PAD> or <UNK>.",
+      "type": "string",
+      "pattern": "^<.*>$"
+    },
+    "UdFeatureRepairKindV2": {
+      "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_feature_value"
+        }
+      ]
+    }
+  }
+}

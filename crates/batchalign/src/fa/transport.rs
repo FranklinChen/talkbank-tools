@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{DurationMs, WorkerLanguage};
+use crate::chat_ops::fa::alignment::FaAlignmentError;
 use crate::chat_ops::fa::origin::EngineId;
 use crate::chat_ops::fa::{FaInferItem, WhisperTextMode, WordTiming};
 use crate::error::{MissingForcedAlignmentEvidence, MissingRequiredEvidence, ServerError};
@@ -19,7 +20,7 @@ use crate::params::CachePolicy;
 use crate::types::engines::SelectableEngine;
 use crate::types::traces::FaFallbackEventTrace;
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
-use crate::worker::fa_result_v2::parse_forced_alignment_result_v2;
+use crate::worker::fa_result_v2::{FaEngineConstraint, FaFailureClass, FaWorkerFailure};
 use crate::worker::request_builder_v2::{
     ForcedAlignmentBuildInputV2, ForcedAlignmentRequestBuildErrorV2, PreparedFaRequestIdsV2,
     build_forced_alignment_request_v2,
@@ -27,7 +28,7 @@ use crate::worker::request_builder_v2::{
 use tracing::warn;
 
 use super::raw_evidence::{
-    ExpectedFaWords, FaEvidenceRoute, FaRawEvidence, ReplayableFaRawEvidence,
+    ExpectedFaWords, FaEvidenceRoute, FaRawEvidence, FaRawEvidenceError, ReplayableFaRawEvidence,
 };
 use super::units::{DispatchUnit, UnitOrdinal};
 
@@ -290,107 +291,95 @@ async fn infer_units_v2<'b>(
             unit,
         };
 
-        match admission.admit(&response, FaEvidenceRoute::Direct) {
-            Ok(parsed) => parsed_results.push(FaWorkerUnitResult::Evidence(Box::new(parsed))),
-            Err(error) => {
-                let Some(retry) = fa_group_retry(batch.engine, &error) else {
-                    // Before propagating to the file level, check whether this is a
-                    // data-driven RuntimeFailure. RuntimeFailure means the model failed
-                    // on this group's specific input, other groups are unaffected, so
-                    // the correct recovery is a group-level skip, not a file abort.
-                    if is_fa_runtime_failure(&error) {
-                        warn!(
-                            request = ordinal.index(),
-                            group = group.index(),
-                            start_ms = window.audio_start().get(),
-                            end_ms = window.end().get(),
-                            error = %error,
-                            "FA request failed with model RuntimeFailure (data-driven); \
-                             leaving words unaligned"
-                        );
-                        parsed_results.push(unaligned_unit_result(unit));
-                        continue;
-                    }
-                    return Err(error);
-                };
+        let failure = match admission.admit(&response, FaEvidenceRoute::Direct) {
+            Ok(parsed) => {
+                parsed_results.push(FaWorkerUnitResult::Evidence(Box::new(parsed)));
+                continue;
+            }
+            Err(failure) => failure,
+        };
+        let retry = match PrimaryStep::after(batch.engine, &failure) {
+            PrimaryStep::Retry(retry) => retry,
+            // The model failed on this request's own input. Other requests
+            // have different words and audio, so the request is left
+            // unaligned and the file continues.
+            PrimaryStep::LeaveUnaligned => {
                 warn!(
                     request = ordinal.index(),
                     group = group.index(),
                     start_ms = window.audio_start().get(),
                     end_ms = window.end().get(),
-                    reason = retry.reason,
-                    failed_engine = batch.engine.selection_name(),
-                    retry_engine = retry.target.selection_name(),
-                    "FA engine hit a recoverable target constraint; retrying request on its \
-                     fallback engine"
+                    error = %failure,
+                    "FA engine constraint has no fallback; \
+                     leaving words unaligned"
                 );
-                let fallback_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
-                // Built only on this rare path: most batches never retry.
-                let fallback_route = services.pipeline.pool.gpu_route(
-                    services.gpu,
-                    crate::worker::pool::GpuTask::FaFallback,
-                    batch.worker_lang.clone(),
-                )?;
-                let fallback_response = dispatch_unit_request(
-                    services,
-                    &artifacts,
-                    &batch,
-                    fallback_namespace,
-                    unit,
-                    retry.target,
-                    &fallback_route,
-                )
-                .await?;
-                match admission.admit(
-                    &fallback_response,
-                    FaEvidenceRoute::Fallback {
-                        reason: retry.reason,
-                    },
-                ) {
-                    Ok(parsed) => parsed_results.push(FaWorkerUnitResult::Evidence(Box::new(
-                        parsed.with_fallback_event(build_fallback_event(
-                            unit,
-                            batch.engine,
-                            retry.target,
-                            retry.reason,
-                        )),
-                    ))),
-                    // The fallback model is not loaded in this worker (capability
-                    // gap, not a data error).  Leave the group's words unaligned
-                    // rather than aborting the whole file, the surrounding
-                    // utterances still have valid timing.
-                    Err(ref error) if is_whisper_model_unavailable(error) => {
-                        warn!(
-                            request = ordinal.index(),
-                            group = group.index(),
-                            start_ms = window.audio_start().get(),
-                            end_ms = window.end().get(),
-                            retry_engine = retry.target.selection_name(),
-                            "fallback FA engine unavailable (worker has no such model \
-                             loaded); leaving request words unaligned"
-                        );
-                        parsed_results.push(unaligned_unit_result(unit));
-                    }
-                    // The fallback itself hit a data-driven RuntimeFailure
-                    // (e.g. the group is still too long for the fallback's own
-                    // context after the retry).  Same treatment: leave the group
-                    // unaligned rather than aborting the file.
-                    Err(ref error) if is_fa_runtime_failure(error) => {
-                        warn!(
-                            request = ordinal.index(),
-                            group = group.index(),
-                            start_ms = window.audio_start().get(),
-                            end_ms = window.end().get(),
-                            error = %error,
-                            retry_engine = retry.target.selection_name(),
-                            "fallback FA engine also failed with model RuntimeFailure; \
-                             leaving request words unaligned"
-                        );
-                        parsed_results.push(unaligned_unit_result(unit));
-                    }
-                    Err(error) => return Err(error),
-                }
+                parsed_results.push(unaligned_unit_result(unit));
+                continue;
             }
+            PrimaryStep::FailFile => return Err(failure.into()),
+        };
+        warn!(
+            request = ordinal.index(),
+            group = group.index(),
+            start_ms = window.audio_start().get(),
+            end_ms = window.end().get(),
+            reason = retry.constraint.reason(),
+            failed_engine = batch.engine.selection_name(),
+            retry_engine = retry.target.selection_name(),
+            "FA engine hit a recoverable target constraint; retrying request on its \
+             fallback engine"
+        );
+        let fallback_namespace = NEXT_FA_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed);
+        // Built only on this rare path: most batches never retry.
+        let fallback_route = services.pipeline.pool.gpu_route(
+            services.gpu,
+            crate::worker::pool::GpuTask::FaFallback,
+            batch.worker_lang.clone(),
+        )?;
+        let fallback_response = dispatch_unit_request(
+            services,
+            &artifacts,
+            &batch,
+            fallback_namespace,
+            unit,
+            retry.target,
+            &fallback_route,
+        )
+        .await?;
+        match admission.admit(
+            &fallback_response,
+            FaEvidenceRoute::Fallback {
+                constraint: retry.constraint,
+            },
+        ) {
+            Ok(parsed) => parsed_results.push(FaWorkerUnitResult::Evidence(Box::new(
+                parsed.with_fallback_event(build_fallback_event(
+                    unit,
+                    batch.engine,
+                    retry.target,
+                    retry.constraint,
+                )),
+            ))),
+            Err(failure) => match FallbackStep::after(&failure) {
+                // The fallback model failed on this input too (the request is
+                // still too long for its own context), or the worker has no
+                // fallback model loaded: a capability gap, not a data error.
+                // Either way the surrounding requests keep their timing.
+                FallbackStep::LeaveUnaligned => {
+                    warn!(
+                        request = ordinal.index(),
+                        group = group.index(),
+                        start_ms = window.audio_start().get(),
+                        end_ms = window.end().get(),
+                        error = %failure,
+                        retry_engine = retry.target.selection_name(),
+                        "fallback FA engine could not align the request either; \
+                         leaving request words unaligned"
+                    );
+                    parsed_results.push(unaligned_unit_result(unit));
+                }
+                FallbackStep::FailFile => return Err(failure.into()),
+            },
         }
     }
 
@@ -400,7 +389,7 @@ async fn infer_units_v2<'b>(
 /// Construct a request result with every word timing left unaligned (`None`).
 ///
 /// All request-level skip paths (empty audio, model unavailability,
-/// data-driven RuntimeFailure) return this same shape so the orchestrator can
+/// recognised engine constraints) return this same shape so the orchestrator can
 /// continue to the next request without aborting the file. For an anchored
 /// group that leaves one piece untimed and its neighbours aligned.
 fn unaligned_unit_result<'a>(unit: &'a DispatchUnit<'a>) -> FaWorkerUnitResult<'a> {
@@ -477,20 +466,27 @@ async fn dispatch_unit_request(
 /// failure would arrive after the expensive part had already been paid for.
 /// Window-relative engine reports cross into file coordinates through THIS
 /// window, a piece's own for a piece, exactly as a single group's do.
+///
+/// Takes the evidence's admitted payload, never the response: admission read
+/// the response once, so a failed or wrong-kind response never reaches here,
+/// and what is left to go wrong is pairing the timings with the words.
 fn parse_unit_response(
-    response: &crate::types::worker_v2::ExecuteResponseV2,
+    raw_evidence: &FaRawEvidence,
     unit: &DispatchUnit<'_>,
-    engine: &EngineId,
-) -> Result<Vec<Option<WordTiming>>, ServerError> {
+) -> Result<Vec<Option<WordTiming>>, FaUnitFailure> {
     let window = unit.window();
-    parse_forced_alignment_result_v2(response, unit.words(), &window, engine).map_err(|error| {
-        ServerError::Validation(format!(
-            "failed to parse worker protocol V2 FA response for request {} (group {}) ({}..{} ms): {error}",
-            unit.ordinal(),
-            unit.group(),
-            window.audio_start().get(),
-            window.end().get(),
-        ))
+    crate::chat_ops::fa::align_fa_response(
+        raw_evidence.payload().clone(),
+        unit.words(),
+        &window,
+        &EngineId::new(raw_evidence.effective_engine().as_wire_name()),
+    )
+    .map_err(|source| FaUnitFailure::Response {
+        request: unit.ordinal().index(),
+        group: unit.group().index(),
+        start_ms: window.audio_start().get(),
+        end_ms: window.end().get(),
+        source,
     })
 }
 
@@ -518,8 +514,8 @@ impl<'a> FaUnitEvidenceAdmission<'_, 'a> {
     fn admit(
         &self,
         response: &crate::types::worker_v2::ExecuteResponseV2,
-        route: FaEvidenceRoute<'_>,
-    ) -> Result<FaWorkerEvidenceResult<'a>, ServerError> {
+        route: FaEvidenceRoute,
+    ) -> Result<FaWorkerEvidenceResult<'a>, FaUnitFailure> {
         let raw_evidence = FaRawEvidence::admit_requested(
             response,
             self.requested_engine,
@@ -528,27 +524,17 @@ impl<'a> FaUnitEvidenceAdmission<'_, 'a> {
             self.unit.cache_key(),
             route,
         )
-        .map_err(|error| {
-            ServerError::Validation(format!(
-                "failed to admit worker protocol V2 FA evidence for request {}: {error}",
-                self.unit.ordinal()
-            ))
+        .map_err(|source| match source {
+            FaRawEvidenceError::WorkerFailure(failure) => FaUnitFailure::worker(self.unit, failure),
+            source => FaUnitFailure::Evidence {
+                request: self.unit.ordinal().index(),
+                source,
+            },
         })?;
-        let timings = parse_unit_response(
-            raw_evidence.response(),
-            self.unit,
-            &EngineId::new(raw_evidence.effective_engine().as_wire_name()),
-        )?;
-        let replayable_raw_evidence = match raw_evidence.into_replayable() {
-            Ok(replayable) => Some(replayable),
-            Err(super::raw_evidence::FaRawEvidenceError::UnversionedFallbackEvidence) => None,
-            Err(error) => {
-                return Err(ServerError::Validation(format!(
-                    "failed to close FA evidence replay state for request {}: {error}",
-                    self.unit.ordinal()
-                )));
-            }
-        };
+        let timings = parse_unit_response(&raw_evidence, self.unit)?;
+        // Closing admitted evidence refuses only fallback output, which is
+        // valid for this run and never persisted.
+        let replayable_raw_evidence = raw_evidence.into_replayable().ok();
         Ok(FaWorkerEvidenceResult {
             unit: self.unit,
             timings,
@@ -564,24 +550,14 @@ pub(super) fn replay_unit_evidence<'a>(
     unit: &'a DispatchUnit<'a>,
 ) -> Result<FaWorkerEvidenceResult<'a>, ServerError> {
     let raw_evidence = raw_evidence.into_inner();
-    let timings = parse_unit_response(
-        raw_evidence.response(),
-        unit,
-        &EngineId::new(raw_evidence.effective_engine().as_wire_name()),
-    )?;
-    let fallback_event = raw_evidence.fallback_reason().map(|reason| {
-        build_fallback_event(
-            unit,
-            raw_evidence.requested_engine(),
-            raw_evidence.effective_engine(),
-            reason,
-        )
-    });
+    let timings = parse_unit_response(&raw_evidence, unit)?;
+    // Replayable evidence is never fallback evidence, so it has no fallback
+    // event to report.
     Ok(FaWorkerEvidenceResult {
         unit,
         timings,
         raw_evidence: None,
-        fallback_event,
+        fallback_event: None,
     })
 }
 
@@ -591,7 +567,7 @@ fn build_fallback_event(
     unit: &DispatchUnit<'_>,
     from_engine: crate::types::engines::FaEngineName,
     to_engine: crate::types::engines::FaEngineName,
-    reason: &str,
+    constraint: FaEngineConstraint,
 ) -> FaFallbackEventTrace {
     FaFallbackEventTrace {
         group_index: unit.group().index(),
@@ -603,45 +579,155 @@ fn build_fallback_event(
             use crate::types::engines::EngineBackend;
             to_engine.wire_name().to_string()
         },
-        reason: reason.to_string(),
+        reason: constraint.reason().to_string(),
         audio_start_ms: DurationMs(unit.window().audio_start().get()),
         audio_end_ms: DurationMs(unit.window().end().get()),
     }
 }
 
-/// Returns `true` when the FA group error is a data-driven `RuntimeFailure`
-/// the worker received and understood the request but the model raised a Python
-/// exception on this specific input (token overflow, shape mismatch, OOM, etc.).
+/// Why one request's worker response was not admitted as timing evidence.
 ///
-/// # Why this is always group-local
+/// Typed so that what a failed request does next is decided by matching it
+/// ([`PrimaryStep::after`], [`FallbackStep::after`]), and so the file-level
+/// error it may become keeps the worker's own category. It used to be a
+/// `ServerError::Validation` string the transport searched for
+/// `"RuntimeFailure:"` and `"ModelUnavailable: no whisper FA host loaded"`,
+/// so the decision depended on how the message happened to be worded, and
+/// a file that did fail was reported to the operator as bad input.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum FaUnitFailure {
+    /// The worker answered with a failure, classified by its protocol code.
+    #[error("FA request {request} (group {group}): {failure}")]
+    Worker {
+        request: usize,
+        group: usize,
+        failure: FaWorkerFailure,
+    },
+    /// The response did not admit as evidence for this request: another
+    /// engine's shape, another word count, another task's result.
+    #[error("failed to admit worker protocol V2 FA evidence for request {request}: {source}")]
+    Evidence {
+        request: usize,
+        source: FaRawEvidenceError,
+    },
+    /// The admitted response could not be lowered into this request's
+    /// timings.
+    #[error(
+        "failed to parse worker protocol V2 FA response for request {request} (group {group}) \
+         ({start_ms}..{end_ms} ms): {source}"
+    )]
+    Response {
+        request: usize,
+        group: usize,
+        start_ms: u64,
+        end_ms: u64,
+        source: FaAlignmentError,
+    },
+}
+
+impl FaUnitFailure {
+    fn worker(unit: &DispatchUnit<'_>, failure: FaWorkerFailure) -> Self {
+        Self::Worker {
+            request: unit.ordinal().index(),
+            group: unit.group().index(),
+            failure,
+        }
+    }
+
+    /// The worker's own report, when that is what this failure is.
+    fn worker_failure(&self) -> Option<&FaWorkerFailure> {
+        match self {
+            Self::Worker { failure, .. } => Some(failure),
+            Self::Evidence { .. } | Self::Response { .. } => None,
+        }
+    }
+}
+
+impl From<FaUnitFailure> for ServerError {
+    /// A worker-reported failure keeps the category its protocol code names
+    /// (a runtime failure, a model that would not load, a refused request);
+    /// a response that does not fit its request is the worker breaking the
+    /// protocol. Neither is invalid client input.
+    fn from(failure: FaUnitFailure) -> Self {
+        match failure {
+            FaUnitFailure::Worker {
+                request,
+                group,
+                failure,
+            } => failure
+                .into_report()
+                .in_context(format_args!("FA request {request} (group {group})"))
+                // Every forced-alignment engine runs on this machine.
+                .into_server_error(crate::worker::execute_result_v2::ModelLocality::Local),
+            FaUnitFailure::Evidence { .. } | FaUnitFailure::Response { .. } => ServerError::Worker(
+                crate::worker::error::WorkerError::Protocol(failure.to_string()),
+            ),
+        }
+    }
+}
+
+/// What a request whose primary engine failed does next.
 ///
-/// A `RuntimeFailure` means the worker successfully parsed the request and
-/// attempted inference, then the model failed. The failure is caused by the
-/// content of *this* group's words and audio. Other groups have different
-/// words and different audio; they will not trigger the same failure. The error
-/// is therefore inherently group-scoped and should be demoted to a group-level
-/// warning (leave words unaligned, continue) rather than propagating as a
-/// file-level failure.
-///
-/// # Contrast with infrastructure failures
-///
-/// `ProcessExited` (worker crash) and `Protocol` (IPC deserialization failure)
-/// are not data-driven: if the worker crashed or the protocol is broken, every
-/// subsequent call will also fail. Those errors still propagate to the file
-/// level so the retry loop and fallback UTR path can attempt recovery.
-///
-/// # Detection
-///
-/// The substring `"RuntimeFailure:"` is inserted by
-/// `parse_forced_alignment_result_v2()` when formatting a
-/// `ProtocolErrorCodeV2::RuntimeFailure` response from the Python worker.
-/// It does not appear in `ModelUnavailable`, `Protocol`, or IPC parse errors,
-/// so the match is specific to data-driven model failures.
-fn is_fa_runtime_failure(error: &ServerError) -> bool {
-    matches!(
-        error,
-        ServerError::Validation(msg) if msg.contains("RuntimeFailure:")
-    )
+/// Decided by [`Self::after`] from the typed failure alone. A retry exists
+/// only here: the fallback's own failure has [`FallbackStep`], which cannot
+/// express one, so a retry cannot chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryStep {
+    /// Re-dispatch the request on the engine row's fallback target.
+    Retry(FaGroupRetry),
+    /// The model failed on this request's own input: leave its words
+    /// unaligned and continue the file.
+    LeaveUnaligned,
+    /// Not this request's input: fail the file with the failure's category.
+    FailFile,
+}
+
+impl PrimaryStep {
+    fn after(engine: crate::types::engines::FaEngineName, failure: &FaUnitFailure) -> Self {
+        match failure.worker_failure().map(FaWorkerFailure::class) {
+            // The policy is a FIELD on the engine's row in `FA_ENGINES`, not a
+            // match over the roster here: a new engine cannot compile without
+            // stating it, beside everything else it is.
+            Some(FaFailureClass::EngineConstraint(constraint)) => {
+                match engine.fallback_policy().retry_target() {
+                    Some(target) => Self::Retry(FaGroupRetry { target, constraint }),
+                    // A constraint the engine has no fallback for is still a
+                    // failure on this request's input.
+                    None => Self::LeaveUnaligned,
+                }
+            }
+            // Missing models, refused requests, unclassified runtime failures
+            // and malformed responses reach the file policy. That policy
+            // distinguishes bounded retries from typed permanent refusals.
+            Some(FaFailureClass::ModelUnavailable | FaFailureClass::FileFailure) | None => {
+                Self::FailFile
+            }
+        }
+    }
+}
+
+/// What a request whose fallback engine also failed does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackStep {
+    /// Leave the request's words unaligned and continue the file.
+    LeaveUnaligned,
+    /// Fail the file with the failure's category.
+    FailFile,
+}
+
+impl FallbackStep {
+    fn after(failure: &FaUnitFailure) -> Self {
+        match failure.worker_failure().map(FaWorkerFailure::class) {
+            // The fallback failed on this input too (still too long for its
+            // own context), or the worker that took it has no model for it: a
+            // capability gap, not a data error. Either way the surrounding
+            // requests keep their timing rather than the file failing.
+            Some(FaFailureClass::EngineConstraint(_) | FaFailureClass::ModelUnavailable) => {
+                Self::LeaveUnaligned
+            }
+            Some(FaFailureClass::FileFailure) | None => Self::FailFile,
+        }
+    }
 }
 
 /// Returns `true` when `error` is a worker process crash, the Python child
@@ -675,34 +761,14 @@ fn is_worker_process_crash(error: &ServerError) -> bool {
     )
 }
 
-/// Returns true when `error` was produced because the worker that handled the
-/// Whisper FA fallback request does not have a Whisper FA model loaded.
-///
-/// This is a **worker capability gap**, not a data quality failure.  When this
-/// is true the FA group should be left unaligned (same as an empty audio
-/// segment) rather than propagating a file-level error.
-///
-/// The distinctive substring comes from the Python worker's
-/// `execute_forced_alignment_request_v2` in `crates/batchalign-pyo3/src/worker_fa_exec.rs`,
-/// which returns `ProtocolErrorCodeV2::ModelUnavailable` with message
-/// `"no whisper FA host loaded for worker protocol V2"` when
-/// `whisper_runner` is `None`.  `parse_forced_alignment_result_v2` formats
-/// this as `"… with ModelUnavailable: no whisper FA host loaded …"`.
-fn is_whisper_model_unavailable(error: &ServerError) -> bool {
-    matches!(
-        error,
-        ServerError::Validation(msg) if msg.contains("ModelUnavailable: no whisper FA host loaded")
-    )
-}
-
 /// A recoverable FA failure and where the group goes next.
 ///
 /// One value rather than a bare reason, because the reason and the engine the
-/// retry runs on are one decision: the reason comes from the error, the target
-/// comes from the failing engine's own row, and a caller holding only the
-/// reason has to name the target itself. It did, as a literal `Whisper`, and
-/// the warn line beside it said "Wave2Vec FA" for every retry, so a Cantonese
-/// group reported the wrong engine to whoever read the log.
+/// retry runs on are one decision: the reason comes from the failure, the
+/// target comes from the failing engine's own row, and a caller holding only
+/// the reason has to name the target itself. It did, as a literal `Whisper`,
+/// and the warn line beside it said "Wave2Vec FA" for every retry, so a
+/// Cantonese group reported the wrong engine to whoever read the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FaGroupRetry {
     /// The engine the group is re-dispatched to.
@@ -710,49 +776,13 @@ struct FaGroupRetry {
     /// Read from [`FaFallbackPolicy::RetryGroupOn`], never named here. That
     /// row's target is const-checked to be language-general, which is what
     /// makes re-dispatching without a second language admission sound.
+    ///
+    /// [`FaFallbackPolicy::RetryGroupOn`]: crate::types::engines::FaFallbackPolicy::RetryGroupOn
     target: crate::types::engines::FaEngineName,
-    /// The exact constraint the engine reported, quoted into the warn line and
-    /// into the fallback event.
-    reason: &'static str,
-}
-
-/// Whether this failure is one the engine's row says to retry, and on what.
-fn fa_group_retry(
-    engine: crate::types::engines::FaEngineName,
-    error: &ServerError,
-) -> Option<FaGroupRetry> {
-    // The policy is a FIELD on the engine's row in `FA_ENGINES`, not a match
-    // over the roster here. The roster match, and the paragraph explaining why
-    // the Qwen3 aligner has nothing to fall back to, moved to that row: a new
-    // engine still cannot compile without stating a policy, and it now states
-    // it beside everything else it is.
-    let target = engine.fallback_policy().retry_target()?;
-
-    let reason = match error {
-        ServerError::Validation(message)
-            if message.contains("targets length is too long for CTC") =>
-        {
-            "targets length is too long for CTC"
-        }
-        ServerError::Validation(message)
-            if message.contains("targets Tensor shouldn't contain blank index") =>
-        {
-            "targets Tensor shouldn't contain blank index"
-        }
-        // Wave2Vec MMS_FA has 7 conv layers (kernels [10,3,3,3,3,2,2], strides
-        // [5,2,2,2,2,2,2]).  A group shorter than ~400 samples (25ms @ 16 kHz)
-        // can produce fewer than 2 samples after layer 6 so layer 7 (kernel=2)
-        // crashes with "Kernel size can't be greater than actual input size".
-        // Whisper pads all input to 30 seconds before computing features and
-        // can handle any non-zero audio length.
-        ServerError::Validation(message)
-            if message.contains("Kernel size can't be greater than actual input size") =>
-        {
-            "audio segment too short for Wave2Vec feature extractor"
-        }
-        _ => return None,
-    };
-    Some(FaGroupRetry { target, reason })
+    /// The constraint the failing engine reported. Its recorded reason
+    /// (`FaEngineConstraint::reason`) is rendered only where the warn line,
+    /// the fallback event and the fallback evidence are written.
+    constraint: FaEngineConstraint,
 }
 
 /// Build one production-domain `FaInferItem` for one request.
@@ -800,8 +830,8 @@ mod tests {
     use super::*;
     use crate::api::NonNegativeSeconds;
     use crate::types::worker_v2::{
-        ExecuteResponseV2, TaskResultV2, TranslationItemResultV2, TranslationResultV2,
-        WorkerRequestIdV2,
+        ExecuteResponseV2, ProtocolErrorCodeV2, TaskResultV2, TranslationItemResultV2,
+        TranslationResultV2, WorkerRequestIdV2,
     };
     use crate::worker::error::WorkerError;
 
@@ -972,10 +1002,12 @@ mod tests {
         assert_ne!(first.audio_ref_id, second.audio_ref_id);
     }
 
+    /// A response of another task's kind is refused where the response is
+    /// read, once, as evidence for no request; it never reaches alignment
+    /// (which used to read the response a second time and carried arms for
+    /// a failure and a wrong kind it could no longer meet).
     #[test]
-    fn parse_unit_response_reports_parser_failure_with_request_context() {
-        let groups = single_groups(&[(100, 900)]);
-        let plan = plan_for(&groups);
+    fn a_non_fa_payload_is_refused_at_admission_with_request_context() {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-fa-v2-bad"),
             TaskResultV2::TranslationResult(TranslationResultV2 {
@@ -984,89 +1016,101 @@ mod tests {
             NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
-        let unit = plan.units().next().expect("one request");
-        let error = parse_unit_response(&response, unit, &EngineId::new("test-fa"))
-            .expect_err("non-FA payload should fail immediately");
+        let error = admitted_failure(crate::types::engines::FaEngineName::Wave2Vec, &response);
 
         assert!(
-            error
-                .to_string()
-                .contains("failed to parse worker protocol V2 FA response for request 0 (group 0)")
+            matches!(
+                error,
+                FaUnitFailure::Evidence {
+                    request: 0,
+                    source: FaRawEvidenceError::UnexpectedResult,
+                }
+            ),
+            "{error}"
         );
-        assert!(error.to_string().contains("translation data"));
     }
 
+    /// The real reader: one worker response through the admission every
+    /// request's response takes, for a request on `engine`.
+    fn admitted_failure(
+        engine: crate::types::engines::FaEngineName,
+        response: &ExecuteResponseV2,
+    ) -> FaUnitFailure {
+        let groups = single_groups(&[(100, 900)]);
+        let plan = plan_for(&groups);
+        let unit = plan.units().next().expect("one request");
+        let namespace = crate::engine_reports::FaCacheNamespace::for_test("test-fa");
+        let admission = FaUnitEvidenceAdmission {
+            requested_engine: engine,
+            cache_namespace: &namespace,
+            unit,
+        };
+        match admission.admit(response, FaEvidenceRoute::Direct) {
+            Ok(_) => panic!("a failed response must not admit"),
+            Err(failure) => failure,
+        }
+    }
+
+    fn failed(code: ProtocolErrorCodeV2, message: &str) -> ExecuteResponseV2 {
+        ExecuteResponseV2::failure(
+            WorkerRequestIdV2::from("req-fa-v2-failed"),
+            code,
+            message.to_owned(),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
+        )
+    }
+
+    /// RED FIRST: the retry was chosen by searching a rendered
+    /// `ServerError::Validation` string. It is now chosen from the
+    /// constraint the response reader classified, and carries the same
+    /// recorded reasons as before.
     #[test]
-    fn whisper_fallback_triggers_for_known_wave2vec_target_failures() {
-        let overflow = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 13 (175765..176365 ms): \
-             worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             targets length is too long for CTC"
-                .into(),
-        );
-        assert_eq!(
-            fa_group_retry(crate::types::engines::FaEngineName::Wave2Vec, &overflow),
-            Some(FaGroupRetry {
-                target: crate::types::engines::FaEngineName::Whisper,
-                reason: "targets length is too long for CTC",
-            })
-        );
-        assert_eq!(
-            fa_group_retry(crate::types::engines::FaEngineName::Whisper, &overflow),
-            None
-        );
-
-        let blank_index = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 56 (754285..767165 ms): \
-             worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             ValueError: targets Tensor shouldn't contain blank index. Found tensor([[20, 5, 10, 10]])"
-                .into(),
-        );
-        assert_eq!(
-            fa_group_retry(crate::types::engines::FaEngineName::Wave2Vec, &blank_index),
-            Some(FaGroupRetry {
-                target: crate::types::engines::FaEngineName::Whisper,
-                reason: "targets Tensor shouldn't contain blank index",
-            })
-        );
-        assert_eq!(
-            fa_group_retry(crate::types::engines::FaEngineName::Whisper, &blank_index),
-            None
-        );
-
-        // Wave2Vec conv layer 7 (kernel=2) crashes when input shrinks to 1 sample.
-        // Observed: group 27 (296480..296500 ms = 20 ms window = 320 samples),
-        // job 2afcc302-bfd, file 28-NM-63-4.cha.
-        let kernel_too_large = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 27 (296480..296500 ms): \
-             worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             RuntimeError: Calculated padded input size per channel: (1). \
-             Kernel size: (2). Kernel size can't be greater than actual input size"
-                .into(),
-        );
-        assert_eq!(
-            fa_group_retry(
-                crate::types::engines::FaEngineName::Wave2Vec,
-                &kernel_too_large
+    fn known_engine_constraints_retry_on_the_rows_fallback_engine() {
+        use crate::types::engines::FaEngineName;
+        for (message, constraint, reason) in [
+            (
+                "targets length is too long for CTC",
+                FaEngineConstraint::CtcTargetsTooLong,
+                "targets length is too long for CTC",
             ),
-            Some(FaGroupRetry {
-                target: crate::types::engines::FaEngineName::Whisper,
-                reason: "audio segment too short for Wave2Vec feature extractor",
-            })
-        );
-        assert_eq!(
-            fa_group_retry(
-                crate::types::engines::FaEngineName::Whisper,
-                &kernel_too_large
+            (
+                "ValueError: targets Tensor shouldn't contain blank index. Found tensor([[20, 5]])",
+                FaEngineConstraint::CtcBlankIndexInTargets,
+                "targets Tensor shouldn't contain blank index",
             ),
-            None
-        );
-
-        let other = ServerError::Validation("some other parse failure".into());
-        assert_eq!(
-            fa_group_retry(crate::types::engines::FaEngineName::Wave2Vec, &other),
-            None
-        );
+            (
+                "RuntimeError: Calculated padded input size per channel: (1). Kernel size: (2). \
+                 Kernel size can't be greater than actual input size",
+                FaEngineConstraint::InputShorterThanKernel,
+                "audio segment too short for Wave2Vec feature extractor",
+            ),
+        ] {
+            // The recorded reason is the vocabulary fallback evidence has
+            // always carried.
+            assert_eq!(constraint.reason(), reason);
+            let response = failed(ProtocolErrorCodeV2::RuntimeFailure, message);
+            assert_eq!(
+                PrimaryStep::after(
+                    FaEngineName::Wave2Vec,
+                    &admitted_failure(FaEngineName::Wave2Vec, &response)
+                ),
+                PrimaryStep::Retry(FaGroupRetry {
+                    target: FaEngineName::Whisper,
+                    constraint,
+                }),
+                "{message}"
+            );
+            // Whisper is the fallback target and has no retry of its own: the
+            // constraint is still a failure on this request's input.
+            assert_eq!(
+                PrimaryStep::after(
+                    FaEngineName::Whisper,
+                    &admitted_failure(FaEngineName::Whisper, &response)
+                ),
+                PrimaryStep::LeaveUnaligned,
+                "{message}"
+            );
+        }
     }
 
     /// The retry each engine offers, written out per variant.
@@ -1081,28 +1125,28 @@ mod tests {
     /// beside `FA_ENGINES` and can no longer be written at all. What is left
     /// for this match is the pair no type pins: that the target and the reason
     /// the transport hands back are the ones the row declares.
-    fn expected_retry(engine: crate::types::engines::FaEngineName) -> Option<FaGroupRetry> {
+    fn expected_step(engine: crate::types::engines::FaEngineName) -> PrimaryStep {
         use crate::types::engines::FaEngineName;
-        const RECOVERABLE: &str = "targets length is too long for CTC";
+        const RECOVERABLE: FaEngineConstraint = FaEngineConstraint::CtcTargetsTooLong;
         match engine {
-            FaEngineName::Wave2Vec => Some(FaGroupRetry {
+            FaEngineName::Wave2Vec => PrimaryStep::Retry(FaGroupRetry {
                 target: FaEngineName::Whisper,
-                reason: RECOVERABLE,
+                constraint: RECOVERABLE,
             }),
-            FaEngineName::Wav2vecCanto => Some(FaGroupRetry {
+            FaEngineName::Wav2vecCanto => PrimaryStep::Retry(FaGroupRetry {
                 target: FaEngineName::Whisper,
-                reason: RECOVERABLE,
+                constraint: RECOVERABLE,
             }),
             // It IS the fallback target and cannot retry itself.
-            FaEngineName::Whisper => None,
+            FaEngineName::Whisper => PrimaryStep::LeaveUnaligned,
             // Its aligner is not a CTC decoder, so no recoverable CTC
             // constraint is reachable for it, and a whole-group retry would
             // replace measured Qwen3 timings with another model's.
-            FaEngineName::Qwen3 => None,
+            FaEngineName::Qwen3 => PrimaryStep::LeaveUnaligned,
         }
     }
 
-    /// Every engine offers exactly the retry written out above, on a failure
+    /// Every engine offers exactly the step written out above, on a failure
     /// all of them could see.
     ///
     /// A ROUNDTRIP between the declaration table and the transport that reads
@@ -1112,154 +1156,131 @@ mod tests {
     fn every_fa_engine_falls_back_exactly_as_its_row_declares() {
         use crate::types::engines::{FaEngineName, SelectableEngine};
 
-        let recoverable = ServerError::Validation(
-            "worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             targets length is too long for CTC"
-                .into(),
+        let recoverable = failed(
+            ProtocolErrorCodeV2::RuntimeFailure,
+            "targets length is too long for CTC",
         );
         for engine in FaEngineName::ALL.iter().copied() {
             assert_eq!(
-                fa_group_retry(engine, &recoverable),
-                expected_retry(engine),
-                "{engine:?} did not offer the retry this test writes out for it"
+                PrimaryStep::after(engine, &admitted_failure(engine, &recoverable)),
+                expected_step(engine),
+                "{engine:?} did not offer the step this test writes out for it"
             );
         }
     }
 
-    /// a user's bug (2026-04-08): `batchalign3 align` silently drops files
-    /// when Wave2Vec falls back to Whisper FA but the worker has no Whisper
-    /// model loaded.
-    ///
-    /// Repro:
-    ///   batchalign3 align ~/ba_data/input ~/ba_data/output
-    ///   → Job submitted for 4 files; 45-3.cha and 86-3.cha missing from output
-    ///
-    /// Server log:
-    ///   Wave2Vec FA hit recoverable target constraint; retrying group with Whisper FA
-    ///   FA error (raw): ModelUnavailable: no whisper FA host loaded for worker protocol V2
-    ///
-    /// Root cause: `infer_units_v2` dispatches the Whisper fallback, but when
-    /// the worker returns `ModelUnavailable` (because `whisper_runner = None`),
-    /// `parse_unit_response` wraps the error into a `ServerError::Validation`
-    /// that looks identical to a fatal data error.  The `?` on the fallback call
-    /// propagates it as a **file-level** failure instead of leaving the group
-    /// unaligned the way empty audio segments are handled.
-    ///
-    /// Fix: implement `is_whisper_model_unavailable` so `infer_units_v2` can
-    /// detect the capability gap and leave the group with `None` timings.
+    /// An unclassified wire failure reaches the file policy on either engine.
+    /// Its wording cannot establish OOM or a permanent input defect.
     #[test]
-    fn whisper_fallback_model_unavailable_is_detectable_as_capability_gap_not_data_error() {
-        // This is the exact error produced in production:
-        // parse_unit_response wraps the ModelUnavailable worker response into
-        // a ServerError::Validation with this message.
-        let model_unavailable = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 24 (379515..381395 ms): \
-             worker protocol V2 forced-alignment request failed with ModelUnavailable: \
-             no whisper FA host loaded for worker protocol V2"
-                .into(),
-        );
-
-        // The test asserts that is_whisper_model_unavailable can distinguish
-        // this worker-capability error from an ordinary data-quality error.
-        // Without this predicate, infer_units_v2 has no way to leave the
-        // group unaligned instead of killing the file.
-        //
-        // This assertion is currently RED: is_whisper_model_unavailable always
-        // returns false (stub).  Implementing it makes the test GREEN.
-        assert!(
-            is_whisper_model_unavailable(&model_unavailable),
-            "ModelUnavailable from Whisper fallback should be detectable \
-             so infer_units_v2 can leave the group unaligned"
-        );
-
-        // A plain data-quality error must NOT be mistaken for a capability gap.
-        let data_error = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 5 (1000..2000 ms): \
-             some parse error from the model output"
-                .into(),
-        );
-        assert!(
-            !is_whisper_model_unavailable(&data_error),
-            "ordinary data errors must not be treated as ModelUnavailable"
-        );
+    fn a_runtime_failure_reaches_bounded_file_retry() {
+        use crate::types::engines::FaEngineName;
+        for message in [
+            "ValueError: Labels' sequence length 2043 cannot exceed the maximum allowed \
+             length of 448 tokens.",
+            "RuntimeError: Expected all tensors to be on the same device",
+            "RuntimeError: MPS backend out of memory",
+            "unclassified local failure",
+        ] {
+            let failure = admitted_failure(
+                FaEngineName::Wave2Vec,
+                &failed(ProtocolErrorCodeV2::RuntimeFailure, message),
+            );
+            assert_eq!(
+                PrimaryStep::after(FaEngineName::Wave2Vec, &failure),
+                PrimaryStep::FailFile
+            );
+            assert_eq!(FallbackStep::after(&failure), FallbackStep::FailFile);
+            let error = ServerError::from(failure);
+            let category = crate::runner::util::classify_server_error(&error);
+            assert_eq!(category, crate::scheduling::FailureCategory::LocalRuntime);
+            assert!(error.to_string().contains(message));
+            let policy = crate::scheduling::RetryPolicy::default();
+            assert!(matches!(
+                policy.after_failure(1, category),
+                crate::scheduling::NextAttempt::RetryAfter(_)
+            ));
+            assert_eq!(
+                policy.after_failure(policy.max_attempts, category),
+                crate::scheduling::NextAttempt::Stop(crate::scheduling::StopReason::BudgetSpent)
+            );
+        }
     }
 
-    /// Any `RuntimeFailure` from the FA worker is data-driven: the model
-    /// failed on *this group's* specific input. Other groups have different
-    /// words and audio and will not trigger the same failure. These errors
-    /// must be demoted to group-level skips, never propagated as file-level
-    /// failures. This test verifies the detection predicate covers:
-    ///
-    /// - The exact 448-token overflow seen on `biling-data/DiazCollazos`
-    /// - Generic RuntimeFailure variants (shape errors, OOM, etc.)
-    /// - Does NOT fire on infrastructure errors (IPC parse, model unavailable)
+    /// The user bug of 2026-04-08: a fallback taken by a worker with no
+    /// fallback model loaded failed the whole file. A missing fallback model
+    /// is a capability gap and leaves the request unaligned; a missing
+    /// PRIMARY model would meet every request, so it fails the file, with
+    /// the bootstrap category its protocol code names.
     #[test]
-    fn fa_runtime_failure_is_detectable_as_data_driven_group_error() {
-        // Exact message from production: biling-data/DiazCollazos/09.cha, job ad9eb6ba,
-        // group 0 (0..10970 ms), 2043 chars > 448 token limit.
-        let overflow_448 = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 0 (0..10970 ms): \
-             worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             ValueError: Labels' sequence length 2043 cannot exceed the maximum \
-             allowed length of 448 tokens."
-                .into(),
+    fn a_missing_model_is_a_gap_on_the_fallback_and_a_file_failure_on_the_primary() {
+        use crate::types::engines::FaEngineName;
+        let failure = admitted_failure(
+            FaEngineName::Whisper,
+            &failed(
+                ProtocolErrorCodeV2::ModelUnavailable,
+                "no whisper FA host loaded for worker protocol V2",
+            ),
         );
-        assert!(
-            is_fa_runtime_failure(&overflow_448),
-            "448-token Whisper CTC overflow must be detectable as a RuntimeFailure"
+        assert_eq!(FallbackStep::after(&failure), FallbackStep::LeaveUnaligned);
+        assert_eq!(
+            PrimaryStep::after(FaEngineName::Whisper, &failure),
+            PrimaryStep::FailFile
         );
-
-        // Generic RuntimeFailure (shape error, device mismatch, etc.), also group-local.
-        let shape_error = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 3 (50000..70000 ms): \
-             worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             RuntimeError: Expected all tensors to be on the same device"
-                .into(),
-        );
-        assert!(
-            is_fa_runtime_failure(&shape_error),
-            "generic RuntimeFailure must also be detectable"
-        );
-
-        // Infrastructure error (IPC parse failure, no RuntimeFailure code), must NOT match.
-        let ipc_error = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 5 (0..5000 ms): \
-             translation data (not FA)"
-                .into(),
-        );
-        assert!(
-            !is_fa_runtime_failure(&ipc_error),
-            "non-RuntimeFailure IPC error must not be mistaken for a data-driven group error"
-        );
-
-        // ModelUnavailable: a capability gap, not a RuntimeFailure.
-        let model_unavail = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 24 (379515..381395 ms): \
-             worker protocol V2 forced-alignment request failed with ModelUnavailable: \
-             no whisper FA host loaded for worker protocol V2"
-                .into(),
-        );
-        assert!(
-            !is_fa_runtime_failure(&model_unavail),
-            "ModelUnavailable must not be mistaken for a data-driven RuntimeFailure"
-        );
+        assert!(matches!(
+            ServerError::from(failure),
+            ServerError::Worker(WorkerError::Bootstrap { .. })
+        ));
     }
 
-    /// When Wave2Vec falls back to Whisper FA and Whisper itself hits a RuntimeFailure
-    /// (e.g., the group is too long even for Whisper), that fallback error must also be
-    /// detectable and demoted to a group-level skip rather than a file-level abort.
+    /// RED FIRST: every FA failure that reached the file level was
+    /// `ServerError::Validation`, which the dashboard reports as bad input.
+    /// A worker failure keeps its protocol category, and a response that
+    /// does not fit its request is a protocol fault.
     #[test]
-    fn fa_runtime_failure_from_whisper_fallback_is_detectable() {
-        let whisper_overflow = ServerError::Validation(
-            "failed to parse worker protocol V2 FA response for group 7 (100000..111000 ms): \
-             worker protocol V2 forced-alignment request failed with RuntimeFailure: \
-             ValueError: Labels' sequence length 512 cannot exceed the maximum \
-             allowed length of 448 tokens."
-                .into(),
+    fn a_failed_request_reaches_the_file_with_its_own_category() {
+        use crate::runner::util::classify_server_error;
+        use crate::scheduling::FailureCategory;
+        use crate::types::engines::FaEngineName;
+
+        let refused = admitted_failure(
+            FaEngineName::Wave2Vec,
+            &failed(ProtocolErrorCodeV2::InvalidPayload, "bad request"),
         );
-        assert!(is_fa_runtime_failure(&whisper_overflow));
-        // Must not be confused with the capability-gap path.
-        assert!(!is_whisper_model_unavailable(&whisper_overflow));
+        assert_eq!(
+            PrimaryStep::after(FaEngineName::Wave2Vec, &refused),
+            PrimaryStep::FailFile
+        );
+        assert_eq!(FallbackStep::after(&refused), FallbackStep::FailFile);
+        assert_eq!(
+            classify_server_error(&ServerError::from(refused)),
+            FailureCategory::WorkerProtocol
+        );
+
+        let denied = admitted_failure(
+            FaEngineName::Wave2Vec,
+            &failed(ProtocolErrorCodeV2::ModelAccessDenied, "gated repository"),
+        );
+        assert_eq!(
+            classify_server_error(&ServerError::from(denied)),
+            FailureCategory::ModelAccessDenied
+        );
+
+        let wrong_task = ExecuteResponseV2::success(
+            WorkerRequestIdV2::from("req-fa-v2-wrong-task"),
+            TaskResultV2::TranslationResult(TranslationResultV2 {
+                items: vec![TranslationItemResultV2::BlankInput],
+            }),
+            NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
+        );
+        let protocol = admitted_failure(FaEngineName::Wave2Vec, &wrong_task);
+        assert_eq!(
+            PrimaryStep::after(FaEngineName::Wave2Vec, &protocol),
+            PrimaryStep::FailFile
+        );
+        assert_eq!(
+            classify_server_error(&ServerError::from(protocol)),
+            FailureCategory::WorkerProtocol
+        );
     }
 
     /// Worker process crashes (SIGKILL, C-extension SIGSEGV) must be detectable
@@ -1322,7 +1343,7 @@ mod tests {
             plan.units().next().expect("one request"),
             crate::types::engines::FaEngineName::Wave2Vec,
             crate::types::engines::FaEngineName::Whisper,
-            "targets length is too long for CTC",
+            FaEngineConstraint::CtcTargetsTooLong,
         );
 
         assert_eq!(event.group_index, 0);
@@ -1350,7 +1371,7 @@ mod tests {
             plan.units().nth(3).expect("one request and three pieces"),
             crate::types::engines::FaEngineName::Wave2Vec,
             crate::types::engines::FaEngineName::Whisper,
-            "targets length is too long for CTC",
+            FaEngineConstraint::CtcTargetsTooLong,
         );
         assert_eq!(event.group_index, 1);
         assert_eq!(event.audio_start_ms.0, 26_000);

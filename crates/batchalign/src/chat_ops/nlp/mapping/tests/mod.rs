@@ -34,7 +34,7 @@ pub(super) fn map_ud_sentence_to_mors(sentence: &UdSentence, ctx: &MappingContex
 }
 
 pub(super) fn it_range(start: usize, end: usize, text: &str) -> UdWord {
-    UdWord::from(UdWordAnalysis {
+    UdWord::try_from(UdWordAnalysis {
         id: UdId::Range(start, end),
         text: text.into(),
         lemma: "".into(),
@@ -46,6 +46,7 @@ pub(super) fn it_range(start: usize, end: usize, text: &str) -> UdWord {
         deps: None,
         misc: None,
     })
+    .expect("test analysis carries no padding feature")
 }
 
 pub(super) fn it_word(
@@ -57,7 +58,7 @@ pub(super) fn it_word(
     deprel: &str,
     feats: Option<&str>,
 ) -> UdWord {
-    UdWord::from(UdWordAnalysis {
+    UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(id),
         text: text.into(),
         lemma: lemma.into(),
@@ -69,6 +70,7 @@ pub(super) fn it_word(
         deps: None,
         misc: None,
     })
+    .expect("test analysis carries no padding feature")
 }
 
 pub(super) fn it_ctx() -> MappingContext {

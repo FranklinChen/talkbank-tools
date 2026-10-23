@@ -82,14 +82,10 @@ of ``ProcessPoolExecutor`` (duplicated models, ~8 GB each).
 # Command classification (from TOML)
 # ---------------------------------------------------------------------------
 
-# CPU-bound commands benefit from ProcessPoolExecutor (true parallelism).
-# On free-threaded Python, morphotag and utseg can use ThreadPoolExecutor
-# with shared models, one copy of Stanza instead of one per process.
-PROCESS_COMMANDS: frozenset[str] = frozenset(
-    _TOML["process_commands"]["free_threaded"]
-    if FREE_THREADED
-    else _TOML["process_commands"]["gil"]
-)
+# Commands whose workers are process-isolated, the same in every runtime. The
+# Stanza commands are among them: a Stanza pipeline is called by one thread at
+# a time, so a request has a process of its own.
+PROCESS_COMMANDS: frozenset[str] = frozenset(_TOML["process_commands"]["commands"])
 
 # GPU-bound commands where MPS/CUDA is the bottleneck, not CPU.
 GPU_HEAVY_COMMANDS: frozenset[str] = frozenset(_TOML["gpu_heavy_commands"]["commands"])

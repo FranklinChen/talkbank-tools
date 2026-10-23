@@ -60,7 +60,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
     report_language_invalid_words(&ctx, &transcript.language_invalid);
     let desc = transcript.description;
 
-    let mut chat_file = build_chat::build_chat(&desc).map_err(|error| match error {
+    let built = build_chat::build_chat(desc).map_err(|error| match error {
         // Neither malformed input nor an internal fault: words reached CHAT
         // assembly and none of them was content, which is what a Cantonese
         // engine that recognized only punctuation produces. Carried as the
@@ -74,7 +74,12 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
         }
         other => ServerError::Validation(format!("Failed to build CHAT: {other}")),
     })?;
-    // Inject processing provenance comment.
+    report_synthesized_terminators(&ctx, &built.synthesized_ends);
+    let synthesized_terminators = std::num::NonZeroUsize::new(built.synthesized_ends.len());
+    let mut chat_file = built.into_file();
+    // Inject processing provenance comment. It also counts the utterances
+    // assembly closed with a terminator this pipeline added, which their `.`
+    // cannot say itself; a later utseg split's cuts are utseg's to record.
     let asr = ctx.asr_identity();
     let provenance = crate::provenance::transcribe_provenance(
         &resolved_lang,
@@ -82,6 +87,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
         ctx.opts.diarize,
         ctx.opts.write_wor,
         ctx.state.word_segmenter.as_ref(),
+        synthesized_terminators,
     );
     crate::provenance::inject_provenance(&mut chat_file, &provenance);
 
@@ -163,6 +169,30 @@ struct LanguageInvalidWordRecord<'a> {
     /// untranscribed marker).
     codes: Vec<&'a str>,
     messages: Vec<&'a str>,
+}
+
+/// Say how many utterances end with a terminator this pipeline added.
+///
+/// The `.` such an utterance is written with cannot say so itself: CHAT has
+/// no notation for a terminator nobody heard. The durable record is the
+/// count in the file's provenance stamp; this line names the first one by
+/// its position among the written utterances, so a reader of the run can
+/// find it.
+fn report_synthesized_terminators<S, P: TranscribePlan>(
+    ctx: &TranscribePipelineContext<'_, S, P>,
+    synthesized: &[build_chat::SynthesizedEnd],
+) {
+    let Some(first) = synthesized.first() else {
+        return;
+    };
+    tracing::info!(
+        file = %ctx.audio_path.display(),
+        synthesized = synthesized.len(),
+        first_utterance = first.utterance,
+        first_speaker = %first.speaker,
+        "utterances closed with a synthesized terminator: the recognizer gave no ending \
+         punctuation, and CHAT requires one"
+    );
 }
 
 /// Narrate, and durably record, every word the CHAT-legality gate refused.

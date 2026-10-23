@@ -201,13 +201,13 @@ Rust entry point: `crates/batchalign/src/morphosyntax/mod.rs::run_morphosyntax_i
 
 **Rust:** `batchalign-transform` crate (`crates/batchalign-transform/src/`)
 
-The core morphosyntax pipeline logic lives in `talkbank-transform`. Most files
+The core morphosyntax transform logic lives in `batchalign-transform`. Most files
 handle CHAT-side extraction, UD→CHAT mapping, and injection. The
-`batchalign` crate orchestrates; `talkbank-transform` implements.
+`batchalign` crate orchestrates; `batchalign-transform` implements the
+analysis transforms. Chatter owns shared CHAT parsing and admission.
 
 | File | Purpose |
 |------|---------|
-| `parse.rs` | `parse_lenient()`: top-level CHAT parsing entry point |
 | `extract.rs` | `ExtractedWord` struct + word extraction from AST for morphosyntax input |
 | `inject.rs` | `inject_morphosyntax()`: primary AST injection of %mor / %gra tiers |
 | `morphosyntax/injection.rs` | `inject_results()`: orchestration helper called by the batch pipeline |
@@ -522,10 +522,15 @@ returned the word, or one of our curated tables. A UD word's features are a
 private, typed `WordFeatures`, with two ways in:
 
 - `UdWordAnalysis`, the record the worker sends (and the route deserialization
-  takes), admits the FEATS column as the analysis's;
+  takes), admits the FEATS column as the analysis's
+  (`WordFeatures::from_analysis`, behind `TryFrom<UdWordAnalysis>`). It
+  refuses a padding value (`UnrepairedPaddingFeature`), which the worker's
+  repair boundary should already have removed (see Feature repair below), so
+  the analysis that carries one fails rather than writing it into `%mor`;
 - `UdWord::apply_curated` writes a curated table's `CuratedFeats` (a FEATS
   string compiled into the binary; its `const` constructor refuses a malformed
-  pair at compile time), replacing the word's features whole. It is the only
+  pair, and a value beginning with `<`, at compile time), replacing the word's
+  features whole. It is the only
   writer of curated values. The English contraction expansions, the Italian
   reconcilers (mis-split overrides, compound imperatives and their clitics,
   component rewrites), the copula-progressive rescue and the lexicon category
@@ -760,7 +765,8 @@ UD-to-CHAT mapping happens in Rust (section 5 above).
   "repairs": [
     {"kind": "relation_alias", "word": "ne",
      "from_relation": "iob", "to_relation": "iobj"}
-  ]
+  ],
+  "feature_repairs": []
 }
 ```
 
@@ -779,7 +785,7 @@ and both documented with their defects in
 
 The other two kinds carry no analysis: `{"kind": "no_words"}` for an utterance
 with no words (no model ran, so it names none), and `{"kind": "failed",
-"error": "..."}` for an item whose file fails with that message. All three
+"error": "..."}` for an item whose file fails with that message. All four
 fields of `analyzed` are required, with no defaults: an analysis that could not
 name its model, or that left "repaired nothing" indistinguishable from "does
 not report repairs", is exactly the shape that hid these facts before.
@@ -817,9 +823,33 @@ Two properties are worth knowing before changing any of this:
   rewrite whose relation did not change, and one whose result is not a UD
   relation, so a count of repairs cannot be inflated by either.
 
-Rust collects the repairs per file (`AppliedAnalyses`, beside the models) and
-writes the total into the morphotag provenance comment as `ud_repairs=`; see
-[Provenance](../architecture/provenance.md).
+### Feature repair
+
+Stanza-trained models also emit padding as a FEATS value (`Case=<PAD>`),
+which is no value of any UD feature. The same constructor, `RepairedSentence`, removes every
+padding value and reports each removal (`FeatureRepair` /
+`UdFeatureRepairV2`, carried in the analyzed item's `feature_repairs` beside
+its relation `repairs`):
+
+| Kind | Trigger | Applied |
+|---|---|---|
+| `pad_feature_value` | a value, or one comma-separated part of one, that is an angle-bracketed placeholder (`<PAD>`, `<UNK>`) | removed; the feature goes when nothing is left, and FEATS goes when no feature is left |
+
+`Case=Nom,<PAD>` keeps `Case=Nom` and reports one repair. What padding is has
+one definition, Rust's `PaddingValue::admit` (`batchalign-types`): angle
+brackets around text with no line terminator, exactly what the IPC schema's
+`^<.*>$` admits. The repair itself is Rust's too, `repair_feats`, which the
+worker calls as `batchalign_core.repair_feats` and which returns the FEATS
+left and each removed `(feature, value)`: the worker only logs and reports
+what Rust removed, and never classifies a value. A repair's `removed_value` is
+a `PaddingValue`, so the server refuses, where it deserializes the response, a
+reported repair of anything that is not padding. The Rust FEATS admission
+applies the same test and refuses a value that arrives unrepaired, so a
+padding value cannot be represented in `WordFeatures`.
+
+Rust collects both kinds of repair per file (`AppliedAnalyses`, beside the
+models) and writes their total into the morphotag provenance comment as
+`ud_repairs=`; see [Provenance](../architecture/provenance.md).
 
 ### Worker-side batch inference (`worker/_infer_hosts.py` + `inference/morphosyntax.py`)
 
@@ -1011,11 +1041,12 @@ words in the Mor domain.  Any code walking the AST with a `word_counter` must al
 increment for separators.  `retokenize.rs` handles this explicitly.  Forgetting causes
 counter desync.
 
-### Manual JSON Parsing
+### Typed worker payloads
 
-`batchalign-core` uses manual JSON field extraction instead of serde_json at runtime to
-avoid the dependency in the release binary.  The parsers handle escapes but are not
-general-purpose.
+The PyO3 bridge converts Python values into JSON values and deserializes
+requests and host output with `serde_json` into the shared wire types.
+`parse_execute_request` and `parse_host_output` own these boundaries in
+`crates/batchalign-pyo3/src/worker_execute.rs`; malformed data is refused there.
 
 ### Special Forms and `xbxxx`
 

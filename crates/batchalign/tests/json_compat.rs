@@ -392,7 +392,12 @@ fn snapshot_worker_capabilities() {
                 Some(batchalign::api::ReportedEngineName::try_from("wave2vec-fa-v1").unwrap()),
             ),
         ]),
-        stanza_capabilities: Default::default(),
+        stanza_catalog: batchalign::stanza_registry::StanzaCatalogReport::NotInstalled {
+            import_error: batchalign::stanza_registry::StanzaReportReason::try_from(
+                "No module named 'stanza'".to_owned(),
+            )
+            .unwrap(),
+        },
     };
     // Snapshot the JSON serde_json writes, which is the wire: task-keyed maps
     // are written with string keys there, while insta's own serializer
@@ -548,7 +553,6 @@ fn batch_infer_ipc_roundtrip() {
             serde_json::json!({"words": ["world"], "terminator": "."}),
         ],
         mwt: BTreeMap::new(),
-        allow_stanza_fallback: false,
     };
 
     let req_json = serde_json::to_string(&req).unwrap();
@@ -591,7 +595,8 @@ fn deserialize_python_capabilities_with_infer() {
         "commands": ["morphotag", "align"],
         "free_threaded": false,
         "infer_tasks": ["morphosyntax", "fa"],
-        "engine_versions": {"morphosyntax": null, "fa": "wave2vec-fa-v1"}
+        "engine_versions": {"morphosyntax": null, "fa": "wave2vec-fa-v1"},
+        "stanza_catalog": {"kind": "catalog", "languages": {"eng": ["tokenize", "pos", "lemma", "depparse", "mwt"]}}
     }"#;
 
     let caps: WorkerCapabilities = serde_json::from_str(python_json).unwrap();

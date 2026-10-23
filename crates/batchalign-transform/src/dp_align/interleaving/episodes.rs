@@ -54,7 +54,7 @@ impl<'source> SpeakerTurn<'source> {
     }
 }
 
-/// Bounded analysis refusal, never an assertion of absence or ambiguity.
+/// Which admission stage exceeded the work budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalInterleavingWorkPhase {
     /// Checked graph-size arithmetic overflowed before graph construction.
@@ -79,9 +79,20 @@ impl LocalInterleavingWorkPhase {
     }
 }
 
-/// Bounded analysis refusal, never an assertion of absence or ambiguity.
+/// Why no analysis was produced: a named finite budget, or an internal
+/// inconsistency of the search. Never an assertion of absence or ambiguity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalInterleavingRefusal {
+    /// A named finite budget prevented completion.
+    Budget(LocalInterleavingBudget),
+    /// Not a budget: the search contradicted what its own admission proved,
+    /// and refused rather than report a wrong optimum.
+    Inconsistent(LocalInterleavingInconsistency),
+}
+
+/// Bounded analysis refusal: one named finite budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalInterleavingBudget {
     /// Feasible-witness work plus admitted source-DAG/reference cells exceed the limit.
     WorkBudgetExceeded {
         /// Which admission stage exceeded its budget.
@@ -95,18 +106,84 @@ pub enum LocalInterleavingRefusal {
     CandidateBudgetExceeded,
 }
 
-impl LocalInterleavingRefusal {
-    /// The production limit the refused budget enforces, in its own unit:
-    /// witness scalar cells/packed-word passes plus banded source/reference
-    /// cells, retained score cells, or
-    /// distinct addressed candidate matches.
-    pub fn limit(self) -> usize {
-        match self {
-            Self::WorkBudgetExceeded { .. } => WORK_CELLS,
-            Self::MemoryBudgetExceeded => SCORE_CELLS,
-            Self::CandidateBudgetExceeded => CANDIDATES,
-        }
-    }
+impl LocalInterleavingBudget {
+    /// The work-cell limit [`Self::WorkBudgetExceeded`] enforces: witness
+    /// scalar cells/packed-word passes plus banded source/reference cells.
+    pub const WORK_CELLS: usize = WORK_CELLS;
+    /// The retained score-cell limit [`Self::MemoryBudgetExceeded`] enforces.
+    pub const SCORE_CELLS: usize = SCORE_CELLS;
+    /// The distinct addressed candidate-match limit
+    /// [`Self::CandidateBudgetExceeded`] enforces.
+    pub const CANDIDATES: usize = CANDIDATES;
+}
+
+/// An internal inconsistency of the packed search: what its forward pass or
+/// reconstruction found contradicts what admission's feasible witness proved.
+/// Each is checked in every build, never only by a debug assertion.
+///
+/// Serialized as UTR evidence by derive: `{"kind": "optimum_below_feasible",
+/// "optimum": .., "feasible": ..}`, one object per variant with its fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalInterleavingInconsistency {
+    /// The forward pass reached no viable end row covering the whole
+    /// reference, although a complete composition exists. Refused rather
+    /// than read as an optimum of zero (which would report every word
+    /// unmatched).
+    NoCompleteComposition,
+    /// The end row's score is below the feasible witness's, so the forward
+    /// pass lost matches the witness exhibits. Refused rather than reported,
+    /// which would call those words missing.
+    OptimumBelowFeasible {
+        /// The end row's score.
+        optimum: usize,
+        /// The feasible witness's matched count, a lower bound.
+        feasible: usize,
+    },
+    /// Reconstruction selected a different number of matches than the
+    /// optimum it reconstructs.
+    ReconstructionMismatch {
+        /// Matches reconstruction selected.
+        selected: usize,
+        /// The optimum it was reconstructing.
+        optimum: usize,
+    },
+    /// The scalar banded traceback reached a step its forward rows do not
+    /// explain: the cell is unreachable, or no incoming edge yields its score.
+    TracebackStalled {
+        /// The reference prefix length where it stalled.
+        reference: usize,
+    },
+    /// A packed row advanced past a node whose required score is more than
+    /// one above its base: a word can add at most one match.
+    ProfileBaseSkipped {
+        /// The row's base score.
+        base: usize,
+        /// The node's required score.
+        required: usize,
+    },
+    /// Two packed rows merged into one node had different base scores,
+    /// although every row reaching a node is trimmed to its required score.
+    ProfileBasesDiffer {
+        /// The first row's base.
+        left: usize,
+        /// The second row's base.
+        right: usize,
+    },
+    /// An edge observation's matching-only cut was not immediately before
+    /// the suffix domain it extends.
+    EdgeCutGap {
+        /// The matching-only cut's reference position.
+        earlier: usize,
+        /// The first position of the suffix domain.
+        first: usize,
+    },
+    /// An edge observation read a forward score outside the forward row's
+    /// domain.
+    ProfileScoreOutsideDomain {
+        /// The reference position read.
+        reference: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -444,10 +521,11 @@ fn search_frontiers(turns: &[SpeakerTurn<'_>]) -> Vec<SearchFrontier> {
 
 impl Budget {
     fn nodes(turns: &[SpeakerTurn<'_>]) -> Result<usize, LocalInterleavingRefusal> {
-        let refused = LocalInterleavingRefusal::WorkBudgetExceeded {
-            phase: LocalInterleavingWorkPhase::GraphShape,
-            required_at_least: usize::MAX,
-        };
+        let refused =
+            LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
+                phase: LocalInterleavingWorkPhase::GraphShape,
+                required_at_least: usize::MAX,
+            });
         let mut nodes = turns.len().checked_add(1).ok_or(refused)?;
         for turn in turns {
             nodes = nodes
@@ -470,7 +548,9 @@ impl Budget {
         // Bound graph construction itself, before allocating adjacency lists.
         // The former dense budget needed at least six rows for every node.
         if nodes > SCORE_CELLS / 6 {
-            return Err(LocalInterleavingRefusal::MemoryBudgetExceeded);
+            return Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::MemoryBudgetExceeded,
+            ));
         }
         Ok(nodes)
     }

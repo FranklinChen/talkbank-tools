@@ -137,7 +137,7 @@ pub(super) fn bound_interior_only_searches(
             continue;
         }
         planned.envelope = Some(FaSearchEnvelope::order_corridor(
-            info.words.clone(),
+            info.words().to_vec(),
             floor,
             Some(ceiling),
         ));

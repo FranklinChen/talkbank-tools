@@ -129,8 +129,7 @@ mod tests {
         async fn utseg_batch(
             &self,
             _files: &[TextBatchFileInput],
-            _lang: &LanguageCode3,
-            _allow_stanza_fallback: bool,
+            _route: &crate::utseg_route::ServableUtsegRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             unreachable!()

@@ -23,7 +23,6 @@ use batchalign_types::worker::BatchInferResponse;
 use batchalign_types::worker_v2::{
     ExecuteRequestV2, TaskRequestV2, TaskResultV2, WordSegmentationResultV2,
 };
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::worker_artifacts::{ArtifactFailure, load_json_attachment_text};
@@ -94,27 +93,6 @@ impl CountedBatch {
     }
 }
 
-/// Classify an exception the runner adapter raised, preserving the taxonomy
-/// the Python control plane applied: `NotImplementedError` means the model is
-/// not loaded, `ValueError` (which pydantic's `ValidationError` subclasses)
-/// means the payload or batch shape was wrong, anything else is a runtime
-/// failure.
-fn classify_runner_error(py: Python<'_>, error: PyErr) -> ExecuteFailure {
-    // Not a silent default: both arms RENDER the same exception, one via its
-    // __str__ and one via its Debug-ish display when __str__ itself raises.
-    let message = match error.value(py).str() {
-        Ok(text) => text.to_string(),
-        Err(_) => error.to_string(),
-    };
-    if error.is_instance_of::<PyNotImplementedError>(py) {
-        ExecuteFailure::ModelUnavailable(message)
-    } else if error.is_instance_of::<PyValueError>(py) {
-        ExecuteFailure::InvalidPayload(message)
-    } else {
-        ExecuteFailure::Runtime(message)
-    }
-}
-
 /// Wrap a normalization refusal in the established per-task message prefix
 /// the Python test matrix asserts on.
 fn host_output_error(task: &str, error: TextResultShapeError) -> ExecuteFailure {
@@ -142,15 +120,15 @@ fn run_morphosyntax(
         "morphosyntax",
     )?;
     let runner = require_runner(runner, "no morphosyntax host loaded for worker protocol V2")?;
-    let response = runner
-        .bind(py)
-        .call1((
+    let response = runner.call1(
+        py,
+        (
             request.request_id.as_ref(),
             task_request.lang.as_ref(),
             batch.json.as_str(),
             task_request.retokenize,
-        ))
-        .map_err(|error| classify_runner_error(py, error))?;
+        ),
+    )?;
     let response: BatchInferResponse = parse_host_output(&response, "morphosyntax")?;
     Ok(TaskResultV2::MorphosyntaxResult(
         normalize_morphosyntax_result(&response, task_request.item_count as usize)
@@ -178,14 +156,14 @@ fn run_utseg(
         "utseg",
     )?;
     let runner = require_runner(runner, "no utseg host loaded for worker protocol V2")?;
-    let response = runner
-        .bind(py)
-        .call1((
+    let response = runner.call1(
+        py,
+        (
             task_request.lang.as_ref(),
             batch.json.as_str(),
-            task_request.allow_stanza_fallback,
-        ))
-        .map_err(|error| classify_runner_error(py, error))?;
+            task_request.segmenter.as_wire_str(),
+        ),
+    )?;
     let response: BatchInferResponse = parse_host_output(&response, "utseg")?;
     Ok(TaskResultV2::UtsegResult(
         normalize_utseg_result(&response, task_request.item_count as usize)
@@ -213,14 +191,14 @@ fn run_translate(
         "translate",
     )?;
     let runner = require_runner(runner, "no translate host loaded for worker protocol V2")?;
-    let response = runner
-        .bind(py)
-        .call1((
+    let response = runner.call1(
+        py,
+        (
             task_request.source_lang.as_ref(),
             task_request.target_lang.as_ref(),
             batch.json.as_str(),
-        ))
-        .map_err(|error| classify_runner_error(py, error))?;
+        ),
+    )?;
     let response: BatchInferResponse = parse_host_output(&response, "translate")?;
     Ok(TaskResultV2::TranslationResult(
         normalize_translation_result(&response, task_request.item_count as usize)
@@ -248,10 +226,7 @@ fn run_coref(
         "coref",
     )?;
     let runner = require_runner(runner, "no coref host loaded for worker protocol V2")?;
-    let response = runner
-        .bind(py)
-        .call1((task_request.lang.as_ref(), batch.json.as_str()))
-        .map_err(|error| classify_runner_error(py, error))?;
+    let response = runner.call1(py, (task_request.lang.as_ref(), batch.json.as_str()))?;
     let response: BatchInferResponse = parse_host_output(&response, "coref")?;
     Ok(TaskResultV2::CorefResult(
         normalize_coref_result(&response, task_request.item_count as usize)
@@ -285,10 +260,10 @@ fn run_word_segmentation(
         "word segmentation",
     )?;
     let runner = require_runner(runner, "no word segmenter for worker protocol V2")?;
-    let response = runner
-        .bind(py)
-        .call1((task_request.segmenter.as_wire_str(), batch.json.as_str()))
-        .map_err(|error| classify_runner_error(py, error))?;
+    let response = runner.call1(
+        py,
+        (task_request.segmenter.as_wire_str(), batch.json.as_str()),
+    )?;
     let result: WordSegmentationResultV2 = parse_host_output(&response, "word segmentation")?;
     Ok(TaskResultV2::WordSegmentationResult(result))
 }

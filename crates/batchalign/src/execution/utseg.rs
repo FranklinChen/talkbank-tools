@@ -8,7 +8,7 @@ use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
 use crate::store::RunnerJobSnapshot;
-use crate::utseg_route::UtsegRoute;
+use crate::utseg_route::ServableUtsegRoute;
 
 use super::text_io::{load_text_inputs, write_text_results};
 use super::worker_gateway::WorkerGateway;
@@ -39,7 +39,7 @@ pub(crate) async fn dispatch_utseg_job(
     host: &DispatchHostContext,
     gateway: Arc<dyn WorkerGateway>,
     should_merge_abbrev: bool,
-    route: &UtsegRoute,
+    route: &ServableUtsegRoute,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
         crate::error::ServerError::Validation(format!("Utseg planning failed: {error}"))
@@ -114,8 +114,7 @@ pub(crate) async fn dispatch_utseg_job(
                     single.iter().map(|file| file.filename.to_string()),
                     gateway_for_task.utseg_batch(
                         &single,
-                        route.language(),
-                        route.fallback().is_allowed(),
+                        &route,
                         crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
                     ),
                 )
@@ -171,6 +170,8 @@ mod tests {
     use crate::runner::DispatchHostContext;
     use crate::store::PendingJobFile;
     use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
+    use crate::types::worker_v2::UtsegSegmenterV2;
+    use crate::utseg_route::UtsegRoute;
 
     #[derive(Default)]
     struct FakeUtsegGateway {
@@ -181,7 +182,7 @@ mod tests {
     struct FakeUtsegState {
         batch_calls: usize,
         batch_sizes: Vec<usize>,
-        routes: Vec<(LanguageCode3, bool)>,
+        routes: Vec<ServableUtsegRoute>,
     }
 
     #[async_trait]
@@ -212,14 +213,13 @@ mod tests {
         async fn utseg_batch(
             &self,
             files: &[TextBatchFileInput],
-            lang: &LanguageCode3,
-            allow_stanza_fallback: bool,
+            route: &ServableUtsegRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
             let mut state = self.state.lock().unwrap();
             state.batch_calls += 1;
             state.batch_sizes.push(files.len());
-            state.routes.push((lang.clone(), allow_stanza_fallback));
+            state.routes.push(route.clone());
             files
                 .iter()
                 .map(|file| {
@@ -320,12 +320,24 @@ mod tests {
         )))
     }
 
-    fn route() -> UtsegRoute {
+    /// A registry serving English and Spanish with every processor the
+    /// Stanza route loads.
+    fn registry() -> crate::stanza_registry::StanzaRegistry {
+        use crate::stanza_registry::StanzaProcessor::{Constituency, Pos, Tokenize};
+        crate::stanza_registry::StanzaRegistry::serving(&[
+            ("eng", &[Tokenize, Pos, Constituency]),
+            ("spa", &[Tokenize, Pos, Constituency]),
+        ])
+    }
+
+    fn route() -> ServableUtsegRoute {
         UtsegRoute::resolve(
             &LanguageCode3::eng(),
             crate::params::UtsegFallbackPolicy::Refuse,
         )
         .expect("English boundary model")
+        .admit(&Ok(registry().shared()))
+        .expect("a boundary-model route needs no Stanza")
     }
 
     /// Per-file dispatch: each file produces its own gateway call, never
@@ -351,7 +363,7 @@ mod tests {
 
         let state = gateway.state.lock().unwrap();
         assert_eq!(state.batch_calls, 2, "one gateway call per file");
-        assert_eq!(state.routes, vec![(LanguageCode3::eng(), false); 2]);
+        assert_eq!(state.routes, vec![route(); 2]);
         // Each call carries exactly one file. With parallelism, the
         // per-call payload is single-file regardless of order; sort the
         // observed sizes for a stable assertion.
@@ -371,7 +383,9 @@ mod tests {
             job.dispatch.lang = LanguageSpec::Resolved(language.clone());
             let route =
                 UtsegRoute::resolve(&language, crate::params::UtsegFallbackPolicy::AllowStanza)
-                    .expect("model or authorized fallback");
+                    .expect("model or authorized fallback")
+                    .admit(&Ok(registry().shared()))
+                    .expect("the registry serves the Stanza route");
             dispatch_utseg_job(
                 &job,
                 &host,
@@ -381,10 +395,16 @@ mod tests {
             )
             .await
             .expect("admitted route dispatched");
-            assert_eq!(
-                gateway.state.lock().unwrap().routes,
-                vec![(language, true); 2]
-            );
+            // English keeps its boundary model even under the opt-in;
+            // Spanish takes the authorized Stanza route. Each call carries
+            // the admitted route itself, segmenter and all.
+            let routes = gateway.state.lock().unwrap().routes.clone();
+            assert_eq!(routes, vec![route.clone(); 2]);
+            let expected = match code {
+                "eng" => UtsegSegmenterV2::BoundaryModel,
+                _ => UtsegSegmenterV2::StanzaConstituency,
+            };
+            assert!(routes.iter().all(|sent| sent.segmenter() == expected));
         }
     }
 

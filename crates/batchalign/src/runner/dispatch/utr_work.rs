@@ -7,7 +7,9 @@ use std::sync::{
 };
 
 use crate::chat_ops::ChatFile;
-use crate::chat_ops::fa::utr::{AsrTimingToken, UtrCancelled, UtrResult, UtrStrategy};
+#[cfg(test)]
+use crate::chat_ops::fa::utr::AsrTimingToken;
+use crate::chat_ops::fa::utr::{PreparedUtrTokens, UtrCancelled, UtrResult, UtrStrategy};
 use crate::error::ServerError;
 
 #[derive(Clone)]
@@ -36,7 +38,7 @@ impl WorkControl for Stop {
 pub(super) struct PendingUtr<'source> {
     source: &'source mut ChatFile,
     strategy: Box<dyn UtrStrategy>,
-    tokens: Vec<AsrTimingToken>,
+    tokens: PreparedUtrTokens,
 }
 
 struct CompletedUtr {
@@ -48,7 +50,7 @@ impl<'source> PendingUtr<'source> {
     pub(super) fn new(
         source: &'source mut ChatFile,
         strategy: Box<dyn UtrStrategy>,
-        tokens: Vec<AsrTimingToken>,
+        tokens: PreparedUtrTokens,
     ) -> Self {
         Self {
             source,

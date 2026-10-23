@@ -11,8 +11,8 @@ use talkbank_model::{
 use talkbank_parser::TreeSitterParser;
 
 use crate::chat_ops::fa::utr::{
-    AsrTimingToken, GlobalUtrParticipation, UtrAlignmentPlan, UtrMatchMode,
-    observe_global_utr_alignment,
+    AsrTimingToken, GlobalUtrParticipation, PreparedUtrTokens, UtrAlignmentPlan, UtrLexicalUnits,
+    UtrMatchMode, observe_global_utr_alignment,
 };
 use crate::cli::args::{UtrAlignmentEvalArgs, UtrAlignmentParticipation};
 use crate::cli::error::CliError;
@@ -25,6 +25,7 @@ struct UtrAlignmentReport<'a> {
     chat: InputIdentity,
     source_name: ReportedSourceName<'a>,
     tokens: InputIdentity,
+    lexical_units: UtrLexicalUnits,
     match_mode: UtrMatchMode,
     participation: GlobalUtrParticipation,
     plan: UtrAlignmentPlan,
@@ -88,7 +89,28 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
         .admit(TranscriptName::Named(stem), &NullErrorSink)?
         .into_valid_file();
     let token_bytes = std::fs::read(&args.tokens)?;
-    let tokens: Vec<AsrTimingToken> = serde_json::from_slice(&token_bytes)?;
+    // Retained tokens were dumped after script normalization, which is not
+    // idempotent, so they are replayed as they are, matched in the units the
+    // transcript's primary language selects, as production matched them.
+    let language = match chat
+        .document()
+        .languages
+        .first()
+        .map(|code| crate::api::LanguageCode3::try_from(code.as_str()))
+    {
+        Some(Ok(language)) => language,
+        Some(Err(_)) | None => {
+            return Err(CliError::InvalidArgument(
+                "UTR replay needs the transcript's primary @Languages code to choose its \
+                 lexical units"
+                    .into(),
+            ));
+        }
+    };
+    let tokens = PreparedUtrTokens::retained(
+        serde_json::from_slice::<Vec<AsrTimingToken>>(&token_bytes)?,
+        &language,
+    );
     let match_mode = match args.fuzzy_threshold {
         None => UtrMatchMode::Exact,
         Some(threshold) => UtrMatchMode::Fuzzy { threshold },
@@ -110,7 +132,15 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
         // model; `regions` records each anchored region's span and
         // algorithm; a budget refusal names its region and budget;
         // `retained_unsearched` marks a timed utterance in a refused region.
-        schema_version: 11,
+        // 12: `lexical_units` records the projection both sides were matched
+        // in; a payload address names its `unit_index` and the word it
+        // belongs to (`word_index`, `part` of `parts`), and unit ordinals
+        // count lexical units only (punctuation is no unit); an unsearched
+        // region is `budget_exhausted` (its region and budget) or
+        // `inconsistent` (its region and what the search contradicted).
+        // 13: an ASR token address names its unit as `unit_index` (it was
+        // `word_index`, though it counted units, not words).
+        schema_version: 13,
         build: crate::build_hash(),
         chat: InputIdentity::of(&args.chat, &chat_bytes),
         source_name: ReportedSourceName {
@@ -122,6 +152,7 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
             },
         },
         tokens: InputIdentity::of(&args.tokens, &token_bytes),
+        lexical_units: tokens.units(),
         match_mode,
         participation,
         plan: observe_global_utr_alignment(chat.document(), &tokens, match_mode, participation),
@@ -168,7 +199,7 @@ mod tests {
         assert_eq!(pair["observation"]["matched_words"], 4);
         assert_eq!(
             pair["observation"]["words"][3]["common"]["token"],
-            serde_json::json!({"token_index":0,"word_index":1})
+            serde_json::json!({"token_index":0,"unit_index":1})
         );
         assert_eq!(report["plan"]["strategy"], "interleaved");
         assert_eq!(
@@ -178,7 +209,7 @@ mod tests {
         assert_eq!(report["plan"]["utterances"][1]["status"], "matched");
         assert_eq!(
             report["plan"]["utterances"][1]["admitted_matches"]["first"]["token"],
-            serde_json::json!({"token_index":0,"word_index":1}),
+            serde_json::json!({"token_index":0,"unit_index":1}),
             "production authority comes from the separate whole-source composition"
         );
         assert_eq!(
@@ -250,7 +281,8 @@ mod tests {
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&output).expect("read report"))
                 .expect("parse report");
-        assert_eq!(report["schema_version"], 11);
+        assert_eq!(report["schema_version"], 13);
+        assert_eq!(report["lexical_units"], "space_delimited_words");
         assert_eq!(report["interleaving"], serde_json::json!([]));
         assert_eq!(
             report["source_name"],
@@ -279,8 +311,8 @@ mod tests {
                     "alignable_words": 1,
                     "matches": {
                         "first": {
-                            "word": {"utterance_index": 0, "word_index": 0},
-                            "token": {"token_index": 0, "word_index": 0},
+                            "word": {"utterance_index": 0, "unit_index": 0, "word_index": 0, "part": 0, "parts": 1},
+                            "token": {"token_index": 0, "unit_index": 0},
                             "chat_text": "hello",
                             "asr_text": "hello",
                             "relation": {"kind": "exact"}
@@ -289,8 +321,8 @@ mod tests {
                     },
                     "admitted_matches": {
                         "first": {
-                            "word": {"utterance_index": 0, "word_index": 0},
-                            "token": {"token_index": 0, "word_index": 0},
+                            "word": {"utterance_index": 0, "unit_index": 0, "word_index": 0, "part": 0, "parts": 1},
+                            "token": {"token_index": 0, "unit_index": 0},
                             "chat_text": "hello",
                             "asr_text": "hello",
                             "relation": {"kind": "exact"}

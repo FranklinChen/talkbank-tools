@@ -1,9 +1,10 @@
 """Stanza capability table builder: single source of truth.
 
 Reads Stanza's ``resources.json`` to discover per-language processor
-availability.  Replaces 7 scattered hardcoded tables across Python and
-Rust with one authoritative data structure built from the installed
-Stanza version.
+availability, and maps ISO 639-3 codes onto its entries through Rust's ISO
+639-1 table. It replaced scattered hardcoded tables across Python and Rust,
+the last of them the server's static list of supported codes, with one
+data structure built from the installed Stanza version.
 
 The table is built once (lazily) and cached for the process lifetime.
 
@@ -28,9 +29,17 @@ import json
 import logging
 import os
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
+import batchalign_core
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.worker._progress import emit_download_event
+from batchalign.worker._types import StanzaProcessorName
+
+_STANZA_PROCESSORS: tuple[StanzaProcessorName, ...] = batchalign_core.STANZA_PROCESSORS
+"""Every processor a catalog entry can ship, in Rust's order (its closed set)."""
 
 L = logging.getLogger(__name__)
 
@@ -54,38 +63,100 @@ class StanzaCatalogDownloadError(RuntimeError):
     """
 
 
-# ISO-639-3 → Stanza alpha-2 overrides for codes that pycountry
-# doesn't map correctly or that Stanza uses non-standard identifiers for.
-_ISO3_OVERRIDES: dict[str, str] = {
-    "nor": "nb",  # Norwegian → Bokmål (Stanza uses "nb")
-    "yue": "zh-hans",  # Cantonese → Chinese (Stanza's zh-hans model)
-    "cmn": "zh-hans",  # Mandarin → Chinese
-    "zho": "zh-hans",  # Chinese (generic) → zh-hans
-    "msa": "ms",  # Malay (ISO-639-3 msa) → Stanza ms
+CHINESE_STANZA_CODE = StanzaCode("zh-hans")
+"""Stanza's Simplified Chinese model, the one every Chinese language uses."""
+
+# The Stanza code BA3 CHOOSES for languages that neither the ISO table nor the
+# catalog resolves. Mandarin (``cmn``) and Cantonese (``yue``) have no ISO
+# 639-1 code and no catalog entry or alias of their own; BA3 analyses both with
+# Stanza's Simplified Chinese model (Cantonese POS is then overridden by
+# PyCantonese). This is a policy, not a fact about codes, which is why it is
+# the only hand-written table in the mapping. ``zho`` needs no entry: its ISO
+# 639-1 code ``zh`` is a catalog alias of ``zh-hans``. ``nor`` needs none
+# either: ``no`` is a catalog alias of ``nb`` (Bokmål).
+_STANZA_CODE_POLICY: dict[str, StanzaCode] = {
+    "cmn": CHINESE_STANZA_CODE,
+    "yue": CHINESE_STANZA_CODE,
 }
+
+if TYPE_CHECKING:
+    from batchalign_core.batchalign_core import (
+        StanzaRequirementName as StanzaRequirementName,
+    )
+else:
+    # Read from Rust's closed table at runtime; mypy reads the extension
+    # stub's spelling, held to the same table by
+    # ``test_stanza_names_match_rust``.
+    StanzaRequirementName = Literal[
+        tuple(name for name, _ in batchalign_core.STANZA_REQUIREMENTS)
+    ]
+"""A Stanza-backed command's requirement, by the name Rust exports it under
+(``StanzaRequirement::wire_name``)."""
+
+
+def processors_argument(processors: Iterable[StanzaProcessorName]) -> str:
+    """A ``stanza.Pipeline`` ``processors`` argument naming exactly these, in
+    the closed processor set's order."""
+    wanted = set(processors)
+    return ",".join(p for p in _STANZA_PROCESSORS if p in wanted)
+
+
+@functools.cache
+def requirement_processors(
+    requirement: StanzaRequirementName,
+) -> frozenset[StanzaProcessorName]:
+    """The processors one command's pipeline needs and loads.
+
+    Read from Rust's closed table (``batchalign_core.STANZA_REQUIREMENTS``),
+    the one the server admits languages by, so what this worker loads and
+    what the server admitted are one list. Its processor names and the
+    processor set are both Rust's, so they cannot disagree.
+    """
+    return frozenset(dict(batchalign_core.STANZA_REQUIREMENTS)[requirement])
 
 
 @dataclass(frozen=True)
 class StanzaLanguageCapability:
-    """Per-language processor availability from Stanza resources.json."""
+    """One catalog entry and the processors it ships, from resources.json."""
 
-    alpha2: str
-    has_tokenize: bool = False
-    has_pos: bool = False
-    has_lemma: bool = False
-    has_depparse: bool = False
-    has_mwt: bool = False
-    has_constituency: bool = False
-    has_coref: bool = False
+    stanza_code: StanzaCode
+    processors: frozenset[StanzaProcessorName]
+
+    def has(self, processor: StanzaProcessorName) -> bool:
+        """Whether the entry ships ``processor``."""
+        return processor in self.processors
+
+    def serves(self, requirement: StanzaRequirementName) -> bool:
+        """Whether the entry ships every processor ``requirement`` needs."""
+        return requirement_processors(requirement) <= self.processors
+
+    @property
+    def supports_morphosyntax(self) -> bool:
+        """Whether the entry has every processor morphotag loads."""
+        return self.serves("morphosyntax")
+
+
+@dataclass(frozen=True)
+class StanzaNotInstalled:
+    """The ``stanza`` package does not import in this worker environment.
+
+    A deploy fact, distinct from a catalog that lacks a language and from a
+    failure to build the table (which raises).
+    """
+
+    import_error: str
 
 
 @dataclass(frozen=True)
 class StanzaCapabilityTable:
-    """Complete capability registry derived from resources.json.
+    """Every ISO 639-3 language the installed Stanza catalog can serve.
 
-    ``languages`` is keyed by ISO-639-3 code (e.g. ``"eng"``, ``"nld"``).
-    ``iso3_to_alpha2`` maps ISO-639-3 → Stanza alpha-2 for all supported
-    languages (derived from pycountry + overrides).
+    ``languages`` is keyed by ISO 639-3 code (``"eng"``, ``"kaz"``); each
+    value names the catalog entry that serves it (``stanza_code``) and that
+    entry's processors. It is the ONE ISO 639-3 to Stanza mapping in the
+    worker: the pipeline loaders read it (``stanza_code_for``), and the
+    capabilities report sends it to the server, whose language admission
+    reads nothing else.
 
     The table carries no Stanza version. It used to, with an empty-string
     default here and ``"unknown"`` in both builders, and nothing read it;
@@ -93,95 +164,95 @@ class StanzaCapabilityTable:
     """
 
     languages: dict[str, StanzaLanguageCapability] = field(default_factory=dict)
-    iso3_to_alpha2: dict[str, str] = field(default_factory=dict)
 
     def supports_morphosyntax(self, iso3: str) -> bool:
         """Whether ``iso3`` has the core Stanza processors morphotag needs."""
         cap = self.languages.get(iso3)
-        if cap is None:
-            return False
-        return all((cap.has_tokenize, cap.has_pos, cap.has_lemma, cap.has_depparse))
+        return cap is not None and cap.supports_morphosyntax
+
+
+def _is_iso_639_3_shaped(code: str) -> bool:
+    """Three lowercase ASCII letters: the shape of an ISO 639-3 code, and the
+    only key the server's capability admission accepts."""
+    return len(code) == 3 and code.isascii() and code.isalpha() and code.islower()
 
 
 def build_stanza_capability_table_from_resources(
     resources: dict[str, object],
+    iso_639_1_pairs: Iterable[tuple[str, str]],
 ) -> StanzaCapabilityTable:
-    """Build the capability table from an already-loaded resources mapping."""
-    # Build alpha2 → capability mapping from resources.json.
-    # Skip non-language keys (like "default") and alias entries.
-    alpha2_caps: dict[str, StanzaLanguageCapability] = {}
+    """Build the capability table from a loaded catalog and the ISO table.
 
-    # Stanza resources keys are alpha-2 codes (or variants like "zh-hans").
-    # We check which processors are listed as top-level keys in the resource entry.
-    _SKIP_KEYS = {"default"}
-    for alpha2, lang_data in resources.items():
-        if alpha2 in _SKIP_KEYS:
-            continue
+    An ISO 639-3 code is served by the catalog entry found by, in order:
+
+    1. ``_STANZA_CODE_POLICY`` (Mandarin and Cantonese);
+    2. its ISO 639-1 code (from ``iso_639_1_pairs``, which the worker reads
+       from Rust's one table, ``batchalign_core.ISO_639_1_PAIRS``), looked up
+       in the catalog directly or through one of the catalog's own aliases
+       (``no`` is an alias of ``nb``, ``zh`` of ``zh-hans``);
+    3. the code itself, likewise: the catalog keys some languages by their
+       three-letter code (``grc``, ``kmr``, ``ckb``) and aliases others
+       (``kaz`` to ``kk``).
+
+    A code none of these reaches is absent, never passed through: an absent
+    language is one the server refuses with a typed reason.
+    """
+    entries: dict[str, StanzaLanguageCapability] = {}
+    aliases: dict[str, str] = {}
+    for code, lang_data in resources.items():
+        # Non-language keys (``url``, ``default``) are not dictionaries of
+        # processors or aliases.
         if not isinstance(lang_data, dict):
             continue
+        target = lang_data.get("alias")
+        if isinstance(target, str):
+            aliases[code] = target
+            continue
         # A real language entry has processor keys like "tokenize", "pos", etc.
-        # Alias entries are strings pointing to another language.
         if "tokenize" not in lang_data:
             continue
-
-        alpha2_caps[alpha2] = StanzaLanguageCapability(
-            alpha2=alpha2,
-            has_tokenize="tokenize" in lang_data,
-            has_pos="pos" in lang_data,
-            has_lemma="lemma" in lang_data,
-            has_depparse="depparse" in lang_data,
-            has_mwt="mwt" in lang_data,
-            has_constituency="constituency" in lang_data,
-            has_coref="coref" in lang_data,
+        entries[code] = StanzaLanguageCapability(
+            stanza_code=StanzaCode(code),
+            processors=frozenset(p for p in _STANZA_PROCESSORS if p in lang_data),
         )
 
-    # Build ISO-639-3 → alpha-2 mapping using pycountry.
-    iso3_map: dict[str, str] = {}
+    def entry_for(code: str) -> StanzaLanguageCapability | None:
+        direct = entries.get(code)
+        if direct is not None:
+            return direct
+        target = aliases.get(code)
+        return entries.get(target) if target is not None else None
 
-    # First: apply explicit overrides (these take priority).
-    for iso3, alpha2 in _ISO3_OVERRIDES.items():
-        if alpha2 in alpha2_caps:
-            iso3_map[iso3] = alpha2
+    part1 = dict(iso_639_1_pairs)
+    candidates = (
+        set(_STANZA_CODE_POLICY)
+        | set(part1)
+        | {code for code in (*entries, *aliases) if _is_iso_639_3_shaped(code)}
+    )
 
-    # Second: use pycountry for standard mappings.
-    try:
-        import pycountry
-
-        for lang in pycountry.languages:
-            alpha3 = getattr(lang, "alpha_3", None)
-            alpha2_code: str | None = getattr(lang, "alpha_2", None)
-            if not alpha3 or not alpha2_code:
-                continue
-            # Don't override explicit overrides.
-            if alpha3 in iso3_map:
-                continue
-            # Check if Stanza has this alpha-2 code.
-            if alpha2_code in alpha2_caps:
-                iso3_map[alpha3] = alpha2_code
-    except ImportError:
-        L.warning(
-            "pycountry not installed: iso3_to_alpha2 mapping will only "
-            "include explicit overrides"
-        )
-
-    # Build the final table keyed by ISO-639-3.
     languages: dict[str, StanzaLanguageCapability] = {}
-    for iso3, alpha2 in iso3_map.items():
-        if alpha2 in alpha2_caps:
-            languages[iso3] = alpha2_caps[alpha2]
+    for iso3 in sorted(candidates):
+        policy = _STANZA_CODE_POLICY.get(iso3)
+        two_letter = part1.get(iso3)
+        if policy is not None:
+            entry = entries.get(policy)
+        elif two_letter is not None and (via_part1 := entry_for(two_letter)):
+            entry = via_part1
+        else:
+            entry = entry_for(iso3)
+        if entry is not None:
+            languages[iso3] = entry
 
     L.info(
-        "Built Stanza capability table: %d languages, %d with constituency, "
-        "%d with mwt",
+        "Built Stanza capability table: %d languages, %d with morphosyntax, "
+        "%d with constituency, %d with mwt",
         len(languages),
-        sum(1 for c in languages.values() if c.has_constituency),
-        sum(1 for c in languages.values() if c.has_mwt),
+        sum(1 for c in languages.values() if c.supports_morphosyntax),
+        sum(1 for c in languages.values() if c.has("constituency")),
+        sum(1 for c in languages.values() if c.has("mwt")),
     )
 
-    return StanzaCapabilityTable(
-        languages=languages,
-        iso3_to_alpha2=iso3_map,
-    )
+    return StanzaCapabilityTable(languages=languages)
 
 
 def build_stanza_capability_table() -> StanzaCapabilityTable:
@@ -192,7 +263,11 @@ def build_stanza_capability_table() -> StanzaCapabilityTable:
     """
     import stanza.resources.common as src
 
-    return build_stanza_capability_table_from_resources(src.load_resources_json())
+    from batchalign_core import ISO_639_1_PAIRS
+
+    return build_stanza_capability_table_from_resources(
+        src.load_resources_json(), ISO_639_1_PAIRS
+    )
 
 
 def refresh_resources_manifest_if_present() -> None:
@@ -275,7 +350,7 @@ def refresh_resources_manifest_if_present() -> None:
 
 
 @functools.lru_cache(maxsize=1)
-def get_cached_capability_table() -> StanzaCapabilityTable | None:
+def get_cached_capability_table() -> StanzaCapabilityTable | StanzaNotInstalled:
     """Return the cached capability table, building it on first call.
 
     Behavior on a fresh install (no ``resources.json`` yet): bootstrap the
@@ -286,23 +361,27 @@ def get_cached_capability_table() -> StanzaCapabilityTable | None:
     Returns:
         - Populated ``StanzaCapabilityTable`` on success (cache hit, fresh
           download, or both).
-        - ``None`` only when the Stanza Python package itself is not
-          installed in the worker venv (a deploy/config error, not a
-          recoverable miss).
+        - ``StanzaNotInstalled`` only when importing the ``stanza`` package
+          itself fails (a deploy/config error, not a recoverable miss).
 
     Raises:
         StanzaCatalogDownloadError: when the catalog must be downloaded
             but the download fails (network, disk, etc.). The orchestrator
             should classify this as non-retryable at the bootstrap layer:
             retrying 3× immediately won't fix a network outage.
+        Exception: any other failure to build the table, including an
+            ``ImportError`` from anything but ``stanza`` itself (a stale
+            ``batchalign_core`` extension without ``ISO_639_1_PAIRS``). Only
+            the ``stanza`` import is "not installed"; every other failure
+            propagates with its own type and message.
     """
     try:
+        import stanza.resources.common  # noqa: F401  (the installed-or-not probe)
+    except ImportError as exc:
+        L.warning("Stanza not installed: capability table unavailable (%s)", exc)
+        return StanzaNotInstalled(import_error=f"{type(exc).__name__}: {exc}")
+    try:
         return build_stanza_capability_table()
-    except ImportError:
-        # Distinct, legitimate silent-None path: Stanza package not in venv.
-        # This is a deploy-config error, not a recoverable miss.
-        L.warning("Stanza not installed: capability table unavailable")
-        return None
     except Exception as exc:
         # Recoverable miss: the catalog file ``resources.json`` does not yet
         # exist locally. Stanza itself raises ``ResourcesFileNotFoundError``

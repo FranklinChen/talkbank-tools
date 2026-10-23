@@ -25,15 +25,18 @@ use crate::types::worker_v2::{
 /// display keeps writing `?` into a `String`-returning function via the
 /// [`From`] impl below; the one caller that needs to route on the failure's
 /// CATEGORY (`parse_speaker_result_v2`, for a Hugging Face Hub access
-/// failure) can read `code` instead of re-deriving it from message text,
-/// which the house rules ban.
+/// failure) can read [`Self::code`] instead of re-deriving it from message
+/// text, which the house rules ban.
+///
+/// Built only by the readers below, from a response the worker sent: the
+/// fields are private, so no caller pairs a code with a message of its own.
 #[derive(Debug, Clone)]
 pub struct ExecuteFailureRead {
     /// The protocol code the worker's response carried.
-    pub code: ProtocolErrorCodeV2,
+    code: ProtocolErrorCodeV2,
     /// The fully formatted diagnostic: `"worker protocol V2 {task} request
     /// failed with {code:?}: {message}"`.
-    pub message: String,
+    message: String,
 }
 
 impl std::fmt::Display for ExecuteFailureRead {
@@ -41,6 +44,8 @@ impl std::fmt::Display for ExecuteFailureRead {
         f.write_str(&self.message)
     }
 }
+
+impl std::error::Error for ExecuteFailureRead {}
 
 impl From<ExecuteFailureRead> for String {
     fn from(value: ExecuteFailureRead) -> Self {
@@ -76,7 +81,144 @@ pub fn take_success_result(
         .map_err(|(code, message)| ExecuteFailureRead::new(task, code, &message))
 }
 
+/// Where the model behind a failed request runs, which decides what its
+/// `RuntimeFailure` means.
+///
+/// Locality selects the diagnostic category, not a claim about determinism.
+/// Both local and remote generic failures can retry within the bounded policy.
+/// Decided from the engine the request named, by an exhaustive match, never
+/// from the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelLocality {
+    /// The model runs in the worker on this machine.
+    Local,
+    /// The worker calls a remote provider.
+    Remote,
+}
+
+impl ModelLocality {
+    /// Where an ASR backend's model runs.
+    pub(crate) fn of_asr(backend: crate::types::worker_v2::AsrBackendV2) -> Self {
+        use crate::types::worker_v2::AsrBackendV2;
+        match backend {
+            AsrBackendV2::LocalWhisper
+            | AsrBackendV2::WhisperHub
+            | AsrBackendV2::HkFunaudio
+            | AsrBackendV2::HkQwen => Self::Local,
+            AsrBackendV2::HkTencent | AsrBackendV2::HkAliyun | AsrBackendV2::Revai => Self::Remote,
+        }
+    }
+
+    /// Where a speaker backend's model runs.
+    pub(crate) fn of_speaker(backend: crate::types::worker_v2::SpeakerBackendV2) -> Self {
+        use crate::types::worker_v2::SpeakerBackendV2;
+        match backend {
+            SpeakerBackendV2::Pyannote | SpeakerBackendV2::Nemo => Self::Local,
+            SpeakerBackendV2::PyannoteAi => Self::Remote,
+        }
+    }
+
+    /// Where a translation backend's model runs.
+    pub(crate) fn of_translate(backend: crate::types::worker_v2::TranslateBackendV2) -> Self {
+        use crate::types::worker_v2::TranslateBackendV2;
+        match backend {
+            TranslateBackendV2::Seamless | TranslateBackendV2::Nllb => Self::Local,
+            TranslateBackendV2::Google
+            | TranslateBackendV2::Tencent
+            | TranslateBackendV2::Aliyun => Self::Remote,
+        }
+    }
+}
+
 impl ExecuteFailureRead {
+    /// The protocol code the worker's response carried.
+    pub fn code(&self) -> ProtocolErrorCodeV2 {
+        self.code
+    }
+
+    /// The fully formatted diagnostic.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The same failure, its message prefixed with where it happened (a
+    /// request, a group). The code is unchanged.
+    pub(crate) fn in_context(self, context: impl std::fmt::Display) -> Self {
+        Self {
+            code: self.code,
+            message: format!("{context}: {}", self.message),
+        }
+    }
+
+    /// A failure as a reader would build it, for tests of what consumes one.
+    #[cfg(test)]
+    pub(crate) fn for_test(code: ProtocolErrorCodeV2, message: &str) -> Self {
+        Self {
+            code,
+            message: message.to_owned(),
+        }
+    }
+
+    /// The server error this worker-reported failure is, decided by its
+    /// protocol code alone (never its message), for every code.
+    ///
+    /// Exhaustive with no catch-all, so a new protocol code must choose its
+    /// category here rather than falling into "invalid input". None of these
+    /// is a refusal of the client's input: the request the server built was
+    /// refused (`WorkerProtocol`), a model could not load (`WorkerBootstrap`),
+    /// the task failed while running (bounded retries with the local or remote
+    /// category selected by `locality`), the provider's quota is exhausted, or
+    /// Hugging Face refused this machine.
+    pub(crate) fn into_server_error(self, locality: ModelLocality) -> crate::error::ServerError {
+        use crate::error::ServerError;
+        use crate::worker::error::{WorkerAfterError, WorkerError};
+        match self.code {
+            ProtocolErrorCodeV2::UnsupportedProtocol
+            | ProtocolErrorCodeV2::InvalidPayload
+            | ProtocolErrorCodeV2::MissingAttachment
+            | ProtocolErrorCodeV2::AttachmentUnreadable => {
+                ServerError::Worker(WorkerError::RequestRefused(self.message))
+            }
+            // A worker with no pipeline for the language fails the same way
+            // on every retry, as when the language is refused while the
+            // worker starts: deterministic, and its message is the operator's
+            // answer.
+            ProtocolErrorCodeV2::ModelUnavailable | ProtocolErrorCodeV2::UnsupportedLanguage => {
+                ServerError::Worker(WorkerError::Bootstrap {
+                    message: self.message,
+                    worker: WorkerAfterError::Serves,
+                })
+            }
+            // A download that failed in transit, or a device that ran out of
+            // memory, may succeed later, wherever the model runs. The worker
+            // answered with a response, so it goes on serving.
+            ProtocolErrorCodeV2::ModelDownloadFailed => {
+                ServerError::Worker(WorkerError::ModelDownload {
+                    message: self.message,
+                    worker: WorkerAfterError::Serves,
+                })
+            }
+            ProtocolErrorCodeV2::DeviceOutOfMemory => {
+                ServerError::Worker(WorkerError::DeviceOutOfMemory {
+                    message: self.message,
+                    worker: WorkerAfterError::Serves,
+                })
+            }
+            ProtocolErrorCodeV2::RuntimeFailure => match locality {
+                ModelLocality::Local => {
+                    ServerError::Worker(WorkerError::ModelRuntime(self.message))
+                }
+                ModelLocality::Remote => {
+                    ServerError::Worker(WorkerError::WorkerResponse(self.message))
+                }
+            },
+            ProtocolErrorCodeV2::ProviderQuotaExhausted => {
+                ServerError::ProviderQuotaExhausted(self.message)
+            }
+            ProtocolErrorCodeV2::ModelAccessDenied => ServerError::ModelAccessDenied(self.message),
+        }
+    }
+
     /// The one message shape both readers share.
     fn new(task: &str, code: ProtocolErrorCodeV2, message: &str) -> Self {
         Self {
@@ -148,6 +290,46 @@ mod tests {
                 .to_string()
                 .contains("speaker-diarization-community-1")
         );
+    }
+
+    /// RED FIRST: a download that failed in transit and a device that ran
+    /// out of memory had no protocol code of their own; the worker reported
+    /// both as `runtime_failure`, which for a local model is not retried.
+    /// Each is now its own code and is retried, wherever the model runs, and
+    /// the worker that answered goes on serving.
+    #[test]
+    fn a_download_and_a_device_shortfall_are_retried_on_a_serving_worker() {
+        use crate::error::ServerError;
+        use crate::runner::util::classify_worker_error;
+        use crate::worker::error::{WorkerAfterError, WorkerError};
+
+        for code in [
+            ProtocolErrorCodeV2::ModelDownloadFailed,
+            ProtocolErrorCodeV2::DeviceOutOfMemory,
+        ] {
+            let failed = ExecuteResponseV2::failure(
+                WorkerRequestIdV2::from("req-1".to_owned()),
+                code,
+                "failed".to_owned(),
+                NonNegativeSeconds::ZERO,
+            );
+            let read = require_success_result(&failed, "utseg").expect_err("a failure");
+            let ServerError::Worker(error) = read.into_server_error(ModelLocality::Local) else {
+                panic!("a worker failure for {code:?}");
+            };
+            match &error {
+                WorkerError::ModelDownload { worker, .. }
+                | WorkerError::DeviceOutOfMemory { worker, .. } => {
+                    assert_eq!(*worker, WorkerAfterError::Serves);
+                }
+                other => panic!("{code:?} became {other:?}"),
+            }
+            assert!(
+                ((classify_worker_error(&error)).retryability()
+                    == crate::types::scheduling::Retryability::Retryable),
+                "{code:?} must be retried"
+            );
+        }
     }
 
     /// Existing callers that only need text (ASR, FA, text, opensmile/AVQI)

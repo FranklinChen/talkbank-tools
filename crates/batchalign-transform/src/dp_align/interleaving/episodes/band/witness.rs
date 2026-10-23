@@ -36,10 +36,12 @@ impl<'relation, 'source> CanonicalWitness<'relation, 'source> {
         control: &C,
     ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
         if m.max(n) > WORK_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                required_at_least: m.max(n),
-            }));
+            return Ok(Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::WorkBudgetExceeded {
+                    phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                    required_at_least: m.max(n),
+                },
+            )));
         }
         let mut prefix = 0;
         while prefix < m.min(n) && relation.matches(prefix, prefix) {
@@ -73,10 +75,12 @@ impl<'relation, 'source> CanonicalWitness<'relation, 'source> {
         Ok(result.and_then(|(score, work)| {
             let work = work.saturating_add(prefix + suffix);
             if work > WORK_CELLS {
-                Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-                    phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                    required_at_least: work,
-                })
+                Err(LocalInterleavingRefusal::Budget(
+                    LocalInterleavingBudget::WorkBudgetExceeded {
+                        phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                        required_at_least: work,
+                    },
+                ))
             } else {
                 Ok(Self {
                     relation,
@@ -107,10 +111,12 @@ fn literal<C: WorkControl + ?Sized>(
         .saturating_add(reference.len().saturating_mul(3))
         .saturating_add(2);
     if work > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-            phase: LocalInterleavingWorkPhase::FeasibleWitness,
-            required_at_least: work,
-        }));
+        return Ok(Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::WorkBudgetExceeded {
+                phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                required_at_least: work,
+            },
+        )));
     }
     // Posting pairs, map entries and two packed rows, before any allocation.
     if reference
@@ -119,7 +125,9 @@ fn literal<C: WorkControl + ?Sized>(
         .saturating_add(blocks.saturating_mul(2 * BIT_WORDS))
         > SCORE_CELLS
     {
-        return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
+        return Ok(Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::MemoryBudgetExceeded,
+        )));
     }
     let reference = LiteralReference::observe(reference, mode, ReferenceOrder::Forward, control)?;
     let mut row = reference.start();
@@ -268,10 +276,12 @@ mod tests {
                 LiteralMatchMode::Exact,
                 &Uninterrupted
             )),
-            Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                ..
-            })
+            Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::WorkBudgetExceeded {
+                    phase: LocalInterleavingWorkPhase::FeasibleWitness,
+                    ..
+                }
+            ))
         ));
         let source = vec!["a"; 1000];
         let reference = vec!["a".to_owned(); 400_000];
@@ -282,7 +292,9 @@ mod tests {
                 LiteralMatchMode::Exact,
                 &Uninterrupted
             )),
-            Err(LocalInterleavingRefusal::MemoryBudgetExceeded)
+            Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::MemoryBudgetExceeded
+            ))
         ));
     }
 }

@@ -16,7 +16,7 @@ fn test_japanese_punctuation_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "\u{3002}".to_string(),
         lemma: "\u{3002}".to_string(),
@@ -27,7 +27,8 @@ fn test_japanese_punctuation_mapping() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -42,7 +43,7 @@ fn test_mwt_assembly_french_elision() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "l'".to_string(),
                 lemma: "le".to_string(),
@@ -53,8 +54,9 @@ fn test_mwt_assembly_french_elision() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "ami".to_string(),
                 lemma: "ami".to_string(),
@@ -65,7 +67,8 @@ fn test_mwt_assembly_french_elision() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
 
@@ -81,7 +84,7 @@ fn test_french_pron_case() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "je".into(),
         lemma: "je".into(),
@@ -92,7 +95,8 @@ fn test_french_pron_case() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -107,7 +111,7 @@ fn a_french_det_without_gender_gets_no_masc() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "le".into(),
         lemma: "le".into(),
@@ -118,7 +122,8 @@ fn a_french_det_without_gender_gets_no_masc() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -131,7 +136,7 @@ fn test_french_det_plural_no_gender_default() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "les".into(),
         lemma: "le".into(),
@@ -142,7 +147,8 @@ fn test_french_det_plural_no_gender_default() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -155,7 +161,7 @@ fn test_french_det_explicit_fem_gender() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "la".into(),
         lemma: "le".into(),
@@ -166,7 +172,8 @@ fn test_french_det_explicit_fem_gender() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -179,7 +186,7 @@ fn test_french_noun_apm_plural() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "chevaux".into(),
         lemma: "cheval".into(),
@@ -190,7 +197,8 @@ fn test_french_noun_apm_plural() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -204,7 +212,7 @@ fn test_french_noun_non_apm_plural() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "maisons".into(),
         lemma: "maison".into(),
@@ -215,7 +223,8 @@ fn test_french_noun_non_apm_plural() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -228,7 +237,7 @@ fn test_french_pron_accusative() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "me".into(),
         lemma: "me".into(),
@@ -239,7 +248,8 @@ fn test_french_pron_accusative() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -252,7 +262,7 @@ fn test_french_pron_no_case_lookup() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "nous".into(),
         lemma: "nous".into(),
@@ -263,7 +273,8 @@ fn test_french_pron_no_case_lookup() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -279,7 +290,7 @@ fn test_french_mwt_contraction_du() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "du".into(),
                 lemma: "du".into(),
@@ -290,8 +301,9 @@ fn test_french_mwt_contraction_du() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "de".into(),
                 lemma: "de".into(),
@@ -302,8 +314,9 @@ fn test_french_mwt_contraction_du() {
                 deprel: "case".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "le".into(),
                 lemma: "le".into(),
@@ -314,8 +327,9 @@ fn test_french_mwt_contraction_du() {
                 deprel: "det".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "pain".into(),
                 lemma: "pain".into(),
@@ -326,7 +340,8 @@ fn test_french_mwt_contraction_du() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let mors = map_ud_sentence_to_mors(&sentence, &ctx);
@@ -352,7 +367,7 @@ fn test_japanese_verb_override_full_output() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "食べちゃう".into(),
         lemma: "食べる".into(),
@@ -363,7 +378,8 @@ fn test_japanese_verb_override_full_output() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -377,7 +393,7 @@ fn test_japanese_intj_override_hai() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "はい".into(),
         lemma: "はい".into(),
@@ -388,7 +404,8 @@ fn test_japanese_intj_override_hai() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -408,7 +425,7 @@ fn test_japanese_aux_override_nai() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "ない".into(),
         lemma: "無い".into(),
@@ -419,7 +436,8 @@ fn test_japanese_aux_override_nai() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -438,7 +456,7 @@ fn test_japanese_comma_lemma_becomes_cm() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "、".into(),
         lemma: "、".into(),
@@ -449,7 +467,8 @@ fn test_japanese_comma_lemma_becomes_cm() {
         deprel: "punct".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -462,7 +481,7 @@ fn test_japanese_all_punct_is_cm() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "…".into(),
         lemma: "…".into(),
@@ -473,7 +492,8 @@ fn test_japanese_all_punct_is_cm() {
         deprel: "punct".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -490,7 +510,7 @@ fn test_japanese_verb_no_irr_suffix() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("ja").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "行った".into(),
         lemma: "行く".into(),
@@ -501,7 +521,8 @@ fn test_japanese_verb_no_irr_suffix() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -517,7 +538,7 @@ fn test_french_3letter_code_works() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("fra").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "je".into(),
         lemma: "je".into(),
@@ -528,7 +549,8 @@ fn test_french_3letter_code_works() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -542,7 +564,7 @@ fn test_japanese_3letter_code_works() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("jpn").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "はい".into(),
         lemma: "はい".into(),
@@ -553,7 +575,8 @@ fn test_japanese_3letter_code_works() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();

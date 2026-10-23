@@ -11,12 +11,12 @@ fn words(length: usize) -> Vec<String> {
 
 fn check_maximum(profile: &Profile) {
     let population = profile
-        .bits
+        .bits()
         .iter()
         .map(|bits| bits.count_ones() as usize)
         .sum::<usize>();
     assert_eq!(profile.total(), profile.base + population);
-    assert_eq!(profile.score_inside(profile.last), profile.total());
+    assert_eq!(profile.score(profile.last()), Some(profile.total()));
     let cloned = profile.clone();
     assert_eq!(cloned.total(), profile.total());
     assert_eq!(cloned.bits, profile.bits);
@@ -98,7 +98,7 @@ fn producer_maxima_survive_both_trims_and_unreachable_rows() {
                     .enumerate()
                 {
                     let first = profile.first;
-                    let last = (profile.last + 1).min(length);
+                    let last = (profile.last() + 1).min(length);
                     let required = (index + 1).saturating_sub(source_slack);
                     let row = profile
                         .advance(&literal, word, required, slack, length, &Uninterrupted)
@@ -108,7 +108,7 @@ fn producer_maxima_survive_both_trims_and_unreachable_rows() {
                         break;
                     };
                     left |= next.first > first;
-                    right |= next.last < last;
+                    right |= next.last() < last;
                     check_maximum(&next);
                     profile = next;
                 }
@@ -137,9 +137,8 @@ fn merged_maxima_equal_pointwise_scalar_maxima_across_shifted_domains() {
                 }
                 profiles.push(Profile {
                     first,
-                    last: first + span,
                     base: 7,
-                    bits,
+                    bits: PackedBits::from_words(bits, span).unwrap(),
                     maximum,
                 });
             }
@@ -149,17 +148,17 @@ fn merged_maxima_equal_pointwise_scalar_maxima_across_shifted_domains() {
         for b in &profiles {
             let merged = a.clone().merge(b.clone(), &Uninterrupted).unwrap();
             check_maximum(&merged);
-            for at in merged.first..=merged.last {
+            for at in merged.first..=merged.last() {
                 let score =
-                    |profile: &Profile| profile.score_inside(at.clamp(profile.first, profile.last));
+                    |profile: &Profile| profile.score(at.clamp(profile.first, profile.last()));
                 assert_eq!(
-                    merged.score_inside(at),
+                    merged.score(at),
                     score(a).max(score(b)),
                     "a=[{},{}] b=[{},{}] at={at}",
                     a.first,
-                    a.last,
+                    a.last(),
                     b.first,
-                    b.last
+                    b.last()
                 );
             }
         }
@@ -180,6 +179,9 @@ fn suffix_preparation_pays_only_allocation_and_reversal_and_preserves_scores() {
             self.0.set(self.0.get() + units);
             Ok(())
         }
+        fn refuse(&self, inconsistency: LocalInterleavingInconsistency) -> Self::Error {
+            panic!("the test search contradicted itself: {inconsistency:?}")
+        }
     }
     for length in [0, 1, 63, 64, 65, 127, 128, 129, 257] {
         let reference = words(length);
@@ -198,9 +200,9 @@ fn suffix_preparation_pays_only_allocation_and_reversal_and_preserves_scores() {
         };
         let paid = Paid(Cell::new(0));
         let suffix = Suffix::of(&profile, length, &paid).unwrap();
-        assert_eq!(paid.0.get(), 2 * (profile.bits.len() + 1));
-        for prefix in suffix.first..=suffix.last {
-            assert_eq!(suffix.score(prefix), profile.score_inside(length - prefix));
+        assert_eq!(paid.0.get(), 2 * (profile.bits().len() + 1));
+        for prefix in suffix.first..=suffix.last() {
+            assert_eq!(Some(suffix.score(prefix)), profile.score(length - prefix));
         }
     }
 }
@@ -243,7 +245,7 @@ fn cached_state_snapshot_distinguishes_represented_origin_from_terminal_score() 
     for row in &rows {
         check_maximum(row);
     }
-    insta::assert_json_snapshot!(rows.iter().map(|row| serde_json::json!({"first":row.first,"last":row.last,"base":row.base,"maximum":row.total(),"blocks":row.bits.len()})).collect::<Vec<_>>(), @r###"
+    insta::assert_json_snapshot!(rows.iter().map(|row| serde_json::json!({"first":row.first,"last":row.last(),"base":row.base,"maximum":row.total(),"blocks":row.bits().len()})).collect::<Vec<_>>(), @r###"
     [
       {
         "base": 0,
@@ -268,4 +270,40 @@ fn cached_state_snapshot_distinguishes_represented_origin_from_terminal_score() 
       }
     ]
     "###);
+}
+
+/// RED FIRST: merging two rows of different bases was a debug assertion, so
+/// a release build merged them and reported a pointwise maximum over two
+/// incomparable score origins. It is refused in every build as the
+/// inconsistency it is.
+#[test]
+fn rows_of_different_bases_are_refused_not_merged() {
+    struct Refusing;
+    impl WorkControl for Refusing {
+        type Error = Option<LocalInterleavingInconsistency>;
+        fn check(&self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+    impl PackedControl for Refusing {
+        fn charge(&self, _: usize) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn refuse(&self, inconsistency: LocalInterleavingInconsistency) -> Self::Error {
+            Some(inconsistency)
+        }
+    }
+    let row = |base| Profile {
+        first: 0,
+        base,
+        bits: PackedBits::from_words(vec![0b1], 1).unwrap(),
+        maximum: base + 1,
+    };
+    assert_eq!(
+        row(3).merge(row(4), &Refusing).err(),
+        Some(Some(LocalInterleavingInconsistency::ProfileBasesDiffer {
+            left: 3,
+            right: 4
+        }))
+    );
 }

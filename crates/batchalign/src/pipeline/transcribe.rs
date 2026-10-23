@@ -350,7 +350,27 @@ impl TranscribeProgress {
 
 struct TranscribeTail {
     post_chat: Option<crate::utseg::UtsegDecisionPolicy>,
-    morphosyntax: bool,
+    morphosyntax: MorphosyntaxTail,
+}
+
+/// What the requested morphosyntax stage does for this transcript, decided
+/// once before recognition.
+enum MorphosyntaxTail {
+    /// Not requested.
+    NotRequested,
+    /// Requested, and the stage runs; its own admission meets an
+    /// auto-detected language once recognition names it.
+    Run,
+    /// Requested for a known language the admitted registry cannot serve:
+    /// the stage is not applied, and the shortfall says why.
+    Unservable(Shortfall),
+}
+
+impl MorphosyntaxTail {
+    /// Whether the stage runs, for the progress total.
+    fn runs(&self) -> bool {
+        matches!(self, Self::Run)
+    }
 }
 
 fn prepare_tail<P: TranscribePlan>(
@@ -358,25 +378,50 @@ fn prepare_tail<P: TranscribePlan>(
     opts: &TranscribeOptions<P>,
     execution: TranscribeUtsegExecution,
     progress: Option<ProgressSender>,
-) -> Result<(TranscribeTail, TranscribeProgress), ServerError> {
-    let stanza_supported = match opts.language().primary_if_known() {
-        Some(code) => stanza_supports(services, code)?,
-        None => true,
-    };
-    let post_chat = if stanza_supported {
-        execution.post_chat_policy()
+) -> (TranscribeTail, TranscribeProgress) {
+    // Segmentation is decided once, by `post_chat_route`, once recognition
+    // has named the language, for a known and an auto-detected language
+    // alike: a route the runtime cannot serve is recorded there as a
+    // `stage_not_applied` shortfall. Deciding it here as well, for known
+    // languages only, was a second decision that logged and recorded
+    // nothing.
+    let post_chat = execution.post_chat_policy();
+    // Morphosyntax is skipped only when the admitted registry says a known
+    // language does not meet its requirement. An auto-detected language is
+    // not known yet, and a server with no admitted registry cannot say: both
+    // run the stage, whose own admission refuses and records a shortfall,
+    // rather than skipping on a guess.
+    let morphosyntax = if !opts.with_morphosyntax {
+        MorphosyntaxTail::NotRequested
     } else {
-        None
+        let gap = opts.language().primary_if_known().and_then(|code| {
+            use crate::stanza_registry::{Morphosyntax, StanzaRefusal, admit_from};
+            match admit_from::<Morphosyntax>(&services.pool.stanza_registry(), code) {
+                Err(StanzaRefusal::Gap(gap)) => Some(gap),
+                Ok(_) | Err(StanzaRefusal::RegistryUnavailable(_)) => None,
+            }
+        });
+        match gap {
+            None => MorphosyntaxTail::Run,
+            Some(gap) => {
+                info!(lang = %opts.language(), %gap, "Skipping requested morphosyntax: no Stanza pipeline for it in this language");
+                MorphosyntaxTail::Unservable(Shortfall::StageNotApplied {
+                    stage: OptionalStage::Morphosyntax,
+                    refusal: StageRefusalRecord::Unestablished {
+                        reason: format!(
+                            "language '{}' is not served by this runtime's Stanza catalog: {gap}",
+                            opts.language()
+                        ),
+                    },
+                })
+            }
+        }
     };
-    let morphosyntax = opts.with_morphosyntax && stanza_supported;
-    if !stanza_supported {
-        info!(lang = %opts.language(), "Skipping requested Stanza-backed stages: no Stanza pipeline for this language");
-    }
     let total = 4
         + usize::from(opts.diarize)
         + usize::from(post_chat.is_some())
-        + usize::from(morphosyntax);
-    Ok((
+        + usize::from(morphosyntax.runs());
+    (
         TranscribeTail {
             post_chat,
             morphosyntax,
@@ -386,7 +431,7 @@ fn prepare_tail<P: TranscribePlan>(
             completed: 0,
             total,
         },
-    ))
+    )
 }
 
 /// Run the transcribe pipeline for a single audio file.
@@ -430,7 +475,7 @@ async fn run_transcribe_pipeline_with_rev_inference<'a>(
     rev_inference: &'a dyn RevAsrEvidenceInference,
 ) -> Result<CompletedTranscribePipeline, ServerError> {
     let execution = TranscribeUtsegExecution::production(opts.plan.with_utseg());
-    let (tail, mut progress) = prepare_tail(&services, opts, execution, progress)?;
+    let (tail, mut progress) = prepare_tail(&services, opts, execution, progress);
     let ctx = TranscribePipelineContext::new(
         audio_path,
         services,
@@ -459,7 +504,7 @@ pub(crate) async fn run_transcribe_pipeline_with_legacy_replay<'a>(
     debug_dir: Option<&Path>,
 ) -> Result<TranscribeOutput, ServerError> {
     let audio_path = replay.media_path().to_owned();
-    let (tail, mut progress) = prepare_tail(&services, opts, execution, progress)?;
+    let (tail, mut progress) = prepare_tail(&services, opts, execution, progress);
     let ctx = progress.run(StageId::AsrInfer, Box::pin(async {
         let response = replay.asr_response().clone();
         let language = resolved_asr_language(opts, &response)?;
@@ -565,7 +610,10 @@ async fn finish_transcribe<P: TranscribePlan>(
             // renumbered its utterances) and every utterance but the faulty
             // ones is analyzed. Findings about the document as a whole skip
             // the stage, counted in progress and recorded.
-            let document = if tail.morphosyntax {
+            let document = if let MorphosyntaxTail::Unservable(shortfall) = tail.morphosyntax {
+                shortfalls.push(shortfall);
+                ProducedOutput::Diagnosed(diagnosed)
+            } else if tail.morphosyntax.runs() {
                 match diagnosed.localize() {
                     Ok(localized) => {
                         let (document, shortfall) = progress
@@ -611,22 +659,28 @@ async fn finish_transcribe<P: TranscribePlan>(
 /// serialization.
 async fn finish_admitted<P: TranscribePlan>(
     ctx: TranscribePipelineContext<'_, ChatReady, P>,
-    morphosyntax: bool,
+    morphosyntax: MorphosyntaxTail,
     mut progress: TranscribeProgress,
 ) -> Result<CompletedTranscribePipeline, ServerError> {
-    let ctx = if morphosyntax {
-        progress
-            .run(
-                StageId::OptionalMorphosyntax,
-                Box::pin(stage_run_morphosyntax(ctx)),
-            )
-            .await?
-    } else {
-        ctx.map_state(|ready| Analyzed {
+    let ctx = match morphosyntax {
+        MorphosyntaxTail::Run => {
+            progress
+                .run(
+                    StageId::OptionalMorphosyntax,
+                    Box::pin(stage_run_morphosyntax(ctx)),
+                )
+                .await?
+        }
+        MorphosyntaxTail::NotRequested => ctx.map_state(|ready| Analyzed {
             document: ready.document,
             speaker_assignments: ready.speaker_assignments,
             shortfalls: ready.shortfalls,
-        })
+        }),
+        MorphosyntaxTail::Unservable(shortfall) => ctx.map_state(|ready| Analyzed {
+            document: ready.document,
+            speaker_assignments: ready.speaker_assignments,
+            shortfalls: ready.shortfalls.into_iter().chain([shortfall]).collect(),
+        }),
     };
     progress
         .run(
@@ -646,30 +700,6 @@ async fn finish_admitted<P: TranscribePlan>(
             }),
         )
         .await
-}
-
-/// Whether Stanza has a pipeline for one language: the runtime registry when
-/// the worker has reported one, else the hardcoded pre-warmup table.
-fn stanza_supports(
-    services: &PipelineServices<'_>,
-    code: &LanguageCode3,
-) -> Result<bool, ServerError> {
-    match services.pool.stanza_registry() {
-        Some(registry) => Ok(registry.supports_morphosyntax(code.as_ref())),
-        None => {
-            // Fallible in chatter 0.3.0; stringified error
-            // (`LanguageCodeError` not re-exported upstream).
-            let chat_lang = crate::chat_ops::LanguageCode::new(code.as_ref()).map_err(|e| {
-                ServerError::Validation(format!(
-                    "transcribe: invalid language code {:?}: {e}",
-                    code.as_ref()
-                ))
-            })?;
-            Ok(crate::chat_ops::morphosyntax_ops::is_stanza_supported(
-                &chat_lang,
-            ))
-        }
-    }
 }
 
 /// Map transcribe-pipeline stage ids onto the shared file-progress stage
@@ -780,16 +810,25 @@ async fn stage_run_utseg<'a, P: TranscribePlan>(
         },
         ctx,
     ) = ctx.split_state();
-    let route = asr.segmentation.as_ref().ok_or_else(|| {
-        ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
-    })?;
-    let Some(route) = route.model() else {
-        return Ok(ctx.map_state(|()| ChatReady {
-            asr,
-            document,
-            speaker_assignments,
-            shortfalls,
-        }));
+    let route = match post_chat_route(&ctx, &asr)? {
+        PostChatRoute::Run(route) => route,
+        PostChatRoute::RecognizerBoundaries => {
+            return Ok(ctx.map_state(|()| ChatReady {
+                asr,
+                document,
+                speaker_assignments,
+                shortfalls,
+            }));
+        }
+        PostChatRoute::Unservable(shortfall) => {
+            shortfalls.push(shortfall);
+            return Ok(ctx.map_state(|()| ChatReady {
+                asr,
+                document,
+                speaker_assignments,
+                shortfalls,
+            }));
+        }
     };
     let filename = ctx
         .audio_path
@@ -804,9 +843,8 @@ async fn stage_run_utseg<'a, P: TranscribePlan>(
     let outcome =
         crate::utseg::process_utseg_with_evidence(crate::utseg::EvidenceRetainingUtsegRequest {
             document,
-            lang: route.language(),
+            route: &route,
             services: ctx.services,
-            fallback_policy: route.fallback(),
             decision_policy: post_chat_policy,
             evidence_filename: evidence_filename.as_ref(),
             evidence_sink: &ctx.utseg_evidence_sink,
@@ -834,6 +872,47 @@ async fn stage_run_utseg<'a, P: TranscribePlan>(
     }))
 }
 
+/// What post-CHAT segmentation does for this transcript.
+enum PostChatRoute {
+    /// Run the admitted route.
+    Run(crate::utseg_route::ServableUtsegRoute),
+    /// The language keeps the recognizer's boundaries: nothing to segment.
+    RecognizerBoundaries,
+    /// The route runs Stanza and this runtime cannot serve it: the stage is
+    /// not applied, and the shortfall says why, instead of the route being
+    /// sent to fail item by item at the worker. The one decision, for a known
+    /// and an auto-detected language alike.
+    Unservable(Shortfall),
+}
+
+/// The post-CHAT route of a recognized transcript, admitted against the
+/// Stanza registry.
+fn post_chat_route<S, P: TranscribePlan>(
+    ctx: &TranscribePipelineContext<'_, S, P>,
+    asr: &Recognized,
+) -> Result<PostChatRoute, ServerError> {
+    let segmentation = asr.segmentation.as_ref().ok_or_else(|| {
+        ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
+    })?;
+    let Some(route) = segmentation.model() else {
+        return Ok(PostChatRoute::RecognizerBoundaries);
+    };
+    Ok(
+        match route.clone().admit(&ctx.services.pool.stanza_registry()) {
+            Ok(route) => PostChatRoute::Run(route),
+            Err(unservable) => {
+                info!(%unservable, "Skipping requested utterance segmentation");
+                PostChatRoute::Unservable(Shortfall::StageNotApplied {
+                    stage: OptionalStage::UtteranceSegmentation,
+                    refusal: StageRefusalRecord::Unestablished {
+                        reason: unservable.to_string(),
+                    },
+                })
+            }
+        },
+    )
+}
+
 /// Post-CHAT segmentation of a diagnosed transcript, outside the utterances
 /// its findings belong to. The held-out utterances are not sent to the model
 /// and keep their generated form; the result is judged afresh.
@@ -850,16 +929,24 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
     localized: crate::pipeline::post_validate::LocalizedDiagnosis,
     post_chat_policy: crate::utseg::UtsegDecisionPolicy,
 ) -> Result<(ProducedOutput, Shortfall), ServerError> {
-    let route = asr.segmentation.as_ref().ok_or_else(|| {
-        ServerError::Validation("post-CHAT segmentation requested from a disabled plan".into())
-    })?;
-    let Some(route) = route.model() else {
-        let held_out =
-            held_out_shortfall(OptionalStage::UtteranceSegmentation, localized.held_out());
-        return Ok((
-            ProducedOutput::Diagnosed(localized.into_diagnosed()),
-            held_out,
-        ));
+    let route = match post_chat_route(ctx, asr)? {
+        PostChatRoute::Run(route) => route,
+        PostChatRoute::RecognizerBoundaries => {
+            let held_out =
+                held_out_shortfall(OptionalStage::UtteranceSegmentation, localized.held_out());
+            return Ok((
+                ProducedOutput::Diagnosed(localized.into_diagnosed()),
+                held_out,
+            ));
+        }
+        // The stage did not run at all, so that, not a held-out count, is
+        // what the file's outcome says.
+        PostChatRoute::Unservable(shortfall) => {
+            return Ok((
+                ProducedOutput::Diagnosed(localized.into_diagnosed()),
+                shortfall,
+            ));
+        }
     };
     let filename = ctx
         .audio_path
@@ -874,9 +961,8 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
     let segmented = crate::utseg::process_localized_utseg_with_evidence(
         crate::utseg::EvidenceRetainingUtsegRequest {
             document: localized,
-            lang: route.language(),
+            route: &route,
             services: ctx.services,
-            fallback_policy: route.fallback(),
             decision_policy: post_chat_policy,
             evidence_filename: evidence_filename.as_ref(),
             evidence_sink: &ctx.utseg_evidence_sink,
@@ -1060,6 +1146,7 @@ async fn stage_run_morphosyntax<'a, P: TranscribePlan>(
         let parsed = crate::pipeline::morphosyntax::ParsedFile::from_output(
             before.clone(),
             mor_params.policy.ca_policy,
+            &ctx.services.pool.stanza_registry(),
         )?;
         crate::pipeline::morphosyntax::run_admitted_morphosyntax(parsed, ctx.services, &mor_params)
             .await

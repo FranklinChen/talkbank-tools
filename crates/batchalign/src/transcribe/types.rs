@@ -900,8 +900,7 @@ mod transcribe_segmentation_tests {
             .unwrap()
             .unwrap();
         assert_eq!(route.language(), &LanguageCode3::spa());
-        assert_eq!(route.model().unwrap().fallback(), AllowStanza);
-        assert!(!route.model().unwrap().uses_boundary_model());
+        assert_eq!(route.model().unwrap().boundary_model(), None);
         assert!(matches!(
             plan.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::eng())),
             Err(SegmentationResolutionError::ChangedLanguage { .. })
@@ -929,7 +928,8 @@ mod transcribe_segmentation_tests {
                 .unwrap()
                 .model()
                 .unwrap()
-                .uses_boundary_model()
+                .boundary_model()
+                .is_some()
         );
         assert!(matches!(
             deferred.resolve_segmentation(&TranscriptLanguage::One(LanguageCode3::spa())),
@@ -944,8 +944,9 @@ mod transcribe_segmentation_tests {
                 .unwrap()
                 .model()
                 .unwrap()
-                .fallback(),
-            AllowStanza
+                .boundary_model(),
+            None,
+            "an authorized Spanish route runs Stanza"
         );
     }
 }

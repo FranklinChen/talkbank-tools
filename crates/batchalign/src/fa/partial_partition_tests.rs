@@ -4,7 +4,7 @@ use super::*;
 use crate::api::{NonNegativeSeconds, OutputShortfallRecord};
 use crate::cache::{UtteranceCache, tasks::FORCED_ALIGNMENT};
 use crate::chat_ops::fa::coordinates::{Ms, Recording};
-use crate::chat_ops::fa::utr::{AsrTimingToken, inject_utr_timing};
+use crate::chat_ops::fa::utr::{AsrTimingToken, inject_spaced};
 use crate::chat_ops::fa::{
     AnchoredPart, AudioIdentity, EndOverlapPolicy, ExistingWorBoundaryPolicy, MainBulletPolicy,
     ReviewLevel, WordGapHealing, WordTiming, group_utterances,
@@ -79,7 +79,7 @@ async fn request_context_preserves_partial_partition_output() {
         working
             .active_mut()
             .expect("active")
-            .recover_timing(async |chat| Ok(inject_utr_timing(chat, &tokens)))
+            .recover_timing(async |chat| Ok(inject_spaced(chat, &tokens)))
             .await
             .expect("synthetic UTR anchors");
         let FaInputDocument::Active(active) = working.attempt() else {

@@ -349,12 +349,6 @@ impl std::borrow::Borrow<str> for LanguageCode3 {
     }
 }
 
-impl Default for LanguageCode3 {
-    fn default() -> Self {
-        Self::eng()
-    }
-}
-
 impl<'de> serde::Deserialize<'de> for LanguageCode3 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

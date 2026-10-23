@@ -51,6 +51,8 @@ use super::presence::RecordingPresence;
 
 mod anchors;
 #[cfg(test)]
+mod character_unit_tests;
+#[cfg(test)]
 mod correspondence_tests;
 mod evidence;
 mod interior;
@@ -61,13 +63,15 @@ pub mod overlap_markers;
 pub(crate) mod region_tests;
 mod regions;
 mod search;
+mod token_text;
 mod two_pass;
+
+pub use token_text::{PreparedUtrTokens, UtrLexicalUnits};
 
 pub use anchors::{
     AlignableWords, AnchorDisorder, AnchorIndex, AnchorLookup, UtteranceAnchors, WordAnchor,
 };
 use evidence::UtrAsrTokenOrdinal;
-use evidence::UtrWordOrdinal;
 pub use evidence::{
     NonEmptyUtrWordMatches, PositiveUtrInterval, UtrAlignmentEvidence, UtrAlignmentPlan,
     UtrAlignmentStrategy, UtrAsrTokenAddress, UtrBudgetRefusal, UtrCorrespondenceRefusal,
@@ -110,14 +114,16 @@ pub struct AsrTimingToken {
 /// Implementations determine how ASR tokens are aligned with CHAT utterances
 /// to recover utterance-level timing bullets.
 pub trait UtrStrategy: Send + Sync {
-    /// Inject utterance-level timing from ASR tokens into untimed CHAT utterances.
-    fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult;
+    /// Inject utterance-level timing from ASR tokens into untimed CHAT
+    /// utterances. The tokens carry the lexical units both sides are matched
+    /// in, so the transcript is projected the way the tokens were.
+    fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &PreparedUtrTokens) -> UtrResult;
     /// Interruptible work on a privately owned candidate document. A cancelled
     /// candidate must not be installed into the caller's source document.
     fn inject_controlled(
         &self,
         chat_file: &mut ChatFile,
-        asr_tokens: &[AsrTimingToken],
+        asr_tokens: &PreparedUtrTokens,
         control: &dyn WorkControl<Error = UtrCancelled>,
     ) -> Result<UtrResult, UtrCancelled>;
 }
@@ -186,8 +192,9 @@ pub fn select_strategy(
 /// Pre-extracted utterance metadata used while planning one UTR pass.
 #[derive(Debug, Clone)]
 pub(super) struct UtrUtteranceInfo {
-    /// Alignable words from the utterance in transcript order.
-    pub(super) words: Vec<String>,
+    /// The owned alignable words and their lexical units, admitted together:
+    /// one unit per word, or per Han character for character matching.
+    units: token_text::UtrChatUnits,
     /// Original source timing, not an independently maintained presence flag.
     retained_timing: Option<lexical::ObservedWordTiming>,
     /// Whether the utterance has a `+<` lazy overlap linker.
@@ -217,7 +224,7 @@ pub(super) struct UtrUtteranceInfo {
 ///
 /// Backward-compatible entry point that delegates to [`GlobalUtr`]. New callers
 /// should prefer [`select_strategy`] to automatically choose the best strategy.
-pub fn inject_utr_timing(chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult {
+pub fn inject_utr_timing(chat_file: &mut ChatFile, asr_tokens: &PreparedUtrTokens) -> UtrResult {
     GlobalUtr.inject(chat_file, asr_tokens)
 }
 
@@ -226,7 +233,7 @@ impl UtrStrategy for GlobalUtr {
     ///
     /// Attempts a cheap exact-subsequence fast path first. Falls back to a
     /// single global Hirschberg DP alignment when the fast path is ambiguous.
-    fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult {
+    fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &PreparedUtrTokens) -> UtrResult {
         run_global_utr(
             chat_file,
             asr_tokens,
@@ -237,7 +244,7 @@ impl UtrStrategy for GlobalUtr {
     fn inject_controlled(
         &self,
         chat_file: &mut ChatFile,
-        asr_tokens: &[AsrTimingToken],
+        asr_tokens: &PreparedUtrTokens,
         control: &dyn WorkControl<Error = UtrCancelled>,
     ) -> Result<UtrResult, UtrCancelled> {
         run_global_utr_controlled(
@@ -248,6 +255,12 @@ impl UtrStrategy for GlobalUtr {
             control,
         )
     }
+}
+
+/// [`inject_utr_timing`] over space-delimited tokens, for tests.
+#[cfg(test)]
+pub(crate) fn inject_spaced(chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult {
+    inject_utr_timing(chat_file, &PreparedUtrTokens::spaced(asr_tokens))
 }
 
 /// Which utterances participate in the global UTR alignment payload.
@@ -267,7 +280,7 @@ pub enum GlobalUtrParticipation {
 /// any bullet projection.
 pub fn observe_global_utr_alignment(
     chat_file: &ChatFile,
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &PreparedUtrTokens,
     match_mode: UtrMatchMode,
     participation: GlobalUtrParticipation,
 ) -> UtrAlignmentPlan {
@@ -288,7 +301,7 @@ pub fn observe_global_utr_alignment(
 /// two-pass strategy handles them separately.
 pub(super) fn run_global_utr(
     chat_file: &mut ChatFile,
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &PreparedUtrTokens,
     participation: GlobalUtrParticipation,
     dp_match_mode: MatchMode,
 ) -> UtrResult {
@@ -303,14 +316,14 @@ pub(super) fn run_global_utr(
 
 pub(super) fn run_global_utr_controlled<C: WorkControl + ?Sized>(
     chat_file: &mut ChatFile,
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &PreparedUtrTokens,
     participation: GlobalUtrParticipation,
     dp_match_mode: MatchMode,
     control: &C,
 ) -> Result<UtrResult, C::Error> {
     control.check()?;
-    if asr_tokens.is_empty() {
-        let utt_infos = collect_utr_utterance_info(chat_file);
+    if asr_tokens.tokens().is_empty() {
+        let utt_infos = collect_utr_utterance_info(chat_file, asr_tokens.units());
         // Nothing can match. The plan still records every utterance as
         // unmatched (or excluded, or wordless) so the evidence is complete,
         // but no decision is written and no bullet is touched: the count is
@@ -444,7 +457,7 @@ impl<'a> PreparedGlobalUtr<'a> {
     #[cfg(test)]
     fn plan(
         source: &'a mut ChatFile,
-        tokens: &[AsrTimingToken],
+        tokens: &PreparedUtrTokens,
         participation: GlobalUtrParticipation,
         match_mode: MatchMode,
     ) -> Self {
@@ -459,12 +472,12 @@ impl<'a> PreparedGlobalUtr<'a> {
 
     fn plan_controlled<C: WorkControl + ?Sized>(
         source: &'a mut ChatFile,
-        tokens: &[AsrTimingToken],
+        tokens: &PreparedUtrTokens,
         participation: GlobalUtrParticipation,
         match_mode: MatchMode,
         control: &C,
     ) -> Result<Self, C::Error> {
-        let census = collect_utr_utterance_info(source);
+        let census = collect_utr_utterance_info(source, tokens.units());
         let plan =
             plan_global_utr_alignment_for(&census, tokens, match_mode, participation, control)?;
         let anchors = AnchorIndex::from_plan(&plan);
@@ -710,6 +723,14 @@ impl<'a> PreparedGlobalUtr<'a> {
                                 refusal.region().describe()
                             ),
                         ),
+                        UtrCorrespondenceRefusal::Inconsistent(inconsistency) => (
+                            batchalign_transform::decisions::UtrStrategy::CorrespondenceSearchInconsistent,
+                            format!(
+                                "search_inconsistent inconsistency={:?} region=[{}]",
+                                inconsistency.inconsistency,
+                                inconsistency.region().describe()
+                            ),
+                        ),
                     };
                     result.decisions.extend(decision(
                         utt_idx,
@@ -793,6 +814,11 @@ impl<'a> PreparedGlobalUtr<'a> {
 /// Extract alignable words, bullet presence, `+<` linker status, and CA
 /// overlap marker info for every utterance in the order UTR sees them.
 impl UtrUtteranceInfo {
+    /// The word population owned by this utterance's unit projection.
+    pub(super) fn words(&self) -> &[String] {
+        self.units.words()
+    }
+
     /// Whether a global pass with this participation leaves the utterance
     /// out of its flattened word sequence: the one owner of that rule, used
     /// both to build the payload and to label the evidence.
@@ -811,7 +837,12 @@ impl UtrUtteranceInfo {
     }
 }
 
-pub(super) fn collect_utr_utterance_info(chat_file: &ChatFile) -> Vec<UtrUtteranceInfo> {
+/// The census of one pass: every utterance's words, and their lexical units
+/// in `units`, the projection the pass's tokens were prepared with.
+pub(super) fn collect_utr_utterance_info(
+    chat_file: &ChatFile,
+    units: UtrLexicalUnits,
+) -> Vec<UtrUtteranceInfo> {
     let mut utt_infos = Vec::new();
     for line in &chat_file.lines {
         if let Line::Utterance(utt) = line {
@@ -873,7 +904,7 @@ pub(super) fn collect_utr_utterance_info(chat_file: &ChatFile) -> Vec<UtrUtteran
                 .collect();
 
             utt_infos.push(UtrUtteranceInfo {
-                words,
+                units: units.project_words(words),
                 retained_timing,
                 presence,
                 has_lazy_overlap,
@@ -896,11 +927,11 @@ pub(super) fn collect_utr_utterance_info(chat_file: &ChatFile) -> Vec<UtrUtteran
 /// Hirschberg alignment.
 pub(super) fn plan_global_utr_alignment(
     chat_file: &ChatFile,
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &PreparedUtrTokens,
     dp_match_mode: MatchMode,
     participation: GlobalUtrParticipation,
 ) -> UtrAlignmentPlan {
-    let utt_infos = collect_utr_utterance_info(chat_file);
+    let utt_infos = collect_utr_utterance_info(chat_file, asr_tokens.units());
     uninterrupted(plan_global_utr_alignment_for(
         &utt_infos,
         asr_tokens,
@@ -918,7 +949,7 @@ pub(super) fn plan_global_utr_alignment(
 /// planned on its own, within its own budget (see `regions`).
 fn plan_global_utr_alignment_for<C: WorkControl + ?Sized>(
     utt_infos: &[UtrUtteranceInfo],
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &PreparedUtrTokens,
     dp_match_mode: MatchMode,
     participation: GlobalUtrParticipation,
     control: &C,
@@ -1046,21 +1077,15 @@ fn plan_region<'c, C: WorkControl + ?Sized>(
         }
         UtrOrderModel::Interleaved | UtrOrderModel::Monotonic => {}
     }
-    let mut payload = Vec::new();
-    for (utterance_index, info) in searched.infos().iter().enumerate() {
-        if info.excluded_from(participation) {
-            continue;
-        }
-        for (word_index, word) in info.words.iter().enumerate() {
-            payload.push(UtrPayloadWord {
-                text: word.clone(),
-                address: UtrWordAddress {
-                    utterance_index: UtrUtteranceOrdinal(utterance_index),
-                    word_index: UtrWordOrdinal(word_index),
-                },
-            });
-        }
-    }
+    let payload: Vec<_> = searched
+        .infos()
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| !info.excluded_from(participation))
+        .flat_map(|(utterance_index, info)| {
+            UtrPayloadWord::of_utterance(UtrUtteranceOrdinal(utterance_index), info)
+        })
+        .collect();
     plan_utr_alignment_controlled(
         &payload,
         lexical,
@@ -1072,10 +1097,37 @@ fn plan_region<'c, C: WorkControl + ?Sized>(
     )
 }
 
+/// One lexical unit of the alignment payload, addressed in the census.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UtrPayloadWord {
     text: String,
     address: UtrWordAddress,
+}
+
+impl UtrPayloadWord {
+    /// An utterance's units, addressed: the one route from the census into
+    /// a payload.
+    fn of_utterance(
+        utterance_index: UtrUtteranceOrdinal,
+        info: &UtrUtteranceInfo,
+    ) -> impl Iterator<Item = Self> + '_ {
+        Self::of_units(utterance_index, &info.units)
+    }
+
+    /// The same, from an utterance's units alone.
+    fn of_units(
+        utterance_index: UtrUtteranceOrdinal,
+        units: &token_text::UtrChatUnits,
+    ) -> impl Iterator<Item = Self> + '_ {
+        units.iter().map(move |(unit_index, text, of_word)| Self {
+            text: text.to_owned(),
+            address: UtrWordAddress {
+                utterance_index,
+                unit_index,
+                of_word,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1290,6 +1342,8 @@ enum CorrespondenceProof {
     /// The region's proof work exceeded a budget; carries which region and
     /// which budget, so every refusal it causes can name both.
     BudgetExhausted(UtrBudgetRefusal),
+    /// The region's search contradicted its own admission; not a budget.
+    Inconsistent(evidence::UtrSearchInconsistency),
 }
 
 fn build_alignment_plan<'c>(
@@ -1311,6 +1365,10 @@ fn build_alignment_plan<'c>(
         CorrespondenceProof::BudgetExhausted(refusal) => (
             Vec::new(),
             UtrCorrespondenceRefusal::BudgetExhausted(refusal),
+        ),
+        CorrespondenceProof::Inconsistent(inconsistency) => (
+            Vec::new(),
+            UtrCorrespondenceRefusal::Inconsistent(inconsistency),
         ),
     };
     let mut by_utterance = vec![Vec::new(); searched];
@@ -1375,25 +1433,32 @@ fn utterance_evidence(
     endpoints: lexical::EndpointExtents,
     participation: GlobalUtrParticipation,
 ) -> UtrUtteranceAlignmentEvidence {
-    let alignable_words = info.words.len();
+    let alignable_words = info.words().len();
     if info.excluded_from(participation) && matches.as_ref().map_or(true, Vec::is_empty) {
         return UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap {
             utterance_index,
             alignable_words,
         };
     }
-    if info.words.is_empty() {
+    if info.words().is_empty() {
         return UtrUtteranceAlignmentEvidence::NoAlignableWords { utterance_index };
     }
     let (matches, inspection_refusal) = match matches {
         Ok(matches) => (matches, None),
         Err(refusal) => (Vec::new(), Some(refusal)),
     };
-    // A budget refusal refuses correspondence, never timing: an utterance
+    // A region refusal refuses correspondence, never timing: an utterance
     // that already has its bullet keeps it and says so.
-    if let (UtrCorrespondenceRefusal::BudgetExhausted(unsearched), Some(_)) =
-        (refusal, info.retained_timing)
-    {
+    let unsearched = match refusal {
+        UtrCorrespondenceRefusal::BudgetExhausted(refusal) => {
+            Some(evidence::UtrUnsearchedRegion::BudgetExhausted(refusal))
+        }
+        UtrCorrespondenceRefusal::Inconsistent(inconsistency) => {
+            Some(evidence::UtrUnsearchedRegion::Inconsistent(inconsistency))
+        }
+        UtrCorrespondenceRefusal::Ambiguous => None,
+    };
+    if let (Some(unsearched), Some(_)) = (unsearched, info.retained_timing) {
         return UtrUtteranceAlignmentEvidence::RetainedUnsearched {
             utterance_index,
             alignable_words,
@@ -1409,7 +1474,8 @@ fn utterance_evidence(
         }
         (None, None) => {
             return match refusal {
-                UtrCorrespondenceRefusal::BudgetExhausted(_) => {
+                UtrCorrespondenceRefusal::BudgetExhausted(_)
+                | UtrCorrespondenceRefusal::Inconsistent(_) => {
                     UtrUtteranceAlignmentEvidence::Refused {
                         utterance_index,
                         alignable_words,
@@ -1436,7 +1502,8 @@ fn utterance_evidence(
             }
             evidence::UtrInspectionMatches::BudgetExhausted { inspection_refusal } => match refusal
             {
-                UtrCorrespondenceRefusal::BudgetExhausted(_) => {
+                UtrCorrespondenceRefusal::BudgetExhausted(_)
+                | UtrCorrespondenceRefusal::Inconsistent(_) => {
                     UtrUtteranceAlignmentEvidence::Refused {
                         utterance_index,
                         alignable_words,
@@ -1452,7 +1519,7 @@ fn utterance_evidence(
             },
         };
     };
-    match admitted_matches.admit_endpoints(alignable_words, endpoints) {
+    match admitted_matches.admit_endpoints(&info.units, endpoints) {
         lexical::BoundaryAdmission::Bound(admitted_matches) => {
             let proposal = admitted_matches.proposal();
             UtrUtteranceAlignmentEvidence::Matched {
@@ -1753,18 +1820,21 @@ mod tests {
         word_counts
             .iter()
             .enumerate()
-            .map(|(utterance_index, count)| UtrUtteranceInfo {
-                words: (0..*count)
+            .map(|(utterance_index, count)| {
+                let words: Vec<String> = (0..*count)
                     .map(|word_index| format!("u{utterance_index}-w{word_index}"))
-                    .collect(),
-                retained_timing: None,
-                has_lazy_overlap: false,
-                has_ca_overlap: false,
-                overlap_onset_fraction: None,
-                speaker: "PAR".to_string(),
-                presence: RecordingPresence::InRecording,
-                bottom_indices: Vec::new(),
-                top_onsets: Vec::new(),
+                    .collect();
+                UtrUtteranceInfo {
+                    units: UtrLexicalUnits::SpaceDelimitedWords.project_words(words),
+                    retained_timing: None,
+                    has_lazy_overlap: false,
+                    has_ca_overlap: false,
+                    overlap_onset_fraction: None,
+                    speaker: "PAR".to_string(),
+                    presence: RecordingPresence::InRecording,
+                    bottom_indices: Vec::new(),
+                    top_onsets: Vec::new(),
+                }
             })
             .collect()
     }
@@ -1779,7 +1849,8 @@ mod tests {
     ) -> UtrAlignmentPlan {
         let regions = regions::partition(utt_infos);
         assert_eq!(regions.len(), 1, "an untimed census is one region");
-        let lexical = lexical::UtrLexicalStream::from_tokens(asr_tokens);
+        let prepared = PreparedUtrTokens::spaced(asr_tokens);
+        let lexical = lexical::UtrLexicalStream::from_tokens(&prepared);
         let local = plan_utr_alignment(
             payload,
             &lexical,
@@ -1843,7 +1914,7 @@ mod tests {
         ]);
         let prepared = PreparedGlobalUtr::plan(
             &mut chat,
-            &tokens,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             GlobalUtrParticipation::AllUtterances,
             MatchMode::CaseInsensitive,
         );
@@ -1906,17 +1977,24 @@ mod tests {
             .collect()
     }
 
+    /// The address of a one-unit word.
     fn test_word_address(utterance_index: usize, word_index: usize) -> UtrWordAddress {
         UtrWordAddress {
             utterance_index: UtrUtteranceOrdinal(utterance_index),
-            word_index: UtrWordOrdinal(word_index),
+            unit_index: evidence::UtrUnitOrdinal(word_index),
+            of_word: evidence::UtrUnitOfWord::units_of(
+                evidence::UtrWordOrdinal(word_index),
+                std::num::NonZeroUsize::MIN,
+            )
+            .next()
+            .unwrap_or_else(|| unreachable!("a word of one unit has that unit")),
         }
     }
 
     fn test_token_address(token_index: usize) -> UtrAsrTokenAddress {
         UtrAsrTokenAddress {
             token_index: UtrAsrTokenOrdinal(token_index),
-            word_index: evidence::UtrAsrWordOrdinal(0),
+            unit_index: evidence::UtrAsrUnitOrdinal(0),
         }
     }
 
@@ -1959,7 +2037,7 @@ mod tests {
         let input = include_str!("../../../../../test-fixtures/fa_two_timed_utterances.cha");
         let mut chat = parse_chat(input);
         let tokens = make_asr_tokens(&[("hello", 0, 500), ("world", 600, 1000)]);
-        let result = inject_utr_timing(&mut chat, &tokens);
+        let result = inject_spaced(&mut chat, &tokens);
         assert_eq!(result.skipped, 2);
         assert_eq!(result.injected, 0);
         assert_eq!(result.unmatched, 0);
@@ -1969,7 +2047,7 @@ mod tests {
     fn test_inject_utr_empty_tokens() {
         let input = include_str!("../../../../../test-fixtures/fa_two_untimed_with_media.cha");
         let mut chat = parse_chat(input);
-        let result = inject_utr_timing(&mut chat, &[]);
+        let result = inject_spaced(&mut chat, &[]);
         assert_eq!(result.unmatched, 2);
         assert_eq!(result.injected, 0);
     }
@@ -2025,7 +2103,7 @@ mod tests {
             ("now", 41800, 42500),
         ]);
 
-        let result = inject_utr_timing(&mut chat, &tokens);
+        let result = inject_spaced(&mut chat, &tokens);
         assert_eq!(result.skipped, 3, "3 already-timed utterances");
         assert_eq!(result.injected, 3, "3 untimed utterances should get timing");
         assert_eq!(result.unmatched, 0);
@@ -2102,16 +2180,19 @@ mod tests {
                     }
                 },
                 admitted_matches: match NonEmptyAdmittedUtrWordMatches::from_vec(
-                    lexical::UtrLexicalStream::from_tokens(&asr_tokens).unique_embedding_matches(
-                        &payload[..2],
-                        &UniqueEmbedding {
-                            indices: vec![1, 2]
-                        },
-                    ),
+                    lexical::UtrLexicalStream::from_tokens(&PreparedUtrTokens::spaced(&asr_tokens))
+                        .unique_embedding_matches(
+                            &payload[..2],
+                            &UniqueEmbedding {
+                                indices: vec![1, 2]
+                            },
+                        ),
                 )
                 .expect("nonempty producer proof")
-                .admit_endpoints(2, lexical::EndpointExtents::UNOBSERVED)
-                {
+                .admit_endpoints(
+                    &token_text::UtrChatUnits::spaced(&["a".to_owned(), "b".to_owned()]),
+                    lexical::EndpointExtents::UNOBSERVED,
+                ) {
                     lexical::BoundaryAdmission::Bound(matches) => matches,
                     lexical::BoundaryAdmission::Interior { .. } => panic!("both endpoints proved"),
                 },
@@ -2188,7 +2269,7 @@ mod tests {
 
         let plan = plan_global_utr_alignment(
             &chat,
-            &tokens,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             MatchMode::CaseInsensitive,
             GlobalUtrParticipation::AllUtterances,
         );
@@ -2213,7 +2294,7 @@ mod tests {
 
         let plan = plan_global_utr_alignment(
             &chat,
-            &tokens,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             MatchMode::CaseInsensitive,
             GlobalUtrParticipation::ExcludeMarkedOverlap,
         );
@@ -2235,7 +2316,7 @@ mod tests {
 
         let plan = plan_global_utr_alignment(
             &chat,
-            &tokens,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             MatchMode::Fuzzy { threshold: 0.85 },
             GlobalUtrParticipation::AllUtterances,
         );
@@ -2259,7 +2340,7 @@ mod tests {
 
         let plan = plan_global_utr_alignment(
             &chat,
-            &tokens,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             MatchMode::CaseInsensitive,
             GlobalUtrParticipation::AllUtterances,
         );
@@ -2346,7 +2427,7 @@ mod tests {
 
         let expected: Vec<ExpectedUtrFixture> = serde_json::from_str(expected_json).unwrap();
 
-        let result = inject_utr_timing(&mut chat, &tokens);
+        let result = inject_spaced(&mut chat, &tokens);
 
         // Collect actual timing
         let mut actual_timing: Vec<Option<(u64, u64)>> = Vec::new();
@@ -2500,7 +2581,7 @@ mod tests {
             "../../../../../test-fixtures/utr_real_world_regression_expected.json"
         ))
         .expect("expected");
-        let result = inject_utr_timing(&mut chat, &tokens);
+        let result = inject_spaced(&mut chat, &tokens);
         let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
             panic!("global plan");
         };

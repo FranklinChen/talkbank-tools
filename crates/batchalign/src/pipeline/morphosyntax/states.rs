@@ -10,7 +10,8 @@ use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::morphosyntax::identity::{AdmittedMorphosyntaxResponse, AppliedAnalyses};
 use crate::morphosyntax::infer_batch;
 use crate::pipeline::post_validate::{DiagnosedOutput, LocalizedDiagnosis, PostValidated};
-use crate::{api::LanguageCode3, error::ServerError, pipeline::PipelineServices};
+use crate::stanza_registry::{Admitted as AdmittedLanguage, Morphosyntax, StanzaRegistryLookup};
+use crate::{error::ServerError, pipeline::PipelineServices};
 use batchalign_transform::morphosyntax::MatchedMorphosyntaxResponses;
 use talkbank_model::model::{ChatOptionFlag, Header, TranscriptName};
 use talkbank_model::validation::ValidChatFile;
@@ -64,23 +65,31 @@ pub(crate) enum LocalizedParse {
     Analyze(Box<Analysis<Admitted, OutsideHeldOut>>),
 }
 
+/// The file's primary language, admitted: the proof every later language of
+/// the file (each utterance's, each `@s` span's) is admitted from.
 struct FileLanguage {
-    api: LanguageCode3,
+    admitted: AdmittedLanguage<Morphosyntax>,
     model: LanguageCode,
 }
 
 impl FileLanguage {
-    /// Resolve the file's language and admit it for analysis.
-    fn resolve(chat: &ChatFile) -> Result<Self, ServerError> {
+    /// Resolve the file's language and admit it for analysis against the
+    /// admitted Stanza registry (or the reason there is none, which
+    /// refuses).
+    fn resolve(chat: &ChatFile, registry: &StanzaRegistryLookup) -> Result<Self, ServerError> {
         let api = resolve_per_file_lang(chat)?;
-        crate::morphosyntax::AnalysisUnavailable::admit_primary(&api)?;
+        let admitted = crate::morphosyntax::AnalysisUnavailable::admit(
+            crate::morphosyntax::AnalysisLanguageRequirement::PrimaryHeader,
+            &api,
+            registry,
+        )?;
         let model = LanguageCode::new(api.as_ref()).map_err(|e| {
             ServerError::Validation(format!(
                 "morphotag: invalid resolved language code {:?}: {e}",
                 api.as_ref()
             ))
         })?;
-        Ok(Self { api, model })
+        Ok(Self { admitted, model })
     }
 }
 
@@ -167,8 +176,8 @@ pub(super) struct Inferred {
     applied: AppliedAnalyses,
 }
 /// Applied, carrying what every analysis that reached the document reported:
-/// the models, which the provenance comment names, and the relation repairs
-/// made inside them, which it counts.
+/// the models, which the provenance comment names, and the relation and
+/// feature repairs made inside them, which it counts.
 pub(super) struct Applied {
     applied: AppliedAnalyses,
 }
@@ -200,6 +209,7 @@ impl ParsedFile {
     pub(crate) fn parse(
         text: &str,
         policy: crate::options::CaMorphotagPolicy,
+        registry: &StanzaRegistryLookup,
     ) -> Result<Self, ServerError> {
         // The planner's choice, kept to hold the admission to it.
         let mut planned = None;
@@ -233,7 +243,7 @@ impl ParsedFile {
             None => Ok(Self::PassThrough(admitted.into_valid_file())),
             Some(ReplacementTiers::Morphosyntax) => {
                 let chat = admitted.into_valid_file().into_unchecked();
-                Self::analyze(chat)
+                Self::analyze(chat, registry)
             }
             // The plan above never selects word timing.
             Some(ReplacementTiers::WordTiming) => Err(contradicted()),
@@ -248,6 +258,7 @@ impl ParsedFile {
     pub(crate) fn from_output(
         output: crate::pipeline::post_validate::PostValidated,
         policy: crate::options::CaMorphotagPolicy,
+        registry: &StanzaRegistryLookup,
     ) -> Result<Self, ServerError> {
         let mut chat = output.into_judged_document();
         if declines_ca(&chat, policy) {
@@ -271,11 +282,11 @@ impl ParsedFile {
             return Ok(Self::PassThrough(chat));
         }
         batchalign_transform::morphosyntax::clear_morphosyntax(&mut chat);
-        Self::analyze(chat)
+        Self::analyze(chat, registry)
     }
 
-    fn analyze(chat: ChatFile) -> Result<Self, ServerError> {
-        let language = FileLanguage::resolve(&chat)?;
+    fn analyze(chat: ChatFile, registry: &StanzaRegistryLookup) -> Result<Self, ServerError> {
+        let language = FileLanguage::resolve(&chat, registry)?;
         Ok(Self::Analyze(Analysis {
             chat,
             language,
@@ -293,6 +304,7 @@ impl ParsedFile {
     pub(crate) fn from_localized(
         localized: LocalizedDiagnosis,
         policy: crate::options::CaMorphotagPolicy,
+        registry: &StanzaRegistryLookup,
     ) -> Result<LocalizedParse, ServerError> {
         if declines_ca(localized.model(), policy) {
             return Ok(LocalizedParse::Declined(localized.into_diagnosed()));
@@ -307,7 +319,7 @@ impl ParsedFile {
             .filter(|ordinal| !held_out.contains(*ordinal))
             .collect();
         batchalign_transform::morphosyntax::clear_morphosyntax_selective(&mut chat, &analyzed);
-        let language = FileLanguage::resolve(&chat)?;
+        let language = FileLanguage::resolve(&chat, registry)?;
         Ok(LocalizedParse::Analyze(Box::new(Analysis {
             chat,
             language,
@@ -343,7 +355,7 @@ impl Analysis<Admitted> {
         IncrementalInput {
             chat: self.chat,
             language: self.language.model,
-            api_language: self.language.api,
+            admitted: self.language.admitted,
         }
     }
 }
@@ -351,7 +363,8 @@ impl Analysis<Admitted> {
 pub(crate) struct IncrementalInput {
     pub(crate) chat: ChatFile,
     pub(crate) language: LanguageCode,
-    pub(crate) api_language: LanguageCode3,
+    /// The file's admitted primary language.
+    pub(crate) admitted: AdmittedLanguage<Morphosyntax>,
 }
 
 impl<D: AnalysisScope> Analysis<Admitted, D> {
@@ -397,7 +410,7 @@ impl<D: AnalysisScope> Analysis<Collected, D> {
             infer_batch(
                 options.services.pool,
                 &self.state.items,
-                &self.language.api,
+                &self.language.admitted,
                 options.mwt,
                 options.tokenization == TokenizationMode::StanzaRetokenize,
                 options.progress,
@@ -464,6 +477,7 @@ impl<D: AnalysisScope> Analysis<Inferred, D> {
                         crate::morphosyntax::dispatch_secondary_l2(
                             &mut self.chat,
                             deferred,
+                            &self.language.admitted,
                             options.services,
                             "single-file",
                             options.cancellation,
@@ -512,18 +526,18 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
         batchalign_transform::decisions::strip_decision_tiers(&mut self.chat);
         if let Some(count) = self.state.applied.repair_count() {
             // The file-level report no worker can make: a worker sees one
-            // batch, not the document these relations belong to. The stamp
+            // batch, not the document these repairs belong to. The stamp
             // below carries the count into the file itself; this line is the
             // operator's copy, and neither is the only record any more.
             warn!(
                 repairs = count.get(),
                 tally = %self.state.applied.repair_tally(),
-                lang = %self.language.api,
-                "Stanza relations repaired before injection"
+                lang = %self.language.admitted.language(),
+                "Stanza relations and feature values repaired before injection"
             );
         }
         let provenance = crate::provenance::morphotag_provenance(
-            &self.language.api,
+            self.language.admitted.language(),
             &self.state.applied,
             options.tokenization == TokenizationMode::StanzaRetokenize,
         );

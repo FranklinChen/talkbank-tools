@@ -50,7 +50,7 @@ pub mod word_segmentation;
 use batchalign_types::domain::AudioPositionSeconds;
 use serde::{Deserialize, Serialize};
 
-pub use asr_types::{AsrNormalizedText, AsrRawText, ChatWordText, SpeakerIndex};
+pub use asr_types::{AsrNormalizedText, AsrRawText, ChatWordContent, ChatWordText, SpeakerIndex};
 pub use chunking::{
     finalize_words_to_chunks, finalize_words_to_chunks_with_snapshot,
     split_prepared_chunk_by_assignments,
@@ -160,13 +160,152 @@ impl AsrWord {
     }
 }
 
+/// A mark that ends an utterance but that CHAT cannot write as a terminator.
+/// Neither is a CHAT word either, so an utterance closed by one ends with a
+/// terminator this pipeline adds ([`SynthesisCause::UnwritableMark`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnwritableEndMark {
+    /// A run of two or more periods (`...`), written as `...`.
+    Ellipsis,
+    /// A pause, `(.)`.
+    Pause,
+}
+
+impl UnwritableEndMark {
+    /// Every mark, so the spelling table below is the only one.
+    pub const ALL: [Self; 2] = [Self::Ellipsis, Self::Pause];
+
+    /// The mark's canonical text, as stage 3 emits it as a token.
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::Ellipsis => "...",
+            Self::Pause => "(.)",
+        }
+    }
+
+    /// The mark `text` is, whole: `(.)`, or a run of two or more periods.
+    pub(super) fn parse(text: &str) -> Option<Self> {
+        if text == Self::Pause.text() {
+            Some(Self::Pause)
+        } else if text.len() >= 2 && text.bytes().all(|byte| byte == b'.') {
+            Some(Self::Ellipsis)
+        } else {
+            None
+        }
+    }
+
+    /// The mark `text` ends with, and the text before it: `(.)`, or a run
+    /// of two or more periods.
+    pub(super) fn split_trailing(text: &str) -> Option<(&str, Self)> {
+        if let Some(before) = text.strip_suffix(Self::Pause.text()) {
+            return Some((before, Self::Pause));
+        }
+        // A run after `+` belongs to a CHAT terminator (`+...`), not to an
+        // ellipsis.
+        let before = text.trim_end_matches('.');
+        (text.len() - before.len() >= 2 && !before.ends_with('+'))
+            .then_some((before, Self::Ellipsis))
+    }
+}
+
+/// Why this pipeline closed an utterance itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SynthesisCause {
+    /// The source gave no ending punctuation (the chunk ran out of words).
+    NoMark,
+    /// The source ended the utterance with a mark CHAT cannot write as a
+    /// terminator.
+    UnwritableMark(UnwritableEndMark),
+}
+
+/// How an utterance ends: with the terminator its source observed, or with
+/// one this pipeline added because the source gave none it could write.
+///
+/// A field of the utterance, never a word: a terminator is not content, and
+/// a word list cannot say which of its tokens the pipeline invented. CHAT has
+/// no notation for a terminator nobody heard, so a synthesized end is written
+/// as `.` ([`Self::terminator`]) and reported beside the transcript instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "UtteranceEndRepr", into = "UtteranceEndRepr")]
+pub enum UtteranceEnd {
+    /// The recognizer's own ending punctuation, as a CHAT terminator.
+    Observed(talkbank_model::model::Terminator),
+    /// The source gave no ending punctuation CHAT can write, so this
+    /// pipeline closed the utterance; the cause says which.
+    Synthesized(SynthesisCause),
+}
+
+impl UtteranceEnd {
+    /// The observed end a CHAT terminator's text states, or `None` when the
+    /// text is not a CHAT terminator.
+    pub fn observed(text: &str) -> Option<Self> {
+        talkbank_model::model::Terminator::try_from_chat_str(
+            talkbank_model::Location::Unlocated,
+            text,
+        )
+        .map(Self::Observed)
+    }
+
+    /// The terminator CHAT is written with: the observed one, or a period for
+    /// a synthesized end. The one place that period is chosen.
+    pub fn terminator(&self) -> talkbank_model::model::Terminator {
+        match self {
+            Self::Observed(terminator) => terminator.clone(),
+            Self::Synthesized(_) => talkbank_model::model::Terminator::Period {
+                location: talkbank_model::Location::Unlocated,
+            },
+        }
+    }
+}
+
+/// The serialized form of an [`UtteranceEnd`]: the observed terminator's
+/// CHAT text, or the synthesis cause (`{"synthesized": "no_mark"}`,
+/// `{"synthesized": {"unwritable_mark": "ellipsis"}}`).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UtteranceEndRepr {
+    Observed(String),
+    Synthesized(SynthesisCause),
+}
+
+/// A serialized utterance end naming text that is not a CHAT terminator.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0:?} is not a CHAT terminator")]
+pub struct NotATerminator(String);
+
+impl TryFrom<UtteranceEndRepr> for UtteranceEnd {
+    type Error = NotATerminator;
+
+    fn try_from(repr: UtteranceEndRepr) -> Result<Self, Self::Error> {
+        match repr {
+            UtteranceEndRepr::Observed(text) => Self::observed(&text).ok_or(NotATerminator(text)),
+            UtteranceEndRepr::Synthesized(cause) => Ok(Self::Synthesized(cause)),
+        }
+    }
+}
+
+impl From<UtteranceEnd> for UtteranceEndRepr {
+    fn from(end: UtteranceEnd) -> Self {
+        match end {
+            UtteranceEnd::Observed(terminator) => Self::Observed(
+                talkbank_model::model::WriteChat::to_chat_string(&terminator),
+            ),
+            UtteranceEnd::Synthesized(cause) => Self::Synthesized(cause),
+        }
+    }
+}
+
 /// A speaker-attributed utterance after retokenization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Utterance {
     /// Speaker index (0-based).
     pub speaker: SpeakerIndex,
-    /// Words in the utterance (last word is a terminator like ".").
+    /// The utterance's words: content only, never its terminator.
     pub words: Vec<AsrWord>,
+    /// How the utterance ends.
+    pub end: UtteranceEnd,
     /// Detected language for this utterance (ISO 639-3), if different from
     /// the primary language. Used for `[- lang]` code-switching precodes in CHAT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,10 +399,11 @@ pub struct AsrOutput {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// CHAT-legal sentence terminators.
+/// CHAT-legal sentence terminators a recognizer's punctuation can be. The
+/// two marks that end an utterance but are not terminators are
+/// [`UnwritableEndMark`].
 pub(super) const ENDING_PUNCT: &[&str] = &[
     ".", "?", "!", "+...", "+/.", "+//.", "+/?", "+!?", "+\"/.", "+\".", "+//?", "+..?", "+.",
-    "...", "(.)",
 ];
 
 /// CHAT morphological punctuation markers.
@@ -285,7 +425,9 @@ pub(super) const MAX_TURN_LEN: usize = 300;
 
 /// Whether an item is punctuation or a sentence terminator rather than a word.
 pub(super) fn is_punct_or_terminator(text: &str) -> bool {
-    ENDING_PUNCT.contains(&text) || MOR_PUNCT.contains(&text)
+    ENDING_PUNCT.contains(&text)
+        || UnwritableEndMark::parse(text).is_some()
+        || MOR_PUNCT.contains(&text)
 }
 
 /// Long silence threshold used as a fallback boundary when ASR omits sentence
@@ -314,6 +456,7 @@ pub(crate) fn observed(seconds: f64) -> Option<AudioPositionSeconds> {
 mod integration_tests {
     use std::collections::BTreeSet;
 
+    use super::UtteranceEnd;
     use super::{
         AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, ChatWordText,
         SpeakerIndex, Utterance, expand_number, observed, prepare_words_pre_expansion,
@@ -357,7 +500,9 @@ mod integration_tests {
         )
         .expect("test: transcript_from_asr_utterances should succeed")
         .description;
-        let chat = crate::build_chat::build_chat(&desc).expect("build chat");
+        let chat = crate::build_chat::build_chat(desc)
+            .expect("build chat")
+            .into_file();
         let serialized = crate::serialize::to_chat_string(&chat);
         let (_parsed, errors) = crate::parse::parse_lenient(&parser, &serialized);
         assert!(
@@ -371,31 +516,68 @@ mod integration_tests {
         utterance.words.iter().map(|w| w.text.as_str()).collect()
     }
 
-    /// A Cantonese monologue of nothing but CJK punctuation reaches CHAT
-    /// assembly with utterances that hold no content, and assembly refuses
-    /// instead of writing a headers-only file.
+    /// RED FIRST: a chunk the recognizer left without ending punctuation was
+    /// closed with a `.` indistinguishable from observed punctuation, and the
+    /// marking that replaced it was a word kind any word could carry. The
+    /// end is now the utterance's own field: synthesized here, observed for
+    /// punctuation the recognizer gave, and counted where CHAT is built.
+    #[test]
+    fn a_terminator_the_pipeline_adds_is_the_utterances_synthesized_end() {
+        let built = |output: &AsrOutput| {
+            let utterances = process_raw_asr(output, "eng")
+                .expect("test: ASR post-processing must not refuse this input");
+            let desc = crate::build_chat::transcript_from_asr_utterances(
+                &utterances,
+                &["PAR".to_string()],
+                &["eng".to_string()],
+                Some("clip"),
+                true,
+            )
+            .expect("test: transcript_from_asr_utterances should succeed")
+            .description;
+            crate::build_chat::build_chat(desc).expect("build chat")
+        };
+
+        let unpunctuated = single_element("hello", 0.0, 1.0);
+        let utterances = process_raw_asr(&unpunctuated, "eng").expect("post-processed");
+        assert_eq!(
+            utterances[0].end,
+            UtteranceEnd::Synthesized(super::SynthesisCause::NoMark)
+        );
+        assert_eq!(texts(&utterances[0]), ["Hello"]);
+        assert_eq!(
+            built(&unpunctuated).synthesized_ends,
+            vec![crate::build_chat::SynthesizedEnd {
+                utterance: 1,
+                speaker: "PAR".to_string(),
+            }]
+        );
+
+        let punctuated = single_element("hello?", 0.0, 1.0);
+        let utterances = process_raw_asr(&punctuated, "eng").expect("post-processed");
+        assert_eq!(
+            utterances[0].end,
+            UtteranceEnd::observed("?").expect("terminator")
+        );
+        assert!(built(&punctuated).synthesized_ends.is_empty());
+    }
+
+    /// A Cantonese monologue of nothing but CJK punctuation yields no
+    /// utterance, and assembly refuses instead of writing a headers-only file.
     ///
-    /// This is the DOWNSTREAM route to an empty Cantonese transcript, and it
-    /// is downstream of normalization: the words survive normalization intact
-    /// (`。` is not a Han character and the tables do not touch it) and are
-    /// lost at tokenization, where every CJK sentence mark becomes a bare
-    /// terminator, and then at utterance building, where a terminator is not
-    /// content. Post-processing reports two utterances, so nothing upstream
-    /// sees an emptiness to report; only the built lines do.
+    /// The words survive normalization intact (`。` is not a Han character
+    /// and the tables do not touch it) and become utterance ends at
+    /// tokenization: an end is not content, so each utterance holds no word
+    /// and post-processing drops it. The emptiness is visible here, where the
+    /// utterances are formed, and assembly names it.
     #[test]
     fn a_cantonese_transcript_of_only_punctuation_is_refused_not_written_empty() {
         let output = single_element("。。", 0.0, 1.0);
         let utterances = process_raw_asr(&output, "yue")
             .expect("test: ASR post-processing must not refuse this input");
-
-        assert_eq!(
-            utterances.len(),
-            2,
-            "post-processing still reports utterances: {utterances:?}"
-        );
         assert!(
-            utterances.iter().all(|utterance| texts(utterance) == ["."]),
-            "every token is a bare terminator: {utterances:?}"
+            utterances.is_empty(),
+            "an utterance of nothing but its end holds no content: {utterances:?}"
         );
 
         let desc = crate::build_chat::transcript_from_asr_utterances(
@@ -408,14 +590,10 @@ mod integration_tests {
         .expect("test: transcript_from_asr_utterances should succeed")
         .description;
 
-        let refusal = crate::build_chat::build_chat(&desc)
+        let refusal = crate::build_chat::build_chat(desc)
             .expect_err("a transcript with no utterance content must be refused");
         assert!(
-            matches!(
-                refusal,
-                crate::build_chat::BuildChatError::NoUtteranceSurvivedBuild { described }
-                    if described == utterances.len()
-            ),
+            matches!(refusal, crate::build_chat::BuildChatError::NoUtterances),
             "the refusal must name what produced nothing, got: {refusal}"
         );
     }
@@ -455,9 +633,11 @@ mod integration_tests {
                 (words[0].start_ms, words[0].end_ms),
                 (Some(1000), Some(1500))
             );
-            assert_eq!(words.len(), 2);
-            assert_eq!(words[1].text.as_str(), &token[token.len() - 1..]);
-            assert_eq!((words[1].start_ms, words[1].end_ms), (None, None));
+            assert_eq!(words.len(), 1);
+            assert_eq!(
+                utterances[0].end,
+                UtteranceEnd::observed(&token[token.len() - 1..]).expect("a terminator")
+            );
             let chat = build_and_reparse_with_speakers(
                 &utterances,
                 "nld",
@@ -493,14 +673,14 @@ mod integration_tests {
             super::AsrTextLanguage::CodeSwitched { primary: "nld" },
         )
         .expect("synthetic code-switched input");
-        assert_eq!(texts(&utterances[0]), ["29e", "."]);
+        assert_eq!(texts(&utterances[0]), ["29e"]);
         assert_eq!(utterances[0].speaker, SpeakerIndex(0));
 
         let mut untimed = single_element("29e.", 1.0, 1.5);
         untimed.monologues[0].elements[0].ts = None;
         untimed.monologues[0].elements[0].end_ts = None;
         let utterances = process_raw_asr(&untimed, "nld").expect("synthetic untimed input");
-        assert_eq!(texts(&utterances[0]), ["negenentwintigste", "."]);
+        assert_eq!(texts(&utterances[0]), ["negenentwintigste"]);
         assert!(
             utterances[0]
                 .words
@@ -531,7 +711,7 @@ mod integration_tests {
             let utterances = process_raw_asr(&output, "por")
                 .expect("test: ASR post-processing must not refuse this input");
             assert_eq!(utterances.len(), 1, "{ordinal}: {utterances:?}");
-            assert_eq!(texts(&utterances[0]), ["quinquagésima", "quarta", "."]);
+            assert_eq!(texts(&utterances[0]), ["quinquagésima", "quarta"]);
             let words = &utterances[0].words;
             assert_eq!(words[0].start_ms, Some(3160));
             assert_eq!(words[1].end_ms, Some(3800));
@@ -554,10 +734,7 @@ mod integration_tests {
         let utterances = process_raw_asr(&output, "por")
             .expect("test: ASR post-processing must not refuse this input");
         let all: Vec<Vec<&str>> = utterances.iter().map(texts).collect();
-        assert_eq!(
-            all,
-            [vec!["quinquagésima", "quarta", "."], vec!["então", "."]]
-        );
+        assert_eq!(all, [vec!["quinquagésima", "quarta"], vec!["então"]]);
         let chat = build_and_reparse(&utterances, "por");
         assert!(chat.contains("quinquagésima quarta ."), "{chat}");
     }

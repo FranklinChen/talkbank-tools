@@ -541,7 +541,7 @@ mod tests {
         let ctx = MappingContext {
             lang: LanguageCode::new(lang).expect("valid test language code"),
         };
-        let ud = UdWord::from(UdWordAnalysis {
+        let ud = UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(1),
             text: text.to_string(),
             lemma: lemma.to_string(),
@@ -552,7 +552,8 @@ mod tests {
             deprel: "root".to_string(),
             deps: None,
             misc: None,
-        });
+        })
+        .expect("test analysis carries no padding feature");
         let mor = map_ud_word(&ud, &ctx).expect("mapping must succeed");
         let mut out = String::new();
         mor.write_chat(&mut out)
@@ -572,7 +573,7 @@ mod tests {
         let ctx = MappingContext {
             lang: LanguageCode::new(lang).expect("valid test language code"),
         };
-        let ud = UdWord::from(UdWordAnalysis {
+        let ud = UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(1),
             text: text.to_string(),
             lemma: text.to_string(),
@@ -583,7 +584,8 @@ mod tests {
             deprel: deprel.to_string(),
             deps: None,
             misc: None,
-        });
+        })
+        .expect("test analysis carries no padding feature");
         let mor = map_ud_word(&ud, &ctx).expect("mapping must succeed");
         let mut out = String::new();
         mor.write_chat(&mut out)
@@ -631,7 +633,7 @@ mod tests {
             UdHead::Root,
             "obj",
         );
-        let analysed = UdWord::from(UdWordAnalysis {
+        let analysed = UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(1),
             text: "me".to_string(),
             lemma: "I".to_string(),
@@ -642,7 +644,8 @@ mod tests {
             deprel: "obj".to_string(),
             deps: None,
             misc: None,
-        });
+        })
+        .expect("test analysis carries no padding feature");
         let case_source = |word: &UdWord| {
             UdFeats::of_word(word)
                 .get(FeatName::Case)
@@ -671,7 +674,7 @@ mod tests {
     /// earlier rewrite) could say anything.
     #[test]
     fn a_misc_entry_does_not_make_a_value_curated() {
-        let word = UdWord::from(UdWordAnalysis {
+        let word = UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(1),
             text: "me".to_string(),
             lemma: "I".to_string(),
@@ -682,7 +685,8 @@ mod tests {
             deprel: "obj".to_string(),
             deps: None,
             misc: Some("CuratedFeats=Case".to_string()),
-        });
+        })
+        .expect("test analysis carries no padding feature");
         assert_eq!(
             word.features().get(FeatName::Case).map(FeatValue::source),
             Some(FeatSource::Analysis)
@@ -826,5 +830,36 @@ mod tests {
             render("eng", "be", "be", UniversalPos::Aux, EN_PRES_3SG),
             "aux|be-Fin-Ind-Pres-S3"
         );
+    }
+
+    /// The word the worker sends once its repair boundary has removed
+    /// `Case=<PAD>`: rendered as the analysis without the padding. Before the
+    /// repair existed, the unrepaired word rendered `noun|кітап-<PAD>`.
+    #[test]
+    fn a_word_whose_padding_value_was_removed_renders_without_it() {
+        assert_eq!(
+            render("kaz", "кітап", "кітап", UniversalPos::Noun, "Number=Sing"),
+            "noun|кітап"
+        );
+    }
+
+    /// A Stanza-trained model can emit padding as a feature VALUE
+    /// (`Case=<PAD>`). The worker's repair boundary removes such a value and
+    /// reports it, so one that still reaches FEATS admission is a defect in
+    /// the worker, refused there rather than written into `%mor`.
+    #[test]
+    fn a_padding_feature_value_is_refused_at_feats_admission() {
+        let word = serde_json::json!({
+            "id": 1,
+            "text": "кітап",
+            "lemma": "кітап",
+            "upos": "NOUN",
+            "feats": "Case=<PAD>|Number=Sing",
+            "head": 0,
+            "deprel": "root",
+        });
+        let refused = serde_json::from_value::<UdWord>(word)
+            .expect_err("a padding feature value must not be admitted");
+        assert!(refused.to_string().contains("<PAD>"), "{refused}");
     }
 }

@@ -2,112 +2,90 @@
 
 from __future__ import annotations
 
-import logging
+import json
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
-from batchalign.worker import _stanza_loading
+from batchalign.inference._domain_types import StanzaCode
+from batchalign.worker import _stanza_capabilities, _stanza_loading
 from batchalign.worker._stanza_capabilities import (
     StanzaCapabilityTable,
     StanzaLanguageCapability,
+    StanzaNotInstalled,
+    build_stanza_capability_table_from_resources,
 )
 from batchalign.worker._stanza_loading import (
     UnsupportedLanguageError,
-    iso3_to_alpha2,
     load_stanza_models,
     load_stanza_retokenize_model,
-    should_request_mwt,
+    stanza_code_for,
 )
+from batchalign_core import ISO_639_1_PAIRS
+
+_CATALOG = Path(__file__).parents[2] / "fixtures" / "stanza_catalog_shape.json"
 
 
-def test_iso3_to_alpha2_maps_known_languages() -> None:
-    assert iso3_to_alpha2("eng") == "en"
-    # ``yue`` (Cantonese) routes through the Chinese model. Both ``zh`` and
-    # ``zh-hans`` are accepted by ``stanza.Pipeline`` (``zh`` is an alias
-    # to ``zh-hans`` in resources.json), but we standardize on the
-    # alias-resolved key so this matches the capability-table override
-    # (``_ISO3_OVERRIDES`` in ``_stanza_capabilities.py``). Drift between
-    # the two would re-create the 2026-05-06 ``mar`` failure shape.
-    assert iso3_to_alpha2("yue") == "zh-hans"
+@pytest.fixture
+def catalog_table(monkeypatch: pytest.MonkeyPatch) -> StanzaCapabilityTable:
+    """The table a worker builds from the committed Stanza 1.15.0 catalog
+    snapshot and Rust's ISO table, installed as the worker's cached table."""
+    table = build_stanza_capability_table_from_resources(
+        json.loads(_CATALOG.read_text())["resources"], ISO_639_1_PAIRS
+    )
+    monkeypatch.setattr(
+        _stanza_capabilities, "get_cached_capability_table", lambda: table
+    )
+    return table
 
 
-def test_iso3_to_alpha2_preserves_existing_alpha2_codes() -> None:
-    assert iso3_to_alpha2("en") == "en"
-    assert iso3_to_alpha2("ja") == "ja"
-
-
-def test_iso3_to_alpha2_leaves_unknown_iso3_unchanged(caplog) -> None:
-    with caplog.at_level(logging.WARNING, logger="batchalign.worker"):
-        assert iso3_to_alpha2("zzz") == "zzz"
-
-    assert (
-        "Unknown ISO-639-3 code 'zzz' - passing through unchanged for Stanza"
-        in caplog.text
+def _install(
+    monkeypatch: pytest.MonkeyPatch, table: StanzaCapabilityTable | StanzaNotInstalled
+) -> None:
+    monkeypatch.setattr(
+        _stanza_capabilities, "get_cached_capability_table", lambda: table
     )
 
 
-# Regression test for the 2026-05-06 morphotag failure on
-# ``childes-other-data/Biling/Gelman/Bystander/25.cha``.
-#
-# 25.cha has ``@Languages: eng, mar`` and one utterance with the
-# ``[- mar]`` whole-utterance precode. The morphotag dispatcher correctly
-# grouped that utterance under ``mar`` and the worker bootstrap then
-# called ``load_stanza_models("mar")``. The bootstrap's preflight gate
-# (``capability_table.supports_morphosyntax("mar")``) passes: the table
-# is keyed by ISO-639-3 via pycountry, so it resolves ``mar`` to
-# ``mr`` and reports "yes, Stanza ships morphosyntax for Marathi."
-#
-# But the *next* line is ``alpha2 = iso3_to_alpha2(lang)``, and
-# ``iso3_to_alpha2`` only understands the hardcoded mapping. ``mar`` is
-# not in the dict, so the function logs a warning and returns ``"mar"``
-# unchanged. ``stanza.Pipeline(lang="mar", ...)`` then crashes with
-# ``ValueError: Language mar is currently unsupported`` because Stanza's
-# ``resources.json`` is keyed by alpha-2 and has no ``"mar"`` entry. The
-# worker dies before emitting its ready signal; the file is recorded as
-# a worker-bootstrap failure even though Stanza fully supports Marathi.
-#
-# The fix is to align ``iso3_to_alpha2`` with the same pycountry-backed
-# resolution the capability table already uses. Hardcoded language
-# tables in two places that need to agree but don't is the exact shape
-# of the original bug.
-def test_iso3_to_alpha2_resolves_marathi_via_pycountry() -> None:
-    """``mar`` (Marathi) must convert to ``mr`` so Stanza's catalog finds it."""
-    assert iso3_to_alpha2("mar") == "mr"
+@pytest.mark.usefixtures("catalog_table")
+def test_stanza_code_for_reads_the_capability_table() -> None:
+    assert stanza_code_for("eng") == "en"
+    # Cantonese routes through the Chinese model by policy; `zho` through
+    # ISO `zh`, which the catalog aliases to `zh-hans`.
+    assert stanza_code_for("yue") == "zh-hans"
+    assert stanza_code_for("zho") == "zh-hans"
+    # Kazakh: ISO `kk`; Ancient Greek: the catalog's own three-letter key.
+    assert stanza_code_for("kaz") == "kk"
+    assert stanza_code_for("grc") == "grc"
 
 
-def test_iso3_to_alpha2_resolves_pycountry_languages_outside_hardcoded_dict() -> None:
-    """Any ISO-639-3 code with a pycountry alpha-2 must resolve, not pass through.
-
-    ``mar`` is the regression-driving case. Two more (``ben`` Bengali and
-    ``hin`` Hindi already in the hardcoded dict, ``swa`` Swahili NOT in
-    the dict) pin the broader principle so a future hardcoded-dict
-    regression cannot pass without also breaking pycountry resolution.
-    """
-    # Bengali: already in the hardcoded dict; serves as control.
-    assert iso3_to_alpha2("ben") == "bn"
-    # Swahili, not in the hardcoded dict, must resolve via pycountry.
-    assert iso3_to_alpha2("swa") == "sw"
+# Regression for the 2026-05-06 morphotag failure on a file with
+# `@Languages: eng, mar`: the capability table resolved `mar` to `mr`, but the
+# loader's own second mapping (an override dict, then pycountry, then the code
+# verbatim) did not, and `stanza.Pipeline(lang="mar")` crashed the worker. The
+# loader now has no mapping of its own: it reads the table.
+@pytest.mark.usefixtures("catalog_table")
+def test_marathi_resolves_through_the_one_mapping() -> None:
+    assert stanza_code_for("mar") == "mr"
 
 
-# ---------------------------------------------------------------------------
-# should_request_mwt: capability-driven processor selection
-#
-# Why this matters: ``load_stanza_models`` previously consulted a hardcoded
-# ``MWT_LANGS`` set. That list said Swedish (``sv``) had MWT, but the actual
-# Stanza catalog does not ship a Swedish MWT model, every Swedish worker
-# spawn raised ``UnsupportedProcessorError`` and the language group failed.
-# The 2026-04-15 overnight morphotag run lost an entire 500-file chunk to
-# this. The principled fix is to query the capability table at runtime
-# rather than maintaining a hand-edited mirror of Stanza's catalog.
-# AGENTS.md: "Per-language processor availability is determined by reading
-# Stanza's resources.json at worker startup, NOT by hardcoded tables."
-# ---------------------------------------------------------------------------
+@pytest.mark.usefixtures("catalog_table")
+def test_a_language_the_catalog_lacks_is_refused_not_passed_through() -> None:
+    """The old mapping passed `zzz` to Stanza verbatim with a warning."""
+    with pytest.raises(UnsupportedLanguageError, match="no entry"):
+        stanza_code_for("zzz")
+
+
+def test_no_capability_table_is_a_deploy_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, StanzaNotInstalled(import_error="No module named 'stanza'"))
+    with pytest.raises(UnsupportedLanguageError, match="not installed"):
+        stanza_code_for("eng")
 
 
 def _table_with(
-    alpha2: str,
+    stanza_code: str,
     *,
     has_tokenize: bool = True,
     has_pos: bool = True,
@@ -115,21 +93,22 @@ def _table_with(
     has_depparse: bool = True,
     has_mwt: bool,
 ) -> StanzaCapabilityTable:
-    """Build a single-entry capability table for one alpha-2 language.
+    """A single-entry capability table for language ``xxx``.
 
-    Pure construction, no Stanza, no resources.json read. Lets us pin the
-    helper's behavior without coupling tests to whatever upstream catalog
-    happens to ship today.
+    Pure construction, no Stanza, no resources.json read.
     """
+    present = {
+        "tokenize": has_tokenize,
+        "pos": has_pos,
+        "lemma": has_lemma,
+        "depparse": has_depparse,
+        "mwt": has_mwt,
+    }
     cap = StanzaLanguageCapability(
-        alpha2=alpha2,
-        has_tokenize=has_tokenize,
-        has_pos=has_pos,
-        has_lemma=has_lemma,
-        has_depparse=has_depparse,
-        has_mwt=has_mwt,
+        stanza_code=StanzaCode(stanza_code),
+        processors=frozenset(name for name, has in present.items() if has),
     )
-    return StanzaCapabilityTable(languages={"xxx": cap}, iso3_to_alpha2={"xxx": alpha2})
+    return StanzaCapabilityTable(languages={"xxx": cap})
 
 
 class TestSupportsMorphosyntax:
@@ -148,30 +127,38 @@ class TestSupportsMorphosyntax:
         assert table.supports_morphosyntax("xxx") is False
 
 
-class TestShouldRequestMwt:
-    def test_returns_false_when_capability_table_lacks_mwt(self) -> None:
-        # Swedish: Stanza ships tokenize/pos/lemma/depparse but NOT mwt.
-        # Asking Stanza for mwt would raise UnsupportedProcessorError.
-        table = _table_with("sv", has_mwt=False)
-        assert should_request_mwt("sv", table) is False
+# MWT is requested exactly when the language's catalog entry ships it. A
+# hardcoded `MWT_LANGS` set once said Swedish had MWT; the catalog does not
+# ship one, every Swedish worker spawn raised `UnsupportedProcessorError`, and
+# the 2026-04-15 overnight run lost a 500-file chunk.
+@pytest.mark.parametrize("has_mwt", [False, True])
+def test_mwt_is_requested_exactly_when_the_entry_ships_it(
+    monkeypatch: pytest.MonkeyPatch, has_mwt: bool
+) -> None:
+    _install(monkeypatch, _table_with("sv", has_mwt=has_mwt))
+    requested: list[str] = []
 
-    def test_returns_true_when_capability_table_has_mwt(self) -> None:
-        # English: Stanza ships mwt; we should request it.
-        table = _table_with("en", has_mwt=True)
-        assert should_request_mwt("en", table) is True
+    def _pipeline(*args: object, **kwargs: object) -> object:
+        requested.append(str(kwargs["processors"]))
+        return types.SimpleNamespace()
 
-    def test_returns_false_when_alpha2_not_in_table(self) -> None:
-        # Conservative fallback: an unknown language is safer without mwt.
-        # Stanza will at minimum tokenize/pos/lemma/depparse if those exist;
-        # a missing mwt processor is the failure mode we're guarding against.
-        table = _table_with("en", has_mwt=True)
-        assert should_request_mwt("zz", table) is False
+    fake_stanza = types.ModuleType("stanza")
+    fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
+    fake_stanza.Pipeline = _pipeline
+    monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
+    monkeypatch.setattr(_stanza_loading, "lemma_pretrain_options", lambda *_: {})
+    monkeypatch.setattr(
+        _stanza_loading,
+        "_emit_stanza_lang_download_event_if_missing",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        _stanza_loading, "pipeline_cache", lambda: _stanza_loading.StanzaPipelineCache()
+    )
 
-    def test_returns_false_when_table_is_none(self) -> None:
-        # ``get_cached_capability_table()`` returns None when Stanza is not
-        # importable. We must not request MWT in that case; there is no
-        # way to confirm support, and a wrong guess crashes the worker.
-        assert should_request_mwt("en", None) is False
+    load_stanza_models("xxx")
+    assert len(requested) == 1
+    assert ("mwt" in requested[0].split(",")) is has_mwt
 
 
 def test_load_stanza_models_rejects_partial_processor_language_before_pipeline(
@@ -180,17 +167,12 @@ def test_load_stanza_models_rejects_partial_processor_language_before_pipeline(
     table = StanzaCapabilityTable(
         languages={
             "pan": StanzaLanguageCapability(
-                alpha2="pa",
-                has_tokenize=True,
-                has_pos=False,
-                has_lemma=False,
-                has_depparse=False,
-                has_mwt=False,
+                stanza_code=StanzaCode("pa"),
+                processors=frozenset({"tokenize"}),
             )
         },
-        iso3_to_alpha2={"pan": "pa"},
     )
-    monkeypatch.setattr(_stanza_loading, "get_cached_capability_table", lambda: table)
+    _install(monkeypatch, table)
 
     fake_stanza = types.ModuleType("stanza")
     fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
@@ -210,60 +192,25 @@ def test_load_stanza_models_rejects_partial_processor_language_before_pipeline(
     assert "morphosyntax" in str(exc_info.value).lower()
 
 
-def test_the_stanza_inference_lock_survives_a_reload(monkeypatch) -> None:
-    """One lock for the life of the process.
-
-    A handler captures the lock before inference; the bounded pipeline cache
-    can evict a language mid-batch and reload it. Before 2026-09-07 every
-    load minted a NEW lock, so a handler that started before the reload and
-    one that started after held different locks and could enter Stanza at
-    once. The identity is what this pins; the load itself is faked.
-    """
-    table = StanzaCapabilityTable(
-        languages={
-            "eng": StanzaLanguageCapability(
-                alpha2="en",
-                has_tokenize=True,
-                has_pos=True,
-                has_lemma=True,
-                has_depparse=True,
-                has_mwt=False,
-            )
-        },
-        iso3_to_alpha2={"eng": "en"},
-    )
-    monkeypatch.setattr(_stanza_loading, "get_cached_capability_table", lambda: table)
-    fake_stanza = types.ModuleType("stanza")
-    fake_stanza.DownloadMethod = types.SimpleNamespace(REUSE_RESOURCES=object())
-    fake_stanza.Pipeline = lambda *args, **kwargs: types.SimpleNamespace()
-    fake_stanza.__version__ = "0.0-test"
-    monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
-    # The lemma pretrain repair reads real model files; the load is faked.
-    monkeypatch.setattr(_stanza_loading, "lemma_pretrain_options", lambda *_: {})
-
-    before = _stanza_loading._state.stanza_nlp_lock
-    load_stanza_models("eng")
-    load_stanza_models("eng")
-    assert _stanza_loading._state.stanza_nlp_lock is before
-
-
+@pytest.mark.usefixtures("catalog_table")
 def test_the_retokenize_guard_admits_every_chinese_code_its_caller_passes() -> None:
     """RED FIRST: the guard compared against a literal the mapping had moved on from.
 
-    ``_ISO3_OVERRIDES`` maps ``cmn``, ``zho`` and ``yue`` to ``zh-hans``, and
-    the loader's guard was ``alpha2 != "zh"``. Its only caller passes ``zho``
-    or ``cmn``, so every real call logged "non-Chinese lang, skipping" and the
-    neural-tokenizer pipeline was never loaded: a ``--retokenize`` Mandarin job
-    fell back to the pretokenized pipeline without saying so. The guard is
-    derived from the override table now, so the two cannot disagree again.
+    The mapping sent ``cmn``, ``zho`` and ``yue`` to ``zh-hans`` while the
+    loader's guard was ``alpha2 != "zh"``. Its only caller passes ``zho`` or
+    ``cmn``, so every real call logged "non-Chinese lang, skipping" and the
+    neural-tokenizer pipeline was never loaded. The guard now compares the
+    table's code with ``CHINESE_STANZA_CODE``, the constant the table's own
+    Chinese policy uses.
     """
     for iso3 in ("cmn", "zho", "yue"):
-        assert iso3_to_alpha2(iso3) in _stanza_loading._STANZA_CHINESE_ALPHA2, (
+        assert stanza_code_for(iso3) == _stanza_loading.CHINESE_STANZA_CODE, (
             f"{iso3} is what the caller passes and must reach the loader"
         )
-    assert iso3_to_alpha2("eng") not in _stanza_loading._STANZA_CHINESE_ALPHA2
+    assert stanza_code_for("eng") != _stanza_loading.CHINESE_STANZA_CODE
 
 
+@pytest.mark.usefixtures("catalog_table")
 def test_two_threads_loading_one_retokenize_key_build_it_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -331,6 +278,7 @@ def test_two_threads_loading_one_retokenize_key_build_it_once(
     assert len(cache) == 1
 
 
+@pytest.mark.usefixtures("catalog_table")
 def test_two_threads_loading_one_mwt_probe_build_it_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

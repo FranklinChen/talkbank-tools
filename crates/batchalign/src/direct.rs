@@ -249,7 +249,7 @@ mod tests {
             media_subdir: Default::default(),
             source_dir: source_path
                 .parent()
-                .unwrap_or_else(|| std::path::Path::new(""))
+                .expect("a file path has a parent")
                 .to_string_lossy()
                 .into_owned()
                 .into(),

@@ -1,7 +1,7 @@
 # utseg: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-06 10:48 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Implementation guide for the `utseg` command. For user-facing documentation,
 see [User Guide: utseg](../../user-guide/commands/utseg.md).
@@ -167,11 +167,22 @@ Resolution happens where the answer is first knowable:
 `--lang auto` the language is not known until ASR returns, so that case alone
 resolves the same route inside the pipeline instead.
 
-The worker keeps its own `UtsegModelNotFoundError`. It is NOT the same
-predicate and was deliberately left in place: it fires when this worker
-process has no boundary model LOADED, which can happen for a language that
-has one, so it stays as a worker-local backstop rather than the decision that
-fails a job after ASR has run.
+The admitted route travels to the worker. `ServableUtsegRoute` (minted only
+by `UtsegRoute::admit` against a registry lookup, by `UtsegRoute::admit_by`
+against a registry in hand, whose only refusal is the registry's
+`StanzaGap`, or by `UtsegRoute::boundary_model` for a route that needs no
+Stanza) is what dispatch, the worker gateway and the request builder take:
+`build_utseg_request_v2` reads the language and the segmenter from the route,
+so no request can name a segmenter its language was not admitted for. The V2
+request names its segmenter (`UtsegSegmenterV2`: `boundary_model` or
+`stanza_constituency`), and the worker runs that segmenter and never chooses
+one from what it has loaded. Its `UtsegModelNotFoundError` (a
+`ModelNotLoadedError`, reported as `model_unavailable`) fires when a request
+names the boundary model and this process has none loaded, a worker-local
+load failure rather than a routing decision. The boundary model's pin is a
+function of the resolved language, so a worker started for `auto` or
+`per-file` loads none; utseg is dispatched on the route's resolved language. The
+legacy `batch_infer` operation cannot name a segmenter, so it refuses utseg.
 
 ## Stanza constituency availability
 
@@ -207,9 +218,10 @@ fill, and the traced path is held to the same answer by
 `snapshot_and_plain_preparation_agree`, which is the test that would catch its
 digit fast path diverging on number expansion.
 
-The input gate is production's: the document is parsed leniently and then judged
-by `validate_to_level` with its parse errors in hand, exactly as the utseg
-pipeline does, so the replay refuses what the run would have refused. The
+The replay input check still parses leniently and calls `validate_to_level`
+with the parse errors. This legacy check is weaker than production's complete
+source-bound admission. A replay result establishes reproduction under its
+recorded comparison contract; it does not certify current production admission. The
 pre-ASR pass additionally refuses a retained output whose `@Languages` names
 anything but the single language the evidence records, or that carries a
 `[- code]` precode, because those are the marks of a `--lang auto` run's
@@ -257,9 +269,13 @@ controlled comparison.
 
 ## Pre-validation gate
 
-`utseg` requires CHAT Level 1 (parseable + valid headers). Gate in
-`crates/batchalign/src/utseg.rs`. Implemented via
-`validate_to_level(chat, ValidationLevel::StructurallyComplete)`.
+`utseg` requires complete retained-input admission before payload collection.
+The shared `admit_retained_text` boundary in
+`crates/batchalign/src/pipeline/text_infer.rs` uses Chatter's source-bound
+admission with model rules and tier alignment. See
+[Command Contracts](../../architecture/command-contracts.md).
+An internally generated diagnosed transcript uses the separate localized
+processing path; it is not admitted as valid input.
 
 ---
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import threading
 import time
 import unicodedata
 from collections.abc import Callable, Generator
@@ -32,7 +31,11 @@ from batchalign.worker._pipeline_cache import (
     PipelineLookup,
     retokenize_key,
 )
-from batchalign.worker._types_v2 import MorphosyntaxPipelineV2, UdRelationRepairKindV2
+from batchalign.worker._types_v2 import (
+    MorphosyntaxPipelineV2,
+    UdFeatureRepairKindV2,
+    UdRelationRepairKindV2,
+)
 
 if TYPE_CHECKING:
     from batchalign.inference._tokenizer_realign import TokenizerContext
@@ -564,17 +567,86 @@ def _repaired_relation(deprel: str, word: str) -> tuple[str, RelationRepair | No
     return _repair(RelationRepairKind.UNKNOWN_RELATION, word, deprel, "dep")
 
 
+# The Python wire owner supplies the feature-repair vocabulary too.
+FeatureRepairKind = UdFeatureRepairKindV2
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureRepair:
+    """One feature value removed from an analysis, as a value to count.
+
+    Carries the word, the feature and the removed value: once the analysis is
+    injected, the value Stanza produced exists nowhere else. Built only from
+    Rust's repair (``batchalign_core.repair_feats``), which removes padding
+    and nothing else; the server refuses a reported removal of anything else.
+    """
+
+    kind: FeatureRepairKind
+    word: str
+    feature: str
+    removed_value: str
+
+    def wire(self) -> JSONObject:
+        """The repair as the Rust side reads it (``UdFeatureRepairV2``)."""
+        return {
+            "kind": self.kind.value,
+            "word": self.word,
+            "feature": self.feature,
+            "removed_value": self.removed_value,
+        }
+
+
+def _repaired_features(
+    feats: str | None, word: str
+) -> tuple[str | None, tuple[FeatureRepair, ...]]:
+    """``feats`` without padding values, and one repair per removed value.
+
+    The repair is Rust's (``batchalign_core.repair_feats``, the same test the
+    server's FEATS admission refuses an unrepaired value by): each
+    comma-separated value is judged on its own, so ``Case=Nom,<PAD>`` keeps
+    ``Case=Nom``; a feature left with no value is dropped, and FEATS left
+    with no feature is ``None``. This function only logs and records what it
+    removed.
+    """
+    if not feats:
+        return feats, ()
+    from batchalign_core import repair_feats
+
+    kept, removed = repair_feats(feats)
+    repairs: list[FeatureRepair] = []
+    for name, value in removed:
+        L.warning(
+            "morphotag: Stanza emitted padding %r as %s of word %r; removing it",
+            value,
+            name,
+            word,
+        )
+        repairs.append(
+            FeatureRepair(
+                kind=FeatureRepairKind.PAD_FEATURE_VALUE,
+                word=word,
+                feature=name,
+                removed_value=value,
+            )
+        )
+    return kept, tuple(repairs)
+
+
+UdRepair = RelationRepair | FeatureRepair
+"""Every repair a worker reports: a relation rewritten or a feature value removed."""
+
+
 @dataclass(frozen=True, slots=True)
 class _RowRepair:
-    """A relation rewrite bound to its producing row, not its surface string."""
+    """A repair bound to its producing row, not its surface string."""
 
     position: int
-    repair: RelationRepair
+    repair: UdRepair
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class RepairedSentence:
-    """One Stanza sentence, validated and with its relations repaired.
+    """One Stanza sentence, validated, with its relations and features repaired.
 
     THE REPAIR IS THE CONSTRUCTOR, and it is the only one. This type is built
     from raw Stanza words and from nothing else, so a repaired sentence cannot
@@ -598,7 +670,7 @@ class RepairedSentence:
         return deepcopy(self._words)
 
     @property
-    def repairs(self) -> tuple[RelationRepair, ...]:
+    def repairs(self) -> tuple[UdRepair, ...]:
         return tuple(entry.repair for entry in self.repair_rows)
 
     def __init__(self, raw_words: list[UdWordRaw]) -> None:
@@ -623,7 +695,11 @@ class RepairedSentence:
                 )
                 validated.lemma = validated.text
 
-            validated.feats = _canonical_feature_names(validated.feats)
+            feats, feature_repairs = _repaired_features(
+                _canonical_feature_names(validated.feats), validated.text
+            )
+            validated.feats = feats
+            repairs.extend(_RowRepair(position, entry) for entry in feature_repairs)
 
             relation, repair = _repaired_relation(validated.deprel, validated.text)
             if repair is not None:
@@ -759,6 +835,18 @@ def _analysis(
     """
     if stanza_version is None:
         return ItemFailed(error=_NO_STANZA_VERSION_ERROR)
+    # Each repair goes to the wire list its kind belongs to; exhaustive, so a
+    # third kind of repair cannot be added without deciding where it is sent.
+    relation_repairs: list[WorkerJSONValue] = []
+    feature_repairs: list[WorkerJSONValue] = []
+    for repair in sentence.repairs:
+        match repair:
+            case RelationRepair():
+                relation_repairs.append(repair.wire())
+            case FeatureRepair():
+                feature_repairs.append(repair.wire())
+            case _ as unreachable:
+                assert_never(unreachable)
     return ItemProduced(
         result={
             "kind": "analyzed",
@@ -768,7 +856,8 @@ def _analysis(
                 "lang": lang,
                 "pipeline": pipeline.value,
             },
-            "repairs": [repair.wire() for repair in sentence.repairs],
+            "repairs": relation_repairs,
+            "feature_repairs": feature_repairs,
         }
     )
 
@@ -836,7 +925,6 @@ def _reanalyze_without_cue(
     *,
     mode: Realigned,
     entry: LoadedPipeline,
-    lock: Callable[[], contextlib.AbstractContextManager[None]],
     apply_pyc_pos: bool,
     lang: LanguageCode,
     stanza_version: str | None,
@@ -845,11 +933,11 @@ def _reanalyze_without_cue(
     """Ask the same model for lexical heads once, with no removable cue."""
     lexical = CueFreeRealigned(mode.context, source.chat_words)
     try:
-        with lock():
+        with entry.calling() as nlp:
             with _realignment_applied(lexical):
-                retry_rows = entry.nlp(lexical.text).to_dict()
+                retry_rows = nlp(lexical.text).to_dict()
             if lang == "eng":
-                annotate_verb_reading_lemmas(retry_rows, entry.nlp)
+                annotate_verb_reading_lemmas(retry_rows, nlp)
         if len(retry_rows) != 1:
             return ItemFailed(error="cue-free model returned the wrong sentence count")
         return _analyzed_item(
@@ -910,8 +998,6 @@ def _finalized(results: list[InferResponse | None]) -> BatchInferResponse:
 def batch_infer_morphosyntax(
     req: BatchInferRequest,
     pipelines: PipelineLookup,
-    nlp_lock: threading.Lock,
-    free_threaded: bool,
     mwt_lexicon: dict[str, list[str]] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     load_pipeline: Callable[[LanguageCode], None] | None = None,
@@ -931,10 +1017,9 @@ def batch_infer_morphosyntax(
         were two separately locked reads with an eviction window between them:
         the second could miss, and `tok_ctx` silently became `None` or another
         language's context while the pipeline in hand was the right one.
-    nlp_lock : threading.Lock
-        Lock guarding Stanza calls on GIL-enabled Python.
-    free_threaded : bool
-        Whether to skip the lock (free-threaded Python).
+        Every call on a pipeline goes through its entry's guard
+        (``LoadedPipeline.calling``), so one pipeline is never called by two
+        threads at once, whatever the interpreter.
     mwt_lexicon : dict, optional
         Custom multi-word token lexicon mapping surface forms to
         expansion tokens (e.g. ``{"gonna": ["going", "to"]}``).
@@ -948,14 +1033,6 @@ def batch_infer_morphosyntax(
         Absent (the default, used by unit tests), a miss is reported straight
         away rather than reaching for a model download.
     """
-
-    @contextlib.contextmanager
-    def _maybe_lock() -> Generator[None]:
-        if free_threaded:
-            yield
-        else:
-            with nlp_lock:
-                yield
 
     t0 = time.monotonic()
 
@@ -1120,14 +1197,14 @@ def batch_infer_morphosyntax(
         )
 
         try:
-            with _maybe_lock():
+            with entry.calling() as nlp:
                 with _realignment_applied(mode):
-                    doc = entry.nlp(combined)
+                    doc = nlp(combined)
                 sents = doc.to_dict()
                 if lang_code == "eng":
                     # Evidence for the Rust finite-verb rescue, computed by the
-                    # same pipeline under the same lock (see the module).
-                    annotate_verb_reading_lemmas(sents, entry.nlp)
+                    # same pipeline under the same guard (see the module).
+                    annotate_verb_reading_lemmas(sents, nlp)
 
             if len(sents) != len(indices):
                 # Stanza returned a different number of sentences than the
@@ -1158,7 +1235,6 @@ def batch_infer_morphosyntax(
                         _reanalyze_without_cue,
                         mode=mode,
                         entry=entry,
-                        lock=_maybe_lock,
                         apply_pyc_pos=apply_pyc_pos,
                         lang=lang_code,
                         stanza_version=stanza_version,

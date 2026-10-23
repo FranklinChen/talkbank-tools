@@ -10,7 +10,9 @@ mod word_features;
 use std::num::NonZeroUsize;
 
 pub(crate) use word_features::FeatName;
-pub use word_features::{CuratedFeats, FeatSource, FeatValue, WordFeatures};
+pub use word_features::{
+    CuratedFeats, FeatSource, FeatValue, UnrepairedPaddingFeature, WordFeatures,
+};
 
 /// The 17 Universal POS tags as defined by Universal Dependencies v2.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
@@ -442,23 +444,28 @@ pub struct UdWordAnalysis {
 }
 
 /// Every feature of an analysis record is the analysis's: this conversion
-/// is where that is stated, once.
-impl From<UdWordAnalysis> for UdWord {
-    fn from(word: UdWordAnalysis) -> Self {
-        Self {
+/// is where that is stated, once. Fallible because the analysis's FEATS are
+/// admitted here: a padding value the worker failed to repair is refused
+/// ([`UnrepairedPaddingFeature`]) rather than written into `%mor`.
+impl TryFrom<UdWordAnalysis> for UdWord {
+    type Error = UnrepairedPaddingFeature;
+
+    fn try_from(word: UdWordAnalysis) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: word.id,
             text: word.text,
             lemma: word.lemma,
             upos: word.upos,
             xpos: word.xpos,
-            feats: word.feats.as_deref().map_or(WordFeatures::NONE, |feats| {
-                WordFeatures::parse(feats, FeatSource::Analysis)
-            }),
+            feats: match word.feats.as_deref() {
+                Some(feats) => WordFeatures::from_analysis(feats)?,
+                None => WordFeatures::NONE,
+            },
             head: UdHead::from_conllu(word.head),
             deprel: word.deprel,
             deps: word.deps,
             misc: word.misc,
-        }
+        })
     }
 }
 
@@ -468,7 +475,7 @@ impl From<UdWordAnalysis> for UdWord {
 /// ([`UdWordAnalysis`]) or from a curated table ([`Self::apply_curated`]),
 /// and every value carries which ([`FeatSource`]).
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
-#[serde(from = "UdWordAnalysis")]
+#[serde(try_from = "UdWordAnalysis")]
 pub struct UdWord {
     /// Word index within the sentence.
     pub id: UdId,

@@ -315,10 +315,7 @@ fn run_local_whisper(
         "no local Whisper ASR host loaded for worker protocol V2",
     )?;
     let audio_array = audio.into_pyarray(py);
-    let response = runner
-        .bind(py)
-        .call1((audio_array, asr_request.lang.as_worker_arg()))
-        .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+    let response = runner.call1(py, (audio_array, asr_request.lang.as_worker_arg()))?;
     let parsed = parse_whisper_result(&response)?;
     // The Python handle stamps its own identity onto the payload, because it is
     // the object the snapshot was resolved into. Checking it here is what makes
@@ -349,10 +346,7 @@ fn run_provider_backend(
     // and a plan/worker disagreement is knowable without spending one.
     let model = loaded_worker_identity(py, asr_request.backend)?;
     admit_identity(&model, asr_request)?;
-    let response = runner
-        .bind(py)
-        .call1((item,))
-        .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+    let response = runner.call1(py, (item,))?;
     Ok(TaskResultV2::MonologueAsrResult(parse_provider_result(
         &response,
         model,

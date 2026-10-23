@@ -1,7 +1,7 @@
 # compare: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-04 20:06 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Implementation guide for the `compare` command. For user-facing
 documentation, see [User Guide: compare](../../user-guide/commands/compare.md).
@@ -13,7 +13,7 @@ documentation, see [User Guide: compare](../../user-guide/commands/compare.md).
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
 | CLI args | `crates/batchalign/src/cli/args/commands.rs`: `CompareArgs` | lang, num-speakers |
-| Command definition | `crates/batchalign/src/commands/compare.rs` | `CommandDefinition` impl, gold-file discovery |
+| Command declaration | `crates/batchalign/src/recipe_runner/catalog.rs` | Catalog entry and `COMPARE_RECIPE`; `compare.rs` owns paired input handling |
 | Compare engine | `crates/batchalign-transform/src/compare/engine.rs` | `compare()`: produces `ComparisonBundle` |
 | Compare orchestration | `crates/batchalign/src/compare.rs` | Pairs each main transcript with its gold companion, runs the comparison, drives the materializers |
 | Part-of-speech evidence | `crates/batchalign-transform/src/compare/pos.rs` | `GoldPos`: whether a document carries `%mor` tags at all, decided ONCE per file from the gold side. `GoldTag` and `MainTag` are separate types over the same primitive so the two sides cannot be passed the wrong way round |

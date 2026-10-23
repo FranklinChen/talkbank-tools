@@ -512,8 +512,7 @@ mod tests {
         async fn utseg_batch(
             &self,
             _files: &[crate::text_batch::TextBatchFileInput],
-            _lang: &crate::api::LanguageCode3,
-            _allow_stanza_fallback: bool,
+            _route: &crate::utseg_route::ServableUtsegRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> crate::text_batch::TextBatchFileResults {
             unreachable!("compare tests do not call utseg_batch")

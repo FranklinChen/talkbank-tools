@@ -8,6 +8,10 @@ is tested by Python itself, not us.
 
 from __future__ import annotations
 
+from typing import Literal
+
+import pytest
+
 from batchalign.inference.audio import bind_whisper_token_timestamp_extractor
 from batchalign.inference.types import (
     CheckpointPinnedLanguage,
@@ -21,7 +25,7 @@ class TestWhisperASRHandle:
 
     How the handle is told its language is fixed at construction (one
     ``decoding`` value), so ``gen_kwargs`` takes no language: a request cannot
-    re-force a fine-tune, and Cantonese's detect rule is the control plane's
+    re-force a fine-tune, and the resolved-language rule is the control plane's
     decision, tested on the Rust side.
     """
 
@@ -46,18 +50,21 @@ class TestWhisperASRHandle:
         assert len(calls) == 1
         assert result["chunks"][0]["text"] == "hello"  # type: ignore[index]
 
-    def test_a_forced_language_is_named_by_its_whisper_token(self) -> None:
+    @pytest.mark.parametrize("token", ["el", "yue"])
+    def test_a_forced_language_is_named_by_its_whisper_token(
+        self, token: Literal["el", "yue"]
+    ) -> None:
         handle = WhisperASRHandle(
             pipe=None,
             config="my_config",
-            decoding=ForceWhisperLanguageV2(token="el"),
+            decoding=ForceWhisperLanguageV2(token=token),
             sample_rate=16000,
         )
         assert handle.gen_kwargs() == {
             "repetition_penalty": 1.001,
             "generation_config": "my_config",
             "task": "transcribe",
-            "language": "el",
+            "language": token,
         }
 
     def test_detection_omits_language_and_task(self) -> None:

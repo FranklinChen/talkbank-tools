@@ -20,9 +20,9 @@ architectural rationale.
 
 from __future__ import annotations
 
-import threading
 from typing import Any
 
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._tokenizer_realign import TokenizerContext
 from batchalign.inference.morphosyntax import batch_infer_morphosyntax
 from batchalign.worker._pipeline_cache import static_pipelines
@@ -79,7 +79,7 @@ def test_realignment_context_is_set_before_nlp_in_normal_mode() -> None:
     `original_words` to the bare CHAT words while the text carries a
     terminator would tell the realigner to expect a token the text has."""
 
-    ctx = TokenizerContext()
+    ctx = TokenizerContext(StanzaCode("en"))
 
     # Record the state of ``ctx.original_words`` at the exact moment
     # ``nlp()`` is invoked.
@@ -114,8 +114,6 @@ def test_realignment_context_is_set_before_nlp_in_normal_mode() -> None:
     batch_infer_morphosyntax(
         request,
         pipelines=static_pipelines({"eng": fake_nlp}, {"eng": ctx}),  # type: ignore[dict-item]
-        nlp_lock=threading.Lock(),
-        free_threaded=False,
     )
 
     # nlp() must have been called at least once.
@@ -146,7 +144,7 @@ def test_realignment_context_cleared_after_nlp_call() -> None:
     a different thread sharing the context) cannot accidentally use
     stale word lists."""
 
-    ctx = TokenizerContext()
+    ctx = TokenizerContext(StanzaCode("en"))
 
     def fake_nlp(_text: str) -> _FakeDoc:
         return _FakeDoc([_make_ud_sentence(["hello"])])
@@ -169,8 +167,6 @@ def test_realignment_context_cleared_after_nlp_call() -> None:
     batch_infer_morphosyntax(
         request,
         pipelines=static_pipelines({"eng": fake_nlp}, {"eng": ctx}),  # type: ignore[dict-item]
-        nlp_lock=threading.Lock(),
-        free_threaded=False,
     )
 
     # After the call, the context must be cleared to the empty default.
@@ -196,7 +192,7 @@ def test_no_realignment_when_retokenize_requested() -> None:
     is invoked.
     """
 
-    ctx = TokenizerContext()
+    ctx = TokenizerContext(StanzaCode("en"))
 
     observed: list[list[list[str]]] = []
 
@@ -222,8 +218,6 @@ def test_no_realignment_when_retokenize_requested() -> None:
     batch_infer_morphosyntax(
         request,
         pipelines=static_pipelines({"eng": fake_nlp}, {"eng": ctx}),  # type: ignore[dict-item]
-        nlp_lock=threading.Lock(),
-        free_threaded=False,
     )
 
     assert observed, "nlp() was not invoked"

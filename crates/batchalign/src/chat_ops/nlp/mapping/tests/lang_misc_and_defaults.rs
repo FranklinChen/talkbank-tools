@@ -19,7 +19,7 @@ fn test_italian_mwt_contraction_della() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "della".into(),
                 lemma: "della".into(),
@@ -30,8 +30,9 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "dep".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "di".into(),
                 lemma: "di".into(),
@@ -42,8 +43,9 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "case".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "la".into(),
                 lemma: "il".into(),
@@ -54,8 +56,9 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "det".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "casa".into(),
                 lemma: "casa".into(),
@@ -66,7 +69,8 @@ fn test_italian_mwt_contraction_della() {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let mors = map_ud_sentence_to_mors(&sentence, &ctx);
@@ -89,7 +93,7 @@ fn a_verb_without_verbform_or_number_is_written_bare() {
         let ctx = MappingContext {
             lang: talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
         };
-        let ud = UdWord::from(UdWordAnalysis {
+        let ud = UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(1),
             text: "x".into(),
             lemma: "x".into(),
@@ -100,7 +104,8 @@ fn a_verb_without_verbform_or_number_is_written_bare() {
             deprel: "root".into(),
             deps: None,
             misc: None,
-        });
+        })
+        .expect("test analysis carries no padding feature");
         let mor = map_ud_word(&ud, &ctx).unwrap();
         let mut out = String::new();
         mor.write_chat(&mut out).unwrap();
@@ -116,7 +121,7 @@ fn test_garbage_deprel_rejected() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "dog".to_string(),
                 lemma: "dog".to_string(),
@@ -127,8 +132,9 @@ fn test_garbage_deprel_rejected() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "big".to_string(),
                 lemma: "big".to_string(),
@@ -139,7 +145,8 @@ fn test_garbage_deprel_rejected() {
                 deprel: "<PAD>".to_string(), // garbage deprel
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let err = map_ud_sentence(&sentence, &ctx).unwrap_err();
@@ -152,7 +159,7 @@ fn test_garbage_deprel_rejected() {
 #[test]
 fn is_terminator_punct_matches_only_sentence_terminators() {
     let make = |text: &str, lemma: &str| {
-        UdWord::from(UdWordAnalysis {
+        UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(1),
             text: text.to_string(),
             lemma: lemma.to_string(),
@@ -164,6 +171,7 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
             deps: None,
             misc: None,
         })
+        .expect("test analysis carries no padding feature")
     };
 
     // The positive direction, on two representatives. The vocabulary belongs
@@ -210,7 +218,7 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
     }
 
     // Non-PUNCT UPOS is never a terminator even with a '.' text.
-    let non_punct = UdWord::from(UdWordAnalysis {
+    let non_punct = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: ".".to_string(),
         lemma: ".".to_string(),
@@ -221,7 +229,8 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     assert!(!super::is_terminator_punct(&non_punct));
 }
 
@@ -232,7 +241,7 @@ fn mid_utterance_comma_produces_cm_mor_item() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "hello".to_string(),
                 lemma: "hello".to_string(),
@@ -243,8 +252,9 @@ fn mid_utterance_comma_produces_cm_mor_item() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: ",".to_string(),
                 lemma: ",".to_string(),
@@ -255,8 +265,9 @@ fn mid_utterance_comma_produces_cm_mor_item() {
                 deprel: "punct".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "world".to_string(),
                 lemma: "world".to_string(),
@@ -267,7 +278,8 @@ fn mid_utterance_comma_produces_cm_mor_item() {
                 deprel: "parataxis".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let (mors, _gras) = map_ud_sentence(&sentence, &ctx).unwrap();
@@ -295,7 +307,7 @@ fn sentence_terminator_is_dropped_from_mor_output() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "hi".to_string(),
                 lemma: "hi".to_string(),
@@ -306,8 +318,9 @@ fn sentence_terminator_is_dropped_from_mor_output() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: ".".to_string(),
                 lemma: ".".to_string(),
@@ -318,7 +331,8 @@ fn sentence_terminator_is_dropped_from_mor_output() {
                 deprel: "punct".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let (mors, _gras) = map_ud_sentence(&sentence, &ctx).unwrap();
@@ -334,7 +348,7 @@ fn comma_kept_terminator_dropped_together() {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
     let mk = |id: usize, text: &str, upos: UniversalPos, head: usize, deprel: &str| {
-        UdWord::from(UdWordAnalysis {
+        UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(id),
             text: text.to_string(),
             lemma: text.to_string(),
@@ -346,6 +360,7 @@ fn comma_kept_terminator_dropped_together() {
             deps: None,
             misc: None,
         })
+        .expect("test analysis carries no padding feature")
     };
     let sentence = UdSentence {
         words: vec![

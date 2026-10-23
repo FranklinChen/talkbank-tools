@@ -2,7 +2,7 @@
 
 **Status:** Current
 **Last verified:** 2026-08-31 07:13 EDT
-**Last updated:** 2026-10-21 14:20 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 **Speaker attribution (2026-09-16).** `AsrMonologueV2.speaker` is a tagged
 `SpeakerAttribution` rather than a bare string, and `ProviderMediaInput`
@@ -326,6 +326,11 @@ ProtocolErrorCode =
   attachment_unreadable
   model_unavailable
   runtime_failure
+  provider_quota_exhausted
+  model_access_denied
+  unsupported_language
+  model_download_failed
+  device_out_of_memory
 ```
 
 Domain/model errors can still carry human-readable detail, but the top-level
@@ -341,6 +346,47 @@ Current classification on the live `execute_v2` path is intentionally split:
 - `runtime_failure` means the model host accepted the request but then crashed
   or returned malformed result data (for example non-finite metrics, reversed
   timing ranges, wrong per-item result shapes, or host/result count drift)
+- `provider_quota_exhausted`, `model_access_denied` and `unsupported_language`
+  are raised by the model host as typed Python exceptions and keep their own
+  codes, so the server can tell an account condition, a credential condition
+  and a language the worker has no pipeline for from a crash
+- `model_download_failed` and `device_out_of_memory` are failures a later
+  attempt can get past (a download that failed in transit, an accelerator
+  out of memory); the server retries both, wherever the model runs
+
+What a model host RAISES is classified in one place: every executor calls its
+runner through `LoadedRunner::call1` (`batchalign-pyo3/src/worker_execute.rs`),
+whose only constructor is `require_runner`, and which classifies the exception
+by its class, most specific first:
+
+| Python class | Protocol code |
+| --- | --- |
+| `ModelAccessDeniedError` | `model_access_denied` |
+| `ProviderQuotaExhaustedError` | `provider_quota_exhausted` |
+| a download that failed in transit (`is_model_download_failure`) | `model_download_failed` |
+| `torch.OutOfMemoryError` (`is_device_out_of_memory`) | `device_out_of_memory` |
+| `UnsupportedLanguageError` | `unsupported_language` |
+| `NotImplementedError` | `model_unavailable` |
+| pydantic `ValidationError` | `invalid_payload` |
+| anything else, including a plain `ValueError` | `runtime_failure` |
+
+A plain `ValueError` is a runtime failure because models raise it for input
+they cannot process (a forced-alignment window too short for its transcript),
+and the server recognises those engine constraints only among runtime
+failures. `UnsupportedLanguageError` subclasses `ValueError` and lives in its
+own module (`batchalign/worker/_language_errors.py`) so the classifier can
+import it without loading Stanza. The two transient questions belong to
+`batchalign/inference/_transient_failures.py`, which the Python request loops
+ask as well, so a download that fails inside a request (an `auto` utseg
+worker loading the request language's Stanza pipeline) and one that fails in
+`ensure_task` are classified alike; see the failure-classification chapter
+for the classes it recognises.
+
+On the server, `ExecuteFailureRead::into_server_error` decides each code's
+category; the text-task readers (`worker/text_result_v2.rs`) keep the code in
+`TextResultRefusal::Failed` until then, rather than flattening it into a
+message. `unsupported_language` becomes the same deterministic bootstrap
+failure the language raises when a worker starts.
 
 ## Artifact References
 
@@ -863,8 +909,8 @@ Current implementation status:
 - that builder writes the transcript arrays into a prepared text artifact
 - that builder extracts the model-ready PCM window into a prepared audio
   artifact
-- `batchalign/worker/_artifact_inputs_v2.py` now provides the thin Python
-  wrapper over Rust-owned prepared text JSON and prepared PCM audio readers
+- `crates/batchalign-pyo3/src/worker_artifacts.rs` owns prepared text JSON
+  and PCM audio reading, descriptor admission and attachment failure codes
 - `crates/batchalign-pyo3/src/worker_fa_exec.rs` now owns the live V2 FA executor control plane,
   while `batchalign/worker/_fa_v2.py` stays as a thin Python host wrapper
 - `crates/batchalign/src/worker/fa_result_v2.rs` now maps those typed V2
@@ -1147,7 +1193,9 @@ in `infer_retry.rs` treat both paths alike:
 |---|---|---|---|
 | `execute_v2` response the protocol refuses (for example success with no result) | `WorkerError::Protocol` | `WorkerProtocol` | No: the file fails |
 | `op=error`, `kind` `runtime` | `WorkerError::WorkerResponse` | `ProviderTransient` | Yes, up to the retry budget |
-| `op=error`, `kind` `bootstrap` | `WorkerError::Bootstrap` | `WorkerBootstrap` | No: the file fails |
+| `op=error`, `kind` `bootstrap` | `WorkerError::Bootstrap` (worker `Exits`) | `WorkerBootstrap` | No: the file fails |
+| `op=error`, `kind` `download` | `WorkerError::ModelDownload` (worker `Exits`) | `ProviderTransient` | Yes, on a fresh worker: the download may get through later |
+| `op=error`, `kind` `out_of_memory` | `WorkerError::DeviceOutOfMemory` (worker `Serves`) | `MemoryPressure` | Yes, after a backoff |
 | `op=error`, `kind` `invalid_request` | `WorkerError::RequestRefused` | `WorkerProtocol` | No: the same request is refused again |
 | `op=error` envelope the protocol refuses (no `error` text, no or unknown `kind`) | `WorkerError::Protocol` | `WorkerProtocol` | No |
 
@@ -1165,8 +1213,8 @@ its stream closes, which `check_available` observes.
 ### Profile routing
 
 `WorkerPool::dispatch_execute_v2()` asks `WorkerPool::serving(target)`:
-- `SharedConcurrent` (GPU with `force_cpu` off and a pool above 1; Stanza on
-  free-threaded Python) → `dispatch_gpu_execute_v2()` → `SharedGpuWorker::execute_v2()`
-- `OneRequestPerProcess` (GPU with `force_cpu` or a pool of 1; Stanza on GIL
-  Python; IO) → `checkout()` → `CheckedOutWorker::execute_v2()`, scaled to
-  `max_workers_per_key` processes per key.
+- `SharedConcurrent` (GPU with `force_cpu` off and a pool above 1) →
+  `dispatch_gpu_execute_v2()` → `SharedGpuWorker::execute_v2()`
+- `OneRequestPerProcess` (GPU with `force_cpu` or a pool of 1; Stanza in
+  every runtime; IO) → `checkout()` → `CheckedOutWorker::execute_v2()`,
+  scaled to `max_workers_per_key` processes per key.

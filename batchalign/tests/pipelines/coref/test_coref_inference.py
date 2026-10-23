@@ -104,7 +104,7 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
     assert len(pipeline_inits) == 1
     assert pipeline_inits[0] == {
         "lang": "en",
-        "processors": "tokenize, coref",
+        "processors": "tokenize,coref",
         "package": {"coref": "ontonotes-singletons_roberta-large-lora"},
         "tokenize_pretokenized": True,
     }

@@ -127,7 +127,7 @@ mod tests {
             let keeps_boundaries =
                 TranscribeSegmentation::resolve(&language, UtsegFallbackPolicy::AllowStanza)
                     .map(|route| route.model().is_none())
-                    .unwrap_or(false);
+                    .expect("every listed language resolves under the opt-in");
             let restores =
                 qwen_recognition(Some(&language)).punctuation == RecognitionPunctuationV2::Restore;
             assert_eq!(keeps_boundaries, restores, "{code}");

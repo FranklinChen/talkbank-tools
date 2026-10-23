@@ -1,5 +1,10 @@
 use super::chunking::{split_long_turns, split_on_long_pauses};
 use super::is_punct_or_terminator;
+
+/// The observed end a terminator's CHAT text states.
+fn end(terminator: &str) -> super::UtteranceEnd {
+    super::UtteranceEnd::observed(terminator).expect("test: a CHAT terminator")
+}
 use super::prepare::{extract_timed_words, split_multiword_tokens};
 use super::utterance::retokenize;
 use super::write_word_forms;
@@ -298,8 +303,9 @@ fn test_retokenize_simple() {
     let utts = retokenize(SpeakerIndex(0), words);
     assert_eq!(utts.len(), 1);
     assert_eq!(utts[0].speaker, SpeakerIndex(0));
-    assert_eq!(utts[0].words.len(), 3);
-    assert_eq!(utts[0].words[2].text, ".");
+    // The terminator is the utterance's end, not one of its words.
+    assert_eq!(utts[0].words.len(), 2);
+    assert_eq!(utts[0].end, end("."));
 }
 
 #[test]
@@ -311,12 +317,15 @@ fn test_retokenize_splits_on_period() {
     ];
     let utts = retokenize(SpeakerIndex(0), words);
     assert_eq!(utts.len(), 2);
-    assert_eq!(utts[0].words.len(), 2); // hello .
+    assert_eq!(utts[0].words.len(), 1);
     assert_eq!(utts[0].words[0].text, "hello");
-    assert_eq!(utts[0].words[1].text, ".");
-    assert_eq!(utts[1].words.len(), 2); // world .
+    assert_eq!(utts[0].end, end("."));
+    assert_eq!(utts[1].words.len(), 1);
     assert_eq!(utts[1].words[0].text, "world");
-    assert_eq!(utts[1].words[1].text, "."); // auto-appended
+    assert_eq!(
+        utts[1].end,
+        super::UtteranceEnd::Synthesized(SynthesisCause::NoMark)
+    );
 }
 
 #[test]
@@ -327,7 +336,101 @@ fn test_retokenize_trailing_no_terminator() {
     ];
     let utts = retokenize(SpeakerIndex(0), words);
     assert_eq!(utts.len(), 1);
-    assert_eq!(utts[0].words.last().unwrap().text, "."); // auto-appended
+    assert_eq!(utts[0].words.last().unwrap().text, "world");
+    assert_eq!(
+        utts[0].end,
+        super::UtteranceEnd::Synthesized(SynthesisCause::NoMark)
+    );
+}
+
+/// `...` and `(.)` end an utterance but are not CHAT terminators, and
+/// neither is a CHAT word either, so the utterance is closed with a
+/// synthesized end that names the mark, whole or at the end of a word.
+#[test]
+fn test_retokenize_an_unwritable_ending_mark_is_a_synthesized_end() {
+    for (text, mark) in [
+        ("...", UnwritableEndMark::Ellipsis),
+        ("(.)", UnwritableEndMark::Pause),
+        ("hm...", UnwritableEndMark::Ellipsis),
+        ("hm(.)", UnwritableEndMark::Pause),
+    ] {
+        let words = vec![
+            AsrWord::new("hello", Some(0), Some(500)),
+            AsrWord::new(text, None, None),
+        ];
+        let utts = retokenize(SpeakerIndex(0), words);
+        assert_eq!(utts.len(), 1, "{text}");
+        assert!(
+            utts[0].words.iter().all(|w| !w.text.as_str().contains('.')),
+            "{text}: {:?}",
+            utts[0].words
+        );
+        assert_eq!(
+            utts[0].end,
+            super::UtteranceEnd::Synthesized(SynthesisCause::UnwritableMark(mark)),
+            "{text}"
+        );
+    }
+}
+
+/// A CHAT terminator that is itself a run of periods (`+...`, trailing off)
+/// stays the observed terminator it is.
+#[test]
+fn test_retokenize_trailing_off_is_observed_not_an_ellipsis() {
+    let words = vec![
+        AsrWord::new("hello", Some(0), Some(500)),
+        AsrWord::new("+...", None, None),
+    ];
+    let utts = retokenize(SpeakerIndex(0), words);
+    assert_eq!(utts.len(), 1);
+    assert_eq!(utts[0].end, end("+..."));
+}
+
+/// RED FIRST: stage 3 split every `.` into its own token, so a provider's
+/// `so...` reached retokenization as `so . . .`: the first period closed the
+/// utterance as an OBSERVED `.` the provider never wrote, and the other two
+/// closed two empty utterances. The `...` and `(.)` rule above was reached
+/// only by a direct call to `retokenize`. A run of periods and `(.)` now
+/// reach the utterance-end decision whole, on real input.
+#[test]
+fn test_process_raw_asr_keeps_an_ellipsis_and_a_pause_whole() {
+    for (element, mark) in [
+        ("so...", UnwritableEndMark::Ellipsis),
+        ("so..", UnwritableEndMark::Ellipsis),
+        ("so(.)", UnwritableEndMark::Pause),
+    ] {
+        let output = AsrOutput {
+            monologues: vec![AsrMonologue {
+                speaker: SpeakerIndex(0),
+                elements: vec![elem("well", 0.0, 0.4), elem(element, 0.4, 1.0)],
+            }],
+        };
+        let utts = process_raw_asr(&output, "eng").expect("test: input is admissible");
+        assert_eq!(utts.len(), 1, "{element}: {utts:?}");
+        let texts: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["Well", "so"], "{element}");
+        assert_eq!(
+            utts[0].end,
+            super::UtteranceEnd::Synthesized(SynthesisCause::UnwritableMark(mark)),
+            "{element}"
+        );
+    }
+}
+
+/// RED FIRST: a mark with nothing before it (two marks in a row, or a mark
+/// opening the chunk) closed an utterance with no words, which inflated
+/// utterance counts and the replay's per-utterance figures.
+#[test]
+fn test_retokenize_emits_no_empty_utterance() {
+    let words = vec![
+        AsrWord::new(".", None, None),
+        AsrWord::new("hello", Some(0), Some(500)),
+        AsrWord::new("?", None, None),
+        AsrWord::new("!", None, None),
+    ];
+    let utts = retokenize(SpeakerIndex(0), words);
+    assert_eq!(utts.len(), 1, "{utts:?}");
+    assert_eq!(utts[0].end, end("?"));
 }
 
 #[test]
@@ -338,7 +441,7 @@ fn test_retokenize_rtl_punct() {
     ];
     let utts = retokenize(SpeakerIndex(0), words);
     assert_eq!(utts.len(), 1);
-    assert_eq!(utts[0].words[1].text, "?"); // normalized
+    assert_eq!(utts[0].end, end("?")); // normalized
 }
 
 /// Golden test: matches Python `_process_raw_asr` output for simple input.
@@ -372,12 +475,15 @@ fn test_process_raw_asr_golden_simple() {
     assert_eq!(utts[0].words[0].start_ms, Some(0));
     assert_eq!(utts[0].words[1].text, "world");
     assert_eq!(utts[0].words[1].start_ms, Some(500));
-    assert_eq!(utts[0].words[2].text, ".");
+    assert_eq!(utts[0].end, end("."));
 
     // Second utterance: How are you .
     assert_eq!(utts[1].words[0].text, "How");
     assert_eq!(utts[1].words[0].start_ms, Some(1500));
-    assert_eq!(utts[1].words.last().unwrap().text, ".");
+    assert_eq!(
+        utts[1].end,
+        super::UtteranceEnd::Synthesized(SynthesisCause::NoMark)
+    );
 }
 
 /// Golden test: compound merging in pipeline.
@@ -492,10 +598,10 @@ fn test_process_raw_asr_splits_unpunctuated_turn_on_long_pause_starters() {
     assert_eq!(
         texts,
         vec![
-            "On television .",
-            "Have you ever been on television .",
-            "Well you know we bring some kids in here and we'd be playing all the time Do you like to play .",
-            "What do you .",
+            "On television",
+            "Have you ever been on television",
+            "Well you know we bring some kids in here and we'd be playing all the time Do you like to play",
+            "What do you",
         ]
     );
 }
@@ -537,7 +643,7 @@ fn test_process_raw_asr_preserves_same_speaker_monologue_boundaries() {
 
     assert_eq!(
         texts,
-        vec!["On television .", "Have you ever been on television ."]
+        vec!["On television", "Have you ever been on television"]
     );
 }
 
@@ -597,7 +703,7 @@ fn test_process_raw_asr_golden_cantonese() {
         .iter()
         .map(|word| word.text.as_str())
         .collect();
-    assert_eq!(tokens, vec!["你", "真", "係", "好", "嘈", "啊", "."]);
+    assert_eq!(tokens, vec!["你", "真", "係", "好", "嘈", "啊"]);
 }
 
 /// Taiwanese recognition arrives in simplified characters; the pipeline
@@ -624,12 +730,11 @@ fn test_process_raw_asr_taiwanese_becomes_taiwan_traditional() {
         .collect();
     assert_eq!(
         words,
-        vec![
-            ("這個", Some(0)),
-            ("來", Some(400)),
-            ("系", Some(600)),
-            (".", None)
-        ]
+        vec![("這個", Some(0)), ("來", Some(400)), ("系", Some(600)),]
+    );
+    assert_eq!(
+        utts[0].end,
+        super::UtteranceEnd::Synthesized(SynthesisCause::NoMark)
     );
 }
 
@@ -663,24 +768,18 @@ fn test_process_raw_asr_handles_single_chunk_cantonese_whisper_output() {
     let utts = process_raw_asr(&output, "yue")
         .expect("test: ASR post-processing must not refuse this input");
     assert_eq!(utts.len(), 3);
-    assert_eq!(utts[0].words.last().unwrap().text, "?");
-    assert_eq!(utts[1].words.last().unwrap().text, "!");
-    assert_eq!(utts[2].words.last().unwrap().text, "?");
+    assert_eq!(utts[0].end, end("?"));
+    assert_eq!(utts[1].end, end("!"));
+    assert_eq!(utts[2].end, end("?"));
     assert_eq!(
         utts[0]
             .words
             .iter()
             .map(|word| word.text.as_str())
             .collect::<Vec<_>>(),
-        vec!["這", "麼", "搞", "笑", "?"]
+        vec!["這", "麼", "搞", "笑"]
     );
-    assert!(
-        utts.iter()
-            .flat_map(|utt| utt.words.iter())
-            .filter(|word| !matches!(word.text.as_str(), "." | "!" | "?"))
-            .count()
-            > 10
-    );
+    assert!(utts.iter().flat_map(|utt| utt.words.iter()).count() > 10);
     assert!(
         utts.iter()
             .flat_map(|utt| utt.words.iter())
@@ -706,7 +805,7 @@ fn test_process_raw_asr_keeps_ascii_words_intact_for_yue() {
             .iter()
             .map(|word| word.text.as_str())
             .collect::<Vec<_>>(),
-        vec!["hello", "."]
+        vec!["hello"]
     );
 }
 
@@ -892,7 +991,7 @@ fn stripped_empty_words_removed() {
     let words: Vec<&str> = utts[0].words.iter().map(|w| w.text.as_str()).collect();
     assert_eq!(
         words,
-        vec!["Hello", "world", "."],
+        vec!["Hello", "world"],
         "empty words after stripping should be removed, got: {words:?}"
     );
 }
@@ -1268,5 +1367,5 @@ fn an_utterance_initial_letter_string_is_not_capitalized() {
         .iter()
         .map(|w| w.text.as_str())
         .collect();
-    assert_eq!(words, ["www@k", "is", "here", "."]);
+    assert_eq!(words, ["www@k", "is", "here"]);
 }

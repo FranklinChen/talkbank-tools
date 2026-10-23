@@ -1,0 +1,1241 @@
+{
+ "resources": {
+  "ab": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "abkhaz": {
+   "alias": "ab"
+  },
+  "abkhazian": {
+   "alias": "ab"
+  },
+  "af": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "afr": {
+   "alias": "af"
+  },
+  "afrikaans": {
+   "alias": "af"
+  },
+  "albanian": {
+   "alias": "sq"
+  },
+  "ancient_greek": {
+   "alias": "grc"
+  },
+  "ancient_hebrew": {
+   "alias": "hbo"
+  },
+  "ang": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ar": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "arabic": {
+   "alias": "ar"
+  },
+  "armenian": {
+   "alias": "hy"
+  },
+  "as": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "asm": {
+   "alias": "as"
+  },
+  "assamese": {
+   "alias": "as"
+  },
+  "bangla": {
+   "alias": "bn"
+  },
+  "basque": {
+   "alias": "eu"
+  },
+  "be": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "bel": {
+   "alias": "be"
+  },
+  "belarusian": {
+   "alias": "be"
+  },
+  "ben": {
+   "alias": "bn"
+  },
+  "bengali": {
+   "alias": "bn"
+  },
+  "bg": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "bhojpuri": {
+   "alias": "bho"
+  },
+  "bor": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "bororo": {
+   "alias": "bor"
+  },
+  "bulgarian": {
+   "alias": "bg"
+  },
+  "burmese": {
+   "alias": "my"
+  },
+  "buryat": {
+   "alias": "bxr"
+  },
+  "bxr": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ca": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "catalan": {
+   "alias": "ca"
+  },
+  "central_kurdish": {
+   "alias": "ckb"
+  },
+  "ckb": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "classical_armenian": {
+   "alias": "xcl"
+  },
+  "classical_chinese": {
+   "alias": "lzh"
+  },
+  "cop": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "coptic": {
+   "alias": "cop"
+  },
+  "croatian": {
+   "alias": "hr"
+  },
+  "cs": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "cu": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "cy": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "cym": {
+   "alias": "cy"
+  },
+  "czech": {
+   "alias": "cs"
+  },
+  "da": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "danish": {
+   "alias": "da"
+  },
+  "de": {
+   "constituency": {},
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "dutch": {
+   "alias": "nl"
+  },
+  "egy": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "egyptian": {
+   "alias": "egy"
+  },
+  "el": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "en": {
+   "constituency": {},
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "eng": {
+   "alias": "en"
+  },
+  "english": {
+   "alias": "en"
+  },
+  "erzya": {
+   "alias": "myv"
+  },
+  "es": {
+   "constituency": {},
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "estonian": {
+   "alias": "et"
+  },
+  "et": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "eu": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "fa": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "fao": {
+   "alias": "fo"
+  },
+  "faroese": {
+   "alias": "fo"
+  },
+  "fi": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "finnish": {
+   "alias": "fi"
+  },
+  "fo": {
+   "depparse": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "fr": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "fra": {
+   "alias": "fr"
+  },
+  "french": {
+   "alias": "fr"
+  },
+  "frm": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "fro": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ga": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "gaelic": {
+   "alias": "ga"
+  },
+  "galician": {
+   "alias": "gl"
+  },
+  "gd": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "genoese": {
+   "alias": "lij"
+  },
+  "georgian": {
+   "alias": "ka"
+  },
+  "german": {
+   "alias": "de"
+  },
+  "gl": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "gla": {
+   "alias": "gd"
+  },
+  "gle": {
+   "alias": "ga"
+  },
+  "glg": {
+   "alias": "gl"
+  },
+  "got": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "gothic": {
+   "alias": "got"
+  },
+  "grc": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "greek": {
+   "alias": "el"
+  },
+  "gv": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "haitian": {
+   "alias": "ht"
+  },
+  "haitian_creole": {
+   "alias": "ht"
+  },
+  "hat": {
+   "alias": "ht"
+  },
+  "hbo": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "he": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "hebrew": {
+   "alias": "he"
+  },
+  "hi": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "hin": {
+   "alias": "hi"
+  },
+  "hindi": {
+   "alias": "hi"
+  },
+  "hr": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "hsb": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ht": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "hu": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "hungarian": {
+   "alias": "hu"
+  },
+  "hy": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "hye": {
+   "alias": "hy"
+  },
+  "hyw": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "icelandic": {
+   "alias": "is"
+  },
+  "id": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ind": {
+   "alias": "id"
+  },
+  "indonesian": {
+   "alias": "id"
+  },
+  "irish": {
+   "alias": "ga"
+  },
+  "is": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "it": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "italian": {
+   "alias": "it"
+  },
+  "ja": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "japanese": {
+   "alias": "ja"
+  },
+  "ka": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "kat": {
+   "alias": "ka"
+  },
+  "kaz": {
+   "alias": "kk"
+  },
+  "kazakh": {
+   "alias": "kk"
+  },
+  "khoekhoe": {
+   "alias": "naq"
+  },
+  "kir": {
+   "alias": "ky"
+  },
+  "kirghiz": {
+   "alias": "ky"
+  },
+  "kk": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "kmr": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ko": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "komi_zyrian": {
+   "alias": "kpv"
+  },
+  "korean": {
+   "alias": "ko"
+  },
+  "kpv": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "kurmanji": {
+   "alias": "kmr"
+  },
+  "ky": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "kyrgyz": {
+   "alias": "ky"
+  },
+  "la": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "latin": {
+   "alias": "la"
+  },
+  "latvian": {
+   "alias": "lv"
+  },
+  "ligurian": {
+   "alias": "lij"
+  },
+  "lij": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "lithuanian": {
+   "alias": "lt"
+  },
+  "low_saxon": {
+   "alias": "nds"
+  },
+  "lt": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "lv": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "lzh": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "maghrebi_arabic_french": {
+   "alias": "qaf"
+  },
+  "mal": {
+   "alias": "ml"
+  },
+  "malayalam": {
+   "alias": "ml"
+  },
+  "maltese": {
+   "alias": "mt"
+  },
+  "manx": {
+   "alias": "gv"
+  },
+  "mar": {
+   "alias": "mr"
+  },
+  "marathi": {
+   "alias": "mr"
+  },
+  "middle_french": {
+   "alias": "frm"
+  },
+  "mlt": {
+   "alias": "mt"
+  },
+  "mr": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "mt": {
+   "depparse": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "my": {
+   "tokenize": {}
+  },
+  "mya": {
+   "alias": "my"
+  },
+  "myanmar": {
+   "alias": "my"
+  },
+  "myv": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "naija": {
+   "alias": "pcm"
+  },
+  "naq": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "nb": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "nds": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "nheengatu": {
+   "alias": "yrl"
+  },
+  "nl": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "nn": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "no": {
+   "alias": "nb"
+  },
+  "north_sami": {
+   "alias": "sme"
+  },
+  "northern_kurdish": {
+   "alias": "kmr"
+  },
+  "norwegian": {
+   "alias": "nb"
+  },
+  "norwegian_nynorsk": {
+   "alias": "nn"
+  },
+  "oc": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "occitan": {
+   "alias": "oc"
+  },
+  "oci": {
+   "alias": "oc"
+  },
+  "odia": {
+   "alias": "or"
+  },
+  "old_church_slavonic": {
+   "alias": "cu"
+  },
+  "old_east_slavic": {
+   "alias": "orv"
+  },
+  "old_english": {
+   "alias": "ang"
+  },
+  "old_french": {
+   "alias": "fro"
+  },
+  "old_occitan": {
+   "alias": "pro"
+  },
+  "old_russian": {
+   "alias": "orv"
+  },
+  "or": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "oriya": {
+   "alias": "or"
+  },
+  "orv": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ory": {
+   "alias": "or"
+  },
+  "ota": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ottoman_turkish": {
+   "alias": "ota"
+  },
+  "pa": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "pan": {
+   "alias": "pa"
+  },
+  "pashto": {
+   "alias": "ps"
+  },
+  "pbt": {
+   "alias": "ps"
+  },
+  "pcm": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "persian": {
+   "alias": "fa"
+  },
+  "pl": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "polish": {
+   "alias": "pl"
+  },
+  "pomak": {
+   "alias": "qpm"
+  },
+  "por": {
+   "alias": "pt"
+  },
+  "portuguese": {
+   "alias": "pt"
+  },
+  "pro": {
+   "depparse": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "pt": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "punjabi": {
+   "alias": "pa"
+  },
+  "qaf": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "qpm": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "qtd": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ro": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "romanian": {
+   "alias": "ro"
+  },
+  "ru": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "rus": {
+   "alias": "ru"
+  },
+  "russian": {
+   "alias": "ru"
+  },
+  "sa": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "san": {
+   "alias": "sa"
+  },
+  "sanskrit": {
+   "alias": "sa"
+  },
+  "say": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "scottish_gaelic": {
+   "alias": "gd"
+  },
+  "sd": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "sdh": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "se": {
+   "alias": "sme"
+  },
+  "serbian": {
+   "alias": "sr"
+  },
+  "shanghainese": {
+   "alias": "wuu"
+  },
+  "simplified_chinese": {
+   "alias": "zh-hans"
+  },
+  "sin": {
+   "alias": "si"
+  },
+  "sindhi": {
+   "alias": "sd"
+  },
+  "sinhala": {
+   "alias": "si"
+  },
+  "sinhalese": {
+   "alias": "si"
+  },
+  "sk": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "sl": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "slovak": {
+   "alias": "sk"
+  },
+  "slovenian": {
+   "alias": "sl"
+  },
+  "sme": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "snd": {
+   "alias": "sd"
+  },
+  "sorani": {
+   "alias": "ckb"
+  },
+  "southern_kurdish": {
+   "alias": "sdh"
+  },
+  "spa": {
+   "alias": "es"
+  },
+  "spanish": {
+   "alias": "es"
+  },
+  "sq": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "sr": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "sv": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "swedish": {
+   "alias": "sv"
+  },
+  "ta": {
+   "coref": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "tam": {
+   "alias": "ta"
+  },
+  "tamil": {
+   "alias": "ta"
+  },
+  "te": {
+   "depparse": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "tel": {
+   "alias": "te"
+  },
+  "telugu": {
+   "alias": "te"
+  },
+  "th": {
+   "depparse": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "thai": {
+   "alias": "th"
+  },
+  "tr": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "traditional_chinese": {
+   "alias": "zh-hant"
+  },
+  "turkish": {
+   "alias": "tr"
+  },
+  "turkish_german": {
+   "alias": "qtd"
+  },
+  "ug": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "uig": {
+   "alias": "ug"
+  },
+  "uk": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ukrainian": {
+   "alias": "uk"
+  },
+  "upper_sorbian": {
+   "alias": "hsb"
+  },
+  "ur": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "urd": {
+   "alias": "ur"
+  },
+  "urdu": {
+   "alias": "ur"
+  },
+  "uyghur": {
+   "alias": "ug"
+  },
+  "uz": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "uzbek": {
+   "alias": "uz"
+  },
+  "uzn": {
+   "alias": "uz"
+  },
+  "vi": {
+   "constituency": {},
+   "depparse": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "vietnamese": {
+   "alias": "vi"
+  },
+  "welsh": {
+   "alias": "cy"
+  },
+  "western_armenian": {
+   "alias": "hyw"
+  },
+  "wo": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "wol": {
+   "alias": "wo"
+  },
+  "wolof": {
+   "alias": "wo"
+  },
+  "wu_chinese": {
+   "alias": "wuu"
+  },
+  "wuu": {
+   "depparse": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "xcl": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "ydd": {
+   "alias": "yi"
+  },
+  "yi": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "yiddish": {
+   "alias": "yi"
+  },
+  "yrl": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "zaar": {
+   "alias": "say"
+  },
+  "zaza": {
+   "alias": "zza"
+  },
+  "zazaki": {
+   "alias": "zza"
+  },
+  "zh": {
+   "alias": "zh-hans"
+  },
+  "zh-hans": {
+   "constituency": {},
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "zh-hant": {
+   "depparse": {},
+   "lemma": {},
+   "pos": {},
+   "tokenize": {}
+  },
+  "zza": {
+   "depparse": {},
+   "lemma": {},
+   "mwt": {},
+   "pos": {},
+   "tokenize": {}
+  }
+ },
+ "stanza_version": "1.15.0"
+}

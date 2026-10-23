@@ -21,16 +21,18 @@ The realigner distinguishes spelling boundaries from analysis boundaries:
   Prevents a merge like "ice-cream" from being expanded again by the MWT model.
 * **English contractions**: merged text that contains ``'``, *unless* the
   prefix before the first ``'`` is ``"o"`` (e.g. o'clock, o'er) → ``(text, True)``
-  Allows "don't", "Claus'" etc. to be handled by Stanza's MWT model.
+  Allows "don't", "Claus'" etc. to be handled by Stanza's MWT model. The rule
+  is Rust's (``RealignLanguage`` in ``batchalign-transform``), applied by
+  ``align_tokens``.
 * **French native elisions**: retain the tokenizer's components as an explicit
   expansion only after Rust binds their exact concatenation to one input word.
   No component spelling, lemma or POS is guessed by the realigner.
 
-Thread safety: :class:`TokenizerContext` uses ``threading.local()`` to store
-``original_words`` per-thread.  On free-threaded Python (3.14t+), multiple
-threads can call ``nlp()`` concurrently without racing on the context.  On
-regular Python, the ``nlp_lock`` in the batch callback still serializes
-access, so the thread-local is effectively a single-thread property.
+Thread safety: one pipeline is never called by two threads at once (every
+call goes through its entry's guard, ``LoadedPipeline.calling``), and the
+context is set inside that guard, so the context a call reads is the one its
+own thread set. :class:`TokenizerContext` additionally keeps
+``original_words`` in ``threading.local()``.
 """
 
 from __future__ import annotations
@@ -40,12 +42,14 @@ import threading
 from collections.abc import Callable
 from typing import TypeAlias
 
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._italian_mwt import (
     ItalianMwtPolicy,
     MwtExpansion,
     could_be_enclisis,
     decide_expansion,
 )
+from batchalign_core import RealignLanguage, align_tokens
 
 L = logging.getLogger("batchalign")
 
@@ -54,14 +58,24 @@ TokenizerToken: TypeAlias = str | tuple[str, bool | list[str]]
 
 
 class TokenizerContext:
-    """Thread-safe context shared between the batch callback and the postprocessor.
+    """Context shared between one pipeline's batch callback and its
+    postprocessor: the pipeline's realignment language, and the words of the
+    call in progress.
 
-    Uses ``threading.local()`` so each thread's ``original_words`` is
-    independent: required for free-threaded Python where multiple threads
-    call ``nlp()`` concurrently on the same Pipeline.
+    The language is read from the pipeline's Stanza code once, here, by
+    ``RealignLanguage.of_stanza_code`` (Rust's mapping, the only one), which
+    refuses an empty code. A context therefore cannot exist without the
+    language its realignment rules depend on.
+
+    Every call on a pipeline goes through that pipeline's own guard, so one
+    call runs on it at a time and the words a batch callback sets are the
+    ones its postprocessor reads. ``threading.local()`` keeps each thread's
+    ``original_words`` separate as well, so that stays true without relying
+    on the guard.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, stanza_code: StanzaCode) -> None:
+        self.language = RealignLanguage.of_stanza_code(stanza_code)
         self._local = threading.local()
 
     @property
@@ -75,7 +89,6 @@ class TokenizerContext:
 
 def make_tokenizer_postprocessor(
     ctx: TokenizerContext,
-    alpha2: str = "",
     italian_policy: ItalianMwtPolicy | None = None,
 ) -> Callable[[list[list[TokenizerToken]]], list[list[TokenizerToken]]]:
     """Create a ``tokenize_postprocessor`` callback for ``stanza.Pipeline``.
@@ -89,15 +102,13 @@ def make_tokenizer_postprocessor(
     Parameters
     ----------
     ctx:
-        Mutable context updated before each ``nlp()`` call with the original
-        CHAT words for the current batch.
-    alpha2:
-        ISO-639-1 language code (e.g. ``"en"``, ``"fr"``).  Used to decide
-        whether merged tokens should be flagged as MWT contractions.
+        The pipeline's context: its realignment language, which decides how
+        merged tokens are hinted, and the original CHAT words of the batch
+        in progress, updated before each ``nlp()`` call.
     italian_policy:
         Inputs for the Italian single-word multi-word-token decision. Applied
-        only when ``alpha2 == "it"``; ``None`` leaves Stanza's own behavior
-        untouched.
+        only when the context's language is Italian; ``None`` leaves Stanza's
+        own behavior untouched.
     """
 
     def postprocessor(
@@ -113,13 +124,13 @@ def make_tokenizer_postprocessor(
         result: list[list[TokenizerToken]] = []
         for sent_idx, sent_tokens in enumerate(tokenized_batch):
             original = ctx.original_words[sent_idx]
-            result.append(_realign_sentence(sent_tokens, original, alpha2))
+            result.append(_realign_sentence(sent_tokens, original, ctx.language))
 
         # Applied to the WHOLE batch, not per sentence: the decision needs a
         # second Stanza pass over the candidate words, and doing that once per
         # batch instead of once per utterance is the difference between one
         # extra model call and several hundred.
-        if alpha2 == "it" and italian_policy is not None:
+        if ctx.language == RealignLanguage.Italian and italian_policy is not None:
             result = _apply_italian_mwt_policy(result, italian_policy)
         return result
 
@@ -138,38 +149,10 @@ def _conform(token: TokenizerToken) -> str:
     return str(token)
 
 
-def _is_contraction(text: str, alpha2: str) -> bool:
-    """Return True if *text* should be flagged as an MWT contraction.
-
-    Replicates Python master's ``tokenizer_processor`` English contraction rule
-    (``ud.py`` lines 680-685)::
-
-        (("en" in lang) and matches_in(i, "'") and
-         not (len(conform(i).split("'")) > 1 and
-              conform(i).split("'")[0].strip() == "o"))
-
-    Returns ``True`` only for English tokens that contain an apostrophe and
-    whose prefix before the first ``'`` is not ``"o"`` (which would be forms
-    like o'clock, o'er, o'er the top, etc.).
-
-    All other tokens return ``False``, meaning the MWT model will NOT try to
-    expand them (suppresses spurious re-expansion of merged words).
-    """
-    if "'" not in text:
-        return False
-    if alpha2 != "en":
-        return False
-    # Exclude o'clock, o'er, o'er, etc. (prefix before first apostrophe is "o")
-    parts = text.split("'")
-    if len(parts) >= 2 and parts[0].strip().lower() == "o":
-        return False
-    return True
-
-
 def _realign_sentence(
     stanza_tokens: list[TokenizerToken],
     original_words: list[str],
-    alpha2: str = "",
+    language: RealignLanguage,
 ) -> list[TokenizerToken]:
     """Merge Stanza tokens that map to the same original CHAT word.
 
@@ -204,10 +187,8 @@ def _realign_sentence(
         parts = text.split(" ")
         flat_tokens.extend(parts if len(parts) > 1 else [tok])
 
-    from batchalign_core import align_tokens
-
     merged = align_tokens(
-        original_words, [_conform(tok) for tok in flat_tokens], alpha2
+        original_words, [_conform(tok) for tok in flat_tokens], language
     )
 
     # Restore Stanza's own MWT hint tuples wherever a merged/aligned token

@@ -52,7 +52,7 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
                             continue;
                         };
                         let observed =
-                            suffix.observe_edge(prefix, self.forward.optimum, &control)?;
+                            suffix.observe_edge(prefix, self.forward.optimum.get(), &control)?;
                         if observed.can_be_missing {
                             missing[word] = true;
                         }
@@ -79,9 +79,9 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
                                 if candidates.len() == CANDIDATES
                                     && !candidates.contains(&addressed)
                                 {
-                                    return Ok(Err(
-                                        LocalInterleavingRefusal::CandidateBudgetExceeded,
-                                    ));
+                                    return Ok(Err(LocalInterleavingRefusal::Budget(
+                                        LocalInterleavingBudget::CandidateBudgetExceeded,
+                                    )));
                                 }
                                 candidates.insert(addressed);
                             }
@@ -157,7 +157,16 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
         // Only this consuming transition can expose selection, after every
         // all-optimal edge and the candidate cap have completed successfully.
         self.selected.reverse();
-        debug_assert_eq!(self.selected.len(), self.forward.optimum);
+        // Checked in every build: a reconstruction of a different size than
+        // its optimum would report the wrong words as matched or missing.
+        if self.selected.len() != self.forward.optimum.get() {
+            return Ok(Err(LocalInterleavingRefusal::Inconsistent(
+                LocalInterleavingInconsistency::ReconstructionMismatch {
+                    selected: self.selected.len(),
+                    optimum: self.forward.optimum.get(),
+                },
+            )));
+        }
         let mut words: Vec<_> = missing
             .into_iter()
             .map(|can_be_missing| WordEvidence {

@@ -119,10 +119,9 @@ mod tests {
             Ok(revision) => revision,
             Err(error) => panic!("the packaged manifest is readable: {error}"),
         };
-        let commit = revision
-            .as_str()
-            .strip_prefix("pyannote-embedding:")
-            .unwrap_or_default();
+        let Some(commit) = revision.as_str().strip_prefix("pyannote-embedding:") else {
+            panic!("the revision names its model: {revision}");
+        };
         assert_eq!(commit.len(), 40, "got {revision}");
         assert!(commit.chars().all(|c| c.is_ascii_hexdigit()));
     }

@@ -593,7 +593,7 @@ mod tests {
     /// went away.
     #[tokio::test]
     async fn retiring_a_live_worker_answers_its_dispatches_retryably() {
-        use crate::runner::util::{classify_worker_error, is_retryable_worker_failure};
+        use crate::runner::util::classify_worker_error;
         let pending = PendingDispatches::default();
         let receipt = pending
             .register(WorkerRequestIdV2::from("r-1"))
@@ -605,7 +605,8 @@ mod tests {
             .expect("answered")
             .expect_err("a retired worker answers no response");
         assert!(
-            is_retryable_worker_failure(classify_worker_error(&error)),
+            ((classify_worker_error(&error)).retryability()
+                == crate::types::scheduling::Retryability::Retryable),
             "{error:?}"
         );
     }

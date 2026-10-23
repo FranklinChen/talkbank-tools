@@ -1,7 +1,7 @@
 # Transcriber `$POS` Hints
 
 **Status:** Reference, default on; opt out via `--no-pos-hints`
-**Last updated:** 2026-10-01 17:40 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 CHAT main-tier words may carry a `$POS` suffix that encodes the
 transcriber's part-of-speech annotation in CLAN-MOR conventions
@@ -45,7 +45,7 @@ to `L2|xxx`.
 
 ```mermaid
 flowchart TD
-    A["Parse CHAT\n(parse_lenient)"] --> B["Extract payloads and typed $POS evidence\n(collect_payloads + collect_pos_hints)"]
+    A["Admit retained CHAT\n(source-bound plan)"] --> B["Extract payloads and typed $POS evidence\n(collect_payloads + collect_pos_hints)"]
     B --> C["Stanza primary inference\n(infer_batch, per-language)"]
     C --> D["Inject %mor + %gra\n(inject_morphosyntax)"]
     D --> E{"L2 @s words present?"}

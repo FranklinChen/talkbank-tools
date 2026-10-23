@@ -1,7 +1,7 @@
 # CHAT Validation Failures
 
 **Status:** Current
-**Last updated:** 2026-10-07 00:19 EDT
+**Last updated:** 2026-10-24 17:45 EDT
 
 The [command contract](../architecture/command-contracts.md) is the authoritative
 input-admission and output policy. This page explains how validation failures
@@ -286,8 +286,11 @@ construction, was their only producer. Inside `findings`:
   holds at most 20 `{utterance, words, untimed_words, cause}` records
   (`utterance` counts from 1; `cause` is `{"kind": "window_refused",
   "window": ...}` with the refused window grouping recorded,
-  `{"kind": "not_placed"}` when grouping could place it in no request, or
-  `{"kind": "no_usable_timing"}` otherwise). The complete account, every untimed word, is logged once.
+  `{"kind": "not_placed"}` when grouping could place it in no request,
+  `{"kind": "localization_unavailable"}`, `{"kind": "requested", "answered",
+  "unaligned", "unrequested"}` counting what the requests covering it
+  yielded, or `{"kind": "unrecorded"}` when nothing the run recorded explains
+  it; `{"kind": "no_usable_timing"}` is read from older records only). The complete account, every untimed word, is logged once.
 
 The database column holds the record's own JSON (`to_column_json` is
 `serde_json::to_value(self)`), so its field list is written once.

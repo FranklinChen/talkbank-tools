@@ -567,6 +567,9 @@ impl<'a, 's, W: WordSpace> AlignedWord<'a, 's, W> {
 }
 
 #[cfg(test)]
+mod oracle_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::morphosyntax::l2::pipeline_tests::ud_sentence;

@@ -97,28 +97,69 @@ impl PatchedToken {
     }
 }
 
-// ─── Contraction detection ──────────────────────────────────────────────────
+// ─── Realignment language ───────────────────────────────────────────────────
 
-/// Whether a merged token should be flagged as an English MWT contraction.
+/// The languages whose realignment differs, read from a pipeline's Stanza
+/// code once, where the pipeline is built.
 ///
-/// Replicates batchalign2's `ud.py` lines 680-685:
-///   - Token contains `'`
-///   - Language is English (`alpha2 == "en"`)
-///   - The prefix before the first `'` is NOT `"o"` (excludes o'clock, o'er)
-pub fn is_contraction(text: &str, alpha2: &str) -> bool {
-    if !text.contains('\'') {
-        return false;
+/// Replaces an `alpha2: &str` that every rule compared against `"en"` or
+/// `"fr"`, and that Python defaulted to `""`: an English pipeline built
+/// without its code silently lost contraction expansion, and nothing could
+/// tell that empty string from a language with no rule. `Other` is every
+/// language without a rule of its own; an empty code is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealignLanguage {
+    /// Stanza `en`: a merged token with an apostrophe is a contraction for
+    /// the MWT processor to expand.
+    English,
+    /// Stanza `fr`: native elision components are retained.
+    French,
+    /// Stanza `it`: no realignment rule here, but the Python postprocessor
+    /// applies its multi-word-token policy.
+    Italian,
+    /// Every other language: merges suppress expansion.
+    Other,
+}
+
+/// A Stanza language code that names no language.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("token realignment needs a Stanza language code; got an empty one")]
+pub struct EmptyStanzaCode;
+
+impl RealignLanguage {
+    /// The realignment language of a Stanza language code (`"en"`, `"fr"`,
+    /// `"it"`, `"zh-hans"`, ...).
+    ///
+    /// # Errors
+    ///
+    /// [`EmptyStanzaCode`] for an empty code.
+    pub fn of_stanza_code(code: &str) -> Result<Self, EmptyStanzaCode> {
+        Ok(match code {
+            "" => return Err(EmptyStanzaCode),
+            "en" => Self::English,
+            "fr" => Self::French,
+            "it" => Self::Italian,
+            _ => Self::Other,
+        })
     }
-    if alpha2 != "en" {
-        return false;
+
+    /// Whether a merged token is an MWT contraction for this language.
+    ///
+    /// Replicates batchalign2's `ud.py` lines 680-685 for English: the token
+    /// contains `'` and its prefix before the first `'` is not `"o"`
+    /// (o'clock, o'er). No other language marks one.
+    fn marks_contraction(self, text: &str) -> bool {
+        match self {
+            Self::English => {
+                text.contains('\'')
+                    && text
+                        .split('\'')
+                        .next()
+                        .is_none_or(|prefix| prefix.trim().to_lowercase() != "o")
+            }
+            Self::French | Self::Italian | Self::Other => false,
+        }
     }
-    // Exclude o'clock, o'er, etc., prefix before first apostrophe is "o"
-    if let Some(prefix) = text.split('\'').next()
-        && prefix.trim().to_lowercase() == "o"
-    {
-        return false;
-    }
-    true
 }
 
 // ─── Core alignment algorithm ───────────────────────────────────────────────
@@ -136,11 +177,11 @@ pub fn is_contraction(text: &str, alpha2: &str) -> bool {
 ///
 /// - `original_words`: cleaned words derived from the typed CHAT structure
 /// - `stanza_tokens`: tokens from Stanza's neural tokenizer
-/// - `alpha2`: ISO-639-1 language code (e.g. `"en"`, `"fr"`)
+/// - `language`: the pipeline's realignment language
 pub fn align_tokens(
     original_words: &[String],
     stanza_tokens: &[String],
-    alpha2: &str,
+    language: RealignLanguage,
 ) -> Result<AlignedTokens, TokenAlignmentError> {
     let mut tokens = Vec::with_capacity(original_words.len());
     let mut native_index = 0;
@@ -169,13 +210,15 @@ pub fn align_tokens(
         if components.len() == 1 {
             tokens.push(PatchedToken::Plain(word.clone()));
         } else {
-            let elision = match alpha2 {
-                "fr" => FrenchElision::admit(word, components.to_vec()),
-                _ => None,
+            let elision = match language {
+                RealignLanguage::French => FrenchElision::admit(word, components.to_vec()),
+                RealignLanguage::English | RealignLanguage::Italian | RealignLanguage::Other => {
+                    None
+                }
             };
             tokens.push(match elision {
                 Some(group) => PatchedToken::FrenchElision(group),
-                None => PatchedToken::Hint(word.clone(), is_contraction(word, alpha2)),
+                None => PatchedToken::Hint(word.clone(), language.marks_contraction(word)),
             });
         }
     }
@@ -241,41 +284,70 @@ pub enum TokenAlignmentError {
 mod tests {
     use super::*;
 
-    fn aligned(words: &[String], native: &[String], lang: &str) -> Vec<PatchedToken> {
+    const EN: RealignLanguage = RealignLanguage::English;
+    const FR: RealignLanguage = RealignLanguage::French;
+
+    fn aligned(words: &[String], native: &[String], lang: RealignLanguage) -> Vec<PatchedToken> {
         align_tokens(words, native, lang).unwrap().tokens().to_vec()
     }
 
-    // ── is_contraction ────────────────────────────────────────────────
+    // ── RealignLanguage ───────────────────────────────────────────────
+
+    #[test]
+    fn a_stanza_code_names_its_realignment_language() {
+        assert_eq!(RealignLanguage::of_stanza_code("en"), Ok(EN));
+        assert_eq!(RealignLanguage::of_stanza_code("fr"), Ok(FR));
+        assert_eq!(
+            RealignLanguage::of_stanza_code("it"),
+            Ok(RealignLanguage::Italian)
+        );
+        for code in ["de", "nl", "zh-hans", "pt"] {
+            assert_eq!(
+                RealignLanguage::of_stanza_code(code),
+                Ok(RealignLanguage::Other)
+            );
+        }
+    }
+
+    /// The empty code used to be a default that read as "no rule": an
+    /// English pipeline built without its code lost contraction expansion.
+    #[test]
+    fn an_empty_stanza_code_is_refused() {
+        assert_eq!(RealignLanguage::of_stanza_code(""), Err(EmptyStanzaCode));
+    }
 
     #[test]
     fn test_english_contraction_detected() {
-        assert!(is_contraction("don't", "en"));
-        assert!(is_contraction("I'm", "en"));
-        assert!(is_contraction("Claus'", "en"));
+        for text in ["don't", "can't", "won't", "it's", "I'm", "Claus'", "John's"] {
+            assert!(EN.marks_contraction(text), "{text}");
+        }
     }
 
     #[test]
     fn test_english_oclock_not_contraction() {
-        assert!(!is_contraction("o'clock", "en"));
-        assert!(!is_contraction("O'er", "en"));
+        assert!(!EN.marks_contraction("o'clock"));
+        assert!(!EN.marks_contraction("O'er"));
     }
 
     #[test]
     fn test_non_english_not_contraction() {
-        assert!(!is_contraction("l'homme", "fr"));
-        assert!(!is_contraction("d'água", "pt"));
+        assert!(!FR.marks_contraction("l'homme"));
+        assert!(!RealignLanguage::Italian.marks_contraction("dell'acqua"));
+        assert!(!RealignLanguage::Other.marks_contraction("d'água"));
+        assert!(!RealignLanguage::Other.marks_contraction("'s"));
     }
 
     #[test]
     fn test_no_apostrophe_not_contraction() {
-        assert!(!is_contraction("hello", "en"));
+        assert!(!EN.marks_contraction("hello"));
+        assert!(!EN.marks_contraction("ice-cream"));
     }
 
     // ── align_tokens ─────────────────────────────────────────────────
 
     #[test]
     fn test_empty_inputs() {
-        let result = aligned(&[], &[], "en");
+        let result = aligned(&[], &[], EN);
         assert!(result.is_empty());
     }
 
@@ -283,7 +355,7 @@ mod tests {
     fn test_one_to_one_mapping() {
         let words = vec!["hello".into(), "world".into()];
         let tokens = vec!["hello".into(), "world".into()];
-        let result = aligned(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, EN);
         assert_eq!(
             result,
             vec![
@@ -298,7 +370,7 @@ mod tests {
         // Stanza splits "ice-cream" into ["ice", "-", "cream"]
         let words = vec!["ice-cream".into()];
         let tokens = vec!["ice".into(), "-".into(), "cream".into()];
-        let result = aligned(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, EN);
         assert_eq!(result, vec![PatchedToken::Hint("ice-cream".into(), false)]);
     }
 
@@ -307,7 +379,7 @@ mod tests {
         // Stanza splits "don't" into ["do", "n't"]
         let words = vec!["don't".into()];
         let tokens = vec!["do".into(), "n't".into()];
-        let result = aligned(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, EN);
         assert_eq!(result, vec![PatchedToken::Hint("don't".into(), true)]);
     }
 
@@ -315,7 +387,7 @@ mod tests {
     fn french_native_elision_keeps_components_and_word_identity() {
         let words = vec!["l'escargot".into(), "dort".into()];
         let native = vec!["l'".into(), "escargot".into(), "dort".into()];
-        let result = aligned(&words, &native, "fr");
+        let result = aligned(&words, &native, FR);
         let PatchedToken::FrenchElision(group) = &result[0] else {
             panic!("native French components must survive realignment");
         };
@@ -350,7 +422,7 @@ mod tests {
         let words = vec!["hello".into()];
         let tokens = vec!["goodbye".into()];
         assert!(matches!(
-            align_tokens(&words, &tokens, "en"),
+            align_tokens(&words, &tokens, EN),
             Err(TokenAlignmentError::WordBoundaryMismatch { .. })
         ));
     }
@@ -359,9 +431,9 @@ mod tests {
     fn raw_shortening_notation_is_not_reparsed_by_the_realigner() {
         let words = vec!["(be)cause".into()];
         let tokens = vec!["because".into()];
-        assert!(align_tokens(&words, &tokens, "en").is_err());
+        assert!(align_tokens(&words, &tokens, EN).is_err());
         assert_eq!(
-            aligned(&["because".into()], &tokens, "en"),
+            aligned(&["because".into()], &tokens, EN),
             vec![PatchedToken::Plain("because".into())]
         );
     }
@@ -372,7 +444,7 @@ mod tests {
     fn test_english_passthrough_no_patches() {
         let words = vec!["the".into(), "dog".into()];
         let tokens = vec!["the".into(), "dog".into()];
-        let result = aligned(&words, &tokens, "en");
+        let result = aligned(&words, &tokens, EN);
         assert_eq!(
             result,
             vec![
@@ -384,12 +456,12 @@ mod tests {
 
     #[test]
     fn native_tokens_cannot_cross_authoritative_word_boundaries() {
-        assert!(align_tokens(&["foo".into(), "bar".into()], &["foobar".into()], "en").is_err());
-        assert!(align_tokens(&["foo".into()], &["foo".into(), "bar".into()], "en").is_err());
-        assert!(align_tokens(&["foo".into()], &[], "en").is_err());
-        assert!(align_tokens(&[], &["foo".into()], "en").is_err());
-        assert!(align_tokens(&["".into()], &[], "en").is_err());
-        assert!(align_tokens(&["foo".into()], &["".into(), "foo".into()], "en").is_err());
+        assert!(align_tokens(&["foo".into(), "bar".into()], &["foobar".into()], EN).is_err());
+        assert!(align_tokens(&["foo".into()], &["foo".into(), "bar".into()], EN).is_err());
+        assert!(align_tokens(&["foo".into()], &[], EN).is_err());
+        assert!(align_tokens(&[], &["foo".into()], EN).is_err());
+        assert!(align_tokens(&["".into()], &[], EN).is_err());
+        assert!(align_tokens(&["foo".into()], &["".into(), "foo".into()], EN).is_err());
     }
 
     #[test]
@@ -397,7 +469,7 @@ mod tests {
         let result = aligned(
             &["école".into(), "中文".into()],
             &["é".into(), "cole".into(), "中文".into()],
-            "fr",
+            FR,
         );
         assert_eq!(
             result.iter().map(PatchedToken::text).collect::<Vec<_>>(),

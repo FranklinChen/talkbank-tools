@@ -24,17 +24,22 @@
 //! | GPU     | `force_cpu`                               | one request/process  |
 //! | GPU     | not `force_cpu`, `gpu_thread_pool_size` 1 | one request/process  |
 //! | GPU     | not `force_cpu`, `gpu_thread_pool_size` n>1 | shared, n in flight |
-//! | Stanza  | free-threaded Python                      | shared, n in flight  |
-//! | Stanza  | GIL Python                                | one request/process  |
+//! | Stanza  | any                                       | one request/process  |
 //! | IO      | any                                       | one request/process  |
 //!
 //! Forced CPU is one request per process because each PyTorch request on CPU
 //! already uses every core through OpenMP; threads sharing a process only
 //! oversubscribe them. A pool size of one is one request per process because a
 //! shared process admitting one request at a time is exactly a single
-//! exclusive worker, and the only concurrency left is more processes. The
-//! Stanza rows are unchanged from before this type: threads share one model on
-//! a free-threaded runtime.
+//! exclusive worker, and the only concurrency left is more processes.
+//!
+//! Stanza is one request per process in every runtime. Every call on a loaded
+//! Stanza pipeline goes through that pipeline's own guard (Stanza does not
+//! promise a pipeline is safe to call from two threads), so requests
+//! multiplexed into one free-threaded process would only queue on the
+//! pipeline of their language. Concurrency for a key therefore comes from
+//! more processes, up to `max_workers_per_key`, in a free-threaded runtime as
+//! in a GIL one.
 
 use std::num::NonZeroU32;
 
@@ -59,19 +64,6 @@ pub enum WorkerServing {
 impl WorkerServing {
     /// The serving mode for workers of `profile` launched with `runtime`.
     pub fn decide(profile: WorkerProfile, runtime: &WorkerRuntimeConfig) -> Self {
-        Self::decide_for(
-            profile,
-            runtime,
-            crate::types::runtime::is_free_threaded_runtime(),
-        )
-    }
-
-    /// [`Self::decide`] with the free-threaded runtime fact supplied.
-    fn decide_for(
-        profile: WorkerProfile,
-        runtime: &WorkerRuntimeConfig,
-        free_threaded: bool,
-    ) -> Self {
         let pool_size = NonZeroU32::new(runtime.gpu_thread_pool_size);
         match profile {
             WorkerProfile::Gpu => match (runtime.force_cpu, pool_size) {
@@ -83,16 +75,7 @@ impl WorkerServing {
                 // request per process.
                 (false, Some(_) | None) => Self::OneRequestPerProcess,
             },
-            WorkerProfile::Stanza => match (free_threaded, pool_size) {
-                (true, Some(in_flight)) => Self::SharedConcurrent { in_flight },
-                // A pool of zero is floored to one in-flight request, as the
-                // shared worker's dispatch semaphore already floors it.
-                (true, None) => Self::SharedConcurrent {
-                    in_flight: NonZeroU32::MIN,
-                },
-                (false, _) => Self::OneRequestPerProcess,
-            },
-            WorkerProfile::Io => Self::OneRequestPerProcess,
+            WorkerProfile::Stanza | WorkerProfile::Io => Self::OneRequestPerProcess,
         }
     }
 
@@ -147,41 +130,38 @@ mod tests {
             (
                 WorkerProfile::Gpu,
                 runtime(true, 4),
-                false,
                 WorkerServing::OneRequestPerProcess,
             ),
             (
                 WorkerProfile::Gpu,
                 runtime(false, 1),
-                false,
                 WorkerServing::OneRequestPerProcess,
             ),
             (
                 WorkerProfile::Gpu,
                 runtime(false, 0),
-                false,
                 WorkerServing::OneRequestPerProcess,
             ),
-            (WorkerProfile::Gpu, runtime(false, 4), false, shared(4)),
-            (WorkerProfile::Stanza, runtime(false, 3), true, shared(3)),
+            (WorkerProfile::Gpu, runtime(false, 4), shared(4)),
+            // Stanza is one request per process whatever the runtime: the
+            // decision no longer reads whether Python is free-threaded, so no
+            // runtime can multiplex requests onto one guarded pipeline.
             (
                 WorkerProfile::Stanza,
                 runtime(false, 3),
-                false,
                 WorkerServing::OneRequestPerProcess,
             ),
             (
                 WorkerProfile::Io,
                 runtime(false, 4),
-                true,
                 WorkerServing::OneRequestPerProcess,
             ),
         ];
-        for (profile, runtime, free_threaded, expected) in cases {
+        for (profile, runtime, expected) in cases {
             assert_eq!(
-                WorkerServing::decide_for(profile, &runtime, free_threaded),
+                WorkerServing::decide(profile, &runtime),
                 expected,
-                "{profile:?} force_cpu={} pool={} free_threaded={free_threaded}",
+                "{profile:?} force_cpu={} pool={}",
                 runtime.force_cpu,
                 runtime.gpu_thread_pool_size
             );

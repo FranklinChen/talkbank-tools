@@ -155,11 +155,11 @@ pub(crate) async fn submit_job(
         .validate()
         .map_err(|e| ServerError::Validation(e.to_string()))?;
 
-    // Authoritative language validation using the Stanza capability
-    // registry (when populated from a worker's resources.json report).
-    // This supersedes the hardcoded fallback table in submission.validate().
-    if let Some(registry) = state.workers.pool.stanza_registry() {
-        crate::types::request::validate_language_with_registry(&submission, Some(registry))
+    // Early refusal from the Stanza registry, the one language authority,
+    // once a worker has reported one; the job meets the same registry again
+    // after its capability probe if none had been admitted yet.
+    if let Ok(registry) = state.workers.pool.stanza_registry() {
+        crate::types::request::validate_language_with_registry(&submission, &registry)
             .map_err(|e| ServerError::Validation(e.to_string()))?;
     }
 

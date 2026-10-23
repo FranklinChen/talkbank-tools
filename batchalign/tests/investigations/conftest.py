@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._tokenizer_realign import (
     TokenizerContext,
     make_tokenizer_postprocessor,
@@ -49,14 +50,17 @@ def _processors_for(lang: str) -> str:
     rather than silent.
     """
     base = ["tokenize", "pos", "lemma", "depparse"]
-    from batchalign.worker._stanza_capabilities import get_cached_capability_table
+    from batchalign.worker._stanza_capabilities import (
+        StanzaNotInstalled,
+        get_cached_capability_table,
+    )
 
     table = get_cached_capability_table()
-    if table is None:
+    if isinstance(table, StanzaNotInstalled):
         base.append("mwt")
         return ",".join(base)
     cap = table.languages.get(lang)
-    if cap is not None and cap.has_mwt:
+    if cap is not None and cap.has("mwt"):
         base.append("mwt")
     return ",".join(base)
 
@@ -71,8 +75,8 @@ def _pipeline_with_postprocessor(alpha2: str) -> tuple:
     import stanza
     from stanza import DownloadMethod
 
-    ctx = TokenizerContext()
-    pp = make_tokenizer_postprocessor(ctx, alpha2=alpha2)
+    ctx = TokenizerContext(StanzaCode(alpha2))
+    pp = make_tokenizer_postprocessor(ctx)
     nlp = stanza.Pipeline(
         lang=alpha2,
         processors=_processors_for(alpha2),

@@ -47,6 +47,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{LanguageCode3, NonNegativeSeconds, ReportedEngineName, WorkerLanguage};
+use crate::stanza_catalog::StanzaCatalogReport;
 
 // ---------------------------------------------------------------------------
 // Domain newtypes (worker-specific)
@@ -149,27 +150,11 @@ pub struct WorkerCapabilities {
     /// task advertised without an entry, an entry for an unadvertised task, or
     /// a name for any task but forced alignment.
     pub engine_versions: BTreeMap<InferTask, Option<ReportedEngineName>>,
-    /// Per-language Stanza processor availability.
-    ///
-    /// Key is ISO-639-3 code (e.g. "eng", "nld"); value lists available
-    /// processor names. Built from Stanza's `resources.json` at worker
-    /// startup. Empty when the worker does not load Stanza (e.g. IO
-    /// profile) or when the worker is an older version that does not
-    /// report this field.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub stanza_capabilities: BTreeMap<String, StanzaLanguageProcessors>,
-}
-
-/// Processor availability for one language in Stanza.
-///
-/// Reported by the Python worker from `resources.json`. Used by the
-/// Rust server for submission validation and dispatch routing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StanzaLanguageProcessors {
-    /// Stanza alpha-2 code this ISO-639-3 code maps to.
-    pub alpha2: String,
-    /// Available processor names (e.g. `["tokenize", "pos", "lemma", "depparse", "mwt"]`).
-    pub processors: Vec<String>,
+    /// The worker's account of its installed Stanza catalog: the catalog it
+    /// read, Stanza not installed, or why the report could not be built.
+    /// Required, so a missing report is a malformed response rather than an
+    /// empty catalog.
+    pub stanza_catalog: StanzaCatalogReport,
 }
 
 // ---------------------------------------------------------------------------
@@ -426,15 +411,6 @@ pub struct BatchInferRequest {
     /// defaults to empty on deserialization.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mwt: BTreeMap<String, Vec<String>>,
-    /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback for utseg when no language-specific TalkBank BERT
-    /// model is configured. Set by the `--utseg-fallback-stanza` CLI
-    /// flag. Only consulted by the `Utseg` task; ignored by other
-    /// inference tasks. Default `false` mirrors the
-    /// `WhisperHubModelNotFoundError` "refuse silent substitution"
-    /// pattern.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_stanza_fallback: bool,
 }
 
 /// Response from batched inference, one `InferResponse` per item.
@@ -490,7 +466,11 @@ mod tests {
             free_threaded: true,
             infer_tasks: vec![],
             engine_versions: BTreeMap::new(),
-            stanza_capabilities: BTreeMap::new(),
+            stanza_catalog: crate::stanza_catalog::StanzaCatalogReport::NotInstalled {
+                import_error: crate::stanza_catalog::StanzaReportReason::try_from(
+                    "No module named 'stanza'".to_owned(),
+                )?,
+            },
         };
         let json = serde_json::to_string(&caps)?;
         let back: WorkerCapabilities = serde_json::from_str(&json)?;
@@ -512,7 +492,11 @@ mod tests {
                 // A supported task whose engine the worker cannot name.
                 (InferTask::Utseg, None),
             ]),
-            stanza_capabilities: BTreeMap::new(),
+            stanza_catalog: crate::stanza_catalog::StanzaCatalogReport::NotInstalled {
+                import_error: crate::stanza_catalog::StanzaReportReason::try_from(
+                    "No module named 'stanza'".to_owned(),
+                )?,
+            },
         };
         let json = serde_json::to_string(&caps)?;
         assert!(json.contains(r#""utseg":null"#), "{json}");
@@ -525,10 +509,21 @@ mod tests {
     /// is read, before any admission code sees it.
     #[test]
     fn worker_capabilities_refuse_unknown_task_keys_and_blank_names() {
-        let unknown_key = r#"{"commands":[],"free_threaded":false,"infer_tasks":[],"engine_versions":{"parsing":"x"}}"#;
+        let unknown_key = r#"{"commands":[],"free_threaded":false,"infer_tasks":[],"engine_versions":{"parsing":"x"},"stanza_catalog":{"kind":"not_installed","import_error":"No module named 'stanza'"}}"#;
         assert!(serde_json::from_str::<WorkerCapabilities>(unknown_key).is_err());
-        let blank = r#"{"commands":[],"free_threaded":false,"infer_tasks":["fa"],"engine_versions":{"fa":" "}}"#;
+        let blank = r#"{"commands":[],"free_threaded":false,"infer_tasks":["fa"],"engine_versions":{"fa":" "},"stanza_catalog":{"kind":"not_installed","import_error":"No module named 'stanza'"}}"#;
         assert!(serde_json::from_str::<WorkerCapabilities>(blank).is_err());
+        let well_formed = r#"{"commands":[],"free_threaded":false,"infer_tasks":["fa"],"engine_versions":{"fa":null},"stanza_catalog":{"kind":"not_installed","import_error":"No module named 'stanza'"}}"#;
+        assert!(serde_json::from_str::<WorkerCapabilities>(well_formed).is_ok());
+    }
+
+    /// A report with no Stanza account is malformed: an absent report is
+    /// never read as an empty catalog.
+    #[test]
+    fn worker_capabilities_require_a_stanza_catalog_report() {
+        let missing =
+            r#"{"commands":[],"free_threaded":false,"infer_tasks":[],"engine_versions":{}}"#;
+        assert!(serde_json::from_str::<WorkerCapabilities>(missing).is_err());
     }
 
     #[test]
@@ -631,7 +626,6 @@ mod tests {
                 serde_json::json!({"words": ["goodbye"]}),
             ],
             mwt: BTreeMap::new(),
-            allow_stanza_fallback: false,
         };
         let json = serde_json::to_string(&req)?;
         // Empty mwt should be omitted from JSON
@@ -648,7 +642,6 @@ mod tests {
             lang: LanguageCode3::eng(),
             items: vec![serde_json::json!({"words": ["gonna"]})],
             mwt: BTreeMap::from([("gonna".into(), vec!["going".into(), "to".into()])]),
-            allow_stanza_fallback: false,
         };
         let json = serde_json::to_string(&req)?;
         assert!(json.contains("\"mwt\""));
@@ -674,7 +667,6 @@ mod tests {
             lang: LanguageCode3::eng(),
             items: vec![],
             mwt: BTreeMap::new(),
-            allow_stanza_fallback: false,
         };
         let json = serde_json::to_string(&req)?;
         assert!(json.contains("\"task\":\"translate\""));

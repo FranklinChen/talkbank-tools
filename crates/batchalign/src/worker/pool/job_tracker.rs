@@ -203,7 +203,7 @@ mod tests {
                 entry
                     .value()
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .expect("no test thread panicked holding the tracker")
                     .len()
             })
             .sum()

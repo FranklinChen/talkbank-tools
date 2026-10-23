@@ -303,8 +303,8 @@ class TestClaim4_Mandarin_Stanza_Segmentation:
 
     def test_language_code_mapping(self) -> None:
         """ISO 639-3 codes for Chinese map to Stanza's 'zh-hans' model."""
-        from batchalign.worker._stanza_loading import iso3_to_alpha2
+        from batchalign.worker._stanza_loading import stanza_code_for
 
-        assert iso3_to_alpha2("cmn") == "zh-hans"
-        assert iso3_to_alpha2("zho") == "zh-hans"
-        assert iso3_to_alpha2("yue") == "zh-hans"
+        assert stanza_code_for("cmn") == "zh-hans"
+        assert stanza_code_for("zho") == "zh-hans"
+        assert stanza_code_for("yue") == "zh-hans"

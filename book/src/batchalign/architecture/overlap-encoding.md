@@ -1,7 +1,7 @@
 # Overlap Encoding: `&*` and `+<` Internals
 
 **Status:** Current
-**Last updated:** 2026-09-06 23:14 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 ## AST Representation
 
@@ -73,8 +73,8 @@ Key points:
 - CA overlap markers (position) narrow the pass-2 search window via proportional onset estimation
 - Best-of-both fallback compares FA group counts to avoid regression on non-English
 
-**Code:** `crates/batchalign/src/fa/utr.rs` and
-`crates/batchalign/src/fa/utr/two_pass.rs`
+**Code:** `crates/batchalign/src/chat_ops/fa/utr.rs` and
+`crates/batchalign/src/chat_ops/fa/utr/two_pass.rs`
 
 ## `&*` → `+<` Conversion
 

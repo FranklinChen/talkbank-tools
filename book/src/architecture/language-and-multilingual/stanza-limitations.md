@@ -15,7 +15,8 @@ boundary is `RepairedSentence` in `batchalign/inference/morphosyntax.py`:
 `batch_infer_morphosyntax` builds each returned item from one, and the only way
 to build one is from raw Stanza words, so the step cannot be skipped.
 
-Every relation it rewrites is reported as well as applied. The repair travels
+Every relation it rewrites, and every padding feature value it removes, is
+reported as well as applied. The repair travels
 to the server on the analyzed item, and the file's morphotag provenance comment
 counts it as `ud_repairs=`, so a repaired transcript says so in itself rather
 than only in a worker log.

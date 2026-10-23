@@ -379,7 +379,7 @@ mod tests {
                 .headers()
                 .get(reqwest::header::CACHE_CONTROL)
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
+                .expect("an embedded asset carries Cache-Control");
             assert!(
                 cache.contains("immutable"),
                 "content-hashed assets should have immutable cache headers"

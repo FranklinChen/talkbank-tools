@@ -14,8 +14,14 @@ fn local_overlap_hull_uses_the_same_matched_interval_admission() {
                 end_ms,
             })
             .collect::<Vec<_>>();
-        recover_overlap_timing(&words, &tokens, 0, 2_000, MatchMode::CaseInsensitive)
-            .map(|interval| (interval.start_ms(), interval.end_ms()))
+        recover_overlap_timing(
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            0,
+            2_000,
+            MatchMode::CaseInsensitive,
+        )
+        .map(|interval| (interval.start_ms(), interval.end_ms()))
     };
     assert_eq!(
         recover(&[

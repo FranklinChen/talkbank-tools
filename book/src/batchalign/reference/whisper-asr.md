@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-10-06 19:25 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 ## Overview
 
@@ -104,10 +104,11 @@ flowchart LR
   the language. Timing recovery with the Whisper UTR engine asks the same
   token table.
 - **The worker is told the token.** The control plane decides
-  `WhisperDecodeLanguageV2` once per worker from its language (`auto`
-  detects; Cantonese detects too, a long-standing rule; every other language
-  forces its token) and sends it at spawn. The worker never maps a language
-  code itself, and its loader refuses a token the loaded checkpoint lacks.
+  `WhisperDecodeLanguageV2` once per worker from its language and sends it
+  at spawn. A worker spawned for `--lang auto` detects; a worker spawned for a
+  resolved language, Cantonese included, forces that language's token and the
+  transcription task. The worker never maps a language code itself, and its
+  loader refuses a token the loaded checkpoint lacks.
 - **Preloading workers.** A worker that preloads ASR with no engine named
   (an align job's GPU worker) resolves its own engine and falls back to stock
   Whisper for most languages, so it also receives the decode language when
@@ -137,8 +138,9 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
   comparison on the same fixtures says it is quality-neutral; the default is
   the precision every measured number in this book was taken at.
 - Chunk length 25s with 3s stride for long files
-- Device selection: CUDA > CPU (`MPS` is intentionally excluded; see
-  `developer/apple-mps-workarounds.md`)
+- Device selection: CUDA > CPU by default; explicit `--allow-mps` permits
+  MPS between CUDA and CPU. `--force-cpu` overrides accelerator selection.
+  See [device policy](../developer/apple-mps-workarounds.md).
 - Stock Whisper requests HuggingFace's `return_timestamps="word"`: spans
   come from acoustic token alignment, not equal division of sentence times.
   Whisper Hub fine-tunes explicitly retain segment mode because their

@@ -153,8 +153,8 @@ Cross-language infrastructure:
 
 | Feature | What | Reference |
 |---------|------|-----------|
-| MWT dispatch | Capability-driven via `should_request_mwt()` against the cached Stanza catalog | §X1 + [Stanza Limitations Defect 5](stanza-limitations.md) |
-| ISO 639-3 → 639-1 mapping | `iso3_to_alpha2()` + `_ISO3_OVERRIDES` (Stanza-specific overrides) for codes like yue/cmn/zho → `zh-hans`, nor → `nb` | [Language Code Resolution](language-code-resolution.md) |
+| MWT dispatch | Capability-driven: the language's entry in the cached Stanza catalog (`has("mwt")`) | §X1 + [Stanza Limitations Defect 5](stanza-limitations.md) |
+| ISO 639-3 → Stanza code mapping | The capability table: Rust's ISO 639-1 table plus the catalog and its aliases (`zho` → `zh-hans`, `nor` → `nb`), with `_STANZA_CODE_POLICY` for `cmn`/`yue` → `zh-hans` | [Language Code Resolution](language-code-resolution.md) |
 | Number expansion | Table-driven via chatter's `num2lang.json` + built-in CJK numerals | [Number Expansion](number-expansion.md) |
 
 ### Stage 7: Forced Alignment

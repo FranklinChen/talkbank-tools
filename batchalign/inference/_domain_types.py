@@ -7,7 +7,7 @@ self-describing without the wrapping friction of ``NewType``.
 from __future__ import annotations
 
 from enum import Enum
-from typing import TypeAlias, TypeVar
+from typing import NewType, TypeAlias, TypeVar
 
 AudioPath: TypeAlias = str
 """Filesystem path to an audio file."""
@@ -24,8 +24,13 @@ TimestampSeconds: TypeAlias = float
 LanguageCode: TypeAlias = str
 """ISO-639-3 language code (e.g. 'eng', 'spa', 'zho')."""
 
-LanguageCode2: TypeAlias = str
-"""ISO-639-1 two-letter language code (e.g. 'en', 'es', 'zh')."""
+StanzaCode = NewType("StanzaCode", str)
+"""The key of an entry in Stanza's resource catalog: usually ISO 639-1
+(``'en'``), sometimes three letters (``'grc'``) or script-qualified
+(``'zh-hans'``). A ``NewType`` rather than an alias, unlike the rest of this
+module, because it is a different space from ``LanguageCode`` that is easy to
+confuse with it, and only the capability table
+(``worker/_stanza_capabilities.py``) mints one."""
 
 SpeakerId: TypeAlias = str
 """Speaker label (e.g. 'SPEAKER_0', 'SPEAKER_1')."""

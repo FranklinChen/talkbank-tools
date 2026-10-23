@@ -1,7 +1,7 @@
 # Batchalign Workers
 
 **Status:** Current
-**Last updated:** 2026-10-06 22:34 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Per-app worker concerns specific to the Batchalign runtime: pool
 sizing, RAM-tier-aware memory budgets, model loading per worker,
@@ -514,7 +514,7 @@ forward-looking proposal, not a commitment.
 
 | File | Role |
 |---|---|
-| `runner/dispatch/infer_batched.rs` | Batch dispatcher: read → delegate → write |
+| `execution/morphotag/mod.rs` | Batch dispatcher: read → delegate → write |
 | `morphosyntax/batch.rs` | Morphotag L2 dispatch for `@s` words |
 | `morphosyntax/worker.rs` | Per-language-group worker dispatch with chunking |
 | `morphosyntax/mod.rs` | Top-level morphotag orchestrator; aggregates per-language `Result<Vec<UdResponse>, ServerError>` and propagates failures upward |

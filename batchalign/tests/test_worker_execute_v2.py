@@ -23,6 +23,7 @@ from batchalign.inference.speaker import (
     SpeakerResponse,
     SpeakerSegment,
 )
+from batchalign.inference.utseg import UtsegInferenceRequest
 from batchalign.tests._asr_model_pins import (
     loaded_identity,
     request_models,
@@ -82,6 +83,7 @@ from batchalign.worker._types_v2 import (
     TranslationResultV2,
     UtsegRequestV2,
     UtsegResultV2,
+    UtsegSegmenterV2,
     WhisperChunkResultPayloadV2,
     WhisperChunkResultV2,
     WhisperChunkSpanV2,
@@ -716,6 +718,7 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
                                         "pipeline": "standard",
                                     },
                                     "repairs": [],
+                                    "feature_repairs": [],
                                 }
                             )
                         )
@@ -803,6 +806,7 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
                                 "pipeline": "cantonese_pycantonese_pos",
                             },
                             "repairs": [],
+                            "feature_repairs": [],
                         }
                     )
                 )
@@ -1072,6 +1076,23 @@ def test_batch_without_items_list_is_invalid_payload(tmp_path: Path) -> None:
 def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
     """The live V2 router should hand utseg requests to the text host."""
 
+    seen: list[UtsegInferenceRequest] = []
+
+    def _recording_runner(req: UtsegInferenceRequest) -> BatchInferResponse:
+        seen.append(req)
+        return BatchInferResponse(
+            results=[
+                InferResponse.timed(
+                    lambda: ItemProduced(
+                        result={
+                            "kind": "constituency",
+                            "trees": ["(ROOT (S hello world))"],
+                        }
+                    )
+                )
+            ]
+        )
+
     payload_path = tmp_path / "utseg-batch.json"
     _write_json_payload(
         payload_path,
@@ -1086,6 +1107,7 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
                 lang="eng",
                 payload_ref_id="text-ref-utseg-1",
                 item_count=1,
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
             ),
             attachments=[
                 PreparedTextRefV2(
@@ -1101,20 +1123,7 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
             asr=AsrExecutionHostV2(),
             forced_alignment=ForcedAlignmentExecutionHostV2(),
             speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(
-                utseg_runner=lambda req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={
-                                    "kind": "constituency",
-                                    "trees": ["(ROOT (S hello world))"],
-                                }
-                            )
-                        )
-                    ]
-                )
-            ),
+            text=TextExecutionHostV2(utseg_runner=_recording_runner),
         ),
     )
 
@@ -1123,6 +1132,11 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
     item = response.result.items[0]
     assert item.kind == "constituency"
     assert item.trees == ["(ROOT (S hello world))"]
+    # The request's segmenter reaches the runner unchanged, across the Rust
+    # control plane: the worker runs the one Rust named.
+    assert [(req.lang, req.segmenter) for req in seen] == [
+        ("eng", UtsegSegmenterV2.STANZA_CONSTITUENCY)
+    ]
 
 
 def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> None:
@@ -1142,6 +1156,7 @@ def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> Non
                 lang="eng",
                 payload_ref_id="text-ref-utseg-assignments-1",
                 item_count=1,
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
             ),
             attachments=[
                 PreparedTextRefV2(
@@ -1220,6 +1235,7 @@ def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) 
                 lang="eng",
                 payload_ref_id="text-ref-utseg-boundary-evidence-1",
                 item_count=1,
+                segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
             ),
             attachments=[
                 PreparedTextRefV2(
@@ -1273,6 +1289,7 @@ def test_invalid_utseg_host_output_fails_its_item(tmp_path: Path) -> None:
                 lang="eng",
                 payload_ref_id="text-ref-utseg-invalid-1",
                 item_count=1,
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
             ),
             attachments=[
                 PreparedTextRefV2(
@@ -1320,6 +1337,7 @@ def test_invalid_utseg_assignment_host_output_fails_its_item(
                 lang="eng",
                 payload_ref_id="text-ref-utseg-invalid-assignments-1",
                 item_count=1,
+                segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,
             ),
             attachments=[
                 PreparedTextRefV2(

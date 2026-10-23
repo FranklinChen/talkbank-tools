@@ -15,7 +15,7 @@ use crate::worker::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::worker::error::WorkerError;
+use crate::worker::error::{WorkerAfterError, WorkerError};
 
 /// Maximum chars of startup stderr to include in error messages.
 pub(super) const STARTUP_STDERR_TAIL_CHARS: usize = 2_000;
@@ -255,9 +255,21 @@ impl ReportedFailure {
     /// The failure as the error of a request the worker had admitted (infer,
     /// batch_infer, execute_v2, capabilities).
     pub(crate) fn into_worker_error(self) -> WorkerError {
+        let worker = self.kind.worker_after();
         match self.kind {
             WorkerErrorKind::Runtime => WorkerError::WorkerResponse(self.message),
-            WorkerErrorKind::Bootstrap => WorkerError::Bootstrap(self.message),
+            WorkerErrorKind::Bootstrap => WorkerError::Bootstrap {
+                message: self.message,
+                worker,
+            },
+            WorkerErrorKind::Download => WorkerError::ModelDownload {
+                message: self.message,
+                worker,
+            },
+            WorkerErrorKind::OutOfMemory => WorkerError::DeviceOutOfMemory {
+                message: self.message,
+                worker,
+            },
             WorkerErrorKind::InvalidRequest => WorkerError::RequestRefused(self.message),
         }
     }
@@ -268,13 +280,46 @@ impl ReportedFailure {
     /// same load fails the same way again, so a `runtime` kind is not trusted
     /// to make it retryable. A refused request stays a refusal.
     pub(crate) fn into_ensure_task_error(self) -> WorkerError {
+        let worker = self.kind.worker_after();
         match self.kind {
-            WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => {
-                WorkerError::Bootstrap(format!("ensure_task failed: {}", self.message))
-            }
+            WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => WorkerError::Bootstrap {
+                message: format!("ensure_task failed: {}", self.message),
+                worker,
+            },
+            // A download that failed in transit is the one load failure a
+            // later attempt can get past, with a memory shortfall, which
+            // later work may have relieved.
+            WorkerErrorKind::Download => WorkerError::ModelDownload {
+                message: format!("ensure_task failed: {}", self.message),
+                worker,
+            },
+            WorkerErrorKind::OutOfMemory => WorkerError::DeviceOutOfMemory {
+                message: format!("ensure_task failed: {}", self.message),
+                worker,
+            },
             WorkerErrorKind::InvalidRequest => {
                 WorkerError::RequestRefused(format!("ensure_task refused: {}", self.message))
             }
+        }
+    }
+
+    /// The failure as the reason a worker never became ready: it reported
+    /// it in place of its ready line while loading its models, then exited.
+    ///
+    /// Classified as an `ensure_task` failure is (a load that failed), except
+    /// that the worker is gone whatever the kind, so nothing reuses it.
+    pub(crate) fn into_startup_error(self) -> WorkerError {
+        let message = format!("worker startup failed: {}", self.message);
+        let worker = WorkerAfterError::Exits;
+        match self.kind {
+            WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => {
+                WorkerError::Bootstrap { message, worker }
+            }
+            WorkerErrorKind::Download => WorkerError::ModelDownload { message, worker },
+            WorkerErrorKind::OutOfMemory => WorkerError::DeviceOutOfMemory { message, worker },
+            // The worker's startup takes no request, so it refuses none; a
+            // refusal here is a protocol disagreement.
+            WorkerErrorKind::InvalidRequest => WorkerError::ReadyParseFailed(message),
         }
     }
 
@@ -295,7 +340,7 @@ impl ReportedFailure {
 /// to avoid disk exhaustion from malformed worker output.
 pub(super) fn dump_failed_ipc_request(
     worker_pid: WorkerPid,
-    worker_label: &str,
+    worker: &super::WorkerConfig,
     request_json: &str,
     error: &WorkerError,
     response_fragment: Option<&str>,
@@ -327,7 +372,9 @@ pub(super) fn dump_failed_ipc_request(
     let dump = serde_json::json!({
         "timestamp": timestamp.to_string(),
         "worker_pid": *worker_pid,
-        "worker_label": worker_label,
+        "worker_label": worker.bootstrap_label(),
+        // What `batchalign3 replay` rebuilds the worker from.
+        "worker_launch": super::WorkerLaunch::of(worker),
         "error_type": format!("{error:?}").split('(').next().unwrap_or("Unknown"),
         "error_message": error.to_string(),
         "request": request_json,

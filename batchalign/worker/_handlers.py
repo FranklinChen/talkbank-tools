@@ -14,6 +14,10 @@ from batchalign.worker._types import (
     CapabilitiesResponse,
     HealthResponse,
     InferTask,
+    StanzaCatalog,
+    StanzaCatalogFailed,
+    StanzaCatalogReport,
+    StanzaNotInstalledReport,
     _state,
 )
 
@@ -64,6 +68,38 @@ def _reported_engine(task: InferTask) -> str | None:
             assert_never(task)
 
 
+def _stanza_catalog_report() -> StanzaCatalogReport:
+    """This worker's account of its installed Stanza catalog.
+
+    Every outcome is reported as itself: the catalog, Stanza not installed,
+    or the failure that stopped the table build, with its type and message.
+    A failure is never reported as an empty catalog, which the server would
+    read as "no Stanza" and refuse morphotag without saying why.
+    """
+    from batchalign.worker._stanza_capabilities import (
+        StanzaCapabilityTable,
+        StanzaNotInstalled,
+        get_cached_capability_table,
+    )
+
+    try:
+        outcome = get_cached_capability_table()
+    except Exception as exc:  # reported, never swallowed: the server names it
+        L.error("Stanza capability table build failed: %s", exc)
+        return StanzaCatalogFailed(reason=f"{type(exc).__name__}: {exc}")
+    match outcome:
+        case StanzaNotInstalled():
+            return StanzaNotInstalledReport(import_error=outcome.import_error)
+        case StanzaCapabilityTable(languages=languages):
+            return StanzaCatalog(
+                languages={
+                    iso3: sorted(cap.processors) for iso3, cap in languages.items()
+                }
+            )
+        case _:
+            assert_never(outcome)
+
+
 def _capabilities() -> CapabilitiesResponse:
     """Report available commands and runtime info.
 
@@ -90,6 +126,10 @@ def _capabilities() -> CapabilitiesResponse:
             free_threaded=False,
             infer_tasks=all_infer_tasks,
             engine_versions=echo_versions,
+            # An echo worker loads no Stanza: it serves no Stanza catalog.
+            stanza_catalog=StanzaNotInstalledReport(
+                import_error="not attempted: a test-echo worker imports no Stanza"
+            ),
         )
 
     from batchalign.runtime import is_free_threaded
@@ -155,43 +195,14 @@ def _capabilities() -> CapabilitiesResponse:
         infer_tasks.append(InferTask.ASR)
         engine_versions[InferTask.ASR] = _reported_engine(InferTask.ASR)
 
-    # Build per-language Stanza capability map from resources.json.
-    stanza_caps: dict[str, StanzaLanguageProcessors] = {}
-    try:
-        from batchalign.worker._stanza_capabilities import get_cached_capability_table
-        from batchalign.worker._types import StanzaLanguageProcessors
-
-        table = get_cached_capability_table()
-        if table is not None:
-            for iso3, caps in table.languages.items():
-                processors = []
-                if caps.has_tokenize:
-                    processors.append("tokenize")
-                if caps.has_pos:
-                    processors.append("pos")
-                if caps.has_lemma:
-                    processors.append("lemma")
-                if caps.has_depparse:
-                    processors.append("depparse")
-                if caps.has_mwt:
-                    processors.append("mwt")
-                if caps.has_constituency:
-                    processors.append("constituency")
-                if caps.has_coref:
-                    processors.append("coref")
-                stanza_caps[iso3] = StanzaLanguageProcessors(
-                    alpha2=caps.alpha2,
-                    processors=processors,
-                )
-    except Exception as e:
-        L.warning("Failed to build stanza_capabilities: %s", e)
+    stanza_catalog = _stanza_catalog_report()
 
     return CapabilitiesResponse(
         commands=[],
         free_threaded=is_free_threaded(),
         infer_tasks=infer_tasks,
         engine_versions=engine_versions,
-        stanza_capabilities=stanza_caps,
+        stanza_catalog=stanza_catalog,
     )
 
 

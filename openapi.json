@@ -367,8 +367,11 @@
           "worker_timeout",
           "worker_protocol",
           "worker_bootstrap",
+          "local_runtime",
           "provider_transient",
           "provider_terminal",
+          "provider_quota_exhausted",
+          "provider_account_refused",
           "memory_pressure",
           "cancelled",
           "system",
@@ -2408,6 +2411,53 @@
           }
         ]
       },
+      "RetiredSecondaryMorphologyFailureKind": {
+        "description": "A secondary-morphology cause earlier builds wrote and this one only reads.",
+        "enum": [
+          "registry_unavailable"
+        ],
+        "type": "string"
+      },
+      "RetiredUntimedCause": {
+        "description": "A cause earlier builds wrote and this one only reads, from records they\nstored.",
+        "oneOf": [
+          {
+            "description": "Recorded whenever no refusal named the utterance, whether or not any\nrequest covered it, so it does not say which of\n[`UntimedCauseRecord::Requested`] and [`UntimedCauseRecord::Unrecorded`]\nwas true.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "no_usable_timing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The transcript marks it as not speech in the recording. Such an\nutterance is now an [`OutputExclusionRecord::NotInRecording`], which\ndoes not diagnose the file.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "not_in_recording"
+                ],
+                "type": "string"
+              },
+              "postcode": {
+                "$ref": "#/components/schemas/OffRecordPostcode",
+                "description": "The postcode that marks it."
+              }
+            },
+            "required": [
+              "postcode",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SecondaryExtractionFailure": {
         "description": "Why secondary positions could not be established from primary injection.",
         "enum": [
@@ -2422,7 +2472,7 @@
         "description": "One secondary span's failure, distinct from an unsupported-language exclusion.",
         "properties": {
           "cause": {
-            "$ref": "#/components/schemas/SecondaryMorphologyFailureKind",
+            "$ref": "#/components/schemas/StoredSecondaryMorphologyFailureKind",
             "description": "Typed producer boundary."
           },
           "detail": {
@@ -2445,7 +2495,6 @@
         "description": "Which producer boundary could not supply secondary morphology.",
         "enum": [
           "invalid_language",
-          "registry_unavailable",
           "worker",
           "response_count",
           "empty_analysis",
@@ -2609,8 +2658,34 @@
         ],
         "type": "object"
       },
+      "StoredSecondaryMorphologyFailureKind": {
+        "description": "Why a secondary span failed, as a record holds it: a cause this build\nwrites, or one only earlier builds wrote and stored records still carry.\n\nUntagged over two string enums, so either reads by its own spelling. The\nwriter produces a [`SecondaryMorphologyFailureKind`], which has no\nretired cause to produce.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SecondaryMorphologyFailureKind",
+            "description": "A cause this build writes."
+          },
+          {
+            "$ref": "#/components/schemas/RetiredSecondaryMorphologyFailureKind",
+            "description": "A cause only earlier builds wrote."
+          }
+        ]
+      },
+      "StoredUntimedCause": {
+        "description": "Why an utterance's words have no timing, as a record holds it: a cause\nthis build writes, or one only earlier builds wrote and stored records\nstill carry.\n\nUntagged over two tagged enums, so either reads by its own `kind` and the\nwire shape is the cause's. The writer produces an [`UntimedCauseRecord`]\n(`fa::completion`), which has no retired cause to produce.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/UntimedCauseRecord",
+            "description": "A cause this build writes."
+          },
+          {
+            "$ref": "#/components/schemas/RetiredUntimedCause",
+            "description": "A cause only earlier builds wrote."
+          }
+        ]
+      },
       "UntimedCauseRecord": {
-        "description": "Why an utterance's words have no timing.",
+        "description": "Why an utterance's words have no timing: the causes this build writes.",
         "oneOf": [
           {
             "description": "Its audio window was refused, so no alignment request was made.",
@@ -2663,36 +2738,52 @@
             "type": "object"
           },
           {
-            "description": "No refusal names it, and no positive interval resulted for these\nwords: the aligner returned none, or they could not be sent to it.",
+            "description": "Requests covered it and no positive interval resulted for these\nwords. The counts are what those requests yielded, from the run's\nown group evidence.",
             "properties": {
+              "answered": {
+                "description": "Requests that returned timing evidence (a worker's answer, the\ncache, a replayed response, or reused `%wor`).",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
               "kind": {
                 "enum": [
-                  "no_usable_timing"
+                  "requested"
                 ],
                 "type": "string"
+              },
+              "unaligned": {
+                "description": "Requests left unaligned: no worker evidence was obtained.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unrequested": {
+                "description": "Word ranges left unrequested: an anchored piece whose window\ncould not be sent.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
               }
             },
             "required": [
+              "answered",
+              "unaligned",
+              "unrequested",
               "kind"
             ],
             "type": "object"
           },
           {
-            "description": "The transcript marks it as not speech in the recording.\n\nRead, never written: only the build of 2026-10-07 that reported such\nan utterance as a shortfall recorded it, and records it stored are\nstill read. An utterance not in the recording is now an\n[`OutputExclusionRecord::NotInRecording`], which does not diagnose\nthe file.",
+            "description": "No grouping decision names it and no request covered it: the run\nrecorded nothing that explains its untimed words.",
             "properties": {
               "kind": {
                 "enum": [
-                  "not_in_recording"
+                  "unrecorded"
                 ],
                 "type": "string"
-              },
-              "postcode": {
-                "$ref": "#/components/schemas/OffRecordPostcode",
-                "description": "The postcode that marks it."
               }
             },
             "required": [
-              "postcode",
               "kind"
             ],
             "type": "object"
@@ -2703,7 +2794,7 @@
         "description": "One utterance forced alignment left with untimed words.",
         "properties": {
           "cause": {
-            "$ref": "#/components/schemas/UntimedCauseRecord",
+            "$ref": "#/components/schemas/StoredUntimedCause",
             "description": "Why."
           },
           "untimed_words": {

@@ -48,6 +48,7 @@ use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::provenance::{ResultNamedCommand, TextStamp};
 use crate::types::engines::TranslateEngineName;
 use crate::types::worker_v2::TranslationItemResultV2;
+use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_translate_request_v2};
 use crate::worker::text_result_v2::parse_translate_result_v2;
@@ -368,8 +369,10 @@ impl ItemTransport for WorkerTransport<'_> {
             self.cancellation,
         )
         .await?;
-        let result = parse_translate_result_v2(response).map_err(|error| {
-            ServerError::Validation(format!("invalid translate V2 result: {error}"))
+        let result = parse_translate_result_v2(response).map_err(|refusal| {
+            refusal.into_server_error(ModelLocality::of_translate(
+                self.route.engine().worker_backend(),
+            ))
         })?;
         single_item(result.items)
     }

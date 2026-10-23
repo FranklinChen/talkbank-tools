@@ -6,7 +6,7 @@ use crate::api::ReportedEngineName;
 use crate::chat_ops::CacheKey;
 use crate::engine_reports::FaCacheNamespace;
 use crate::types::engines::{FaEngineName, FaTimingResolution};
-use crate::types::worker_v2::{ExecuteOutcomeRef, ExecuteResponseV2, TaskResultV2};
+use crate::types::worker_v2::ExecuteResponseV2;
 
 const FA_RAW_EVIDENCE_SCHEMA_VERSION: u8 = 2;
 
@@ -84,11 +84,15 @@ impl ExpectedFaWords {
 }
 
 /// How the effective response relates to the engine selected by the caller.
-pub(super) enum FaEvidenceRoute<'a> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FaEvidenceRoute {
     /// The selected engine produced the response directly.
     Direct,
-    /// A retry engine produced the response after a named primary failure.
-    Fallback { reason: &'a str },
+    /// A retry engine produced the response after the primary engine met
+    /// this input constraint: the reason is the constraint, never free text.
+    Fallback {
+        constraint: crate::worker::fa_result_v2::FaEngineConstraint,
+    },
 }
 
 /// Raw worker response admitted against the request facts needed for use.
@@ -105,8 +109,26 @@ pub(super) struct FaRawEvidence {
     effective_engine: FaEngineName,
     expected_words: ExpectedFaWords,
     cache_key: CacheKey,
-    fallback_reason: Option<String>,
+    /// The constraint the fallback answered, written as its reason. Only
+    /// fresh evidence can carry one: it never reaches the cache
+    /// ([`Self::into_replayable`]).
+    #[serde(serialize_with = "serialize_fallback_reason")]
+    fallback_reason: Option<crate::worker::fa_result_v2::FaEngineConstraint>,
     response: ExecuteResponseV2,
+    /// The response's timing payload, read once where the evidence was
+    /// admitted. Derived from `response`, so never persisted.
+    #[serde(skip)]
+    payload: crate::chat_ops::nlp::FaRawResponse,
+}
+
+/// A fallback constraint as the reason evidence has always carried.
+fn serialize_fallback_reason<S: serde::Serializer>(
+    reason: &Option<crate::worker::fa_result_v2::FaEngineConstraint>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    reason
+        .map(crate::worker::fa_result_v2::FaEngineConstraint::reason)
+        .serialize(serializer)
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,11 +182,11 @@ pub(super) enum FaRawEvidenceError {
         cached: FaEngineName,
         proven: FaEngineName,
     },
-    #[error("forced-alignment worker returned an error: {code:?}: {message}")]
-    WorkerFailure {
-        code: crate::types::worker_v2::ProtocolErrorCodeV2,
-        message: String,
-    },
+    /// The worker answered with a failure, classified by its protocol code
+    /// where the response is read, so the transport decides retry or skip by
+    /// matching the variant rather than the rendered message.
+    #[error("forced-alignment worker returned an error: {0}")]
+    WorkerFailure(crate::worker::fa_result_v2::FaWorkerFailure),
     #[error("forced-alignment worker returned the wrong task-result kind")]
     UnexpectedResult,
     #[error("indexed forced-alignment evidence cannot satisfy requested engine {0:?}")]
@@ -177,13 +199,20 @@ pub(super) enum FaRawEvidenceError {
     UnexpectedDirectEngine,
     #[error("forced-alignment fallback did not change the effective engine")]
     IneffectiveFallback,
-    #[error("forced-alignment fallback reason must not be empty")]
-    EmptyFallbackReason,
-    #[error(
-        "forced-alignment fallback evidence is valid for this run but lacks a versioned effective-engine cache identity"
-    )]
-    UnversionedFallbackEvidence,
+    #[error(transparent)]
+    UnversionedFallbackEvidence(#[from] UnversionedFallbackEvidence),
 }
+
+/// Fallback evidence: valid for the run that produced it, never persisted.
+///
+/// Its own type because it is the ONE way [`FaRawEvidence::into_replayable`]
+/// can refuse, so a caller matches it without an arm for the rest of
+/// [`FaRawEvidenceError`], which closing admitted evidence cannot produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "forced-alignment fallback evidence is valid for this run but lacks a versioned effective-engine cache identity"
+)]
+pub(super) struct UnversionedFallbackEvidence;
 
 /// Raw evidence proven safe to persist and replay.
 ///
@@ -203,16 +232,21 @@ impl FaRawEvidence {
         cache_namespace: &FaCacheNamespace,
         expected_words: ExpectedFaWords,
         cache_key: &CacheKey,
-        route: FaEvidenceRoute<'_>,
+        route: FaEvidenceRoute,
     ) -> Result<Self, FaRawEvidenceError> {
-        let effective_engine = match response.read() {
-            ExecuteOutcomeRef::Failed { code, message } => {
-                return Err(FaRawEvidenceError::WorkerFailure {
-                    code,
-                    message: message.to_owned(),
-                });
-            }
-            ExecuteOutcomeRef::Success(TaskResultV2::IndexedWordTimingResult(result)) => {
+        use crate::chat_ops::nlp::FaRawResponse;
+        use crate::worker::fa_result_v2::FaPayloadRefusal;
+        // The one read of the response: a failed response is the worker's
+        // report, classified once, never evidence; a result for another task
+        // is no evidence either. Alignment consumes the payload kept here.
+        let payload = crate::worker::fa_result_v2::read_fa_payload(response).map_err(
+            |refusal| match refusal {
+                FaPayloadRefusal::Failed(failure) => FaRawEvidenceError::WorkerFailure(failure),
+                FaPayloadRefusal::WrongResult(_) => FaRawEvidenceError::UnexpectedResult,
+            },
+        )?;
+        let effective_engine = match &payload {
+            FaRawResponse::IndexedWordLevel { indexed_timings } => {
                 // An indexed payload carries a start AND an end per word, so
                 // only an engine whose row says it reports word INTERVALS can
                 // have produced it. Read from the table rather than compared
@@ -223,10 +257,10 @@ impl FaRawEvidence {
                 if requested_engine.timing_resolution() == FaTimingResolution::TokenOnsets {
                     return Err(FaRawEvidenceError::IndexedEngineMismatch(requested_engine));
                 }
-                if result.indexed_timings.len() != expected_words.get() {
+                if indexed_timings.len() != expected_words.get() {
                     return Err(FaRawEvidenceError::WordCardinality {
                         expected: expected_words.get(),
-                        actual: result.indexed_timings.len(),
+                        actual: indexed_timings.len(),
                     });
                 }
                 requested_engine
@@ -244,22 +278,16 @@ impl FaRawEvidence {
             // retry would return the indexed shape above, be credited to the
             // engine that was requested, and have its timings thrown away by
             // the `Fallback` arm below as an ineffective fallback.
-            ExecuteOutcomeRef::Success(TaskResultV2::WhisperTokenTimingResult(_)) => {
-                FaEngineName::Whisper
-            }
-            ExecuteOutcomeRef::Success(_) => return Err(FaRawEvidenceError::UnexpectedResult),
+            FaRawResponse::TokenLevel { .. } => FaEngineName::Whisper,
         };
 
         let fallback_reason = match route {
             FaEvidenceRoute::Direct if effective_engine == requested_engine => None,
             FaEvidenceRoute::Direct => return Err(FaRawEvidenceError::UnexpectedDirectEngine),
-            FaEvidenceRoute::Fallback { reason: _ } if effective_engine == requested_engine => {
+            FaEvidenceRoute::Fallback { .. } if effective_engine == requested_engine => {
                 return Err(FaRawEvidenceError::IneffectiveFallback);
             }
-            FaEvidenceRoute::Fallback { reason } if reason.trim().is_empty() => {
-                return Err(FaRawEvidenceError::EmptyFallbackReason);
-            }
-            FaEvidenceRoute::Fallback { reason } => Some(reason.to_owned()),
+            FaEvidenceRoute::Fallback { constraint } => Some(constraint),
         };
 
         Ok(Self {
@@ -274,17 +302,21 @@ impl FaRawEvidence {
             cache_key: cache_key.clone(),
             fallback_reason,
             response: response.clone(),
+            payload,
         })
     }
 
     /// Close fresh evidence into the persistence-capable state.
-    pub(super) fn into_replayable(self) -> Result<ReplayableFaRawEvidence, FaRawEvidenceError> {
+    pub(super) fn into_replayable(
+        self,
+    ) -> Result<ReplayableFaRawEvidence, UnversionedFallbackEvidence> {
         if self.fallback_reason.is_some() {
-            return Err(FaRawEvidenceError::UnversionedFallbackEvidence);
+            return Err(UnversionedFallbackEvidence);
         }
         Ok(ReplayableFaRawEvidence(self))
     }
 
+    #[cfg(test)]
     pub(super) fn requested_engine(&self) -> FaEngineName {
         self.requested_engine
     }
@@ -298,12 +330,16 @@ impl FaRawEvidence {
         self.expected_words
     }
 
-    pub(super) fn response(&self) -> &ExecuteResponseV2 {
-        &self.response
+    /// The timing payload read once at admission.
+    pub(super) fn payload(&self) -> &crate::chat_ops::nlp::FaRawResponse {
+        &self.payload
     }
 
-    pub(super) fn fallback_reason(&self) -> Option<&str> {
-        self.fallback_reason.as_deref()
+    #[cfg(test)]
+    pub(super) fn fallback_reason(
+        &self,
+    ) -> Option<crate::worker::fa_result_v2::FaEngineConstraint> {
+        self.fallback_reason
     }
 }
 
@@ -359,17 +395,18 @@ impl ReplayableFaRawEvidence {
             return Err(FaRawEvidenceError::CacheKeyDrift);
         }
 
-        let route = match raw.fallback_reason.as_deref() {
-            Some(reason) => FaEvidenceRoute::Fallback { reason },
-            None => FaEvidenceRoute::Direct,
-        };
+        // Fallback evidence is never persisted ([`FaRawEvidence::into_replayable`]),
+        // so a stored reason is refused as the fallback evidence it would be.
+        if raw.fallback_reason.is_some() {
+            return Err(UnversionedFallbackEvidence.into());
+        }
         let admitted = FaRawEvidence::admit_requested(
             &raw.response,
             requested_engine,
             cache_namespace,
             expected_words,
             cache_key,
-            route,
+            FaEvidenceRoute::Direct,
         )?;
         if raw.effective_engine != admitted.effective_engine {
             return Err(FaRawEvidenceError::EffectiveEngineDrift {
@@ -377,12 +414,11 @@ impl ReplayableFaRawEvidence {
                 proven: admitted.effective_engine,
             });
         }
-        admitted.into_replayable().map(|replayable| {
-            Self(FaRawEvidence {
-                request_engine_identity,
-                ..replayable.0
-            })
-        })
+        let replayable = admitted.into_replayable()?;
+        Ok(Self(FaRawEvidence {
+            request_engine_identity,
+            ..replayable.0
+        }))
     }
 
     pub(super) fn into_inner(self) -> FaRawEvidence {
@@ -583,7 +619,7 @@ mod tests {
             ExpectedFaWords::new(1),
             &key,
             FaEvidenceRoute::Fallback {
-                reason: "targets length is too long for CTC",
+                constraint: crate::worker::fa_result_v2::FaEngineConstraint::CtcTargetsTooLong,
             },
         )
         .expect("valid fallback evidence");
@@ -591,15 +627,19 @@ mod tests {
         assert_eq!(evidence.effective_engine(), FaEngineName::Whisper);
         assert_eq!(
             evidence.fallback_reason(),
-            Some("targets length is too long for CTC")
+            Some(crate::worker::fa_result_v2::FaEngineConstraint::CtcTargetsTooLong)
         );
-        let error = evidence
-            .into_replayable()
-            .expect_err("fallback evidence has no effective-model cache identity");
-        assert!(matches!(
-            error,
-            FaRawEvidenceError::UnversionedFallbackEvidence
-        ));
+        assert_eq!(
+            serde_json::to_value(&evidence).expect("serialize")["fallback_reason"],
+            "targets length is too long for CTC",
+            "the reason is written in the vocabulary evidence has always used"
+        );
+        assert_eq!(
+            evidence
+                .into_replayable()
+                .expect_err("fallback evidence has no effective-model cache identity"),
+            UnversionedFallbackEvidence
+        );
     }
 
     #[test]

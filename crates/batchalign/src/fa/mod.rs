@@ -920,7 +920,6 @@ pub(crate) async fn run_fa_from_ast(
         },
     );
     let (decision_records, timing_effects) = written_decisions.into_evidence();
-    let decision_traces = decision_records.into_iter().map(Into::into).collect();
     let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
     // 10. Every processed return requires complete typed construction
@@ -931,7 +930,7 @@ pub(crate) async fn run_fa_from_ast(
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
         cache_namespace: services.cache_namespace.clone(),
-        decisions: decision_traces,
+        decisions: decision_records,
         timing_decisions,
         gap_healing: fa_params.gap_healing,
         fallback_events,
@@ -1288,7 +1287,9 @@ mod tests {
         assert!(!first_untimed.is_empty());
         assert!(first_untimed.iter().all(|utterance| matches!(
             utterance.cause,
-            crate::api::UntimedCauseRecord::LocalizationUnavailable
+            crate::api::StoredUntimedCause::Written(
+                crate::api::UntimedCauseRecord::LocalizationUnavailable
+            )
         )));
         insta::assert_json_snapshot!(first_untimed[0].cause, @r#"
         {

@@ -84,7 +84,7 @@ rand = "0.10"
 ratatui = { version = "0.30", features = ["serde"] }
 regex = "1.13"
 reqwest = { version = "0.13", features = ["multipart", "json", "blocking"] }
-rstest = { version = "0.27.0", default-features = false }
+rstest = { version = "0.28.0", default-features = false }
 schemars = { version = "1.2", features = ["indexmap2", "smol_str03"] }
 yaml_serde = "0.10"
 
@@ -117,7 +117,7 @@ talkbank-parser-tests = { git = "https://github.com/TalkBank/chatter", rev = "f7
 tempfile = "3.27"
 thiserror = "^2.0.21"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio = { version = "1.53", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 tokio-util = "0.7"
 toml = "^1.1.8"
 tracing-appender = "0.2"

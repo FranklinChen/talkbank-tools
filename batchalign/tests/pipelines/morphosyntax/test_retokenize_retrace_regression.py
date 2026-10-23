@@ -29,11 +29,11 @@ def test_retokenize_retrace_utterance_returns_correct_count() -> None:
     The words are: 呢 度 食飯 啦 飯 啦 (retrace <下次> [/] already removed
     by Rust before reaching Python).
     """
-    import threading
 
     import stanza
     from stanza import DownloadMethod
 
+    from batchalign.inference._domain_types import StanzaCode
     from batchalign.inference._tokenizer_realign import TokenizerContext
     from batchalign.inference.morphosyntax import batch_infer_morphosyntax
     from batchalign.tests._morphosyntax_batch_items import morphosyntax_item
@@ -57,9 +57,9 @@ def test_retokenize_retrace_utterance_returns_correct_count() -> None:
 
     resp = batch_infer_morphosyntax(
         req=req,
-        pipelines=static_pipelines({"yue": nlp}, {"yue": TokenizerContext()}),
-        nlp_lock=threading.Lock(),
-        free_threaded=False,
+        pipelines=static_pipelines(
+            {"yue": nlp}, {"yue": TokenizerContext(StanzaCode("zh-hant"))}
+        ),
     )
 
     result = resp.results[0]

@@ -515,7 +515,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(position, (form, head, deprel))| {
-                    crate::morphosyntax::UdWord::from(crate::morphosyntax::UdWordAnalysis {
+                    crate::morphosyntax::UdWord::try_from(crate::morphosyntax::UdWordAnalysis {
                         id: crate::morphosyntax::UdId::Single(position + 1),
                         text: (*form).to_string(),
                         lemma: (*form).to_string(),
@@ -527,6 +527,7 @@ mod tests {
                         deps: None,
                         misc: None,
                     })
+                    .expect("test analysis carries no padding feature")
                 })
                 .collect(),
         }

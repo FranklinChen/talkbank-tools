@@ -28,9 +28,11 @@ use crate::chat_ops::fa::utr::AnchorIndex;
 use batchalign_transform::dp_align::{self, MatchMode};
 use dp_align::control::{Uninterrupted, WorkControl, uninterrupted};
 
+#[cfg(test)]
+use super::AsrTimingToken;
 use super::{
-    AsrTimingToken, GlobalUtrParticipation, PositiveUtrInterval, UtrResult, UtrStrategy,
-    UtrUtteranceInfo, collect_utr_utterance_info,
+    GlobalUtrParticipation, PositiveUtrInterval, UtrResult, UtrStrategy, UtrUtteranceInfo,
+    collect_utr_utterance_info,
 };
 
 /// Parameters needed to compare FA grouping outcomes between strategies.
@@ -331,14 +333,14 @@ impl TwoPassOverlapUtr {
 }
 
 impl UtrStrategy for TwoPassOverlapUtr {
-    fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &[AsrTimingToken]) -> UtrResult {
+    fn inject(&self, chat_file: &mut ChatFile, asr_tokens: &super::PreparedUtrTokens) -> UtrResult {
         uninterrupted(self.inject_with_control(chat_file, asr_tokens, &Uninterrupted))
     }
 
     fn inject_controlled(
         &self,
         chat_file: &mut ChatFile,
-        asr_tokens: &[AsrTimingToken],
+        asr_tokens: &super::PreparedUtrTokens,
         control: &dyn WorkControl<Error = super::UtrCancelled>,
     ) -> Result<UtrResult, super::UtrCancelled> {
         self.inject_with_control(chat_file, asr_tokens, control)
@@ -349,7 +351,7 @@ impl TwoPassOverlapUtr {
     fn inject_with_control<C: WorkControl + ?Sized>(
         &self,
         chat_file: &mut ChatFile,
-        asr_tokens: &[AsrTimingToken],
+        asr_tokens: &super::PreparedUtrTokens,
         control: &C,
     ) -> Result<UtrResult, C::Error> {
         control.check()?;
@@ -445,13 +447,13 @@ impl TwoPassOverlapUtr {
 /// includes all utterances in the global DP to prevent context starvation.
 fn run_two_pass_inner<C: WorkControl + ?Sized>(
     chat_file: &mut ChatFile,
-    asr_tokens: &[AsrTimingToken],
+    asr_tokens: &super::PreparedUtrTokens,
     config: &TwoPassConfig,
     control: &C,
 ) -> Result<Result<UtrResult, UtrPopulationChanged>, C::Error> {
     control.check()?;
     // Check overlap density to decide whether to exclude from pass 1.
-    let pre_infos = collect_utr_utterance_info(chat_file);
+    let pre_infos = collect_utr_utterance_info(chat_file, asr_tokens.units());
     let before_bullets = UtrBulletPopulation::from_infos(&pre_infos);
     let total_utts = pre_infos.len();
     let overlap_utts = pre_infos
@@ -488,7 +490,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
         control,
     )?;
 
-    if asr_tokens.is_empty() {
+    if asr_tokens.tokens().is_empty() {
         return Ok(Ok(result.with_overlap_recoveries(Vec::new())));
     }
 
@@ -496,7 +498,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
     // When skip_in_pass1 is false, pass 2 only runs on utterances that
     // didn't get timing from the global DP (they participated but weren't
     // matched). The onset fraction still helps narrow recovery windows.
-    let utt_infos = collect_utr_utterance_info(chat_file);
+    let utt_infos = collect_utr_utterance_info(chat_file, asr_tokens.units());
     let utt_line_indices = chat_file
         .lines
         .iter()
@@ -532,7 +534,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
         // Recover timing for +< utterances and ⌊-bearing (CA overlap) utterances.
         if !is_recoverable_overlap(info, config)
             || info.retained_timing.is_some()
-            || info.words.is_empty()
+            || info.units.is_empty()
         {
             continue;
         }
@@ -547,7 +549,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
 
         // Adaptive window: try narrow first, widen on failure.
         if let Some(interval) = recover_with_adaptive_window_controlled(
-            &info.words,
+            &info.units,
             asr_tokens,
             utt_idx,
             &utt_bullets,
@@ -753,8 +755,8 @@ fn count_timed_utterances(chat_file: &ChatFile) -> usize {
 /// Stops at the first match to prefer the tightest plausible window.
 #[cfg(test)]
 fn recover_with_adaptive_window(
-    words: &[String],
-    asr_tokens: &[AsrTimingToken],
+    words: &super::token_text::UtrChatUnits,
+    asr_tokens: &super::PreparedUtrTokens,
     utt_idx: usize,
     utt_bullets: &[Option<(u64, u64)>],
     pred_onset_fraction: Option<f64>,
@@ -772,8 +774,8 @@ fn recover_with_adaptive_window(
 }
 
 fn recover_with_adaptive_window_controlled<C: WorkControl + ?Sized>(
-    words: &[String],
-    asr_tokens: &[AsrTimingToken],
+    words: &super::token_text::UtrChatUnits,
+    asr_tokens: &super::PreparedUtrTokens,
     utt_idx: usize,
     utt_bullets: &[Option<(u64, u64)>],
     pred_onset_fraction: Option<f64>,
@@ -909,9 +911,9 @@ fn find_predecessor_bullet(
 ///
 /// This is cheap: typically 1-3 backchannel words against 5-20 windowed tokens.
 #[cfg(test)]
-pub fn recover_overlap_timing(
-    words: &[String],
-    asr_tokens: &[AsrTimingToken],
+pub(super) fn recover_overlap_timing(
+    words: &super::token_text::UtrChatUnits,
+    asr_tokens: &super::PreparedUtrTokens,
     window_start_ms: u64,
     window_end_ms: u64,
     dp_match_mode: MatchMode,
@@ -927,8 +929,8 @@ pub fn recover_overlap_timing(
 }
 
 fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
-    words: &[String],
-    asr_tokens: &[AsrTimingToken],
+    words: &super::token_text::UtrChatUnits,
+    asr_tokens: &super::PreparedUtrTokens,
     window_start_ms: u64,
     window_end_ms: u64,
     dp_match_mode: MatchMode,
@@ -945,7 +947,7 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
     let windowed_texts = windowed.texts();
 
     let admission = dp_align::CorrespondenceAdmission::observe_controlled(
-        words,
+        words.texts(),
         &windowed_texts,
         dp_match_mode,
         control,
@@ -953,17 +955,8 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
     let dp_align::CorrespondenceAdmission::Complete(common) = admission else {
         return Ok(None);
     };
-    let payload = words
-        .iter()
-        .enumerate()
-        .map(|(index, text)| super::UtrPayloadWord {
-            text: text.clone(),
-            address: super::UtrWordAddress {
-                utterance_index: super::UtrUtteranceOrdinal(0),
-                word_index: super::evidence::UtrWordOrdinal(index),
-            },
-        })
-        .collect::<Vec<_>>();
+    let payload =
+        super::UtrPayloadWord::of_units(super::UtrUtteranceOrdinal(0), words).collect::<Vec<_>>();
     let Some(admitted) =
         super::NonEmptyAdmittedUtrWordMatches::from_vec(windowed.common_matches(&common, &payload))
     else {
@@ -971,7 +964,7 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
     };
     // This windowed proof observes common correspondences only.
     let super::lexical::BoundaryAdmission::Bound(admitted) =
-        admitted.admit_endpoints(words.len(), super::lexical::EndpointExtents::UNOBSERVED)
+        admitted.admit_endpoints(words, super::lexical::EndpointExtents::UNOBSERVED)
     else {
         return Ok(None);
     };
@@ -1006,7 +999,13 @@ mod tests {
     fn overlap_word_inside_a_segment_keeps_the_provider_interval() {
         let tokens = make_asr_tokens(&[("outside", 0, 50), ("hello world", 100, 900)]);
         assert_eq!(
-            recover_overlap_timing(&["world".to_owned()], &tokens, 400, 600, MatchMode::Exact),
+            recover_overlap_timing(
+                &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&["world".to_owned()]),
+                &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+                400,
+                600,
+                MatchMode::Exact
+            ),
             Some(expected_interval(100, 900)),
         );
     }
@@ -1079,7 +1078,13 @@ mod tests {
     fn test_recover_overlap_timing_finds_mhm_in_window() {
         let words = vec!["mhm".to_string()];
         let tokens = make_asr_tokens(&[("mhm", 1800, 2200)]);
-        let result = recover_overlap_timing(&words, &tokens, 0, 3000, MatchMode::CaseInsensitive);
+        let result = recover_overlap_timing(
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            0,
+            3000,
+            MatchMode::CaseInsensitive,
+        );
         assert_eq!(result, Some(expected_interval(1800, 2200)));
     }
 
@@ -1087,7 +1092,13 @@ mod tests {
     fn test_recover_overlap_timing_no_match_outside_window() {
         let words = vec!["mhm".to_string()];
         let tokens = make_asr_tokens(&[("mhm", 5000, 5500)]);
-        let result = recover_overlap_timing(&words, &tokens, 0, 3000, MatchMode::CaseInsensitive);
+        let result = recover_overlap_timing(
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            0,
+            3000,
+            MatchMode::CaseInsensitive,
+        );
         assert_eq!(result, None);
     }
 
@@ -1095,7 +1106,13 @@ mod tests {
     fn test_recover_overlap_timing_multi_word() {
         let words = vec!["oh".to_string(), "okay".to_string()];
         let tokens = make_asr_tokens(&[("oh", 1500, 1700), ("okay", 1800, 2200)]);
-        let result = recover_overlap_timing(&words, &tokens, 0, 3000, MatchMode::CaseInsensitive);
+        let result = recover_overlap_timing(
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            0,
+            3000,
+            MatchMode::CaseInsensitive,
+        );
         assert_eq!(result, Some(expected_interval(1500, 2200)));
     }
 
@@ -1104,8 +1121,13 @@ mod tests {
         let words = vec!["mhm".to_string()];
         let tokens = make_asr_tokens(&[("mhm", 1800, 2200)]);
         // Window that doesn't overlap any tokens
-        let result =
-            recover_overlap_timing(&words, &tokens, 5000, 6000, MatchMode::CaseInsensitive);
+        let result = recover_overlap_timing(
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            5000,
+            6000,
+            MatchMode::CaseInsensitive,
+        );
         assert_eq!(result, None);
     }
 
@@ -1149,8 +1171,8 @@ mod tests {
         ];
         // "mhm" at 1800 is within narrow window (1000-500=500, 3000+500=3500)
         let result = recover_with_adaptive_window(
-            &words,
-            &tokens,
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             1,
             &bullets,
             None,
@@ -1170,8 +1192,8 @@ mod tests {
             None,               // +< utterance
         ];
         let result = recover_with_adaptive_window(
-            &words,
-            &tokens,
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             1,
             &bullets,
             None,
@@ -1186,8 +1208,8 @@ mod tests {
         let tokens = make_asr_tokens(&[("mhm", 1800, 2200)]);
         let bullets = vec![None]; // no predecessor
         let result = recover_with_adaptive_window(
-            &words,
-            &tokens,
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             0,
             &bullets,
             None,
@@ -1211,8 +1233,8 @@ mod tests {
             None,                 // overlap utterance
         ];
         let result = recover_with_adaptive_window(
-            &words,
-            &tokens,
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             1,
             &bullets,
             Some(0.6),
@@ -1240,16 +1262,16 @@ mod tests {
 
         // Both should find the token
         let without = recover_with_adaptive_window(
-            &words,
-            &tokens,
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             1,
             &bullets,
             None,
             &TwoPassConfig::default(),
         );
         let with = recover_with_adaptive_window(
-            &words,
-            &tokens,
+            &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
             1,
             &bullets,
             Some(0.8),
@@ -1343,7 +1365,10 @@ mod tests {
             },
         ];
 
-        let result = TwoPassOverlapUtr::new().inject(&mut chat, &tokens);
+        let result = TwoPassOverlapUtr::new().inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
 
         // The fallback should have kicked in: global can match "ja" at 50000ms,
         // while pass 2 can't find "ja" in the predecessor window (100-3000ms ± buffer).
@@ -1450,7 +1475,10 @@ mod tests {
         // max_group_ms is small enough to create multiple groups when
         // all utterances are timed.
         let strategy = TwoPassOverlapUtr::with_grouping_context(sixty_second_recording(), 15000);
-        let result = strategy.inject(&mut chat, &tokens);
+        let result = strategy.inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
 
         // Global should be preferred because it can time "ja" (creating
         // tighter groups), while two-pass leaves it untimed (wider groups).
@@ -1546,7 +1574,10 @@ mod tests {
                 max_exclusion_density: UtrOverlapDensityThreshold::MAX,
                 ..TwoPassConfig::default()
             });
-        let result = strategy.inject(&mut chat, &tokens);
+        let result = strategy.inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
 
         // Two-pass should be kept (groups equal, better backchannel placement).
         assert_eq!(result.injected, 3, "two-pass should time all 3 utterances");

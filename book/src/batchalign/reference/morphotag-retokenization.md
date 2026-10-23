@@ -1,7 +1,7 @@
 # Morphotag Retokenization
 
 **Status:** Current
-**Last updated:** 2026-10-12 22:31 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 ## Purpose and audience
 
@@ -169,7 +169,7 @@ glance. Every node labels its source file.
 
 ```mermaid
 flowchart TD
-    Cha["CHAT file on disk"] --> Parse["parse_lenient()\n(talkbank-transform/src/parse.rs)"]
+    Cha["CHAT file on disk"] --> Parse["ParsedFile::parse()\nsource-bound admission"]
     Parse --> Extract["extract_words()\n(talkbank-transform/src/extract.rs)"]
     Extract --> Collect["collect_payloads()\n(talkbank-transform/src/morphosyntax/payload.rs)"]
     Collect --> Worker["Python worker\n(batchalign/worker/_protocol.py)"]
@@ -461,7 +461,8 @@ following source files, read during authoring:
 - `batchalign/inference/morphosyntax.py`: `batch_infer_morphosyntax`
   (`:201`) and the `ctx.original_words` dispatcher around it.
 - `batchalign/worker/_stanza_loading.py`: per-language Stanza pipeline
-  construction; `should_request_mwt` at `:40`; `load_stanza_models` at `:126`.
+  construction; `language_capability` (the catalog entry, MWT included) and
+  `load_stanza_models`.
 - `crates/batchalign/tests/ml_golden/morphotag/golden.rs:158` and
   `crates/batchalign/tests/ml_golden/morphotag/golden_l2.rs:121`,
   retokenize and L2 contractions golden tests respectively.

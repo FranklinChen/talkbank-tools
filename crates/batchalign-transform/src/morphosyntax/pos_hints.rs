@@ -1,15 +1,9 @@
-//! Transcriber-supplied `$POS` hint application and the Stanza
-//! language-support gate.
+//! Transcriber-supplied `$POS` hint application.
 //!
 //! [`collect_pos_hints`] captures typed `$POS` evidence before retokenization,
 //! and [`apply_pos_hint_evidence`] uses it to override Stanza's UPOS in the
 //! corresponding `%mor` item when the two disagree. The bookkeeping is
 //! summarized in [`HintOutcome`].
-//! [`is_stanza_supported`] / [`supported_iso3_codes`] front the static
-//! list of ISO-639-3 codes that Stanza actually has a pipeline for.
-
-use std::collections::HashSet;
-use std::sync::LazyLock;
 
 use talkbank_model::alignment::helpers::visit_mor_positions;
 use talkbank_model::alignment::{MainWordIndex, MorItemIndex};
@@ -193,32 +187,4 @@ pub fn apply_pos_hint_evidence(
 pub fn apply_pos_hints(chat_file: &mut talkbank_model::model::ChatFile) -> HintOutcome {
     let evidence = collect_pos_hints(chat_file);
     apply_pos_hint_evidence(chat_file, evidence, &[])
-}
-
-/// ISO 639-3 codes that have a known Stanza pipeline.
-static SUPPORTED_STANZA_CODES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "eng", "spa", "fra", "deu", "ita", "por", "nld", "cat", "glg", "dan", "swe", "nor", "fin",
-        "est", "lav", "lit", "isl", "pol", "ces", "ron", "hun", "bul", "hrv", "slk", "slv", "ukr",
-        "rus", "ell", "cym", "gle", "gla", "eus", "mlt", "ara", "heb", "fas", "hin", "urd", "tur",
-        "tam", "tel", "tha", "vie", "ind", "zho", "cmn", "yue", "jpn", "kor", "kat", "hye", "afr",
-        "lat",
-    ]
-    .into_iter()
-    .collect()
-});
-
-/// Check whether a language code is supported by the Stanza worker.
-pub fn is_stanza_supported(lang: &talkbank_model::model::LanguageCode) -> bool {
-    SUPPORTED_STANZA_CODES.contains(lang.as_ref())
-}
-
-/// Sorted list of ISO-639-3 codes the Rust gate considers Stanza-supported.
-pub fn supported_iso3_codes() -> &'static [&'static str] {
-    static SORTED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-        let mut v: Vec<&'static str> = SUPPORTED_STANZA_CODES.iter().copied().collect();
-        v.sort_unstable();
-        v
-    });
-    &SORTED
 }

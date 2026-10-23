@@ -1,7 +1,7 @@
 # morphotag: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-03 08:50 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Implementation guide for the `morphotag` command. For user-facing
 documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.md).
@@ -19,9 +19,9 @@ documentation, see [User Guide: morphotag](../../user-guide/commands/morphotag.m
 | Input admission and CA policy | `crates/batchalign/src/pipeline/morphosyntax/states.rs`: `ParsedFile` | Consumes Chatter's header-aware source admission into whole-file pass-through or admitted analysis |
 | Morphosyntax orchestration | `crates/batchalign/src/morphosyntax/` | Per-file collection, multilingual worker dispatch, result injection |
 | Worker boundary | `crates/batchalign/src/execution/worker_gateway.rs` | Delegates each file to the consuming pipeline, without a separate language parse |
-| Injection | `talkbank-transform::morphosyntax` | Writes `%mor`/`%gra` from matched typed UD annotations |
-| Retokenization | `crates/batchalign/src/retokenize/` | Character-level DP for Stanza word splits/merges |
-| Payload collection & injection | `crates/batchalign-transform/src/morphosyntax/`: `collect_payloads()`, `clear_morphosyntax()`, `inject_results()`, `remove_empty_morphosyntax_placeholders()` | Cross-crate: domain logic lives in talkbank-transform model layer |
+| Injection | `batchalign-transform::morphosyntax` | Writes `%mor`/`%gra` from matched typed UD annotations |
+| Retokenization | `crates/batchalign-transform/src/retokenize.rs` | Character-level DP for Stanza word splits/merges |
+| Payload collection & injection | `crates/batchalign-transform/src/morphosyntax/`: `collect_payloads()`, `clear_morphosyntax()`, `inject_results()`, `remove_empty_morphosyntax_placeholders()` | Cross-crate: analysis logic lives in batchalign-transform |
 | Worker IPC | `batchalign/inference/morphosyntax.py`: `batch_infer_morphosyntax()` | Loads Stanza, returns raw `to_dict()` UD annotations |
 
 Local submissions (auto-daemon or loopback `--server`) use `paths_mode=true`:
@@ -126,38 +126,18 @@ The Rust injection layer (`inject_results()`) maps the UD annotation back to
 the CHAT AST word by word, writing `%mor` (`pos|lemma` notation) and `%gra`
 (`idx head deprel`) tiers.
 
-### Upstream-defect ingress filter (Python side)
+### Retired upstream control-token filter
 
-Before the UD annotations cross back from Python to Rust,
-`batch_infer_morphosyntax` runs a known-defect workaround over every
-Stanza sentence: any ``<SOS>``, ``<EOS>``, ``<UNK>``, ``<PAD>``, ``<s>``,
-``</s>`` (and similar neural-LM control-token) substrings that leaked
-into ``word.text`` or ``word.lemma`` are stripped in place. Every
-rewrite emits a ``tracing.warning`` naming the language, the leaked
-value, and the post-strip replacement so the workaround is visible
-in ``~/.batchalign3/server.log``.
+The Python strip-in-place filter for Finnish MWT control-token leakage was
+removed with the Stanza 1.12.0 upgrade. Current workers do not run
+`_control_token_filter.py`. The standalone upstream reproducer remains at
+`batchalign/tests/pipelines/morphosyntax/test_stanza_fi_mwt_sos_leak.py`.
+See [Defect 4](../../reference/stanza-limitations.md#defect-4-neural-lm-control-tokens-leak-into-document-output-finnish-mwt)
+for the dated evidence and retirement decision.
 
-This is Defect 4 in the [Stanza Limitations
-registry](../../reference/stanza-limitations.md#defect-4-neural-lm-control-tokens-leak-into-document-output-finnish-mwt).
-The minimum trigger is 3+-word Finnish input containing ``tollei`` on
-Stanza 1.11.1. ``chatter validate`` is the downstream gate if a leak
-variant escapes the filter's vocabulary.
-
-Code + tests:
-
-- `batchalign/inference/_control_token_filter.py`: pure stripper + regex
-- `batchalign/inference/morphosyntax.py`: call site inside
-  `batch_infer_morphosyntax` after `doc.to_dict()`
-- `batchalign/tests/inference/test_control_token_filter.py`,
-  34 pure-function tests (regex vocabulary, strip contract, MWT safety)
-- `batchalign/tests/pipelines/morphosyntax/test_stanza_fi_mwt_sos_leak.py`
- , standalone upstream reproducer
-- `batchalign/tests/pipelines/morphosyntax/test_control_token_leak_propagation.py`
- , integration test through `batch_infer_morphosyntax`
-
-The five-step workflow that produced this filter is the same one any
-future upstream defect should follow, see
-[Upstream Defect Policy](../upstream-defect-policy.md).
+Current FEATS padding repair is separate: Rust's `repair_feats` returns the
+repaired features and typed evidence, and Python reports that evidence with
+the analysis. See [Morphosyntax](../../reference/morphosyntax.md).
 
 ### Language-group failure propagation (Rust side)
 
@@ -172,19 +152,10 @@ routes every file whose utterance range intersects a failed group to
 `TextBatchFileResult::err`, skipping `inject_results()` so no CHAT is
 serialized with stripped tiers.
 
-The two layers are complementary:
-
-| Layer | Handles | Response |
-|---|---|---|
-| Python ingress filter | Upstream library produces bad individual tokens | Strip + log; file lands clean |
-| Rust failure propagation | Pool-level failure produced no response at all | Per-file error; file not written |
-
-Code: `crates/batchalign/src/morphosyntax/outcomes.rs` (pure
-aggregator + classifier, 13 tests),
-`crates/batchalign/src/morphosyntax/dispatcher.rs` (trait boundary
-for fake-pool tests),
-`crates/batchalign/src/morphosyntax/saturation_tests.rs` (3
-end-to-end corruption-regression tests).
+The retired Python token filter is not a recovery mechanism for worker
+failure. Current response admission and dispatch live in
+`crates/batchalign/src/morphosyntax/worker.rs`; the admitted morphotag workflow
+and writeback live in `crates/batchalign/src/execution/morphotag/`.
 
 See also: [Batchalign Workers, Saturation Safeguards](../../../architecture/runtime/batchalign-workers.md#worker-pool-saturation-safeguards).
 
@@ -200,7 +171,7 @@ flowchart TD
     parse["Parse CHAT\n(batchalign, tree-sitter)"]
     clear["clear_morphosyntax()\n(morphosyntax/payload.rs)\nreplace Mor/Gra in place with EMPTY\nMorTier::new_mor(Vec::new()) / GraTier::new_gra(Vec::new())"]
     collect["collect_payloads() + collect_pos_hints()\nCapture typed $POS evidence before retokenization\nhas_mor requires Mor tier to be NON-EMPTY"]
-    infer["Batch infer\n(runner/dispatch/infer_batched.rs)"]
+    infer["Batch infer\n(execution/morphotag/mod.rs)"]
     inject["inject_results()\n(morphosyntax/injection.rs)\nwrites %mor and %gra into the SAME slots"]
     l2["L2 dispatch (if enabled)\n(morphosyntax/l2/*)"]
     poshints["Apply captured POS evidence (if enabled)\n(morphosyntax/pos_hints.rs)"]
@@ -305,7 +276,7 @@ Implementation: `crates/batchalign/src/morphosyntax/batch.rs:288-312`.
 When `--retokenize` is set, `TokenizationMode::StanzaRetokenize` is passed to
 the worker. Stanza may split or merge words on the main tier to match UD
 tokenization. The retokenization is implemented in Rust
-(`crates/batchalign/src/retokenize/`) using a character-level
+(`crates/batchalign-transform/src/retokenize.rs`) using a character-level
 Hirschberg DP to map Stanza tokens back to original CHAT positions. Existing
 `%wor` timing bullets become stale after retokenization.
 
@@ -418,7 +389,7 @@ The outcome tracks 5 categories:
 - `hints_unmapped`: transcriber POS code not in the CLAN↔UPOS mapping table
 - `hints_skipped_no_mor`: utterance had no `%mor` tier to override
 
-Implementation: `crates/batchalign/src/chat_ops/morphosyntax_ops/pos_hints.rs`,
+Implementation: `crates/batchalign-transform/src/morphosyntax/pos_hints.rs`,
 `batchalign/src/morphosyntax/batch.rs:509-521`.
 
 ---

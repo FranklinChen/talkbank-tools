@@ -1,7 +1,7 @@
 # Cantonese and CJK: Architecture
 
 **Status:** Current
-**Last updated:** 2026-05-19 17:38 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Architecture and rationale for batchalign's CJK-language pipelines: ASR
 engine dispatch, Rust-side text normalization, and word segmentation
@@ -168,7 +168,7 @@ one character at a time.
 
 ### UTF-8-safe retokenization
 
-`crates/talkbank-transform/src/asr_postprocess/mod.rs` uses
+`crates/batchalign-transform/src/asr_postprocess/mod.rs` uses
 `char_indices()` for proper UTF-8 handling, byte slicing would panic
 on multi-byte CJK characters:
 

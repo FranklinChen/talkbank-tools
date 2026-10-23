@@ -62,6 +62,13 @@ pub(in crate::runner) struct UtrPassContext<'a> {
 }
 
 impl<'a> UtrPassContext<'a> {
+    /// The language UTR requests its recognition in: the one value both the
+    /// worker route (and so the decode decision a stock Whisper worker is
+    /// spawned with) and the UTR cache namespace are derived from.
+    fn asr_language(&self) -> crate::transcribe::SingleAsrLanguage {
+        crate::transcribe::SingleAsrLanguage::One(self.lang.clone())
+    }
+
     /// The recording this pass is working against.
     ///
     /// Delegates to [`AudioContext::recording`] rather than repeating its
@@ -325,7 +332,7 @@ pub(in crate::runner) async fn run_utr_pass(
             }
             context
                 .dumper
-                .dump_utr_tokens(context.filename, &all_tokens);
+                .dump_utr_tokens(context.filename, all_tokens.tokens());
 
             let strategy = resolve_strategy(&context, recording);
             let utr_result = work::PendingUtr::new(chat_file, strategy, all_tokens)
@@ -443,7 +450,7 @@ async fn run_utr_pass_full(
     }
     context
         .dumper
-        .dump_utr_tokens(context.filename, &asr_tokens);
+        .dump_utr_tokens(context.filename, asr_tokens.tokens());
 
     let strategy = resolve_strategy(&context, recording);
     let utr_result = work::PendingUtr::new(chat_file, strategy, asr_tokens)
@@ -513,7 +520,7 @@ async fn infer_utr_asr_response(
                 &crate::transcribe::AsrInferParams {
                     backend,
                     audio_path,
-                    lang: &crate::transcribe::SingleAsrLanguage::One(context.lang.clone()),
+                    lang: &context.asr_language(),
                     num_speakers: NumSpeakers(1),
                     extras: &no_extras,
                     gpu: context.services.gpu,
@@ -664,14 +671,26 @@ impl UtrAsrInferred {
 /// named the safe direction is to recompute, never to reuse rows that may have
 /// come from other weights.
 fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility {
-    match crate::model_manifest::utr_pinned_models(context.engine, context.lang) {
-        Ok(models) => UtrAsrCacheNamespace::for_pinned_plan(context.engine, &models),
+    let models = match crate::model_manifest::utr_pinned_models(context.engine, context.lang) {
+        Ok(models) => models,
         Err(error) => {
             warn!(
                 context.filename,
                 engine = context.engine.as_wire_name(),
                 %error,
                 "UTR ASR models could not be resolved; running without cache reuse"
+            );
+            return UtrAsrCacheEligibility::Floating;
+        }
+    };
+    match UtrAsrCacheNamespace::for_pinned_plan(context.engine, &models, &context.asr_language()) {
+        Ok(eligibility) => eligibility,
+        Err(error) => {
+            warn!(
+                context.filename,
+                engine = context.engine.as_wire_name(),
+                %error,
+                "UTR ASR producer could not be named; running without cache reuse"
             );
             UtrAsrCacheEligibility::Floating
         }
@@ -913,39 +932,25 @@ fn asr_response_to_utr_tokens(
     conversion
 }
 
-/// Normalize recovered token text for the job's language, once over the whole
-/// run.
+/// Prepare recovered tokens for the job's language: its script, once over
+/// the whole run, and the lexical units both sides are matched in.
 ///
 /// UTR matches ASR text against the transcript's OWN words, so a Cantonese
 /// transcript (HK traditional) or a Taiwanese one (Taiwan traditional) and a
-/// provider's simplified output would miss each other word for word. This used to be done inside the provider bridges,
-/// which meant whether it happened at all depended on which engine ran: Tencent
-/// normalized, Whisper and Qwen did not. It now happens here, once, for every
-/// engine, through the pipeline's one owner, and a normalization that changed
-/// the character count refuses rather than re-cutting the tokens away from
-/// their timings.
+/// provider's simplified output would miss each other word for word. This
+/// happens here, once, for every engine, through
+/// [`PreparedUtrTokens::prepare`](crate::chat_ops::fa::utr::PreparedUtrTokens::prepare);
+/// a normalization that changed the character count refuses rather than
+/// re-cutting the tokens away from their timings.
 fn normalize_utr_tokens(
     tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
     lang: &LanguageCode3,
-) -> Result<Vec<crate::chat_ops::fa::utr::AsrTimingToken>, crate::error::ServerError> {
-    let Some(normalization) =
-        batchalign_transform::asr_postprocess::HanScriptNormalization::for_language(lang.as_ref())
-    else {
-        return Ok(tokens);
-    };
-    let aligned = normalization
-        .admit(tokens.iter().map(|token| token.text.as_str()))
-        .map_err(|refusal| {
-            crate::error::ServerError::Validation(format!(
-                "UTR could not normalize its tokens: {refusal}"
-            ))
-        })?;
-    // One surface per token, in order, by construction.
-    Ok(tokens
-        .into_iter()
-        .zip(aligned.into_units())
-        .map(|(token, text)| crate::chat_ops::fa::utr::AsrTimingToken { text, ..token })
-        .collect())
+) -> Result<crate::chat_ops::fa::utr::PreparedUtrTokens, crate::error::ServerError> {
+    crate::chat_ops::fa::utr::PreparedUtrTokens::prepare(tokens, lang).map_err(|refusal| {
+        crate::error::ServerError::Validation(format!(
+            "UTR could not normalize its tokens: {refusal}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -979,6 +984,7 @@ mod utr_token_conversion_tests {
         let converted = normalize_utr_tokens(vec![timed("这个", 0), timed("来", 200)], &nan)
             .expect("conversion preserves character counts");
         let summary: Vec<_> = converted
+            .tokens()
             .iter()
             .map(|t| (t.text.as_str(), t.start_ms, t.end_ms))
             .collect();
@@ -986,7 +992,7 @@ mod utr_token_conversion_tests {
 
         let untouched = normalize_utr_tokens(vec![timed("这个", 0)], &LanguageCode3::eng())
             .expect("no normalization to refuse");
-        assert_eq!(untouched[0].text, "这个");
+        assert_eq!(untouched.tokens()[0].text, "这个");
     }
 
     fn token(text: &str, start_s: Option<f64>, end_s: Option<f64>) -> AsrToken {
@@ -1402,7 +1408,12 @@ mod utr_evidence_cache_tests {
         let lang = crate::api::LanguageCode3::eng();
         let models = crate::model_manifest::utr_pinned_models(engine, &lang)
             .expect("a UTR engine resolves a pinned composition");
-        let eligibility = UtrAsrCacheNamespace::for_pinned_plan(engine, &models);
+        let eligibility = UtrAsrCacheNamespace::for_pinned_plan(
+            engine,
+            &models,
+            &crate::transcribe::SingleAsrLanguage::One(lang.clone()),
+        )
+        .expect("the engine can decode English");
         assert!(
             matches!(eligibility, UtrAsrCacheEligibility::Pinned(_)),
             "every UTR engine composition is fully pinned in this build"

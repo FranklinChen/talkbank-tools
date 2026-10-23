@@ -279,7 +279,6 @@ pub(crate) async fn process_fa_incremental(
         },
     );
     let (decision_records, timing_effects) = written_decisions.into_evidence();
-    let decision_traces = decision_records.into_iter().map(Into::into).collect();
     let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
     // The media/timing transition and post-validation run in
@@ -290,7 +289,7 @@ pub(crate) async fn process_fa_incremental(
         group_evidence,
         engine: fa_params.engine.as_wire_name().to_owned(),
         cache_namespace: services.cache_namespace.clone(),
-        decisions: decision_traces,
+        decisions: decision_records,
         timing_decisions,
         gap_healing: fa_params.gap_healing,
         fallback_events,

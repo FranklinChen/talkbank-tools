@@ -61,8 +61,13 @@ const CATEGORY_GROUP: Record<FailureCategory, ErrorGroupKind> = {
   // A configuration/credential condition on the SERVER's machine (a gated
   // Hugging Face model, a missing token): neither bad input nor a defect.
   model_access_denied: "model_access",
+  local_runtime: "engine",
   provider_transient: "engine",
   provider_terminal: "engine",
+  // The provider account's quota is used up: no retry helps until restored.
+  provider_quota_exhausted: "engine",
+  // The provider refuses the account itself (key, permission, credit).
+  provider_account_refused: "engine",
   // A deterministic worker start-up failure (model load, missing language
   // pack); the message is the worker's own and actionable.
   worker_bootstrap: "worker_setup",

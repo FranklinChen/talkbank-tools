@@ -2,69 +2,80 @@ use super::BuildChatError;
 use talkbank_model::Location;
 use talkbank_model::model::{
     BracketedContent, BracketedItem, DependentTier, LanguageCode, Line, Retrace, RetraceKind,
-    Separator, Terminator, Utterance, UtteranceContent, Word,
+    Separator, Utterance, UtteranceContent, Word,
 };
 use talkbank_parser::TreeSitterParser;
 
 use crate::asr_postprocess;
 
-use super::{DescribedTiming, TranscriptDescription, WordDesc};
+use super::{DescribedTiming, SynthesizedEnd, TranscriptDescription, UtteranceBody, WordDesc};
+
+/// The built utterance lines, with every one whose terminator the
+/// description's producer synthesized.
+pub(super) struct BuiltUtterances {
+    pub(super) lines: Vec<Line>,
+    pub(super) synthesized_ends: Vec<SynthesizedEnd>,
+}
 
 pub(super) fn build_utterance_lines(
     desc: &TranscriptDescription,
     parser: &TreeSitterParser,
-    langs: &[LanguageCode],
-    primary_lang: &LanguageCode,
-) -> Result<Vec<Line>, BuildChatError> {
+) -> Result<BuiltUtterances, BuildChatError> {
+    let primary_lang = desc.langs.primary();
     let mut lines = Vec::with_capacity(desc.utterances.len());
+    let mut synthesized_ends = Vec::new();
 
     for utterance in &desc.utterances {
-        let words = utterance.words.as_deref().unwrap_or(&[]);
-        let should_apply_language_override = !words.is_empty();
-
-        let built = if words.is_empty() {
-            utterance.text.as_ref().map_or(Ok(None), |text| {
-                build_text_utterance(parser, &utterance.speaker, text, utterance.timing, langs)
-            })?
-        } else {
-            build_word_utterance(parser, &utterance.speaker, words, desc.write_wor)?
-        };
-
-        if let Some(mut line) = built {
-            if should_apply_language_override {
-                apply_utterance_language_override(
-                    &mut line,
-                    utterance.lang.as_deref(),
-                    primary_lang,
-                )?;
+        let built = match &utterance.body {
+            UtteranceBody::Text { text, timing } => {
+                build_text_utterance(parser, &utterance.speaker, text, *timing, primary_lang)?
             }
-            lines.push(line);
-        }
+            UtteranceBody::Words { words, end } => {
+                let built = build_word_utterance(&utterance.speaker, words, end, desc.write_wor);
+                match built {
+                    Some(mut line) => {
+                        apply_utterance_language_override(
+                            &mut line,
+                            utterance.lang.as_ref(),
+                            primary_lang,
+                        );
+                        if let asr_postprocess::UtteranceEnd::Synthesized(_) = end {
+                            // Its position among the lines written, which is
+                            // what a reader of the CHAT file counts.
+                            synthesized_ends.push(SynthesizedEnd {
+                                utterance: lines.len() + 1,
+                                speaker: utterance.speaker.clone(),
+                            });
+                        }
+                        Some(line)
+                    }
+                    None => None,
+                }
+            }
+        };
+        lines.extend(built);
     }
 
-    Ok(lines)
+    Ok(BuiltUtterances {
+        lines,
+        synthesized_ends,
+    })
 }
 
 fn apply_utterance_language_override(
     line: &mut Line,
-    utterance_lang: Option<&str>,
+    utterance_lang: Option<&LanguageCode>,
     primary_lang: &LanguageCode,
-) -> Result<(), BuildChatError> {
+) {
     if let Some(utterance_lang) = utterance_lang
-        && utterance_lang != primary_lang.as_str()
+        && utterance_lang != primary_lang
         && let Line::Utterance(utterance) = line
     {
-        let code =
-            LanguageCode::new(utterance_lang).map_err(|source| BuildChatError::LanguageCode {
-                code: utterance_lang.to_string(),
-                source,
-            })?;
         utterance.main.content.language_code = Some(talkbank_model::model::LanguagePrecode::new(
             Location::Unlocated,
-            code,
+            utterance_lang.clone(),
         ));
     }
-    Ok(())
 }
 
 /// If `text` is a tag-marker separator (comma, tag marker, vocative marker),
@@ -102,7 +113,7 @@ fn build_text_utterance(
     speaker: &str,
     text: &str,
     timing: DescribedTiming,
-    langs: &[LanguageCode],
+    primary_lang: &LanguageCode,
 ) -> Result<Option<Line>, BuildChatError> {
     let text = text.trim();
     if text.is_empty() {
@@ -117,7 +128,10 @@ fn build_text_utterance(
         DescribedTiming::Untimed(_) => String::new(),
     };
 
-    let lang_code = langs.first().map(LanguageCode::as_str).unwrap_or("eng");
+    // The transcript's own primary language, parsed where the description was
+    // built: the mini-document states the language the caller declared,
+    // never an invented one.
+    let lang_code = primary_lang.as_str();
     let mini_chat = format!(
         "@UTF8\n@Begin\n@Languages:\t{lang}\n@Participants:\t{speaker} Participant Participant\n\
          @ID:\t{lang}|corpus_name|{speaker}|||||Participant|||\n*{speaker}:\t{text}{bullet}\n@End\n",
@@ -143,22 +157,6 @@ fn build_text_utterance(
     Ok(None)
 }
 
-/// Admit a word only after a clean fragment parse, including for JSON input.
-fn parse_asr_word(parser: &TreeSitterParser, text: &str) -> Result<Word, BuildChatError> {
-    let errors = talkbank_model::ErrorCollector::new();
-    let outcome = parser.parse_word_fragment(text, 0, &errors);
-    let diagnostics = errors.into_vec();
-    match outcome {
-        talkbank_model::ParseOutcome::Parsed(word) if diagnostics.is_empty() => Ok(word),
-        talkbank_model::ParseOutcome::Parsed(_) | talkbank_model::ParseOutcome::Rejected => {
-            Err(BuildChatError::Word {
-                text: text.to_owned(),
-                diagnostics,
-            })
-        }
-    }
-}
-
 /// The span an utterance's timed words cover so far: none, or the positive
 /// interval covering every one of them. Absence is the only "untimed" state,
 /// so there is no separate has-timing flag to keep in step with it.
@@ -175,20 +173,15 @@ impl UtteranceSpan {
     }
 }
 
-/// Parse a word and attach inline bullet timing, updating utterance-level
-/// timing bookkeeping only after successful word admission.
-fn parse_and_time_word(
-    parser: &TreeSitterParser,
-    text: &str,
-    timing: DescribedTiming,
-    span: &mut UtteranceSpan,
-) -> Result<Word, BuildChatError> {
-    let mut word = parse_asr_word(parser, text)?;
+/// A parsed word with its inline bullet timing, updating utterance-level
+/// timing bookkeeping.
+fn timed_word(word: &Word, timing: DescribedTiming, span: &mut UtteranceSpan) -> Word {
+    let mut word = word.clone();
     if let Some(interval) = timing.positive() {
         word.inline_bullet = Some(interval.bullet());
         span.cover(interval);
     }
-    Ok(word)
+    word
 }
 
 /// Build a word-level utterance from individual word tokens.
@@ -209,54 +202,45 @@ fn parse_and_time_word(
 /// - A run of N > 1 Retrace words with differing text → one bracketed
 ///   annotated-group node (`<I want> [/] I want cookie`).
 fn build_word_utterance(
-    parser: &TreeSitterParser,
     speaker: &str,
     words: &[WordDesc],
+    end: &asr_postprocess::UtteranceEnd,
     write_wor: bool,
-) -> Result<Option<Line>, BuildChatError> {
+) -> Option<Line> {
     let mut content: Vec<UtteranceContent> = Vec::new();
     let mut span = UtteranceSpan::default();
 
-    let last_text = words.last().map(|word| word.text.as_str()).unwrap_or(".");
-    let terminator = Terminator::try_from_chat_str(Location::Unlocated, last_text).unwrap_or(
-        Terminator::Period {
-            location: Location::Unlocated,
-        },
-    );
+    // The description states how the utterance ends, as a field: the
+    // terminator the recognizer observed, or the period a synthesized end is
+    // written with. Every word is content.
+    let terminator = end.terminator();
 
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
-        let text = word.text.as_str().trim();
-
-        if text.is_empty() {
-            index += 1;
-            continue;
+        match word.text.content() {
+            asr_postprocess::ChatWordContent::Separator(separator) => {
+                content.push(UtteranceContent::Separator(separator.clone()));
+                index += 1;
+            }
+            asr_postprocess::ChatWordContent::Word(_)
+                if word.kind == asr_postprocess::WordKind::Retrace =>
+            {
+                index = push_retrace_run(words, index, &mut content, &mut span);
+            }
+            asr_postprocess::ChatWordContent::Word(parsed) => {
+                content.push(UtteranceContent::Word(Box::new(timed_word(
+                    parsed,
+                    word.timing,
+                    &mut span,
+                ))));
+                index += 1;
+            }
         }
-
-        if Terminator::is_chat_terminator(text) {
-            index += 1;
-            continue;
-        }
-
-        if let Some(separator) = tag_marker_separator(text) {
-            content.push(UtteranceContent::Separator(separator));
-            index += 1;
-            continue;
-        }
-
-        if word.kind == asr_postprocess::WordKind::Retrace {
-            index = push_retrace_run(parser, words, index, &mut content, &mut span)?;
-            continue;
-        }
-
-        let parsed = parse_and_time_word(parser, text, word.timing, &mut span)?;
-        content.push(UtteranceContent::Word(Box::new(parsed)));
-        index += 1;
     }
 
     if content.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     let mut main = talkbank_model::model::MainTier::new(
@@ -278,33 +262,30 @@ fn build_word_utterance(
             .push(DependentTier::Wor(wor_tier).into());
     }
 
-    Ok(Some(Line::utterance(utterance)))
+    Some(Line::utterance(utterance))
 }
 
+/// Push the run of retrace words starting at `start_index` (a separator
+/// ends the run: it is not a word, so it cannot be retraced) and return the
+/// index after it.
 fn push_retrace_run(
-    parser: &TreeSitterParser,
     words: &[WordDesc],
     start_index: usize,
     content: &mut Vec<UtteranceContent>,
     span: &mut UtteranceSpan,
-) -> Result<usize, BuildChatError> {
+) -> usize {
+    let mut parsed: Vec<Word> = Vec::new();
     let mut end_index = start_index;
-    while end_index < words.len() && words[end_index].kind == asr_postprocess::WordKind::Retrace {
+    while let Some(retrace_word) = words.get(end_index)
+        && retrace_word.kind == asr_postprocess::WordKind::Retrace
+        && let asr_postprocess::ChatWordContent::Word(word) = retrace_word.text.content()
+    {
+        parsed.push(timed_word(word, retrace_word.timing, span));
         end_index += 1;
     }
 
-    let mut parsed: Vec<Word> = Vec::new();
-    for retrace_word in &words[start_index..end_index] {
-        let text = retrace_word.text.as_str().trim();
-        if text.is_empty() {
-            continue;
-        }
-        let word = parse_and_time_word(parser, text, retrace_word.timing, span)?;
-        parsed.push(word);
-    }
-
     push_retrace_content(parsed, content);
-    Ok(end_index)
+    end_index
 }
 
 fn push_retrace_content(parsed: Vec<Word>, content: &mut Vec<UtteranceContent>) {

@@ -90,6 +90,48 @@ struct Feature {
     source: FeatSource,
 }
 
+/// The one FEATS splitter: the `(name, value)` pairs of
+/// `Name=Value|Name=Value`. An empty string or UD's `_` is no pairs; a pair
+/// without `=` is not a feature and is skipped with a warning (a curated
+/// table cannot contain one: [`CuratedFeats::new`] refuses it at compile
+/// time). The value is everything after the first `=`, commas included.
+fn split_pairs(text: &str) -> impl Iterator<Item = (&str, &str)> {
+    text.split('|')
+        .filter(|pair| !pair.is_empty() && *pair != "_")
+        .filter_map(move |pair| {
+            let split = pair.split_once('=');
+            if split.is_none() {
+                tracing::warn!(
+                    pair,
+                    feats = text,
+                    "FEATS pair without `=` is not a feature"
+                );
+            }
+            split
+        })
+}
+
+/// Whether one value of a feature (one comma-separated part of it) is model
+/// padding: the one test (`PaddingValue::admit`), which the worker's repair
+/// (`repair_feats`) also reads.
+fn is_padding_value(value: &str) -> bool {
+    batchalign_types::worker_v2::PaddingValue::admit(value).is_some()
+}
+
+/// An analysis arrived with a padding value the worker should have removed.
+///
+/// Typed rather than logged and dropped: dropping it here would be a second,
+/// silent repair beside the worker's reported one, and the file's provenance
+/// would undercount what was changed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "FEATS value {value:?} of feature {name:?} is model padding, which the worker's repair boundary must remove and report before sending the analysis"
+)]
+pub struct UnrepairedPaddingFeature {
+    name: Box<str>,
+    value: Box<str>,
+}
+
 /// A feature value borrowed from a word, with where it came from. Only
 /// [`WordFeatures::get`] makes one, so no literal can pass for a value either
 /// source assigned.
@@ -113,9 +155,10 @@ impl<'a> FeatValue<'a> {
 
 /// A word's features in FEATS order, each with its source.
 ///
-/// Constructed only by [`Self::parse`] (from the analysis, or from a curated
-/// table), so every value has exactly one source and a word's features are
-/// replaced whole by each writer.
+/// Constructed only by [`Self::from_analysis`] and [`CuratedFeats::features`],
+/// so every value has exactly one source, a word's features are replaced
+/// whole by each writer, and no value is model padding (the first refuses one
+/// at run time, the second at compile time).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordFeatures(Vec<Feature>);
 
@@ -123,37 +166,40 @@ impl WordFeatures {
     /// No features.
     pub(super) const NONE: Self = Self(Vec::new());
 
-    /// The one FEATS splitter: `Name=Value|Name=Value`, every value from
-    /// `source`. An empty string or UD's `_` is no features; a later pair with
-    /// a repeated name overrides the earlier one; a pair without `=` is not a
-    /// feature and is skipped (the analysis boundary logs it, and a curated
-    /// table cannot contain one: [`CuratedFeats::new`] refuses it at compile
-    /// time). The value is everything after the first `=`.
-    pub(super) fn parse(text: &str, source: FeatSource) -> Self {
-        let mut features: Vec<Feature> = Vec::new();
-        for pair in text.split('|') {
-            if pair.is_empty() || pair == "_" {
-                continue;
+    /// The analysis's FEATS column, every value [`FeatSource::Analysis`]: the
+    /// only route by which an engine's features become a word's.
+    ///
+    /// Refuses a padding value ([`UnrepairedPaddingFeature`]). The worker's
+    /// repair boundary removes padding values and reports each removal, so
+    /// one arriving here is a defect in the worker. Refusing it here, the
+    /// one runtime constructor, is what makes a padding value unrepresentable
+    /// in a [`WordFeatures`] and so unwritable into `%mor`.
+    pub(super) fn from_analysis(text: &str) -> Result<Self, UnrepairedPaddingFeature> {
+        let mut features = Self::NONE;
+        for (name, value) in split_pairs(text) {
+            if value.split(',').any(is_padding_value) {
+                return Err(UnrepairedPaddingFeature {
+                    name: name.into(),
+                    value: value.into(),
+                });
             }
-            let Some((name, value)) = pair.split_once('=') else {
-                tracing::warn!(
-                    pair,
-                    feats = text,
-                    "FEATS pair without `=` is not a feature"
-                );
-                continue;
-            };
-            let feature = Feature {
-                name: name.into(),
-                value: value.into(),
-                source,
-            };
-            match features.iter_mut().find(|f| *f.name == *name) {
-                Some(existing) => *existing = feature,
-                None => features.push(feature),
-            }
+            features.insert(name, value, FeatSource::Analysis);
         }
-        Self(features)
+        Ok(features)
+    }
+
+    /// Set `name` to `value`: a later pair with a repeated name overrides the
+    /// earlier one, in the earlier one's position.
+    fn insert(&mut self, name: &str, value: &str, source: FeatSource) {
+        let feature = Feature {
+            name: name.into(),
+            value: value.into(),
+            source,
+        };
+        match self.0.iter_mut().find(|f| *f.name == *name) {
+            Some(existing) => *existing = feature,
+            None => self.0.push(feature),
+        }
     }
 
     /// The value of `name`, with where it came from.
@@ -229,9 +275,9 @@ impl fmt::Display for WordFeatures {
 /// A curated table's feature bundle: a FEATS string compiled into the binary.
 ///
 /// [`Self::new`] is a `const fn` that refuses a malformed string, so a table
-/// entry with a pair lacking `=`, an empty name or an empty value fails to
-/// compile. Being `&'static str`, it cannot be built from data received at run
-/// time.
+/// entry with a pair lacking `=`, an empty name, an empty value or a value
+/// beginning with `<` (the start of model padding) fails to compile. Being
+/// `&'static str`, it cannot be built from data received at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CuratedFeats(&'static str);
 
@@ -261,15 +307,28 @@ impl CuratedFeats {
                 eq = None;
             } else if bytes[i] == b'=' && eq.is_none() {
                 eq = Some(i);
+            } else if bytes[i] == b'<'
+                && let Some(at) = eq
+            {
+                // `<` opening a value, or one comma-separated part of it.
+                assert!(
+                    at + 1 != i && bytes[i - 1] != b',',
+                    "curated FEATS value that begins like model padding"
+                );
             }
             i += 1;
         }
         Self(feats)
     }
 
-    /// The table's features, every one curated.
+    /// The table's features, every one curated. No padding check: [`Self::new`]
+    /// refused padding when the table was compiled.
     pub(super) fn features(self) -> WordFeatures {
-        WordFeatures::parse(self.0, FeatSource::Curated)
+        let mut features = WordFeatures::NONE;
+        for (name, value) in split_pairs(self.0) {
+            features.insert(name, value, FeatSource::Curated);
+        }
+        features
     }
 }
 
@@ -277,22 +336,55 @@ impl CuratedFeats {
 mod tests {
     use super::*;
 
+    /// An analysis's FEATS that carries no padding.
+    fn analysis(text: &str) -> WordFeatures {
+        WordFeatures::from_analysis(text).expect("test FEATS carry no padding")
+    }
+
+    /// Padding is refused whole value or comma-separated part, and the
+    /// refusal names both, so the worker defect can be found.
+    #[test]
+    fn a_padding_value_is_refused_wherever_it_sits() {
+        for (feats, name, value) in [
+            ("Case=<PAD>|Number=Sing", "Case", "<PAD>"),
+            ("Number=Sing|Case=Nom,<UNK>", "Case", "Nom,<UNK>"),
+        ] {
+            assert_eq!(
+                WordFeatures::from_analysis(feats),
+                Err(UnrepairedPaddingFeature {
+                    name: name.into(),
+                    value: value.into(),
+                }),
+                "{feats}"
+            );
+        }
+    }
+
+    /// Only an angle-bracketed placeholder is padding; a value merely
+    /// containing a bracket, or a lone one, is the analysis's to keep.
+    #[test]
+    fn a_value_that_is_not_a_placeholder_is_kept() {
+        assert_eq!(analysis("Foo=a<b>").value(FeatName::VerbForm), None);
+        assert_eq!(analysis("Foo=a<b>").to_string(), "Foo=a<b>");
+        assert_eq!(analysis("Foo=<").to_string(), "Foo=<");
+    }
+
     #[test]
     fn parse_keeps_commas_inside_a_value() {
-        let feats = WordFeatures::parse("PronType=Int,Rel|Person=3", FeatSource::Analysis);
+        let feats = analysis("PronType=Int,Rel|Person=3");
         assert_eq!(feats.value(FeatName::PronType), Some("Int,Rel"));
         assert_eq!(feats.value(FeatName::Person), Some("3"));
     }
 
     #[test]
     fn parse_reads_no_features_from_empty_or_underscore() {
-        assert!(WordFeatures::parse("", FeatSource::Analysis).is_empty());
-        assert!(WordFeatures::parse("_", FeatSource::Analysis).is_empty());
+        assert!(analysis("").is_empty());
+        assert!(analysis("_").is_empty());
     }
 
     #[test]
     fn a_later_duplicate_overrides_and_a_pair_without_equals_is_skipped() {
-        let feats = WordFeatures::parse("Number=Sing|Bogus|Number=Plur", FeatSource::Analysis);
+        let feats = analysis("Number=Sing|Bogus|Number=Plur");
         assert_eq!(feats.value(FeatName::Number), Some("Plur"));
         assert_eq!(feats.to_string(), "Number=Plur");
     }
@@ -306,7 +398,7 @@ mod tests {
         );
         let mut adopted = CuratedFeats::new("VerbForm=Fin").features();
         adopted.adopt(
-            &WordFeatures::parse("Person=3|Number=Sing|Case=Nom", FeatSource::Analysis),
+            &analysis("Person=3|Number=Sing|Case=Nom"),
             &[FeatName::Person, FeatName::Number],
         );
         assert_eq!(adopted.to_string(), "Number=Sing|Person=3|VerbForm=Fin");
@@ -325,7 +417,7 @@ mod tests {
     fn adopt_never_overrides_what_the_table_fixed() {
         let mut feats = CuratedFeats::new("Number=Sing|Person=3|VerbForm=Fin").features();
         feats.adopt(
-            &WordFeatures::parse("Number=Plur|Person=1", FeatSource::Analysis),
+            &analysis("Number=Plur|Person=1"),
             &[FeatName::Person, FeatName::Number],
         );
         assert_eq!(feats.to_string(), "Number=Sing|Person=3|VerbForm=Fin");

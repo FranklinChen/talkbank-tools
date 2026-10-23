@@ -1,7 +1,7 @@
 # Cantonese Engines
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:20 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Batchalign includes alternative ASR and forced alignment engines for Cantonese.
 These are built-in modules shipped in the base package, selected with the
@@ -169,10 +169,10 @@ Three stages can each end with no words, and they mean different things:
   normalize. Check that the engine has a Cantonese model and that `--lang yue`
   reached it.
 - **post-processing kept no utterance** from the words the engine returned.
-- **CHAT assembly kept no utterance line.** The words were all terminators or
-  separators. This is the shape a provider produces when it returns only CJK
-  sentence marks: each `。` becomes a bare `.`, and an utterance of nothing but
-  a terminator has no content to write.
+- **CHAT assembly kept no utterance line.** No utterance body had content to
+  write. Closing marks are separate end fields, not words. A provider answer
+  containing only CJK sentence marks is normally rejected earlier, when
+  post-processing keeps no content utterance.
 
 Until 2026-09-16 the first of these produced a completed job and an empty file.
 

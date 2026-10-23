@@ -24,6 +24,10 @@ enum Stop<E> {
 trait PackedControl: WorkControl {
     fn charge(&self, units: usize) -> Result<(), Self::Error>;
     fn profile_width(&self, _words: usize) {}
+    /// The stop a packed profile operation returns when its arithmetic
+    /// contradicts the search's own invariants: checked in every build and
+    /// refused, never only debug-asserted.
+    fn refuse(&self, inconsistency: LocalInterleavingInconsistency) -> Self::Error;
 }
 trait CandidateControl: PackedControl {
     fn candidate(&self) -> Result<(), Self::Error>;
@@ -32,6 +36,9 @@ trait CandidateControl: PackedControl {
 impl PackedControl for Uninterrupted {
     fn charge(&self, _: usize) -> Result<(), Self::Error> {
         Ok(())
+    }
+    fn refuse(&self, inconsistency: LocalInterleavingInconsistency) -> Self::Error {
+        panic!("an uninterrupted test search contradicted itself: {inconsistency:?}")
     }
 }
 

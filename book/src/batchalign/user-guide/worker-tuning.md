@@ -1,7 +1,7 @@
 # Worker Tuning
 
 **Status:** Current
-**Last updated:** 2026-09-15 18:27 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This page explains how the server decides how many workers to run, how memory
 budgets work, and how to tune the server for your hardware.
@@ -30,12 +30,11 @@ GPU-heavy commands (`transcribe`, `align`, `benchmark`) are capped by both
 > sets `force_cpu = true` on the same hosts so workers skip GPU
 > detection entirely.
 >
-> PyTorch releases the GIL only during CUDA/MPS native calls; with
-> MPS excluded for batchalign3, every Whisper inference is GIL-bound
-> CPU work and there is no compute parallelism to gain. A higher
-> value lets multiple `execute_v2` calls into a single Python
-> process where they fight for cores, slowing each other down by
-> the contention factor. Verify your host's resolved values with
+> CPU inference already uses native compute threads. A higher value lets
+> multiple `execute_v2` calls into a single Python process and can
+> oversubscribe CPU cores; the GIL alone does not determine inference
+> parallelism. MPS is excluded by default, with an explicit opt-in for
+> supported ASR/FA loaders. Verify your host's resolved values with
 > `batchalign3 doctor --check` (see [Doctor](doctor.md)).
 >
 > The Rust-side `dispatch_semaphore` mirrors `gpu_thread_pool_size`

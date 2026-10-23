@@ -1,7 +1,7 @@
 # Model Downloads and Caching (Developer Reference)
 
 **Status:** Current
-**Last updated:** 2026-09-16 09:28 EDT
+**Last updated:** 2026-10-24 18:07 EDT
 
 This page documents how batchalign3 downloads, caches, and verifies ML
 models, the contributor-facing complement to the
@@ -45,7 +45,7 @@ Source verified by reading code on 2026-05-06.
 | # | Family | Load site | Library | Cache root |
 |---|---|---|---|---|
 | 1 | Stanza morphosyntax | `batchalign/worker/_stanza_loading.py:99` `load_stanza_models` | `stanza.Pipeline(download_method=REUSE_RESOURCES)` | Stanza `DEFAULT_MODEL_DIR` |
-| 2 | Stanza utseg | `_stanza_loading.py:280` `load_utseg_builder` | (same) | (same) |
+| 2 | Stanza utseg (fallback route, once per language) | `_stanza_loading.py` `load_utseg_pipeline` | (same) | (same) |
 | 3 | Stanza Chinese retok | `_stanza_loading.py:235` `load_stanza_retokenize_model` | (same) | (same) |
 | 4 | Stanza coref (lazy) | `batchalign/inference/coref.py:66-68` | `stanza.Pipeline(...)` | (same) |
 | 5 | Whisper ASR | `batchalign/inference/asr.py:119` `load_whisper_asr` | `transformers.pipeline + WhisperProcessor.from_pretrained` | HF |

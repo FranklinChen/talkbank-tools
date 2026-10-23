@@ -14,8 +14,8 @@ pub(super) struct Geometry {
     pub(super) cells: usize,
 }
 
-pub(super) fn work_refusal(required_at_least: usize) -> LocalInterleavingRefusal {
-    LocalInterleavingRefusal::WorkBudgetExceeded {
+pub(super) fn work_refusal(required_at_least: usize) -> LocalInterleavingBudget {
+    LocalInterleavingBudget::WorkBudgetExceeded {
         phase: LocalInterleavingWorkPhase::PackedSearch,
         required_at_least,
     }
@@ -40,7 +40,9 @@ impl Geometry {
     ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
         let count = graph.order.len();
         if count.saturating_add(1) > SCORE_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
+            return Ok(Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::MemoryBudgetExceeded,
+            )));
         }
         let width = match representation {
             Representation::Full => n,
@@ -168,10 +170,14 @@ impl Geometry {
         // There is always at least one stride for the nonempty graph.
         let geometry = best;
         if geometry.work > WORK_CELLS {
-            return Ok(Err(work_refusal(geometry.work)));
+            return Ok(Err(LocalInterleavingRefusal::Budget(work_refusal(
+                geometry.work,
+            ))));
         }
         if geometry.cells > SCORE_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
+            return Ok(Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::MemoryBudgetExceeded,
+            )));
         }
         Ok(Ok(geometry))
     }

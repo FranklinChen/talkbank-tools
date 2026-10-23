@@ -14,6 +14,7 @@ mod progress_preamble;
 mod protocol;
 pub mod spawn;
 
+pub(crate) use config::WorkerLaunch;
 pub use config::{WorkerConfig, WorkerRuntimeConfig};
 pub use spawn::spawn_tcp_daemon;
 // The wire envelopes and the reported-failure mapping are shared by every

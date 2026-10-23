@@ -1,7 +1,7 @@
 # NLP Engine Text Input Expectations
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Comprehensive reference for what text format each NLP engine/tool in batchalign3
 expects as input, what preprocessing is applied, and what would break if raw
@@ -186,7 +186,8 @@ combined = "\n\n".join(texts)
 
 **Preprocessing pipeline (Rust -> Python):**
 
-1. **Rust parses CHAT** into AST via `parse_lenient()`
+1. **Rust admits CHAT** through `ParsedFile::parse()`, binding the selected
+   analysis replacement plan to the same source parse and validating retained input
 2. **Rust extracts words** via `collect_utterance_content()` using `TierDomain::Mor`
 3. Each word's `cleaned_text()` is collected -- this strips all CHAT markers
 4. Word texts are sent as `Vec<String>` in the `MorphosyntaxBatchItem`
@@ -199,17 +200,17 @@ The Python `morphosyntax.py` explicitly avoids stripping parentheses (line
 handles CHAT notation").
 
 **Stanza pipeline configuration (`batchalign/worker/_stanza_loading.py`):**
-Per-language MWT eligibility is **capability-driven** via
-`should_request_mwt(alpha2, get_cached_capability_table())` at
-`_stanza_loading.py:40`; languages where the cached catalog reports
-`has_mwt=True` get the postprocessor and `tokenize_no_ssplit=True`,
-others fall back to `tokenize_pretokenized=True`. The earlier
-hardcoded `MWT_LANGS` allowlist was deleted.
+Per-language MWT eligibility is **capability-driven**: the loader reads
+the language's catalog entry (`language_capability(lang)`); languages
+where the cached catalog reports
+`has("mwt")` get the postprocessor and `tokenize_no_ssplit=True`,
+others fall back to `tokenize_pretokenized=True`. No allowlist of MWT
+languages exists.
 
 | Language class | `tokenize_pretokenized` | `tokenize_no_ssplit` | `tokenize_postprocessor` | MWT |
 |---|---|---|---|---|
-| `should_request_mwt() == False` (e.g. Japanese, Chinese, Korean, Swedish today) | `True` | `True` | None | No |
-| `should_request_mwt() == True` (e.g. English, French, German, Italian, Hebrew, Greek) | (model decides) | `True` | Custom realigner | Yes (English uses `gum`) |
+| entry without `mwt` (e.g. Japanese, Chinese, Korean, Swedish today) | `True` | `True` | None | No |
+| entry with `mwt` (e.g. English, French, German, Italian, Hebrew, Greek) | (model decides) | `True` | Custom realigner | Yes (English uses `gum`) |
 
 **Key Stanza behaviors:**
 
@@ -279,15 +280,17 @@ doc = nlp(" ".join(item.words))
 cleaned text from Rust extraction, joined with spaces in Python.
 
 **Stanza pipeline:** Configured with `tokenize_pretokenized=True` (preserves
-word boundaries) and constituency parsing enabled. The pipeline is constructed
-per-request via `build_stanza_config_from_langs()` in `_stanza_loading.py`.
+word boundaries) and constituency parsing enabled. It is built once per worker
+and language by `load_utseg_pipeline()` in `_stanza_loading.py`, through the
+shared pipeline cache (key `{lang}:utseg`), and every batch calls it through
+that entry's guard.
 
 **Output:** Constituency tree bracket notation strings. Rust parses the tree
 strings and computes word-to-utterance assignments.
 
 **Source files:**
 - `batchalign/inference/utseg.py` (Python: `batch_infer_utseg()`)
-- `batchalign/worker/_stanza_loading.py` (Python: `load_utseg_builder()`)
+- `batchalign/worker/_stanza_loading.py` (Python: `load_utseg_pipeline()`)
 - `crates/batchalign/src/utseg.rs` (Rust: assignment computation)
 
 ---

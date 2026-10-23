@@ -57,7 +57,6 @@ fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
         lang: LanguageCode3::eng(),
         items,
         mwt: BTreeMap::new(),
-        allow_stanza_fallback: false,
     }
 }
 

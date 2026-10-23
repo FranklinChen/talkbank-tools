@@ -1,7 +1,7 @@
 # Adding a New Command
 
 **Status:** Current
-**Last updated:** 2026-10-06 15:08 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This guide walks through adding a new batchalign3 command end-to-end.
 
@@ -14,7 +14,7 @@ one `CatalogEntry` in `recipe_runner/catalog.rs` naming a `Recipe` in
 | `CommandFamily` | Best example | What to read |
 |--------|-------------|---------------|
 | `AudioSequential` (one media file at a time) | **`align`** | `ALIGN_RECIPE`, `runner/dispatch/fa_pipeline.rs` |
-| `BatchedText` (pooled batch-infer) | `morphotag` | `MORPHOTAG_RECIPE`, `runner/dispatch/infer_batched.rs` |
+| `BatchedText` (pooled batch-infer) | `morphotag` | `MORPHOTAG_RECIPE`, `execution/morphotag/mod.rs` |
 | `ReferenceProjection` (compare against gold) | `compare` | `COMPARE_RECIPE`, `compare.rs` |
 | `MediaAnalysis` (non-CHAT artifact out) | `opensmile` | `OPENSMILE_RECIPE`, `runner/dispatch/media_analysis_v2.rs` |
 | `Composite` (reuses other recipes) | `benchmark` | `BENCHMARK_RECIPE`, `runner/dispatch/benchmark_pipeline.rs` |
@@ -65,13 +65,13 @@ The key files, in the order you'll edit them:
 
 | Step | File | What you add |
 |------|------|-------------|
-| 1 | `batchalign-types/src/domain.rs` | `ReleasedCommand::YourCommand` variant |
-| 2 | `batchalign/src/recipe_runner/recipes.rs` | `YOUR_COMMAND_RECIPE`: the ordered stages |
-| 3 | `batchalign/src/recipe_runner/catalog.rs` | one `CatalogEntry` declaring every field |
+| 1 | `crates/batchalign-types/src/domain.rs` | `ReleasedCommand::YourCommand` variant |
+| 2 | `crates/batchalign/src/recipe_runner/recipes.rs` | `YOUR_COMMAND_RECIPE`: the ordered stages |
+| 3 | `crates/batchalign/src/recipe_runner/catalog.rs` | one `CatalogEntry` declaring every field |
 | 4 | `batchalign/src/your_command.rs` or shared runner code | Core logic (ML dispatch, post-processing) |
-| 5 | `batchalign/src/cli/args/commands.rs` | CLI arg struct |
-| 6 | `batchalign/src/cli/args/mod.rs` | `CommandProfile` match arm |
-| 7 | `batchalign/src/cli/args/options.rs` | `CommandOptions` variant + `build_typed_options` arm |
+| 5 | `crates/batchalign/src/cli/args/commands.rs` | CLI arg struct |
+| 6 | `crates/batchalign/src/cli/args/mod.rs` | `CommandProfile` match arm |
+| 7 | `crates/batchalign/src/cli/args/options.rs` | `CommandOptions` variant + `build_typed_options` arm |
 
 Steps 2 and 3 are the whole registration story. Three tests fail until they are
 done, each naming what is missing: `every_released_command_has_a_spec` (no

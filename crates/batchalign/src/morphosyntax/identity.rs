@@ -1,9 +1,10 @@
 //! What the workers reported about each morphosyntax response a run applies:
-//! which Stanza model produced it, and which relations it repaired inside it.
+//! which Stanza model produced it, and what it repaired inside it.
 //!
 //! The worker reports both on every analyzed item
 //! (`MorphosyntaxModelIdentityV2`: Stanza version, language, and the pipeline
-//! variant that ran; `UdRelationRepairV2`: one per relation it rewrote). The
+//! variant that ran; `UdRelationRepairV2`: one per relation it rewrote;
+//! `UdFeatureRepairV2`: one per feature value it removed). The
 //! server admits them per item into an [`AdmittedMorphosyntaxResponse`], and
 //! the provenance comment names the distinct models behind the responses that
 //! were actually applied and counts the repairs inside them
@@ -19,7 +20,7 @@ use std::num::NonZeroUsize;
 use crate::api::{StampJoiner, StampSafeText};
 use crate::chat_ops::nlp::UdResponse;
 use crate::provenance::EngineNames;
-use crate::types::worker_v2::{MorphosyntaxModelIdentityV2, UdRelationRepairV2};
+use crate::types::worker_v2::{MorphosyntaxModelIdentityV2, UdFeatureRepairV2, UdRelationRepairV2};
 use batchalign_transform::morphosyntax::{AdmittedUdResponse, UnexpectedSentenceCount};
 
 /// Where one admitted response came from.
@@ -33,15 +34,14 @@ use batchalign_transform::morphosyntax::{AdmittedUdResponse, UnexpectedSentenceC
 /// the care taken by callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum MorphosyntaxResponseSource {
-    /// A worker analyzed the item with this model, repairing these relations
-    /// on the way. The two travel together because a repair is something a
+    /// A worker analyzed the item with this model, making these repairs on
+    /// the way. The two travel together because a repair is something a
     /// model's output needed: there is no repair without a model that ran.
     Worker {
         /// The model that analyzed the item.
         model: MorphosyntaxModelIdentityV2,
-        /// Every relation the worker rewrote in this item's analysis, in the
-        /// order it made them. Empty means it rewrote nothing.
-        repairs: Vec<UdRelationRepairV2>,
+        /// Everything the worker repaired in this item's analysis.
+        repairs: MorphosyntaxRepairs,
     },
     /// The worker had no words to analyze for this item, so no model ran.
     NoWordsToAnalyze,
@@ -58,16 +58,23 @@ pub(crate) struct AdmittedMorphosyntaxResponse {
 
 impl AdmittedMorphosyntaxResponse {
     /// A response a worker produced, with the model it reported and the
-    /// relations it repaired. All three are taken by value: they move out of
-    /// the wire result, uncloned.
+    /// relations and feature values it repaired. All are taken by value: they
+    /// move out of the wire result, uncloned.
     pub(super) fn from_worker(
         response: UdResponse,
         model: MorphosyntaxModelIdentityV2,
-        repairs: Vec<UdRelationRepairV2>,
+        relations: Vec<UdRelationRepairV2>,
+        features: Vec<UdFeatureRepairV2>,
     ) -> Result<Self, UnexpectedSentenceCount> {
         Ok(Self {
             response: AdmittedUdResponse::try_from(response)?,
-            source: MorphosyntaxResponseSource::Worker { model, repairs },
+            source: MorphosyntaxResponseSource::Worker {
+                model,
+                repairs: MorphosyntaxRepairs {
+                    relations,
+                    features,
+                },
+            },
         })
     }
 
@@ -94,16 +101,29 @@ impl AdmittedMorphosyntaxResponse {
     /// nothing, for tests that stub the worker.
     #[cfg(test)]
     pub(crate) fn for_test(response: UdResponse, stanza_version: &str, lang: &str) -> Self {
-        Self::for_test_with_repairs(response, stanza_version, lang, Vec::new())
+        Self::for_test_with_all_repairs(response, stanza_version, lang, Vec::new(), Vec::new())
     }
 
-    /// The same, carrying the repairs a worker reported, for tests about them.
+    /// The same, carrying the relation repairs a worker reported, for tests
+    /// about them.
     #[cfg(test)]
     pub(crate) fn for_test_with_repairs(
         response: UdResponse,
         stanza_version: &str,
         lang: &str,
-        repairs: Vec<UdRelationRepairV2>,
+        relations: Vec<UdRelationRepairV2>,
+    ) -> Self {
+        Self::for_test_with_all_repairs(response, stanza_version, lang, relations, Vec::new())
+    }
+
+    /// The same, carrying both kinds of repair a worker reports.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_all_repairs(
+        response: UdResponse,
+        stanza_version: &str,
+        lang: &str,
+        relations: Vec<UdRelationRepairV2>,
+        features: Vec<UdFeatureRepairV2>,
     ) -> Self {
         Self::from_worker(
             response,
@@ -113,7 +133,8 @@ impl AdmittedMorphosyntaxResponse {
                 lang: crate::api::LanguageCode3::try_new(lang).expect("test language is ISO 639-3"),
                 pipeline: crate::types::worker_v2::MorphosyntaxPipelineV2::Standard,
             },
-            repairs,
+            relations,
+            features,
         )
         .expect("worker test double must obey per-payload sentence cardinality")
     }
@@ -157,31 +178,49 @@ impl MorphosyntaxEngines {
     }
 }
 
-/// Every relation the workers repaired inside the responses one run applied.
+/// Every UD repair a worker made inside an analysis: the relations it
+/// rewrote and the feature values it removed. The same type holds one item's
+/// repairs and, extended, everything one run applied.
 ///
 /// Kept whole rather than as a running total, because a repair is meant to be
-/// attributable as well as countable: the word and both relations are what
+/// attributable as well as countable: the word and what changed on it are what
 /// makes a count actionable, and they exist nowhere else once the analysis is
-/// injected. The count is what provenance writes.
+/// injected. The count is what provenance writes. The two kinds are one value
+/// because they are reported for the same item and counted by the same stamp
+/// field, so a phase cannot carry one and drop the other.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct MorphosyntaxRepairs(Vec<UdRelationRepairV2>);
+pub(super) struct MorphosyntaxRepairs {
+    relations: Vec<UdRelationRepairV2>,
+    features: Vec<UdFeatureRepairV2>,
+}
 
 impl MorphosyntaxRepairs {
+    /// Add `other`'s repairs after this one's.
+    fn extend(&mut self, other: Self) {
+        self.relations.extend(other.relations);
+        self.features.extend(other.features);
+    }
+
     /// How many repairs were made, or `None` when none were.
     ///
     /// `NonZeroUsize` rather than `usize`, so "some repairs" and "no repairs"
     /// are different values rather than a number a caller must remember to
     /// compare against zero. The stamp writes a field only in the first case.
     fn count(&self) -> Option<NonZeroUsize> {
-        NonZeroUsize::new(self.0.len())
+        NonZeroUsize::new(self.relations.len() + self.features.len())
     }
 
     /// The repairs tallied by kind, for one operator-facing line: for example
-    /// `relation_alias=2 unknown_relation=1`.
+    /// `pad_feature_value=1 relation_alias=2 unknown_relation=1`.
     fn tally(&self) -> String {
         let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
-        for repair in &self.0 {
-            *counts.entry(repair.kind.wire_name()).or_default() += 1;
+        let kinds = self
+            .relations
+            .iter()
+            .map(|repair| repair.kind.wire_name())
+            .chain(self.features.iter().map(|repair| repair.kind.wire_name()));
+        for kind in kinds {
+            *counts.entry(kind).or_default() += 1;
         }
         counts
             .into_iter()
@@ -225,7 +264,7 @@ impl AppliedAnalyses {
                 match admitted.source {
                     MorphosyntaxResponseSource::Worker { model, repairs } => {
                         applied.engines.0.insert(model);
-                        applied.repairs.0.extend(repairs);
+                        applied.repairs.extend(repairs);
                     }
                     MorphosyntaxResponseSource::NoWordsToAnalyze => {}
                 }
@@ -247,7 +286,7 @@ impl AppliedAnalyses {
                 if !self.engines.0.contains(model) {
                     self.engines.0.insert(model.clone());
                 }
-                self.repairs.0.extend(repairs.iter().cloned());
+                self.repairs.extend(repairs.clone());
             }
             MorphosyntaxResponseSource::NoWordsToAnalyze => {}
         }
@@ -256,7 +295,7 @@ impl AppliedAnalyses {
     /// Merge in what another applied batch reported.
     pub(crate) fn extend(&mut self, other: Self) {
         self.engines.0.extend(other.engines.0);
-        self.repairs.0.extend(other.repairs.0);
+        self.repairs.extend(other.repairs);
         self.secondary.extend(other.secondary);
     }
 
@@ -290,7 +329,8 @@ impl AppliedAnalyses {
         self.engines.engine_names()
     }
 
-    /// How many relations were repaired, or `None` when none were.
+    /// How many relations and feature values were repaired, or `None` when
+    /// none were.
     pub(crate) fn repair_count(&self) -> Option<NonZeroUsize> {
         self.repairs.count()
     }
@@ -304,7 +344,9 @@ impl AppliedAnalyses {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::worker_v2::{MorphosyntaxPipelineV2, UdRelationRepairKindV2};
+    use crate::types::worker_v2::{
+        MorphosyntaxPipelineV2, UdFeatureRepairKindV2, UdRelationRepairKindV2,
+    };
 
     fn empty() -> UdResponse {
         UdResponse {
@@ -342,7 +384,12 @@ mod tests {
             let raw = UdResponse {
                 sentences: (0..count).map(|_| one.sentences[0].clone()).collect(),
             };
-            let result = AdmittedMorphosyntaxResponse::from_worker(raw, model.clone(), Vec::new());
+            let result = AdmittedMorphosyntaxResponse::from_worker(
+                raw,
+                model.clone(),
+                Vec::new(),
+                Vec::new(),
+            );
             if count > 1 {
                 assert_eq!(
                     result
@@ -398,7 +445,7 @@ mod tests {
                     lang: crate::api::LanguageCode3::try_new("cmn").expect("valid"),
                     pipeline,
                 },
-                repairs: Vec::new(),
+                repairs: MorphosyntaxRepairs::default(),
             });
         }
         assert_eq!(
@@ -452,6 +499,30 @@ mod tests {
             applied.repair_tally(),
             "relation_alias=2 unknown_relation=1"
         );
+    }
+
+    /// A removed padding feature value is a repair like a rewritten relation:
+    /// counted into the same total the stamp writes, and tallied by its own
+    /// kind.
+    #[test]
+    fn feature_repairs_are_counted_with_relation_repairs() {
+        let (_, applied) = AppliedAnalyses::take_applied(vec![
+            AdmittedMorphosyntaxResponse::for_test_with_all_repairs(
+                empty(),
+                "1.15.0",
+                "kaz",
+                vec![repair(UdRelationRepairKindV2::PadRelation, "<PAD>", "dep")],
+                vec![UdFeatureRepairV2 {
+                    kind: UdFeatureRepairKindV2::PadFeatureValue,
+                    word: "кітап".to_owned(),
+                    feature: "Case".to_owned(),
+                    removed_value: crate::types::worker_v2::PaddingValue::admit("<PAD>")
+                        .expect("<PAD> is padding"),
+                }],
+            ),
+        ]);
+        assert_eq!(applied.repair_count().map(NonZeroUsize::get), Some(2));
+        assert_eq!(applied.repair_tally(), "pad_feature_value=1 pad_relation=1");
     }
 
     /// A response no model produced cannot carry repairs: the source that

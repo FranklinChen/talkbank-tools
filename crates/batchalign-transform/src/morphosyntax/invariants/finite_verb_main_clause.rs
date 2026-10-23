@@ -303,7 +303,7 @@ mod tests {
         head: usize,
         deprel: &str,
     ) -> UdWord {
-        UdWord::from(UdWordAnalysis {
+        UdWord::try_from(UdWordAnalysis {
             id,
             text: text.to_string(),
             lemma: lemma.to_string(),
@@ -315,6 +315,7 @@ mod tests {
             deps: None,
             misc: None,
         })
+        .expect("test analysis carries no padding feature")
     }
 
     /// `w` as the worker sends an English `-ing` noun: with its verb lemma.
@@ -324,7 +325,7 @@ mod tests {
     }
 
     fn punct_word(id: UdId, text: &str, head: usize) -> UdWord {
-        UdWord::from(UdWordAnalysis {
+        UdWord::try_from(UdWordAnalysis {
             id,
             text: text.to_string(),
             lemma: text.to_string(),
@@ -336,10 +337,11 @@ mod tests {
             deps: None,
             misc: None,
         })
+        .expect("test analysis carries no padding feature")
     }
 
     fn range_parent(start: usize, end: usize, text: &str) -> UdWord {
-        UdWord::from(UdWordAnalysis {
+        UdWord::try_from(UdWordAnalysis {
             id: UdId::Range(start, end),
             text: text.to_string(),
             lemma: String::new(),
@@ -351,6 +353,7 @@ mod tests {
             deps: None,
             misc: None,
         })
+        .expect("test analysis carries no padding feature")
     }
 
     fn fixture_sink() -> UdSentence {

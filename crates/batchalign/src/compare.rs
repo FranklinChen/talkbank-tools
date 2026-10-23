@@ -246,14 +246,18 @@ async fn build_comparison_artifacts(
     // the gate had judged came to be re-read by a parser that tolerates what
     // the gate refuses. What the command writes is the comparison artifact, and
     // that gets its own proof in the materializers below.
+    let registry = services.pool.stanza_registry();
     let parsed = match main {
-        ComparisonMain::Source(text) => {
-            crate::pipeline::morphosyntax::ParsedFile::parse(text, mor_params.policy.ca_policy)?
-        }
+        ComparisonMain::Source(text) => crate::pipeline::morphosyntax::ParsedFile::parse(
+            text,
+            mor_params.policy.ca_policy,
+            &registry,
+        )?,
         ComparisonMain::Constructed(output) => {
             crate::pipeline::morphosyntax::ParsedFile::from_output(
                 output,
                 mor_params.policy.ca_policy,
+                &registry,
             )?
         }
     };

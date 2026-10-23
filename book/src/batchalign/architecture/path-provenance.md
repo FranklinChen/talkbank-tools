@@ -1,7 +1,7 @@
 # Typed Path Provenance
 
 **Status:** Current
-**Last updated:** 2026-05-19 20:22 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Paths in batchalign3 cross machine boundaries: a client submits paths from
 their filesystem, the server resolves media on its own filesystem (potentially
@@ -262,7 +262,7 @@ lives on -- and enforce this through the presence or absence of `AsRef<Path>`.
 |------|------|
 | `crates/batchalign-types/src/paths.rs` | All four newtypes + `infer_media_mapping()` |
 | `crates/batchalign/src/types/request.rs` | `JobSubmission` uses `ClientPath`, `MediaMappingKey`, `RepoRelativePath` |
-| `crates/batchalign/src/types/config.rs` | `ServerConfig.media_mappings: BTreeMap<MediaMappingKey, ServerPath>` |
+| `crates/batchalign/src/types/config/mod.rs` | `ServerConfig.media_mappings: BTreeMap<MediaMappingKey, ServerPath>` |
 | `crates/batchalign/src/runner/dispatch/fa_pipeline.rs` | Media resolution cascade using all four types |
 | `crates/batchalign/src/submission.rs` | `ClientPath` to `PathBuf` bridge in `materialize_submission_job()` |
 | `crates/batchalign/src/store/job/types.rs` | `JobFilesystemConfig` stores `ClientPath` for `source_dir` |

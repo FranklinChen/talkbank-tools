@@ -19,19 +19,6 @@ from batchalign.worker._pipeline_cache import (
 )
 
 
-class _RecordingLock:
-    """Minimal context-manager lock that counts acquisitions."""
-
-    def __init__(self) -> None:
-        self.enter_count = 0
-
-    def __enter__(self) -> None:
-        self.enter_count += 1
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-
 class _FakeDoc:
     """Tiny doc-like object exposing Stanza's ``to_dict()`` seam."""
 
@@ -126,6 +113,7 @@ def _analyzed(words: list[str], lang: str) -> dict[str, Any]:
         "raw_sentences": [_raw_sentence(words)],
         "model": _model(lang),
         "repairs": [],
+        "feature_repairs": [],
     }
 
 
@@ -172,7 +160,7 @@ def test_repaired_sentence_coerces_tuple_ids_without_touching_the_input() -> Non
 
 
 def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) -> None:
-    """Batch morphosyntax should group by language, set tokenizer context, and lock."""
+    """Batch morphosyntax should group by language and set tokenizer context."""
 
     # t0, then a start/end pair for each of the three analyzed items, then the
     # batch total for the log line. Each item reports its own pair.
@@ -182,7 +170,6 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
         lambda: next(monotonic),
     )
 
-    lock = _RecordingLock()
     eng_ctx = SimpleNamespace(original_words=[])
     fra_ctx = SimpleNamespace(original_words=[])
     # Stanza is given the terminator, so it returns a word for it; these
@@ -227,11 +214,8 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
         static_pipelines(
             {"eng": eng_nlp, "fra": fra_nlp}, {"eng": eng_ctx, "fra": fra_ctx}
         ),
-        lock,
-        free_threaded=False,
     )
 
-    assert lock.enter_count == 2
     assert eng_nlp.calls == [
         (
             "hello world .\n\ngoodbye moon .",
@@ -283,7 +267,6 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
         lambda: next(monotonic),
     )
 
-    lock = _RecordingLock()
     fallback_ctx = SimpleNamespace(original_words=[])
     fra_nlp = _RecordingNlp(
         fallback_ctx,
@@ -310,11 +293,8 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
             ],
         ),
         static_pipelines({"fra": fra_nlp, "eng": eng_nlp}, {"eng": fallback_ctx}),
-        lock,
-        free_threaded=True,
     )
 
-    assert lock.enter_count == 0
     assert fra_nlp.calls == [("salut toi .", [["salut", "toi", "."]])]
     assert fallback_ctx.original_words == []
     assert response.results[0].result is None
@@ -387,8 +367,6 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
         static_pipelines(
             {"eng": eng_nlp, "fra": fra_nlp}, {"eng": eng_ctx, "fra": fra_ctx}
         ),
-        _RecordingLock(),
-        free_threaded=True,
     )
 
     for index in (0, 2):
@@ -458,8 +436,6 @@ def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
             ],
         ),
         pipelines,
-        _RecordingLock(),
-        free_threaded=True,
         load_pipeline=_load,
     )
 
@@ -501,8 +477,6 @@ def test_batch_infer_morphosyntax_reports_why_a_reload_failed(monkeypatch) -> No
             ],
         ),
         static_pipelines({}, {}),
-        _RecordingLock(),
-        free_threaded=True,
         load_pipeline=_load,
     )
 
@@ -535,7 +509,6 @@ def test_batch_infer_morphosyntax_reports_missing_pipelines_and_mismatches(
         lambda: next(monotonic),
     )
 
-    lock = _RecordingLock()
     eng_ctx = SimpleNamespace(original_words=[])
     mismatch_nlp = _RecordingNlp(
         eng_ctx,
@@ -568,8 +541,6 @@ def test_batch_infer_morphosyntax_reports_missing_pipelines_and_mismatches(
             ],
         ),
         static_pipelines({"eng": mismatch_nlp}, {"eng": eng_ctx}),
-        lock,
-        free_threaded=False,
     )
 
     assert mismatch_nlp.calls == [
@@ -614,8 +585,6 @@ def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
             ],
         ),
         static_pipelines({}, {}),
-        _RecordingLock(),
-        free_threaded=False,
     )
 
     # A wordless utterance is its own outcome and names no model.
@@ -639,7 +608,6 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
     relation. A unit test on `UdWord` cannot catch the wiring gap; only a test
     at this seam can.
     """
-    lock = _RecordingLock()
     ctx = SimpleNamespace(original_words=[])
     nlp = _RecordingNlp(
         ctx,
@@ -689,8 +657,6 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
             ],
         ),
         static_pipelines({"ita": nlp}, {"ita": ctx}),
-        lock,
-        free_threaded=False,
     )
 
     sentence = resp.results[0].result["raw_sentences"][0]
@@ -714,6 +680,73 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
     ]
 
 
+def test_batch_infer_morphosyntax_removes_padding_feature_values_and_reports_them() -> (
+    None
+):
+    """A padding FEATS value is removed on the production path, and reported.
+
+    Stanza-trained models emit padding as a feature value as well as a
+    relation (``Case=<PAD>``); unrepaired, it reached ``%mor`` as
+    ``noun|кітап-<PAD>``. The repair boundary removes the value, keeps the
+    rest of FEATS, and reports the removal so the file's provenance counts it.
+    """
+    ctx = SimpleNamespace(original_words=[])
+    nlp = _RecordingNlp(
+        ctx,
+        [
+            [
+                {
+                    "id": 1,
+                    "text": "кітап",
+                    "lemma": "кітап",
+                    "upos": "NOUN",
+                    "feats": "Case=<PAD>|Number=Sing",
+                    "head": 0,
+                    "deprel": "root",
+                },
+                {
+                    "id": 2,
+                    "text": ".",
+                    "lemma": ".",
+                    "upos": "PUNCT",
+                    "head": 1,
+                    "deprel": "punct",
+                },
+            ]
+        ],
+    )
+
+    resp = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax",
+            lang="kaz",
+            items=[
+                {
+                    "words": ["кітап"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "lang": "kaz",
+                }
+            ],
+        ),
+        static_pipelines({"kaz": nlp}, {"kaz": ctx}),
+    )
+
+    result = resp.results[0].result
+    word = result["raw_sentences"][0][0]
+    assert word["feats"] == "Number=Sing", word
+    assert "<PAD>" not in str(result["raw_sentences"])
+    assert result["feature_repairs"] == [
+        {
+            "kind": "pad_feature_value",
+            "word": "кітап",
+            "feature": "Case",
+            "removed_value": "<PAD>",
+        }
+    ]
+    assert result["repairs"] == []
+
+
 # ---------------------------------------------------------------------------
 # The terminator is a parsing cue for Stanza, never data
 # ---------------------------------------------------------------------------
@@ -728,8 +761,6 @@ def _run_eng(
     response = batch_infer_morphosyntax(
         BatchInferRequest(task="morphosyntax", lang="eng", items=items),
         static_pipelines({"eng": nlp}, {"eng": ctx}),
-        _RecordingLock(),
-        free_threaded=False,
     )
     return response, nlp
 
@@ -845,8 +876,6 @@ def test_batch_infer_morphosyntax_names_the_cantonese_variant(monkeypatch) -> No
             ],
         ),
         static_pipelines({"yue": yue_nlp}, {"yue": yue_ctx}),
-        _RecordingLock(),
-        free_threaded=True,
     )
 
     result = response.results[0].result

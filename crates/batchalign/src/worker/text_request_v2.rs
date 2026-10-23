@@ -137,15 +137,15 @@ pub fn build_morphosyntax_request_v2(
 
 /// Build a batched utterance-segmentation V2 request.
 ///
-/// `allow_stanza_fallback` is the operator opt-in to the legacy Stanza
-/// constituency-parser fallback for languages without a TalkBank BERT
-/// utseg model. Surfaced as the `--utseg-fallback-stanza` CLI flag.
-pub fn build_utseg_request_v2(
+/// Takes the servable route, the only proof that its language is admitted
+/// for the segmenter it names, and reads both from it: no caller can build a
+/// Stanza request for a language the registry never admitted. The worker runs
+/// that segmenter and no other.
+pub(crate) fn build_utseg_request_v2(
     store: &PreparedArtifactStoreV2,
     ids: &PreparedTextRequestIdsV2,
-    lang: &LanguageCode3,
+    route: &crate::utseg_route::ServableUtsegRoute,
     items: &[UtsegBatchItem],
-    allow_stanza_fallback: bool,
 ) -> Result<ExecuteRequestV2, TextRequestBuildErrorV2> {
     let payload = PreparedUtsegBatchV2 {
         items: items.to_vec(),
@@ -155,10 +155,10 @@ pub fn build_utseg_request_v2(
         request_id: ids.request_id.clone(),
         task: InferenceTaskV2::Utseg,
         payload: TaskRequestV2::Utseg(UtsegRequestV2 {
-            lang: lang.clone(),
+            lang: route.language().clone(),
             payload_ref_id: attachment.id.clone(),
             item_count: item_count(items.len())?,
-            allow_stanza_fallback,
+            segmenter: route.segmenter(),
         }),
         attachments: vec![ArtifactRefV2::PreparedText(attachment)],
     })

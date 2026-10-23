@@ -1,19 +1,11 @@
-use talkbank_model::model::{ChatFile, LanguageCode};
+use talkbank_model::model::LanguageCode;
 
 use crate::asr_postprocess;
 
-use super::{DescribedTiming, ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc};
-
-/// Build a CHAT file from a JSON transcript description string.
-///
-/// This is the entry point used by the PyO3 bridge (`build_chat_inner`).
-pub fn build_chat_from_json(json: &str) -> Result<ChatFile, String> {
-    let desc: TranscriptDescription =
-        serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {e}"))?;
-    // The PyO3 edge speaks strings; the typed error is flattened HERE, at the
-    // boundary, rather than by everything upstream of it.
-    super::build_chat(&desc).map_err(|e| e.to_string())
-}
+use super::{
+    DescribedTiming, ParticipantDesc, TranscriptDescription, TranscriptLanguages, UtteranceBody,
+    UtteranceDesc, WordDesc,
+};
 
 /// Domain errors from building a `TranscriptDescription`.
 ///
@@ -241,7 +233,7 @@ impl<'a> NamedAsrUtterances<'a> {
 ///
 /// Each word's text is validated at construction via
 /// [`ChatWordText::try_from_lang`][try_lang] under the utterance's declared
-/// language (or the required primary `langs[0]`). Fails
+/// language (or the required primary language). Fails
 /// with [`TranscriptBuildError`] at the first offending word. This is
 /// the "loud guard" half of strategy 4c: normalization runs upstream
 /// in `process_raw_asr`'s stages; this gate is the belt after the
@@ -275,35 +267,32 @@ fn build_named_asr_transcript(
     }
 
     let participants = build_asr_participants(&input.named);
-    let primary_lang_raw = langs
-        .first()
-        .ok_or(TranscriptBuildError::MissingPrimaryLanguage)?;
-    let primary_lang_code = LanguageCode::new(primary_lang_raw).map_err(|source| {
-        TranscriptBuildError::InvalidLanguageCode {
-            lang: primary_lang_raw.to_string(),
-            source,
-        }
-    })?;
+    // Every language parsed once, here: the description carries the typed
+    // list, so assembly neither defaults nor re-parses one.
+    let languages = TranscriptLanguages::parse(langs)?;
 
     let mut utterance_descs = Vec::with_capacity(utterances.len());
     let mut language_invalid: Vec<LanguageInvalidWord> = Vec::new();
     for (utt_idx, named) in input.named.into_iter().enumerate() {
         let utterance = named.utterance;
         let speaker_id = named.speaker_id;
-        let utterance_lang = match utterance.lang.as_deref() {
-            Some(raw) => LanguageCode::new(raw).map_err(|source| {
-                TranscriptBuildError::InvalidLanguageCode {
+        // The utterance's own language, parsed once and carried typed; its
+        // words are judged under it, or under the primary when it has none.
+        let declared_lang = utterance
+            .lang
+            .as_deref()
+            .map(|raw| {
+                LanguageCode::new(raw).map_err(|source| TranscriptBuildError::InvalidLanguageCode {
                     lang: raw.to_string(),
                     source,
-                }
-            })?,
-            None => primary_lang_code.clone(),
-        };
+                })
+            })
+            .transpose()?;
+        let utterance_lang = declared_lang.as_ref().unwrap_or(languages.primary());
 
         let mut words = Vec::with_capacity(utterance.words.len());
         for (word_idx, word) in utterance.words.iter().enumerate() {
-            let admitted =
-                validate_asr_word(word, &speaker_id, &utterance_lang, utt_idx, word_idx)?;
+            let admitted = validate_asr_word(word, &speaker_id, utterance_lang, utt_idx, word_idx)?;
             // Exhaustive: a future admission outcome must state what the
             // caller owes it rather than falling through this match.
             match admitted {
@@ -317,23 +306,19 @@ fn build_named_asr_transcript(
 
         utterance_descs.push(UtteranceDesc {
             speaker: speaker_id,
-            words: Some(words),
-            text: None,
-            // Word-level utterances take their span from their words.
-            timing: DescribedTiming::Untimed(
-                asr_postprocess::UntimedCause::ProviderReportedNoTiming,
-            ),
-            lang: utterance.lang.clone(),
+            // Word-level utterances take their span from their words, and
+            // their end travels as the field it is.
+            body: UtteranceBody::Words {
+                words,
+                end: utterance.end.clone(),
+            },
+            lang: declared_lang,
         });
     }
 
     Ok(AsrTranscript {
         description: TranscriptDescription {
-            langs: if langs.is_empty() {
-                vec!["eng".to_string()]
-            } else {
-                langs.to_vec()
-            },
+            langs: languages,
             participants,
             media_name: media_name.map(String::from),
             media_type: Some("audio".to_string()),

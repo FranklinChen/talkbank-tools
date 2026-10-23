@@ -70,7 +70,9 @@ pub(super) fn lang_to_iso2(lang: &LanguageCode3) -> Result<&'static str, Whisper
 /// Map whisper.cpp's detected ISO 639-1 token back to TalkBank's ISO
 /// 639-3 canonical code: the reverse direction of `LANG_TABLE`,
 /// restricted to the same supported set so detection cannot smuggle in
-/// a language the rest of the pipeline has no support for.
+/// a language the rest of the pipeline has no support for. Only the
+/// whisper-rs backend reads a detected language.
+#[cfg(any(feature = "whisper-rs-backend", test))]
 pub(super) fn iso2_to_lang(iso2: &str) -> Result<LanguageCode3, WhisperNativeError> {
     let (iso3, _) = LANG_TABLE
         .iter()

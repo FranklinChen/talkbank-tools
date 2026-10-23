@@ -383,6 +383,9 @@ pub enum UtrStrategy {
     AmbiguousCorrespondence,
     /// Correspondence proof exceeded its bounded work budget.
     CorrespondenceBudgetExhausted,
+    /// Correspondence search contradicted its own admission and refused the
+    /// region: an internal inconsistency, never a budget.
+    CorrespondenceSearchInconsistent,
     /// Diagnostic selection was bounded; this is not correspondence absence.
     InspectionBudgetExhausted,
     /// Proved interior words cannot authorize an entire utterance crop.
@@ -399,6 +402,7 @@ impl UtrStrategy {
             Self::ProjectionExhausted => "projection_exhausted",
             Self::AmbiguousCorrespondence => "ambiguous_correspondence",
             Self::CorrespondenceBudgetExhausted => "correspondence_budget_exhausted",
+            Self::CorrespondenceSearchInconsistent => "correspondence_search_inconsistent",
             Self::InspectionBudgetExhausted => "inspection_budget_exhausted",
             Self::IncompleteBoundary => "incomplete_boundary",
             Self::Unmatched => "unmatched",

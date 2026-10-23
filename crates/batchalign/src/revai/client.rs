@@ -214,6 +214,11 @@ pub enum RevAiDisposition {
     /// Repeating the request cannot help: a 4xx, a job Rev.AI itself failed,
     /// or a response we cannot decode.
     Terminal,
+    /// Rev.AI refuses this account (HTTP 401, 402 or 403: the key is not
+    /// accepted, the account is not permitted, or it has no credit left). No
+    /// request from it succeeds until an account holder acts, so neither a
+    /// retry nor a narrower UTR fallback can help.
+    AccountRefused,
 }
 
 impl std::fmt::Display for RevAiDisposition {
@@ -221,6 +226,7 @@ impl std::fmt::Display for RevAiDisposition {
         match self {
             Self::Transient => write!(f, "transient"),
             Self::Terminal => write!(f, "terminal"),
+            Self::AccountRefused => write!(f, "account_refused"),
         }
     }
 }
@@ -240,8 +246,10 @@ pub enum RevAiError {
     Http(#[from] reqwest::Error),
 
     /// Rev.AI returned a non-success HTTP status and response body.
-    #[error("Rev.AI returned HTTP {status}: {body}")]
+    #[error("Rev.AI {endpoint} returned HTTP {status}: {body}")]
     ApiError {
+        /// The request the status answers, which decides what it means.
+        endpoint: RevAiEndpoint,
         /// Numeric HTTP status code from Rev.AI.
         status: u16,
         /// Response body returned by Rev.AI.
@@ -281,6 +289,59 @@ pub enum RevAiError {
     TranscriptEncoding(#[from] std::string::FromUtf8Error),
 }
 
+/// Which Rev.AI request a failed status answers.
+///
+/// A status means different things on different requests: a 401 or 403 on a
+/// submission refuses the account (its key, its permission, its credit), but
+/// on a job's status or transcript a 403 may refuse only that resource. So
+/// [`RevAiError::disposition`] reads the account refusal only from a
+/// submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevAiEndpoint {
+    /// `POST /jobs`: submitting media for transcription.
+    SubmitJob,
+    /// `GET /jobs/{id}`: a transcription job's status.
+    JobDetails,
+    /// `GET /jobs/{id}/transcript`.
+    Transcript,
+    /// `POST /languageid/.../jobs`: submitting media for language id.
+    SubmitLanguageId,
+    /// `GET .../jobs/{id}` of a language-id job.
+    LanguageIdJob,
+    /// `GET .../jobs/{id}/result` of a language-id job.
+    LanguageIdResult,
+}
+
+impl RevAiEndpoint {
+    /// Whether the request submits work on the account's behalf, so a
+    /// refusal of it is a refusal of the account.
+    const fn submits(self) -> bool {
+        match self {
+            Self::SubmitJob | Self::SubmitLanguageId => true,
+            Self::JobDetails | Self::Transcript | Self::LanguageIdJob | Self::LanguageIdResult => {
+                false
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for RevAiEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SubmitJob => "job submission",
+            Self::JobDetails => "job status",
+            Self::Transcript => "transcript",
+            Self::SubmitLanguageId => "language-id submission",
+            Self::LanguageIdJob => "language-id job status",
+            Self::LanguageIdResult => "language-id result",
+        })
+    }
+}
+
+/// HTTP 429: Rev.AI is rate limiting this account. Transient on every
+/// request: the limit lifts, and the request is not at fault.
+const TOO_MANY_REQUESTS: u16 = 429;
+
 /// Render an error together with every cause beneath it.
 ///
 /// `reqwest::Error`'s own Display stops at the stage that failed, so the
@@ -308,7 +369,18 @@ impl RevAiError {
             // The socket, not the request: a reset, a hang-up mid-body, a DNS
             // blip. Nothing about the submission changes by trying again.
             Self::Http(_) => RevAiDisposition::Transient,
-            Self::ApiError { status, .. } if *status >= 500 => RevAiDisposition::Transient,
+            // The service, or its rate limit, on any request: both lift.
+            Self::ApiError { status, .. } if *status >= 500 || *status == TOO_MANY_REQUESTS => {
+                RevAiDisposition::Transient
+            }
+            // The account, not the request: an unaccepted key, a forbidden
+            // account, no credit. Read only from a submission; on a job's
+            // status or transcript a 403 may refuse that resource alone.
+            Self::ApiError {
+                endpoint,
+                status: 401..=403,
+                ..
+            } if endpoint.submits() => RevAiDisposition::AccountRefused,
             Self::ApiError { .. } => RevAiDisposition::Terminal,
             // Every attempt already failed; the loop only keeps retrying what
             // it judged retryable, so the exhaustion itself is transient.
@@ -333,6 +405,9 @@ impl From<RevAiError> for crate::error::ServerError {
         let disposition = match error.disposition() {
             RevAiDisposition::Transient => crate::error::AsrProviderDisposition::Transient,
             RevAiDisposition::Terminal => crate::error::AsrProviderDisposition::Terminal,
+            RevAiDisposition::AccountRefused => {
+                crate::error::AsrProviderDisposition::AccountRefused
+            }
         };
         Self::AsrProvider {
             disposition,
@@ -426,13 +501,19 @@ impl RevAiClient {
                     if !resp.status().is_success() {
                         let status = resp.status().as_u16();
                         let body = read_error_body(resp);
-                        let error = RevAiError::ApiError { status, body };
+                        let error = RevAiError::ApiError {
+                            endpoint: RevAiEndpoint::SubmitJob,
+                            status,
+                            body,
+                        };
                         // Retry only what the error itself says is worth
                         // retrying, rather than re-deciding the 5xx boundary
                         // here in a second place.
                         match error.disposition() {
                             RevAiDisposition::Transient => attempts_failed.push(error),
-                            RevAiDisposition::Terminal => return Err(error),
+                            RevAiDisposition::Terminal | RevAiDisposition::AccountRefused => {
+                                return Err(error);
+                            }
                         }
                         continue;
                     }
@@ -460,7 +541,11 @@ impl RevAiClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = read_error_body(resp);
-            return Err(RevAiError::ApiError { status, body });
+            return Err(RevAiError::ApiError {
+                endpoint: RevAiEndpoint::JobDetails,
+                status,
+                body,
+            });
         }
 
         Ok(resp.json()?)
@@ -482,7 +567,11 @@ impl RevAiClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = read_error_body(resp);
-            return Err(RevAiError::ApiError { status, body });
+            return Err(RevAiError::ApiError {
+                endpoint: RevAiEndpoint::Transcript,
+                status,
+                body,
+            });
         }
 
         retain_transcript_body(resp.bytes()?.to_vec())
@@ -563,7 +652,11 @@ impl RevAiClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = read_error_body(resp);
-            return Err(RevAiError::ApiError { status, body });
+            return Err(RevAiError::ApiError {
+                endpoint: RevAiEndpoint::SubmitLanguageId,
+                status,
+                body,
+            });
         }
 
         Ok(resp.json()?)
@@ -580,7 +673,11 @@ impl RevAiClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = read_error_body(resp);
-            return Err(RevAiError::ApiError { status, body });
+            return Err(RevAiError::ApiError {
+                endpoint: RevAiEndpoint::LanguageIdJob,
+                status,
+                body,
+            });
         }
 
         Ok(resp.json()?)
@@ -601,7 +698,11 @@ impl RevAiClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = read_error_body(resp);
-            return Err(RevAiError::ApiError { status, body });
+            return Err(RevAiError::ApiError {
+                endpoint: RevAiEndpoint::LanguageIdResult,
+                status,
+                body,
+            });
         }
 
         Ok(resp.json()?)
@@ -898,6 +999,75 @@ mod transport_failure_tests {
             RequestDeadline::Exchange.duration(),
             RequestDeadline::EXCHANGE
         );
+    }
+
+    /// RED FIRST: an account-level refusal (401, 402, 403) was a terminal
+    /// failure of the request, classified with a failed job or an
+    /// undecodable response, and kept the same-engine UTR fallback that the
+    /// same account would be refused. It is its own category now, not
+    /// retried and withholding that fallback; other 4xx stay terminal.
+    #[test]
+    fn an_account_refusal_is_its_own_category() {
+        for status in [401_u16, 402, 403] {
+            let error = RevAiError::ApiError {
+                endpoint: RevAiEndpoint::SubmitJob,
+                status,
+                body: "refused".into(),
+            };
+            assert_eq!(
+                error.disposition(),
+                RevAiDisposition::AccountRefused,
+                "{status}"
+            );
+            assert_eq!(
+                classify_server_error(&ServerError::from(error)),
+                FailureCategory::ProviderAccountRefused,
+                "{status}"
+            );
+        }
+        let bad_request = RevAiError::ApiError {
+            endpoint: RevAiEndpoint::SubmitJob,
+            status: 400,
+            body: "bad media".into(),
+        };
+        assert_eq!(bad_request.disposition(), RevAiDisposition::Terminal);
+    }
+
+    /// RED FIRST: the account mapping applied to every request, so a 403 on
+    /// one job's status or transcript (which may refuse only that resource)
+    /// was read as the whole account refused; and a 429 was terminal, so a
+    /// rate-limited request was not retried and its UTR fallback was sent
+    /// into the same limit. The account refusal is read only from a
+    /// submission, and a 429 is transient on every request.
+    ///
+    /// The bodies here are placeholders: the mapping reads the status and the
+    /// request, never the body. No recorded Rev.AI response body backs these
+    /// statuses yet; a fixture is owed from a real response.
+    #[test]
+    fn a_status_means_what_it_means_on_the_request_it_answers() {
+        let status = |endpoint, status| RevAiError::ApiError {
+            endpoint,
+            status,
+            body: String::new(),
+        };
+        for (endpoint, forbidden) in [
+            (RevAiEndpoint::SubmitJob, RevAiDisposition::AccountRefused),
+            (
+                RevAiEndpoint::SubmitLanguageId,
+                RevAiDisposition::AccountRefused,
+            ),
+            (RevAiEndpoint::JobDetails, RevAiDisposition::Terminal),
+            (RevAiEndpoint::Transcript, RevAiDisposition::Terminal),
+            (RevAiEndpoint::LanguageIdJob, RevAiDisposition::Terminal),
+            (RevAiEndpoint::LanguageIdResult, RevAiDisposition::Terminal),
+        ] {
+            assert_eq!(
+                status(endpoint, 429).disposition(),
+                RevAiDisposition::Transient,
+                "{endpoint}"
+            );
+            assert_eq!(status(endpoint, 403).disposition(), forbidden, "{endpoint}");
+        }
     }
 
     /// A Rev.AI endpoint that accepts the connection and drops it without

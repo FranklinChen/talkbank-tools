@@ -3,10 +3,10 @@
 This module exists to keep Stanza-specific bootstrap policy out of the generic
 worker entrypoint and the request-time inference routers. It owns:
 
-- ISO language-code normalization for Stanza
-- the MWT/non-MWT processor policy (capability-driven; see ``should_request_mwt``)
+- resolving a language to the catalog entry that serves it (``stanza_code_for``)
+- the MWT/non-MWT processor policy (capability-driven, from that entry)
 - installation of preloaded Stanza pipelines into worker runtime state
-- the utseg-specific stanza-config builder used by inference dispatch
+- utseg's Stanza constituency pipeline, loaded once per language
 """
 
 from __future__ import annotations
@@ -15,41 +15,32 @@ import logging
 import threading
 from collections.abc import Sequence
 
-from batchalign.inference._domain_types import LanguageCode, LanguageCode2
+from batchalign.inference._domain_types import LanguageCode, StanzaCode
 from batchalign.inference._italian_mwt import (
     INFINITIVE_ENDINGS,
     ItalianLexicon,
     ItalianMwtPolicy,
 )
-from batchalign.inference.types import StanzaNLP
+from batchalign.worker import _stanza_capabilities
+from batchalign.worker._language_errors import UnsupportedLanguageError
 from batchalign.worker._pipeline_cache import (
+    LoadedPipeline,
     StanzaPipelineCache,
     mwt_probe_key,
     retokenize_key,
+    utseg_key,
 )
 from batchalign.worker._stanza_capabilities import (
-    _ISO3_OVERRIDES,
-    StanzaCapabilityTable,
-    get_cached_capability_table,
+    CHINESE_STANZA_CODE,
+    StanzaLanguageCapability,
+    StanzaRequirementName,
+    processors_argument,
+    requirement_processors,
 )
 from batchalign.worker._stanza_lemma_pretrain import lemma_pretrain_options
-from batchalign.worker._types import _state
+from batchalign.worker._types import StanzaProcessorName, _state
 
 L = logging.getLogger("batchalign.worker")
-
-# Every Stanza alpha-2 code a Chinese ISO-639-3 code resolves to, DERIVED from
-# the shared override table rather than spelled out.
-#
-# The retokenize loader's guard was the literal `"zh"` while `_ISO3_OVERRIDES`
-# maps `cmn`, `zho` and `yue` all to `"zh-hans"`, so it rejected every code its
-# only caller passes and the neural-tokenizer pipeline could not be loaded at
-# all: a `--retokenize` Mandarin job logged "non-Chinese lang zho, skipping" and
-# silently fell back to the pretokenized pipeline. A literal beside a mapping it
-# has to agree with is the drift this module's own `iso3_to_alpha2` docstring
-# warns about, one function further down.
-_STANZA_CHINESE_ALPHA2: frozenset[str] = frozenset(
-    _ISO3_OVERRIDES[iso3] for iso3 in ("cmn", "zho", "yue")
-)
 
 # The one Stanza package Japanese is loaded with, for every processor. Named
 # once because the lemma pretrain repair must read the same lemma model the
@@ -97,102 +88,57 @@ class StanzaLexiconUnavailableError(RuntimeError):
     """
 
 
-class UnsupportedLanguageError(ValueError):
-    """Stanza has no usable pipeline for the requested language.
+def _pipeline_processors(requirement: StanzaRequirementName, *, with_mwt: bool) -> str:
+    """The processors a command's pipeline is built with: Rust's requirement
+    for that command, plus ``mwt`` when the language's catalog entry ships it."""
+    wanted: set[StanzaProcessorName] = set(requirement_processors(requirement))
+    if with_mwt:
+        wanted.add("mwt")
+    return processors_argument(wanted)
 
-    Distinct from a configuration error: the request itself cannot be
-    served by this worker, so callers should reject the job upstream
-    rather than retry. Surfaced as a typed error so downstream code
-    can branch on it cleanly instead of pattern-matching the deep
-    ``KeyError`` Stanza would otherwise raise from
-    ``maintain_processor_list``.
+
+def _morphosyntax_processors(*, with_mwt: bool) -> str:
+    """The processors a morphotag pipeline is built with."""
+    return _pipeline_processors("morphosyntax", with_mwt=with_mwt)
+
+
+def language_capability(lang: LanguageCode) -> StanzaLanguageCapability:
+    """The catalog entry that serves ``lang``, from the capability table.
+
+    The table is the worker's ONE ISO 639-3 to Stanza mapping (Rust's ISO
+    639-1 table plus the installed catalog; see ``_stanza_capabilities``), the
+    same table the server admits languages from, so a pipeline can only be
+    built for a language the server could have admitted. Raises
+    ``UnsupportedLanguageError`` when the table is unavailable or has no entry
+    for ``lang``; nothing is passed through to Stanza unresolved.
+
+    It replaced ``iso3_to_alpha2``, a second resolution (an override dict,
+    then ``pycountry``, then the code verbatim with a warning) that agreed
+    with the table only by construction and handed Stanza codes it had no
+    entry for.
     """
+    # Read through the module so a test that replaces the table replaces it
+    # for every loader.
+    table = _stanza_capabilities.get_cached_capability_table()
+    if isinstance(table, _stanza_capabilities.StanzaNotInstalled):
+        # A deploy error, not a language Stanza lacks.
+        raise UnsupportedLanguageError(
+            f"Cannot load Stanza for {lang!r}: the Stanza Python package "
+            f"is not installed in the worker environment ({table.import_error}). "
+            "Reinstall batchalign3 with the morphosyntax extras enabled, or "
+            "contact an operator to fix the deploy."
+        )
+    cap = table.languages.get(lang)
+    if cap is None:
+        raise UnsupportedLanguageError(
+            f"The installed Stanza catalog has no entry for language {lang!r}."
+        )
+    return cap
 
 
-def should_request_mwt(
-    alpha2: LanguageCode2, table: StanzaCapabilityTable | None
-) -> bool:
-    """Decide whether to request the ``mwt`` processor for ``alpha2``.
-
-    Single source of truth: the Stanza capability table built from the
-    installed catalog's ``resources.json`` (see ``_stanza_capabilities``).
-    A previous hardcoded ``MWT_LANGS`` set drifted from the catalog and
-    requested ``mwt`` for languages Stanza no longer ships it for (e.g.
-    Swedish on Stanza 1.11), crashing the worker at bootstrap.
-
-    Returns False when the table is unavailable: the conservative choice
-    is to omit ``mwt`` and let Stanza tokenize/POS/lemma/depparse only,
-    rather than guess and risk an ``UnsupportedProcessorError``.
-    """
-    if table is None:
-        return False
-    for cap in table.languages.values():
-        if cap.alpha2 == alpha2:
-            return cap.has_mwt
-    return False
-
-
-def iso3_to_alpha2(iso3: LanguageCode) -> LanguageCode2:
-    """Convert ISO-639-3 language code to ISO-639-1 for Stanza.
-
-    Batchalign uses ISO-639-3 broadly, but Stanza is configured with mostly
-    ISO-639-1-style identifiers plus a few special cases. This function is
-    the canonical bridge so the rest of the worker code does not embed ad
-    hoc language-code fallbacks or guess at unsupported codes.
-
-    Resolution order:
-
-    1. **Special-case overrides**, for codes where ISO 639-3 disagrees with
-       Stanza's own catalog labelling (e.g. ``yue``/``cmn`` both routing to
-       Stanza ``zh``, ``nor``→``nb`` for Norwegian Bokmål as the default).
-       These cases are *not* recoverable via pycountry because pycountry
-       only encodes ISO-639's standard 1-to-1 mapping, which would point
-       at codes Stanza does not ship.
-    2. **pycountry**, for every other code with a standard ISO 639-1
-       counterpart (``mar``→``mr``, ``swa``→``sw``, ...). This must be the
-       fallback rather than a duplicate hardcoded dict, otherwise the
-       hardcoded list inevitably drifts out of sync, Stanza adds a
-       language, the capability table picks it up via pycountry, but
-       ``iso3_to_alpha2`` returns the iso3 verbatim and ``stanza.Pipeline``
-       crashes with "Language X is currently unsupported".
-       (2026-05-06: Marathi ``mar`` failed exactly this way on
-       ``childes-other-data/Biling/Gelman/Bystander/25.cha``.)
-    3. **Pass-through with warning**, for genuinely unmapped codes
-       (length-2 codes assumed to already be alpha-2; everything else
-       hits the warning path).
-    """
-    # 1. Stanza-specific overrides: single source of truth shared with
-    #    the capability-table builder. A second independent override dict
-    #    here is the drift hazard that caused the 2026-05-06 ``mar``
-    #    failure; do not reintroduce one.
-    if iso3 in _ISO3_OVERRIDES:
-        return _ISO3_OVERRIDES[iso3]
-
-    # 2. pycountry for the standard ISO 639-3 ↔ ISO 639-1 cases.
-    #    The capability table already uses pycountry; this keeps the two
-    #    code paths honest about which languages they each understand.
-    try:
-        import pycountry
-
-        lang = pycountry.languages.get(alpha_3=iso3)
-        if lang is not None:
-            alpha2 = getattr(lang, "alpha_2", None)
-            if isinstance(alpha2, str) and alpha2:
-                return alpha2
-    except ImportError:
-        # Fall through to the warning path.
-        pass
-
-    # 3. Already alpha-2? Pass through silently, common when callers feed a
-    #    Stanza-style code straight in.
-    if len(iso3) == 2:
-        return iso3
-
-    L.warning(
-        "Unknown ISO-639-3 code %r - passing through unchanged for Stanza",
-        iso3,
-    )
-    return iso3
+def stanza_code_for(lang: LanguageCode) -> StanzaCode:
+    """The Stanza catalog code that serves ``lang`` (``kaz`` is ``kk``)."""
+    return language_capability(lang).stanza_code
 
 
 def load_stanza_models(lang: LanguageCode) -> None:
@@ -240,60 +186,39 @@ def _build_stanza_models(lang: LanguageCode) -> None:
         TokenizerContext,
         make_tokenizer_postprocessor,
     )
+    from batchalign_core import RealignLanguage
 
     # Preflight gate: consult the capability table BEFORE calling
-    # stanza.Pipeline. The capability table is built from the installed
-    # Stanza catalog (resources.json) and is the only source of truth
-    # that stays correct across Stanza upgrades. Hardcoded lists
-    # (Rust SUPPORTED_STANZA_CODES, the iso3_to_alpha2 mapping below)
-    # have drifted multiple times and are now treated as advisory.
-    # Without this gate, an unsupported language reaches stanza.Pipeline
-    # which raises KeyError('packages') deep in maintain_processor_list
-    # the worker dies before emitting its ready signal, the daemon sees a
-    # generic IPC error, and the user gets "transcription failed" with
-    # the linguistic root cause buried in stderr.
-    table = get_cached_capability_table()
-    if table is None:
-        # Post-2026-05-06: ``get_cached_capability_table()`` returns ``None``
-        # ONLY when the Stanza Python package is missing from the worker
-        # venv. The historical "resources.json missing" path now bootstraps
-        # the catalog automatically and either returns a populated table or
-        # raises ``StanzaCatalogDownloadError``. So if we reach here, it's a
-        # genuine deploy-config error: BA3 was installed without Stanza.
+    # stanza.Pipeline. Without it, an unsupported language reaches
+    # stanza.Pipeline, which raises KeyError('packages') deep in
+    # maintain_processor_list: the worker dies before emitting its ready
+    # signal, the daemon sees a generic IPC error, and the user gets
+    # "transcription failed" with the linguistic root cause buried in stderr.
+    cap = language_capability(lang)
+    if not cap.supports_morphosyntax:
         raise UnsupportedLanguageError(
-            f"Cannot load Stanza for {lang!r}: the Stanza Python package "
-            "is not installed in the worker environment. Reinstall "
-            "batchalign3 with the morphosyntax extras enabled, or contact "
-            "an operator to fix the deploy."
-        )
-    if not table.supports_morphosyntax(lang):
-        sample = sorted(table.languages.keys())[:8]
-        raise UnsupportedLanguageError(
-            f"Stanza lacks the core morphosyntax processors for language {lang!r}. "
-            f"It may appear in Stanza's resources.json as a stub or partial "
-            f"entry, but no usable morphotag Pipeline can be built. "
-            f"Languages with full morphosyntax support include: {sample} (and "
-            f"{len(table.languages) - len(sample)} more)."
+            f"Stanza's catalog entry {cap.stanza_code!r} for language {lang!r} "
+            "lacks the core morphosyntax processors "
+            f"({', '.join(sorted(requirement_processors('morphosyntax')))}), so no "
+            "morphotag Pipeline can be built."
         )
 
-    alpha2 = iso3_to_alpha2(lang)
+    alpha2 = cap.stanza_code
 
     # MWT availability comes from Stanza's installed resources.json, never
     # from a hardcoded list. A stale list silently crashes the worker when
     # upstream drops a model (see the 2026-04-15 Swedish bootstrap failure).
-    has_mwt = should_request_mwt(alpha2, table)
-    processors = "tokenize,pos,lemma,depparse"
-    if has_mwt:
-        processors += ",mwt"
+    has_mwt = cap.has("mwt")
+    processors = _morphosyntax_processors(with_mwt=has_mwt)
 
-    ctx = TokenizerContext()
+    ctx = TokenizerContext(alpha2)
 
     # Italian needs a policy for single-word multi-word tokens; every other
     # language keeps Stanza's own behavior. Built here rather than inside the
     # postprocessor so the dependency is visible at the seam, and resolved
     # lazily because it reads from the pipeline this call is about to create.
     italian_policy: ItalianMwtPolicy | None = None
-    if alpha2 == "it":
+    if ctx.language == RealignLanguage.Italian:
         provider = ItalianMwtPolicyProvider(lang)
         italian_policy = ItalianMwtPolicy(
             propose_splits=provider.propose_splits,
@@ -335,15 +260,13 @@ def _build_stanza_models(lang: LanguageCode) -> None:
     elif alpha2 == "en":
         nlp = stanza.Pipeline(
             **common,
-            tokenize_postprocessor=make_tokenizer_postprocessor(ctx, alpha2),
+            tokenize_postprocessor=make_tokenizer_postprocessor(ctx),
             package={"mwt": "gum"},
         )
     else:
         nlp = stanza.Pipeline(
             **common,
-            tokenize_postprocessor=make_tokenizer_postprocessor(
-                ctx, alpha2, italian_policy
-            ),
+            tokenize_postprocessor=make_tokenizer_postprocessor(ctx, italian_policy),
         )
 
     # Install into the bounded cache, which may evict another language's
@@ -371,8 +294,8 @@ def load_stanza_retokenize_model(lang: LanguageCode) -> None:
     built the neural tokenizer (a separate ~200 MB model), and the second
     install replaced the first.
     """
-    alpha2 = iso3_to_alpha2(lang)
-    if alpha2 not in _STANZA_CHINESE_ALPHA2:
+    alpha2 = stanza_code_for(lang)
+    if alpha2 != CHINESE_STANZA_CODE:
         L.warning(
             "load_stanza_retokenize_model called for non-Chinese lang %s, skipping",
             lang,
@@ -387,7 +310,7 @@ def load_stanza_retokenize_model(lang: LanguageCode) -> None:
 
 
 def _build_stanza_retokenize_model(
-    lang: LanguageCode, alpha2: str, retok_key: str
+    lang: LanguageCode, alpha2: StanzaCode, retok_key: str
 ) -> None:
     """Build and install the Mandarin retokenize pipeline.
 
@@ -399,8 +322,8 @@ def _build_stanza_retokenize_model(
 
     from batchalign.inference._tokenizer_realign import TokenizerContext
 
-    processors = "tokenize,pos,lemma,depparse"
-    ctx = TokenizerContext()
+    processors = _morphosyntax_processors(with_mwt=False)
+    ctx = TokenizerContext(alpha2)
 
     # The Mandarin retokenize pipeline uses the neural tokenizer (a separate
     # ~200 MB model from the ``tokenize_pretokenized`` variant). Surface the
@@ -549,7 +472,7 @@ class ItalianMwtPolicyProvider:
         self._forcing = threading.local()
         self._lexicon: ItalianLexicon | None = None
         self._lexicon_resolved = False
-        self._probe: StanzaNLP | None = None
+        self._probe: LoadedPipeline | None = None
         self._probe_resolved = False
 
     def lexicon(self) -> ItalianLexicon | None:
@@ -557,8 +480,8 @@ class ItalianMwtPolicyProvider:
             return self._lexicon
         self._lexicon_resolved = True
         pipelines = _state.stanza_pipelines
-        nlp = None if pipelines is None else pipelines.get(self._lang)
-        if nlp is None:
+        entry = None if pipelines is None else pipelines.loaded(self._lang)
+        if entry is None:
             L.warning(
                 "Italian MWT policy: no loaded pipeline for %s, leaving Stanza's "
                 "own multi-word tokenization untouched",
@@ -566,7 +489,11 @@ class ItalianMwtPolicyProvider:
             )
             return None
         try:
-            self._lexicon = extract_stanza_lexicon(nlp)
+            # Under the pipeline's guard like any other use of it. This runs
+            # from the postprocessor, inside a call that already holds it on
+            # this thread, which the reentrant guard admits.
+            with entry.calling() as nlp:
+                self._lexicon = extract_stanza_lexicon(nlp)
         except StanzaLexiconUnavailableError as exc:
             L.warning("Italian MWT policy disabled: %s", exc)
             return None
@@ -609,7 +536,8 @@ class ItalianMwtPolicyProvider:
         try:
             import stanza
 
-            docs = probe([stanza.Document([], text=" ".join(u)) for u in utterances])
+            with probe.calling() as nlp:
+                docs = nlp([stanza.Document([], text=" ".join(u)) for u in utterances])
         except Exception as exc:
             L.warning("Italian MWT split probe failed, leaving analysis alone: %s", exc)
             return None
@@ -653,7 +581,7 @@ class ItalianMwtPolicyProvider:
             forced.append(row)
         return forced
 
-    def _probe_pipeline(self) -> StanzaNLP | None:
+    def _probe_pipeline(self) -> LoadedPipeline | None:
         if self._probe_resolved:
             return self._probe
         self._probe_resolved = True
@@ -669,7 +597,7 @@ class ItalianMwtPolicyProvider:
 
 def load_stanza_mwt_probe_model(
     lang: LanguageCode, postprocessor: object | None = None
-) -> StanzaNLP:
+) -> LoadedPipeline:
     """Load a minimal tokenize+mwt pipeline used to preview MWT proposals.
 
     Stored under ``"{lang}:mwtprobe"`` in worker state, alongside the standard
@@ -696,9 +624,9 @@ def load_stanza_mwt_probe_model(
     cache = pipeline_cache()
     with cache.load_slot(probe_key) as already_resident:
         if already_resident is not None:
-            return already_resident.nlp
+            return already_resident
 
-        alpha2 = iso3_to_alpha2(lang)
+        alpha2 = stanza_code_for(lang)
         nlp = stanza.Pipeline(
             lang=alpha2,
             processors="tokenize,mwt",
@@ -708,79 +636,76 @@ def load_stanza_mwt_probe_model(
         )
         # No tokenizer context: the probe has no realignment layer, and an empty
         # one here would read as "a context exists" to anything that looked.
-        cache.install(probe_key, nlp, context=None)
+        # The installed entry is returned, so the caller calls the probe
+        # through the one guard the cache gave it.
+        installed = cache.install(probe_key, nlp, context=None)
         L.info("Loaded Stanza MWT probe pipeline for %s (key=%s)", lang, probe_key)
-        # `stanza.Pipeline` is untyped (no stubs ship with it, and
-        # `ignore_missing_imports` makes it `Any`), so this is the boundary where
-        # an `Any` becomes a typed value. Narrowed explicitly rather than
-        # returned bare: a bare return would silently re-infect every caller with
-        # `Any`, which is exactly how the untyped probe seam went unnoticed.
-        probe: StanzaNLP = nlp
-        return probe
+        return installed.entry
 
 
-def load_utseg_builder(lang: LanguageCode) -> None:
-    """Load the utseg config builder for one primary language.
+def prepare_utseg_stanza(lang: LanguageCode) -> None:
+    """Resolve utseg's primary language against the Stanza catalog.
 
-    Utterance segmentation uses a lighter-weight configuration boundary than
-    morphosyntax. Instead of preloading full pipelines here, the worker stores a
-    callable that can derive the necessary Stanza config bundle from a set of
-    languages at inference time.
+    Loads nothing: the constituency pipeline is built on the first request
+    that names the Stanza segmenter and has an item of more than one word,
+    by :func:`load_utseg_pipeline` (which the utseg handler calls directly,
+    in every worker language mode), and reused after that. The language is
+    resolved now so an unservable primary fails at worker load, not at the
+    first request.
     """
-    alpha2 = iso3_to_alpha2(lang)
-    mwt_exclude = {"zh", "ja", "ko", "th", "vi", "my"}
-    has_mwt = alpha2 not in mwt_exclude
+    language_capability(lang)
 
-    def build_stanza_config_from_langs(
-        langs: list[str],
-    ) -> tuple[list[str], dict[str, dict[str, str | bool]]]:
-        """Build the Stanza config payload expected by utseg inference.
 
-        Processor selection is per-language: only request processors that
-        Stanza actually supports for each language (from the capability
-        table). Languages without constituency get sentence-boundary
-        segmentation instead.
-        """
-        from batchalign.worker._stanza_capabilities import get_cached_capability_table
+def load_utseg_pipeline(lang: LanguageCode) -> LoadedPipeline:
+    """The Stanza constituency pipeline for ``lang``, built once and reused.
 
-        table = get_cached_capability_table()
+    Built through the pipeline cache under ``{lang}:utseg``, with that key's
+    construction slot held, exactly as morphotag's pipelines are, so a worker
+    that segments many batches loads the model once rather than once per
+    batch, and every call goes through the entry's own guard.
 
-        lang_alpha2: list[str] = []
-        configs: dict[str, dict[str, str | bool]] = {}
-        for language in langs:
-            alpha2_code = iso3_to_alpha2(language)
-            if alpha2_code == "zh":
-                alpha2_code = "zh-hans"
-            lang_alpha2.append(alpha2_code)
+    The processors are utterance segmentation's requirement (Rust's
+    ``StanzaRequirement::UtteranceSegmentation``: tokenize, pos and
+    constituency, whose trees are all the route reads), plus ``mwt`` where the
+    catalog entry ships it. No lemmatizer: segmentation never reads lemmas.
 
-            processors: set[str] = {"tokenize", "pos", "lemma"}
+    Raises ``UnsupportedLanguageError`` when the language's catalog entry
+    lacks a processor of that requirement. The server refuses such a language
+    before dispatch (`UtsegRoute::admit`); this is the worker's own refusal
+    for a request that reached it anyway, never a pipeline without a parser
+    whose every item would fail.
+    """
+    cap = language_capability(lang)
+    if not cap.serves("utterance_segmentation"):
+        raise UnsupportedLanguageError(
+            f"The installed Stanza catalog entry for {lang!r} lacks the utterance "
+            f"segmentation processors ("
+            f"{_pipeline_processors('utterance_segmentation', with_mwt=False)}"
+            f"), so it cannot segment with Stanza."
+        )
 
-            # Only add constituency if the language explicitly supports it.
-            # When capability data is unavailable, prefer the safe
-            # sentence-boundary fallback over guessing and crashing.
-            lang_caps = table.languages.get(language) if table else None
-            if lang_caps is not None and lang_caps.has_constituency:
-                processors.add("constituency")
+    key = utseg_key(lang)
+    cache = pipeline_cache()
+    with cache.load_slot(key) as already_resident:
+        if already_resident is not None:
+            return already_resident
 
-            # Only add MWT if the language supports it.
-            if lang_caps is not None and lang_caps.has_mwt:
-                processors.add("mwt")
-            elif table is None and has_mwt:
-                processors.add("mwt")
+        import stanza
+        from stanza import DownloadMethod
 
-            configs[alpha2_code] = {
-                "processors": ",".join(sorted(processors)),
-                "tokenize_pretokenized": True,
-                # `lemma` is always requested above, so the lemmatizer's
-                # pretrain repair applies here as in morphotag.
-                **lemma_pretrain_options(alpha2_code),
-            }
-        return lang_alpha2, configs
-
-    # Installing the builder is what "utseg has loaded" means to the
-    # capability report; the version it names comes from
-    # `_state.stanza_version()`, not from a copy taken here.
-    _state.utseg_config_builder = build_stanza_config_from_langs
+        _emit_stanza_lang_download_event_if_missing(lang, cap.stanza_code)
+        nlp = stanza.Pipeline(
+            lang=cap.stanza_code,
+            processors=_pipeline_processors(
+                "utterance_segmentation", with_mwt=cap.has("mwt")
+            ),
+            tokenize_pretokenized=True,
+            download_method=DownloadMethod.REUSE_RESOURCES,
+        )
+        # No tokenizer context: utseg has no realignment layer.
+        installed = cache.install(key, nlp, context=None)
+        L.info("Loaded Stanza utseg pipeline for %s (key=%s)", lang, key)
+        return installed.entry
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +714,7 @@ def load_utseg_builder(lang: LanguageCode) -> None:
 
 
 def _emit_stanza_lang_download_event_if_missing(
-    lang: LanguageCode, alpha2: LanguageCode2
+    lang: LanguageCode, alpha2: StanzaCode
 ) -> None:
     """Emit a user-visible event if Stanza needs to download ``alpha2``.
 

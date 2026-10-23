@@ -145,7 +145,6 @@ fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
         lang: LanguageCode3::eng(),
         items,
         mwt: BTreeMap::new(),
-        allow_stanza_fallback: false,
     }
 }
 
@@ -216,6 +215,64 @@ async fn spawn_test_echo_worker_task_bootstrap() {
 
     let health = lease.health_check().await.expect("health check failed");
     assert_eq!(health.command, "infer:morphosyntax");
+}
+
+/// REAL BOUNDARY for language admission: a real (not echo) worker builds its
+/// capability table from the installed Stanza catalog and Rust's ISO table,
+/// reports it, and the server's registry admission reads that report. Kazakh,
+/// which a static list once refused, is admitted; Quechua, which no catalog
+/// serves, is not in it. Opt-in: it spawns a real Stanza worker (no model is
+/// loaded for a per-file worker, but the worker refreshes the catalog it
+/// reads when it starts).
+#[tokio::test]
+#[ignore = "Real Stanza worker and catalog; opt-in via --ignored"]
+async fn a_real_workers_catalog_report_admits_kazakh() {
+    use batchalign::stanza_registry::StanzaRequirement;
+    let _ = require_python!();
+    let Some(python) = common::resolve_python_for_module("stanza") else {
+        eprintln!("SKIP: Python with Stanza not available");
+        return;
+    };
+    let config = WorkerConfig {
+        python_path: python,
+        test_echo: false,
+        profile: WorkerProfile::Stanza,
+        task: Some(InferTask::Morphosyntax),
+        lang: WorkerLanguage::PerFile,
+        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<120>(),
+        ..Default::default()
+    };
+    let mut lease = common::test_worker_pool::shared_test_worker_pool()
+        .checkout(&config)
+        .await
+        .expect("checkout failed");
+    let caps = lease.capabilities().await.expect("capabilities failed");
+    let batchalign::stanza_registry::StanzaCatalogReport::Catalog { languages } =
+        caps.stanza_catalog
+    else {
+        panic!(
+            "a real Stanza worker reports its catalog, got {:?}",
+            caps.stanza_catalog
+        );
+    };
+    // The server admits a language for morphotag when its entry ships every
+    // processor of the requirement; the report is what that reads.
+    let serves = |code: &str| {
+        languages
+            .get(&LanguageCode3::try_new(code).unwrap())
+            .is_some_and(|shipped| {
+                StanzaRequirement::Morphosyntax
+                    .processors()
+                    .iter()
+                    .all(|required| shipped.contains(required))
+            })
+    };
+    assert!(serves("kaz"));
+    assert!(serves("eng"));
+    assert!(
+        !languages.contains_key(&LanguageCode3::try_new("que").unwrap()),
+        "Quechua has no catalog entry"
+    );
 }
 
 #[tokio::test]

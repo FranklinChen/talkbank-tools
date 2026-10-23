@@ -519,7 +519,7 @@ fn test_inject_results_retokenize_cantonese_retrace() {
         .enumerate()
         .map(|(i, w)| {
             let (head, deprel) = if i == 0 { (0, "root") } else { (1, "dep") };
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(i + 1),
                 text: w.to_string(),
                 lemma: w.to_string(),
@@ -533,6 +533,7 @@ fn test_inject_results_retokenize_cantonese_retrace() {
                 deps: None,
                 misc: None,
             })
+            .expect("test analysis carries no padding feature")
         })
         .collect();
 
@@ -813,7 +814,7 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
 
     let secondary_sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "los".to_string(),
                 lemma: "el".to_string(),
@@ -824,8 +825,9 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "niños".to_string(),
                 lemma: "niño".to_string(),
@@ -836,7 +838,8 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
     let expected_line = span.line_idx();
@@ -944,7 +947,7 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
         sentences: vec![UdSentence {
             words: vec![
                 // Range parent token for "gonna"
-                UdWord::from(UdWordAnalysis {
+                UdWord::try_from(UdWordAnalysis {
                     id: UdId::Range(1, 2),
                     text: "gonna".into(),
                     lemma: "".into(),
@@ -955,9 +958,10 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "dep".into(),
                     deps: None,
                     misc: None,
-                }),
+                })
+                .expect("test analysis carries no padding feature"),
                 // Component 1: "gon" (going)
-                UdWord::from(UdWordAnalysis {
+                UdWord::try_from(UdWordAnalysis {
                     id: UdId::Single(1),
                     text: "gon".into(),
                     lemma: "go".into(),
@@ -968,9 +972,10 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "advcl".into(),
                     deps: None,
                     misc: None,
-                }),
+                })
+                .expect("test analysis carries no padding feature"),
                 // Component 2: "na" (to)
-                UdWord::from(UdWordAnalysis {
+                UdWord::try_from(UdWordAnalysis {
                     id: UdId::Single(2),
                     text: "na".into(),
                     lemma: "to".into(),
@@ -981,9 +986,10 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "mark".into(),
                     deps: None,
                     misc: None,
-                }),
+                })
+                .expect("test analysis carries no padding feature"),
                 // Regular word: "eat"
-                UdWord::from(UdWordAnalysis {
+                UdWord::try_from(UdWordAnalysis {
                     id: UdId::Single(3),
                     text: "eat".into(),
                     lemma: "eat".into(),
@@ -994,9 +1000,10 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "root".into(),
                     deps: None,
                     misc: None,
-                }),
+                })
+                .expect("test analysis carries no padding feature"),
                 // Regular word: "cookies"
-                UdWord::from(UdWordAnalysis {
+                UdWord::try_from(UdWordAnalysis {
                     id: UdId::Single(4),
                     text: "cookies".into(),
                     lemma: "cookie".into(),
@@ -1007,9 +1014,10 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "obj".into(),
                     deps: None,
                     misc: None,
-                }),
+                })
+                .expect("test analysis carries no padding feature"),
                 // Punctuation: "."
-                UdWord::from(UdWordAnalysis {
+                UdWord::try_from(UdWordAnalysis {
                     id: UdId::Single(5),
                     text: ".".into(),
                     lemma: ".".into(),
@@ -1020,7 +1028,8 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
                     deprel: "punct".into(),
                     deps: None,
                     misc: None,
-                }),
+                })
+                .expect("test analysis carries no padding feature"),
             ],
         }],
     };
@@ -2209,10 +2218,13 @@ fn assert_utterances_preserved_one_to_one(label: &str, before: &[String], after:
     let mut introduced: Vec<&String> = Vec::new();
 
     for (id, &n_in) in &before_counts {
-        let n_out = after_counts.get(id).copied().unwrap_or(0);
-        if n_out == 0 {
+        // An id the output never mentions is lost: absence, branched on, not
+        // a count of zero standing in for it.
+        let Some(&n_out) = after_counts.get(id) else {
             lost.push(id);
-        } else if n_out != n_in {
+            continue;
+        };
+        if n_out != n_in {
             duplicated.push((id, n_in, n_out));
         }
     }
@@ -3233,12 +3245,12 @@ fn run_synthesis_root_invariant_check(form_marker: &str, surface: &str, expected
 
     // End-to-end: the resulting CHAT file must validate clean.
     let opts = talkbank_model::ParseValidateOptions::default().with_alignment();
-    talkbank_model::validate_chat_file_with_options(&mut chat_file, &opts).unwrap_or_else(|err| {
+    if let Err(err) = talkbank_model::validate_chat_file_with_options(&mut chat_file, &opts) {
         panic!(
             "[{form_marker}] post-injection CHAT must validate; \
              got {err:?}"
-        )
-    });
+        );
+    }
 }
 
 #[test]

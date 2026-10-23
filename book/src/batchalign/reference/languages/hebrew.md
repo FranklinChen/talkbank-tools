@@ -49,12 +49,11 @@ pipeline normalizes these to ASCII (runs for all languages, not just Hebrew):
 
 Hebrew uses Stanza's MWT processor for preposition+article contractions
 (e.g., בַּ → ב + ה). MWT eligibility is **capability-driven**:
-`should_request_mwt(alpha2, get_cached_capability_table())` at
-`batchalign/worker/_stanza_loading.py:40` consults the cached Stanza
-catalog and reports `has_mwt=True` for `he`. The earlier hardcoded
-`MWT_LANGS` / `_MWT_EXCLUSION` sets were deleted,
+the loader reads the language's entry (`language_capability(lang)` in
+`batchalign/worker/_stanza_loading.py`) from the cached Stanza
+catalog and reports `has("mwt")` for `he`; no language list decides it.
 [Stanza Limitations Defect 5](../stanza-limitations.md) has the
-rewrite rationale.
+rationale.
 
 ### HebBinyan (Verb Conjugation Pattern)
 
@@ -114,4 +113,4 @@ editors depends on the editor's BiDi support.
 | `crates/batchalign-transform/src/morphosyntax/features.rs:43,46` | HebBinyan/HebExistential extraction |
 | `crates/batchalign-transform/src/morphosyntax/types.rs:38` | `heb` → `he` Stanza alpha-2 mapping |
 | `crates/batchalign/src/chat_ops/nlp/mapping/tests/lang_de_es_he.rs` | Hebrew integration tests (`:15`, `:45`, `:268`) |
-| `batchalign/worker/_stanza_loading.py` | Stanza pipeline config; MWT eligibility driven by `should_request_mwt()` |
+| `batchalign/worker/_stanza_loading.py` | Stanza pipeline config; MWT eligibility from the catalog entry (`language_capability()`) |

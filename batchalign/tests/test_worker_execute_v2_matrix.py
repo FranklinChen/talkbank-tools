@@ -78,6 +78,7 @@ from batchalign.worker._types_v2 import (
     TranslationResultV2,
     UtsegRequestV2,
     UtsegResultV2,
+    UtsegSegmenterV2,
     WhisperTokenTimingResultV2,
 )
 
@@ -406,6 +407,7 @@ def _make_text_request(tmp_path: Path, task_name: TextTaskName) -> ExecuteReques
             lang="eng",
             payload_ref_id=attachment_id,
             item_count=1,
+            segmenter=UtsegSegmenterV2.BOUNDARY_MODEL,
         )
         task = InferenceTaskV2.UTSEG
     elif task_name == "translate":
@@ -690,6 +692,7 @@ def test_text_execute_v2_rejects_result_count_mismatch(
                     "pipeline": "standard",
                 },
                 "repairs": [],
+                "feature_repairs": [],
             },
             MorphosyntaxResultV2,
             id="morphosyntax",
@@ -774,12 +777,23 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
         pytest.param("morphosyntax", {"raw_sentences": []}, id="morphosyntax-untagged"),
         pytest.param(
             "morphosyntax",
-            {"kind": "analyzed", "raw_sentences": {}, "model": _MODEL, "repairs": []},
+            {
+                "kind": "analyzed",
+                "raw_sentences": {},
+                "model": _MODEL,
+                "repairs": [],
+                "feature_repairs": [],
+            },
             id="morphosyntax-raw_sentences",
         ),
         pytest.param(
             "morphosyntax",
-            {"kind": "analyzed", "raw_sentences": [], "repairs": []},
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "repairs": [],
+                "feature_repairs": [],
+            },
             id="morphosyntax-missing-model",
         ),
         # A host that reports no repairs must say so. Defaulting the field
@@ -787,8 +801,19 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
         # item, which is the shape that kept relation rewrites in the log only.
         pytest.param(
             "morphosyntax",
-            {"kind": "analyzed", "raw_sentences": [], "model": _MODEL},
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "model": _MODEL,
+                "feature_repairs": [],
+            },
             id="morphosyntax-missing-repairs",
+        ),
+        # Likewise for the feature values a host removed.
+        pytest.param(
+            "morphosyntax",
+            {"kind": "analyzed", "raw_sentences": [], "model": _MODEL, "repairs": []},
+            id="morphosyntax-missing-feature-repairs",
         ),
         pytest.param(
             "morphosyntax",
@@ -797,6 +822,7 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "raw_sentences": [],
                 "model": _MODEL,
                 "repairs": [{"kind": "transposed", "word": "ne"}],
+                "feature_repairs": [],
             },
             id="morphosyntax-unknown-repair-kind",
         ),
@@ -805,8 +831,27 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
             {
                 "kind": "analyzed",
                 "raw_sentences": [],
+                "model": _MODEL,
+                "repairs": [],
+                "feature_repairs": [
+                    {
+                        "kind": "truncated_feature",
+                        "word": "ne",
+                        "feature": "Case",
+                        "removed_value": "<PAD>",
+                    }
+                ],
+            },
+            id="morphosyntax-unknown-feature-repair-kind",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
                 "model": {**_MODEL, "stanza_version": ""},
                 "repairs": [],
+                "feature_repairs": [],
             },
             id="morphosyntax-blank-model-version",
         ),
@@ -817,6 +862,7 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "raw_sentences": [],
                 "model": {**_MODEL, "pipeline": "retokenize"},
                 "repairs": [],
+                "feature_repairs": [],
             },
             id="morphosyntax-unknown-pipeline",
         ),

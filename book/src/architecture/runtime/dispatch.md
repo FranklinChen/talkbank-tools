@@ -1,7 +1,7 @@
 # Dispatch and Execution
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 How a job moves from the CLI to a running command: the four CLI
 dispatch targets, the workflow families that organize commands, the
@@ -127,39 +127,41 @@ without constructing or modifying CHAT.
 
 ## Where to add new command semantics
 
-Start in `crates/batchalign/src/commands/` and
+Start in `crates/batchalign/src/recipe_runner/catalog.rs` and
 `crates/batchalign/src/command_model/catalog.rs`. Jump to
-`crates/batchalign/src/command_family.rs` when you need
+`crates/batchalign/src/recipe_runner/command_spec.rs` when you need
 released-command family metadata, and to
 `crates/batchalign/src/text_batch.rs` when you need shared text-family
 helpers reused by the runner kernel.
 
-The command module owns the public entrypoint, metadata, and
-materialization choice. `runner/` stays focused on job lifecycle,
-queueing, and shared dispatch machinery.
+The catalog owns command metadata and its recipe. Family executors in
+`execution/` and `runner/dispatch/` consume that plan; `runner/` also owns job
+lifecycle and queueing. There is no per-command `commands/` authoring layer.
 
 ## Processing Lifecycle
 
-Every CHAT-mutating command follows this pattern:
+CHAT-mutating commands use command-specific typed admission and processing:
 
-1. **Parse**: `parse_lenient()` produces a `ChatFile` AST.
-2. **Pre-validate**: check input quality against a command-specific
-   `ValidityLevel` (e.g., `MainTierValid` for `morphotag`).
-3. **Collect payloads**: extract per-utterance data from the AST
-   (word lists, text, language metadata).
-4. **Cache check**: hash payloads with BLAKE3, partition into hits
-   and misses.
-5. **Infer**: send misses to Python workers via typed worker IPC
-   (`execute_v2` on the live infer surfaces). Workers return raw ML
-   output.
-6. **Inject**: insert results (cache hits + infer results) into the
-   AST.
-7. **Cache put**: persist new results for future reuse.
-8. **Post-validate**: alignment checks + semantic validation.
-9. **Serialize**: `to_chat_string()` produces final CHAT output.
+1. **Admit input** under the command's replacement-tier and validation policy.
+   The parsed model and the admission evidence travel together; a recovered
+   unchecked AST is not an admitted input.
+2. **Collect payloads** from the admitted model, including resolved utterance
+   languages and any required model-capability admission.
+3. **Resolve inference** through the command's cache policy, where it has one,
+   and typed `execute_v2` worker requests. Morphotag's inference is not cached;
+   its incremental policy instead reuses already complete utterances.
+4. **Apply results** through the owning transform, preserving typed failures
+   and any permitted diagnosed or partial outcomes.
+5. **Admit output** before writing. Post-validation and serialization consume
+   the resulting document state; a completed job does not by itself imply a
+   fully analyzed or acoustically correct transcript.
 
-Generation commands (`transcribe`) replace step 1 with ASR inference
-followed by `build_chat()` to construct the initial AST.
+See [command contracts](../../batchalign/architecture/command-contracts.md)
+for each command's admitted and diagnosed output policy.
+
+Generation commands (`transcribe`) begin with ASR inference and typed
+`build_chat()` construction, then admit the produced document before optional
+CHAT processing.
 
 `ReferenceProjection` (`compare`) intentionally diverges from this
 generic loop:

@@ -8,8 +8,7 @@ use serde::Deserialize;
 
 use crate::api::AudioPositionSeconds;
 use crate::types::worker_v2::{
-    ExecuteResponseV2, ProtocolErrorCodeV2, SpeakerInferenceEvidenceV2, SpeakerResultV2,
-    SpeakerSegmentV2, TaskResultV2,
+    ExecuteResponseV2, SpeakerInferenceEvidenceV2, SpeakerResultV2, SpeakerSegmentV2, TaskResultV2,
 };
 use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
 use batchalign_types::interval::AdmittedInterval;
@@ -27,14 +26,9 @@ use batchalign_types::interval::AdmittedInterval;
 /// condition on the operator's own machine.
 #[derive(Debug, Clone)]
 pub enum SpeakerResultParseError {
-    /// The worker's response itself reported failure; carries the protocol
-    /// code so the caller can categorize it without re-parsing the message.
-    Protocol {
-        /// The failed request's protocol category.
-        code: ProtocolErrorCodeV2,
-        /// The fully formatted diagnostic.
-        message: String,
-    },
+    /// The worker's response itself reported failure, carried whole so the
+    /// caller categorizes it by its protocol code, never its message.
+    Protocol(ExecuteFailureRead),
     /// The worker reported success but the payload was not a speaker result.
     UnexpectedPayload(String),
 }
@@ -42,7 +36,7 @@ pub enum SpeakerResultParseError {
 impl std::fmt::Display for SpeakerResultParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Protocol { message, .. } => f.write_str(message),
+            Self::Protocol(failure) => write!(f, "{failure}"),
             Self::UnexpectedPayload(message) => f.write_str(message),
         }
     }
@@ -50,10 +44,7 @@ impl std::fmt::Display for SpeakerResultParseError {
 
 impl From<ExecuteFailureRead> for SpeakerResultParseError {
     fn from(value: ExecuteFailureRead) -> Self {
-        Self::Protocol {
-            code: value.code,
-            message: value.message,
-        }
+        Self::Protocol(value)
     }
 }
 
@@ -185,8 +176,8 @@ mod tests {
     use super::*;
     use crate::api::NonNegativeSeconds;
     use crate::types::worker_v2::{
-        ExecuteResponseV2, SpeakerInferenceEvidenceV2, SpeakerProviderJobIdV2, SpeakerResultV2,
-        SpeakerSegmentV2, WorkerRequestIdV2,
+        ExecuteResponseV2, ProtocolErrorCodeV2, SpeakerInferenceEvidenceV2, SpeakerProviderJobIdV2,
+        SpeakerResultV2, SpeakerSegmentV2, WorkerRequestIdV2,
     };
 
     #[test]
@@ -307,9 +298,13 @@ mod tests {
             .expect_err("a failed response is never speaker data");
 
         match error {
-            SpeakerResultParseError::Protocol { code, message } => {
-                assert_eq!(code, ProtocolErrorCodeV2::ModelAccessDenied);
-                assert!(message.contains("speaker-diarization-community-1"));
+            SpeakerResultParseError::Protocol(failure) => {
+                assert_eq!(failure.code(), ProtocolErrorCodeV2::ModelAccessDenied);
+                assert!(
+                    failure
+                        .message()
+                        .contains("speaker-diarization-community-1")
+                );
             }
             SpeakerResultParseError::UnexpectedPayload(message) => {
                 panic!("a protocol failure must not read as a shape mismatch: {message}");

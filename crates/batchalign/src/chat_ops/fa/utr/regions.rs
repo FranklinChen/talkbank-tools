@@ -352,7 +352,7 @@ mod tests {
 
     fn info(timing: Option<(u64, u64)>, overlap: bool) -> UtrUtteranceInfo {
         UtrUtteranceInfo {
-            words: vec!["word".to_owned()],
+            units: crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&["word".to_owned()]),
             retained_timing: timing
                 .map(|(start_ms, end_ms)| ObservedWordTiming { start_ms, end_ms }),
             has_lazy_overlap: overlap,

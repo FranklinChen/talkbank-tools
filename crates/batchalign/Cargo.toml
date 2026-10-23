@@ -157,7 +157,7 @@ rubato = { workspace = true, optional = true }
 audioadapter-buffers = { workspace = true, optional = true }
 # Default-model auto-fetch (ggml-large-v3 from ggerganov/whisper.cpp).
 hf-hub = { workspace = true, optional = true }
-unicode-normalization = "0.1.25"
+unicode-normalization = "0.1.26"
 
 # whisper-rs compiles whisper.cpp (C/C++). On macOS the Metal backend is always
 # built; CoreML/CUDA are additive opt-ins via the whisper-rs-coreml/-cuda

@@ -15,8 +15,9 @@ use super::comparison::{Alignable, FuzzyComparison, PreparedFuzzyWord};
 
 mod episodes;
 pub use episodes::{
-    CommonLocalMatch, LocalInterleaving, LocalInterleavingRefusal, LocalInterleavingWorkPhase,
-    LocalMatch, LocalSearchCorridor, LocalWord, RequiredLocalWord, SpeakerTurn,
+    CommonLocalMatch, LocalInterleaving, LocalInterleavingBudget, LocalInterleavingInconsistency,
+    LocalInterleavingRefusal, LocalInterleavingWorkPhase, LocalMatch, LocalSearchCorridor,
+    LocalWord, RequiredLocalWord, SpeakerTurn,
 };
 pub use episodes::{PackedSearchCost, PackedSearchStage, PackedSearchStatus};
 

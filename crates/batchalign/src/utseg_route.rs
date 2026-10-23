@@ -29,6 +29,11 @@
 
 use crate::api::LanguageCode3;
 use crate::params::UtsegFallbackPolicy;
+use crate::stanza_registry::{
+    Admitted, StanzaGap, StanzaRefusal, StanzaRegistry, StanzaRegistryLookup,
+    UtteranceSegmentation, admit_from,
+};
+use crate::types::worker_v2::UtsegSegmenterV2;
 
 /// Whether one language has a TalkBank utterance-boundary model.
 ///
@@ -61,7 +66,6 @@ fn has_boundary_model(lang: &LanguageCode3) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UtsegRoute {
     language: LanguageCode3,
-    fallback: UtsegFallbackPolicy,
     kind: RouteKind,
 }
 
@@ -87,19 +91,118 @@ pub(crate) struct UtsegUnavailable {
     lang: LanguageCode3,
 }
 
+/// A route this runtime can serve: proven by [`UtsegRoute::admit`] against
+/// the admitted Stanza registry when the route runs Stanza, and needing no
+/// proof when it runs a boundary model. The only route a job is dispatched
+/// with, so a language whose catalog entry cannot segment is refused before
+/// any work rather than failing item by item at the worker.
+///
+/// It is what the worker request carries: [`Self::segmenter`] names the one
+/// segmenter the worker runs, so the worker never re-derives a route from
+/// what it happens to have loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServableUtsegRoute(ServableSegmenter);
+
+/// The servable segmenter, with what proves it: a boundary-model language
+/// needs no Stanza proof; the Stanza route carries the registry's admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServableSegmenter {
+    BoundaryModel(LanguageCode3),
+    StanzaConstituency(Admitted<UtteranceSegmentation>),
+}
+
+impl ServableUtsegRoute {
+    /// The language this route segments.
+    pub(crate) fn language(&self) -> &LanguageCode3 {
+        match &self.0 {
+            ServableSegmenter::BoundaryModel(language) => language,
+            ServableSegmenter::StanzaConstituency(admitted) => admitted.language(),
+        }
+    }
+
+    /// The segmenter the worker request names.
+    pub(crate) fn segmenter(&self) -> UtsegSegmenterV2 {
+        match &self.0 {
+            ServableSegmenter::BoundaryModel(_) => UtsegSegmenterV2::BoundaryModel,
+            ServableSegmenter::StanzaConstituency(_) => UtsegSegmenterV2::StanzaConstituency,
+        }
+    }
+}
+
+/// The Stanza constituency route chosen for a language this runtime's
+/// Stanza catalog cannot serve.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "utterance segmentation for language '{lang}' takes the Stanza constituency route, which \
+     this runtime cannot serve: {reason}"
+)]
+pub(crate) struct UtsegStanzaUnservable {
+    lang: LanguageCode3,
+    reason: StanzaRefusal<UtteranceSegmentation>,
+}
+
 impl UtsegRoute {
+    /// Prove this route servable, or refuse it before any work.
+    ///
+    /// # Errors
+    ///
+    /// The route runs Stanza and the admitted registry does not serve the
+    /// language's constituency requirement, or there is no admitted registry.
+    pub(crate) fn admit(
+        self,
+        registry: &StanzaRegistryLookup,
+    ) -> Result<ServableUtsegRoute, UtsegStanzaUnservable> {
+        match self.kind {
+            RouteKind::BoundaryModel => Ok(ServableUtsegRoute(ServableSegmenter::BoundaryModel(
+                self.language,
+            ))),
+            RouteKind::StanzaFallback => admit_from(registry, &self.language)
+                .map(|admitted| ServableUtsegRoute(ServableSegmenter::StanzaConstituency(admitted)))
+                .map_err(|reason| UtsegStanzaUnservable {
+                    lang: self.language,
+                    reason,
+                }),
+        }
+    }
+
+    /// Prove this route servable by an admitted registry in hand (the
+    /// submission check): the registry's own admission, so the only refusal
+    /// is the registry's gap. There is no "no registry" case to answer.
+    ///
+    /// # Errors
+    ///
+    /// The route runs Stanza and the registry does not serve the language.
+    pub(crate) fn admit_by(
+        self,
+        registry: &std::sync::Arc<StanzaRegistry>,
+    ) -> Result<ServableUtsegRoute, StanzaGap<UtteranceSegmentation>> {
+        match self.kind {
+            RouteKind::BoundaryModel => Ok(ServableUtsegRoute(ServableSegmenter::BoundaryModel(
+                self.language,
+            ))),
+            RouteKind::StanzaFallback => registry.admit(&self.language).map(|admitted| {
+                ServableUtsegRoute(ServableSegmenter::StanzaConstituency(admitted))
+            }),
+        }
+    }
+
+    /// The servable route of a boundary-model language, which needs no
+    /// Stanza proof; `None` for the Stanza route, which must be admitted.
+    ///
+    /// Transcribe's pre-CHAT pass runs the boundary model or nothing, so this
+    /// is how it reaches a route to dispatch without consulting a registry.
+    pub(crate) fn boundary_model(&self) -> Option<ServableUtsegRoute> {
+        match self.kind {
+            RouteKind::BoundaryModel => Some(ServableUtsegRoute(ServableSegmenter::BoundaryModel(
+                self.language.clone(),
+            ))),
+            RouteKind::StanzaFallback => None,
+        }
+    }
+
     /// The language whose segmentation capability this value proves.
     pub(crate) fn language(&self) -> &LanguageCode3 {
         &self.language
-    }
-
-    /// The exact operator policy admitted with this language.
-    pub(crate) fn fallback(&self) -> UtsegFallbackPolicy {
-        self.fallback
-    }
-
-    pub(crate) fn uses_boundary_model(&self) -> bool {
-        self.kind == RouteKind::BoundaryModel
     }
 
     /// Decide how this language will be segmented, or refuse.
@@ -115,14 +218,12 @@ impl UtsegRoute {
         if has_boundary_model(lang) {
             return Ok(Self {
                 language: lang.clone(),
-                fallback,
                 kind: RouteKind::BoundaryModel,
             });
         }
         match fallback {
             UtsegFallbackPolicy::AllowStanza => Ok(Self {
                 language: lang.clone(),
-                fallback,
                 kind: RouteKind::StanzaFallback,
             }),
             UtsegFallbackPolicy::Refuse => Err(UtsegUnavailable { lang: lang.clone() }),
@@ -148,9 +249,11 @@ mod tests {
                 UtsegFallbackPolicy::AllowStanza,
             ] {
                 let route = UtsegRoute::resolve(&lang(code), policy).expect("boundary model");
-                assert!(route.uses_boundary_model());
+                assert_eq!(
+                    route.boundary_model().map(|servable| servable.segmenter()),
+                    Some(UtsegSegmenterV2::BoundaryModel)
+                );
                 assert_eq!(route.language(), &lang(code));
-                assert_eq!(route.fallback(), policy);
             }
         }
     }
@@ -188,6 +291,53 @@ mod tests {
         );
     }
 
+    /// RED FIRST: the Stanza route was admitted by tokenize and pos alone, so
+    /// a language whose catalog entry has no constituency parser ran, and
+    /// every multi-word item failed at the worker with "produced no tree". It
+    /// is now refused before any work, naming the processors it lacks; a
+    /// boundary-model route needs no Stanza, registry or not.
+    #[test]
+    fn the_stanza_route_is_admitted_only_with_a_constituency_parser() {
+        use crate::stanza_registry::{GapKind, StanzaProcessor::*};
+        let admitted = StanzaRegistry::serving(&[
+            ("nld", &[Tokenize, Pos, Lemma, Depparse, Mwt]),
+            ("spa", &[Tokenize, Pos, Constituency, Mwt]),
+        ])
+        .shared();
+        let gap = UtsegRoute::resolve(&lang("nld"), UtsegFallbackPolicy::AllowStanza)
+            .expect("authorized fallback")
+            .admit_by(&admitted)
+            .expect_err("no constituency parser, no Stanza segmentation");
+        assert_eq!(
+            gap.kind(),
+            &GapKind::ProcessorsUnavailable {
+                missing: std::collections::BTreeSet::from([Constituency])
+            }
+        );
+        let registry: StanzaRegistryLookup = Ok(admitted);
+        let refusal = UtsegRoute::resolve(&lang("nld"), UtsegFallbackPolicy::AllowStanza)
+            .expect("authorized fallback")
+            .admit(&registry)
+            .expect_err("the lookup refuses the same gap");
+        assert!(refusal.to_string().contains("constituency"), "{refusal}");
+
+        let spanish = UtsegRoute::resolve(&lang("spa"), UtsegFallbackPolicy::AllowStanza)
+            .expect("authorized fallback")
+            .admit(&registry)
+            .expect("Spanish ships a constituency parser");
+        assert_eq!(spanish.language(), &lang("spa"));
+        assert_eq!(spanish.segmenter(), UtsegSegmenterV2::StanzaConstituency);
+
+        let english =
+            UtsegRoute::resolve(&lang("eng"), UtsegFallbackPolicy::Refuse).expect("boundary model");
+        assert!(english.boundary_model().is_some());
+        english
+            .admit(&Err(
+                crate::stanza_registry::StanzaRegistryUnavailable::NoReport,
+            ))
+            .expect("a boundary-model route reads no Stanza output");
+    }
+
     /// The opt-in is what makes an unsupported language runnable, and it
     /// selects Stanza rather than silently borrowing another language's model.
     #[test]
@@ -195,9 +345,8 @@ mod tests {
         for code in ["spa", "fra", "jpn", "cat", "nld"] {
             let route = UtsegRoute::resolve(&lang(code), UtsegFallbackPolicy::AllowStanza)
                 .expect("authorized fallback");
-            assert!(!route.uses_boundary_model());
+            assert_eq!(route.boundary_model(), None);
             assert_eq!(route.language(), &lang(code));
-            assert_eq!(route.fallback(), UtsegFallbackPolicy::AllowStanza);
         }
     }
 

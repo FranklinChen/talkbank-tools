@@ -1,7 +1,7 @@
 # Terminator Architecture
 
 **Status:** Current
-**Last updated:** 2026-05-21 13:15 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This document is a comprehensive reference for how CHAT terminators are created,
 stored, defaulted, validated, and propagated through every batchalign3 pipeline.
@@ -11,8 +11,8 @@ transcript special case, and the differences from batchalign2.
 ## What Is a Terminator?
 
 A **terminator** is the punctuation mark that ends a CHAT utterance. It indicates
-the utterance type (declarative, interrogative, etc.) and in CA transcripts,
-the intonation contour.
+the utterance type or interruption/completion state. CA intonation markers
+are separate content separators, not terminators.
 
 **CHAT manual reference:** <https://talkbank.org/0info/manuals/CHAT.html#Utterance_Terminators>
 
@@ -26,18 +26,18 @@ In standard CHAT, every main-tier utterance **must** end with a terminator:
 
 **In CA transcripts (`@Options: CA`), terminators are optional.** Many
 utterances have no terminator at all, and others use CA-specific intonation
-markers instead of standard punctuation:
+markers alongside their content:
 
 ```text
-*KE: I like LA the best , LA's quiet -->
+*KE: I like LA the best , LA's quiet →
 *CO: yeah
 *KE: I'm gonna make a little tiny
 ```
 
-The `-->` is a CA level-pitch terminator. The other two utterances have no
-terminator at all. This is valid CHAT for CA mode.
+The `→` is a CA level-pitch separator. None of these examples supplies a
+terminator; CA mode permits that absence.
 
-## The 20 Terminator Variants
+## The 13 Terminator Variants
 
 **Source:** `talkbank-model/src/model/content/terminator.rs`
 
@@ -56,13 +56,6 @@ terminator at all. This is valid CHAT for CA mode.
 | | `BreakForCoding` | `+.` | |
 | **Quotation** | `QuotedNewLine` | `+"/.` | |
 | | `QuotedPeriodSimple` | `+".` | |
-| **CA Intonation** | `CaRisingToHigh` | (arrow) | U+21D7 |
-| | `CaRisingToMid` | (arrow) | U+2197 |
-| | `CaLevel` | (arrow) | U+2192 |
-| | `CaFallingToMid` | (arrow) | U+2198 |
-| | `CaFallingToLow` | (arrow) | U+21D8 |
-| **CA Break** | `CaTechnicalBreak` | (symbol) | U+224B |
-| | `CaNoBreak` | (symbol) | U+2248 |
 
 The `Terminator` enum does **not** implement `Default`. An utterance with no
 terminator is represented as `Option<Terminator>::None`, never a defaulted
@@ -74,11 +67,11 @@ variant.
 
 ```rust,ignore
 pub struct TierContent {
-    pub linkers: Linkers,
+    pub linkers: TierLinkers,
     pub language_code: Option<LanguagePrecode>,
-    pub content: TierItems,           // words, separators, groups, etc.
+    pub content: TierContentItems,           // words, separators, groups, etc.
     pub terminator: Option<Terminator>,  // <-- HERE
-    pub postcodes: Vec<Postcode>,
+    pub postcodes: TierPostcodes,
     pub bullet: Option<Bullet>,       // terminal utterance-level bullet
     pub location: Location,
 }
@@ -94,231 +87,120 @@ flowchart LR
 When `terminator` is `None`, the serializer skips it entirely. The bullet still
 appears at the end, but there is no punctuation mark between content and bullet.
 
-## The Terminator-Bullet Problem
+## Terminators, CA Separators and Bullets
 
-### How the grammar classifies bullets
+The pinned Chatter model represents `⇗ ↗ → ↘ ⇘` and the CA TCU markers
+`≋ +≋ ≈ +≈` as `Separator` variants. The former `Terminator::Ca*`
+variants are already retired. Their absence from the terminator grammar is
+intentional; do not restore them or promote trailing arrows to terminators.
 
-The tree-sitter grammar defines two positions where `MEDIA_URL` (bullet) nodes
-can appear:
-
-```mermaid
-flowchart TD
-    subgraph "Grammar Rule: tier_body"
-        contents["contents\n(repeat1: words, separators,\noverlap markers, CA arrows)"]
-        utt_end["utterance_end\n(terminator? postcodes? media_url?)"]
-    end
-
-    contents --> utt_end
-
-    contents -->|"MEDIA_URL in contents"| IB["InternalBullet\n(content item)"]
-    utt_end -->|"MEDIA_URL in utterance_end"| TB["TierContent.bullet\n(terminal bullet)"]
-```
-
-A `MEDIA_URL` node in `contents` becomes `UtteranceContent::InternalBullet`.
-A `MEDIA_URL` node in `utterance_end` becomes `TierContent.bullet`.
-
-### The CA arrow bug (grammar.js)
-
-**The 5 CA intonation arrows are defined as content separators, NOT as
-terminators in the grammar.** The `terminator` rule lists 16 variants but
-excludes the arrows. The arrows are in the `ca_intonation` rule inside
-`separator`, which is consumed by the greedy `contents` rule.
-
-```text
-Grammar:
-  terminator = choice(PERIOD, QUESTION, EXCLAMATION, ..., CA_NO_BREAK, CA_TECHNICAL_BREAK)
-                                                          ← CA arrows MISSING here
-
-  separator = choice(..., ca_intonation)
-                          ← CA arrows consumed here
-
-  contents = repeat1(choice(content_item, separator, ...))
-                          ← greedy, eats arrows before utterance_end runs
-```
-
-**Result for a CA line with two bullets:**
-
-```text
-Input:  *KE: words --> [bullet1] [bullet2]
-
-Grammar parse:
-  contents = [words, Separator(-->), InternalBullet(bullet1)]
-  utterance_end = [no terminator, terminal bullet(bullet2)]
-```
-
-The arrow is eaten by `contents` as a separator. The first bullet after it is
-also eaten as an `InternalBullet`. Only the second bullet reaches
-`utterance_end` and becomes the terminal `TierContent.bullet`.
-
-### Consequence: double bullets on the main line
-
-When the file is serialized:
-
-1. Content items are written (including `InternalBullet(bullet1)`)
-2. Terminator is written (None for CA, so skipped)
-3. Terminal bullet is written (`TierContent.bullet = bullet2`)
-
-Output: `*KE: words --> [bullet1] [bullet2]` -- two bullets.
-
-### The corrective direction
-
-The arrows are not terminators. Per CHECK, the five CA intonation
-arrows (`→ ↗ ⇗ ↘ ⇘`) are **separators**, not utterance enders, and
-the current `Terminator::CaRisingToHigh / CaRisingToMid / CaLevel /
-CaFallingToMid / CaFallingToLow` variants are the misclassification.
-The corrective direction is to remove those five variants from the
-model and grammar, keeping the arrows in the `separator` rule where
-they belong, and to fix the double-bullet symptom downstream: bullets
-positioned after an arrow on a CA tier should remain a single terminal
-`TierContent.bullet`, not split into `InternalBullet` + terminal.
-Tracked as BUG-009.
+`UtteranceContent::InternalBullet` and `TierContent.bullet` represent distinct
+positions. A serialization containing two bullets must be diagnosed from the
+actual input and admitted model; the presence of a CA arrow alone is not
+proof of a parser defect or authority to move a bullet.
 
 ## Where Terminators Are Created
 
-Every code path that creates a `Terminator` value:
+### 1. Parser (Chatter)
 
-### 1. Parser (talkbank-tools)
-
-**File:** `talkbank-parser/.../terminator.rs`
-
-Maps 16 of 20 CST node kinds to `Terminator` variants. The 5 CA intonation
-arrows are **not mapped** (they never reach the terminator position due to the
-grammar bug above). The 2 CA break variants (`CaTechnicalBreak`, `CaNoBreak`)
-and their linker forms are mapped.
+The shared model's `Terminator::from_chat_str` accepts the 13 canonical
+spellings above. Parser-produced terminators retain their source locations;
+programmatically constructed terminators use `Location::Unlocated`.
+CA separators remain content items. BA3 consumes the pinned Chatter model
+rather than maintaining a separate CHAT terminator inventory.
 
 ### 2. ASR post-processing
 
 **File:** `crates/batchalign-transform/src/asr_postprocess/mod.rs`
 
-When `retokenize()` flushes remaining words without explicit punctuation, it
-unconditionally appends a period:
+An utterance's end is a field of the ASR utterance, never one of its words:
 
 ```rust,ignore
-buf.push(AsrWord::new(".", None, None));  // HARDCODED PERIOD
+pub enum UtteranceEnd {
+    Observed(Terminator),          // the recognizer's ending punctuation
+    Synthesized(SynthesisCause),   // the pipeline closed the utterance
+}
+
+pub enum SynthesisCause {
+    NoMark,                            // the chunk ran out of words
+    UnwritableMark(UnwritableEndMark), // `...` (Ellipsis) or `(.)` (Pause)
+}
 ```
 
-**Impact:** All ASR-produced utterances get a period terminator. CA transcripts
-created from ASR will have periods that should not exist.
+`retokenize()` is the one producer of utterances. A closing mark ends the
+current utterance and becomes its end, read once as a `ClosingMark`:
+`Observed` when it is a CHAT terminator, `Synthesized(UnwritableMark(..))`
+when it is a mark CHAT cannot write as one (a run of two or more periods,
+or `(.)`). Stage 3 of preparation keeps such a mark whole as one token, so
+it reaches this decision intact rather than as separate periods, the first
+of which would read as an observed `.`. When retokenization flushes
+remaining words without explicit punctuation, the end is
+`Synthesized(NoMark)`. A mark with no words before it closes nothing and
+emits no utterance.
+
+CHAT requires a terminator and has no notation for one nobody heard, so a
+synthesized end is written as `.` (`UtteranceEnd::terminator`, the one place
+that period is chosen). `build_chat` returns the written utterances whose end
+was synthesized (`BuiltChat::synthesized_ends`, by position among the file's
+utterances), and transcribe counts them in the file's provenance stamp
+(`asr_synthesized_terminators=N`), named for the stage it counts: a later
+utseg split writes a period at each cut (below), which the stamp does not
+count. CA transcripts created from ASR still get these periods.
 
 ### 3. Utterance segmentation (utseg)
 
 **File:** `crates/batchalign-transform/src/utseg.rs`
 
-When splitting an utterance into multiple, every split gets a hardcoded Period:
-
-```rust,ignore
-Terminator::Period { location: Location::Unlocated }
-```
-
-**Impact:** Running utseg on a CA transcript destroys the original
-terminator-less structure.
+A split's earlier children receive a synthesized period. The final child
+inherits the parent's terminator, including a non-period ending; the retained
+`utseg_split_inherits_terminator_on_last_child` control exercises that boundary.
+The `%wor` terminators are kept in sync with their new main tiers. These cuts
+are not included in the ASR assembly's synthesized-end count.
 
 ### 4. CHAT building from ASR
 
 **File:** `crates/batchalign-transform/src/build_chat/mod.rs`
 
-Infers terminator from the last word text. Default is Period:
+Takes the terminator from the description's end (`UtteranceBody::Words { words,
+end }`), never from a word: every word is content, and a terminator is not a
+word (`ChatWordText` refuses one). Assembly decides nothing about how an
+utterance ends.
 
-```rust,ignore
-_ => Terminator::Period { location: Location::Unlocated }
-```
+## Stanza Input and MOR/GRA Output
 
-**Impact:** All build-from-ASR paths produce Period terminators.
+`stanza_input_terminator` in
+`crates/batchalign-transform/src/morphosyntax/payload.rs` is the single owner
+of the model-input policy. It copies an existing main-tier terminator; for an
+utterance without one, it supplies an unlocated period as Stanza's
+sentence-final input signal. This is a deliberate inference policy, not a
+claim that the source contained a period. Primary and secondary-language
+analysis use the same helper.
 
-## Where Terminators Are Silently Defaulted
+Morphotag normally honors `@Options: CA` by passing the document through
+without analysis. The explicit analyze policy opts into morphology. The
+injected MOR tier receives the payload's typed terminator, and its matching
+GRA relation is admitted with it through `MorGraTerminatorSlot` and
+`try_align_mor_gra`. The mapper's extra PUNCT relation belongs to that explicit
+slot, not to a guessed content word. Empty or inconsistent morphology is
+handled by the command's typed completion and refusal policy.
 
-### Morphosyntax payload collection
+There is no morphology inference cache that could collide on missing versus
+present terminators. Incremental equivalence compares the actual optional
+main-tier terminator among its reuse inputs.
 
-**File:** `crates/batchalign-transform/src/morphosyntax/payload.rs`
+## Admission and Preservation
 
-```text
-.unwrap_or_else(|| ".".to_string())
-```
+Input and output use the command-specific Chatter admission boundaries.
+CA policy belongs to those boundaries, not an ad hoc post-command warning
+that every utterance must have punctuation. See
+[command contracts](../architecture/command-contracts.md) and
+[CHAT validation failures](chat-validation-failures.md).
 
-When collecting words for the Python Stanza worker, a missing terminator is
-silently replaced with `"."` in the payload string. This affects the NLP model's
-sentence-type features.
-
-### MOR tier injection terminator handling
-
-**File:** `crates/batchalign-transform/src/morphosyntax/injection.rs`
-
-The injection layer copies the utterance's terminator into the rebuilt
-MOR tier. When the terminator is `None`, the MOR tier gets an empty
-string at that position. There is no morphosyntax cache layer to read
-from (text NLP runs use a no-op cache).
-
-## Where Terminators Are Validated
-
-### Pre-command validation (CA-aware)
-
-**File:** `../chatter/crates/talkbank-transform/src/validate.rs`
-
-```rust,ignore
-let is_ca = file.options.iter().any(|f| matches!(f, ChatOptionFlag::Ca));
-if !is_ca && utt.main.content.terminator.is_none() { /* error */ }
-```
-
-Correctly exempts CA files from the missing-terminator check.
-
-### Post-command validation (NOT CA-aware)
-
-**File:** `../chatter/crates/talkbank-transform/src/validate.rs`
-
-```text
-if utt.main.content.terminator.is_none() { /* warning */ }
-```
-
-Does **not** check for CA mode. This is why the Sprott output shows "utterance
-by *KE lost its terminator" warnings -- the CA utterances legitimately have no
-terminator, but post-validation doesn't know that.
-
-### NLP mapping assumptions
-
-**File:** `crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs`
-
-The MOR/GRA coordination code assumes every utterance has a terminator that
-maps to a PUNCT relation in GRA:
-
-```rust,ignore
-let terminator_idx = mors.iter().map(|m| m.count_chunks()).sum::<usize>() + 1;
-```
-
-The `+1` is the terminator. For CA utterances without terminators, this count
-may be wrong.
-
-## Single-Parse Pipeline (eliminates serialize→re-parse)
-
-The align pipeline previously serialized the `ChatFile` to text after UTR and
-re-parsed it before FA, creating 3 parses and 2 serializations per file. The
-re-parse was the mechanism that turned UTR-injected terminal bullets into
-`InternalBullet` content items (when CA arrows prevented correct terminal
-placement).
-
-As of 2026-03-30, the pipeline uses a **single-parse architecture**:
-
-1. `fa_pipeline.rs` parses CHAT text once → `ChatFile`
-2. `run_utr_pass(&mut ChatFile, ...)` mutates the AST in place, no serialization
-3. `run_fa_from_ast(ChatFile, ...)` receives the AST directly, no re-parse
-4. Final serialization happens once at the end
-
-This eliminates the serialize→re-parse cycle entirely. Combined with the
-talkbank-tools CA terminator resolution (which promotes trailing CA arrows
-from separator to terminator during CST→AST conversion), the double-bullet
-bug cannot occur.
-
-## Where Terminators Are Correctly Preserved
-
-- **FA pipeline** (`fa/injection.rs`, `fa/postprocess.rs`, `fa/orchestrate.rs`):
-  FA never touches `TierContent.terminator`. It only modifies word
-  `inline_bullet` and `TierContent.bullet`.
-
-- **Retokenize** (`retokenize/parse_helpers.rs`): When Stanza produces a
-  different terminator than the original, a warning is logged and the original
-  is preserved.
-
-- **Compare** (`compare.rs`): Collects terminators as `Option<String>` -- safe
-  for `None`.
+Alignment passes the model between UTR and forced alignment. Word timing and
+utterance timing are distinct from the main tier's terminator. Retokenization
+preserves the original ending when rebuilding the main tier. Passing an AST
+between stages prevents an unnecessary serialization/reparse boundary; it
+does not by itself prove every timing or bullet-placement outcome correct.
 
 ## Batchalign2 Comparison
 
@@ -361,67 +243,30 @@ in `ENDING_PUNCT` and would have been treated as regular word content.
 | Aspect | BA2 | BA3 |
 |--------|-----|-----|
 | **Terminator storage** | Last Form in content list | Separate `Option<Terminator>` field |
-| **Terminator type** | String from `ENDING_PUNCT` | 20-variant enum |
-| **CA arrows** | Not recognized as terminators | Enum variants exist but grammar doesn't wire them |
+| **Terminator type** | String from `ENDING_PUNCT` | 13-variant enum |
+| **CA arrows** | Not recognized as terminators | Typed content separators; never terminators |
 | **Missing terminator** | Implicit `.` default | Explicit `None` |
 | **Bullet model** | Regex on serialized text | AST: `InternalBullet` vs `TierContent.bullet` |
 | **FA terminator treatment** | Strip before Whisper | Exclude from word extraction |
 | **Grammar-level distinction** | N/A (no grammar) | `contents` vs `utterance_end` position |
 
-### What changed (and what broke)
+## Implementation Owners
 
-BA3 introduced a principled AST with separate terminator and bullet fields,
-replacing BA2's string manipulation. This is architecturally correct but
-exposed a grammar gap: the CA intonation arrows are defined as content
-separators in the grammar, not as terminators. BA2 never had this problem
-because it never parsed terminators from a grammar -- it just did string
-matching.
+| Owner | Responsibility |
+|-------|----------------|
+| Chatter `talkbank-model` | Terminator inventory, CA separators, optional main-tier ending and paired MOR/GRA construction |
+| `crates/batchalign-transform/src/asr_postprocess/utterance.rs` | Observed or synthesized ASR ending and its cause |
+| `crates/batchalign-transform/src/build_chat/utterances.rs` | Consume the description's end; report synthesized assembly endings |
+| `crates/batchalign-transform/src/utseg.rs` | Split children, preserve the parent's ending on the final child and synchronize `%wor` |
+| `crates/batchalign-transform/src/morphosyntax/payload.rs` | Typed Stanza-input terminator policy |
+| `crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs` | Build GRA chunk relations and the terminator relation |
+| `crates/batchalign-transform/src/inject.rs` | Admit the MOR/GRA terminator slot before installing tiers |
+| `crates/batchalign/src/pipeline/morphosyntax/states.rs` | CA pass-through/analyze policy and document admission |
 
-The double-bullet bug is a consequence of this grammar gap. When the grammar
-consumes a CA arrow as a content separator, it also consumes the next bullet as
-an `InternalBullet` content item. Then `utterance_end` creates a second
-terminal bullet. Both serialize on the main line.
+## Qualification Limits
 
-## Exhaustive File Inventory
-
-Every file in batchalign3 that references terminators, classified by behavior:
-
-All paths below are under `crates/`.
-
-| File | Behavior | Notes |
-|------|----------|-------|
-| `talkbank-transform/src/asr_postprocess/mod.rs` | **DEFAULTS to `.`** | Appends period when no punctuation |
-| `talkbank-transform/src/build_chat/mod.rs` | **CREATES from last word** | Defaults to Period for unrecognized |
-| `talkbank-transform/src/utseg.rs` | **CREATES Period** | Split utterances always get period |
-| `talkbank-transform/src/morphosyntax/payload.rs` | **DEFAULTS to `"."`** | Payload string includes silent default |
-| `talkbank-transform/src/morphosyntax/injection.rs` | **READS, patches** | Copies utterance terminator into MOR tier |
-| `talkbank-transform/src/inject.rs` | **PRESERVES** | Top-level injection entry; passes through to retokenize |
-| `talkbank-transform/src/retokenize/parse_helpers.rs` | **PRESERVES** | Keeps original when Stanza differs |
-| `talkbank-transform/src/retokenize/rebuild.rs` | **PRESERVES** | Carries expected_terminator through |
-| `batchalign/src/compare.rs` | **READS** | Collects as `Option<String>` |
-| `talkbank-transform/src/translate.rs` | **READS** | Lists all variants for spacing |
-| `talkbank-transform/src/validate.rs` | **CHECKS (CA-aware)** | Pre-validation exempts CA |
-| `talkbank-transform/src/validate.rs` | **CHECKS (NOT CA-aware)** | Post-validation always warns |
-| `talkbank-transform/src/morphosyntax/sentence_mapping.rs` | **ASSUMES +1** | GRA index assumes terminator exists |
-| `talkbank-transform/src/morphosyntax/gra_validate.rs` | **ASSUMES** | Skips last GRA as terminator PUNCT |
-| `batchalign/src/fa/` | **PRESERVES** | Forced-alignment never touches terminator |
-
-## Known Issues
-
-1. **Grammar bug:** CA intonation arrows not in `terminator` rule -- causes
-   double bullets and `InternalBullet` misclassification.
-
-2. **Post-validation not CA-aware:** `validate_output()` warns about missing
-   terminators even for CA files.
-
-3. **Hardcoded period defaults:** ASR postprocess, utseg, and build_chat all
-   default to Period when no terminator is found. CA transcripts processed
-   through these paths get incorrect periods.
-
-4. **NLP mapping +1 assumption:** MOR/GRA coordination assumes a terminator
-   PUNCT relation exists. CA utterances without terminators may have wrong
-   GRA indices.
-
-5. **Morphosyntax silent default:** Cache key computation silently defaults
-   missing terminator to `"."`, which could cause cache collisions between
-   CA utterances that differ only in terminator presence.
+A synthesized period is a written convention, not observed punctuation or an
+acoustically measured boundary. ASR assembly counts and later utseg cuts have
+different scopes. CA policy, missing endings, non-period endings and timing
+preservation need their own boundary controls; neither an old bug narrative
+nor a passing ordinary sentence establishes them all.

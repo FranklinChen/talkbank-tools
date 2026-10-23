@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-16 09:58 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -21,7 +21,7 @@ be described as proof that the supplied words occur in the requested audio.
 |-------|----------|----------------|
 | CLI args | `crates/batchalign/src/cli/args/commands.rs`: `AlignArgs` | UTR/FA engine flags, strategy, fuzzy, buffer params |
 | Options builder | `crates/batchalign/src/cli/args/options.rs`: `build_typed_options` | Maps `AlignArgs` → `CommandOptions::Align(AlignOptions)` and anchors CLI media roots |
-| Command definition | `crates/batchalign/src/commands/align.rs`: `AlignCommand` | `CommandDefinition` impl, pre-validation gate |
+| Command declaration | `crates/batchalign/src/recipe_runner/catalog.rs` and `recipes.rs` | Catalog metadata and `ALIGN_RECIPE`; the FA pipeline owns input admission |
 | FA pipeline | `crates/batchalign/src/runner/dispatch/fa_pipeline.rs` | Per-file FA orchestration: UTR → grouping → FA → injection |
 | UTR dispatch | `crates/batchalign/src/runner/dispatch/utr.rs` | Resolved strategy construction and per-recording grouping context |
 | UTR library | `crates/batchalign/src/chat_ops/fa/utr.rs` | `run_utr_pass()`, `inject_utr_timing()`, partial-window logic |
@@ -89,7 +89,11 @@ source: `RequiredFaTiming::admit` returns `FaCompletion::Complete` when every
 required word retains a positive interval, or `FaCompletion::Partial` with an
 `UntimedAccount` naming each utterance with untimed words, the words, and the
 cause (`WindowRefused`, carrying the refused window grouping recorded;
-`NotPlaced`, a run grouping could place in no request; or `NoUsableTiming`).
+`NotPlaced`, a run grouping could place in no request; `LocalizationUnavailable`;
+`Requested`, counting what the requests that covered the utterance yielded
+from the run's group evidence; or `Unrecorded`, when no decision names it and
+no request covered it, said as such rather than given a cause the run did not
+observe).
 Both carry a second, separate account: the `ExclusionAccount` of every
 utterance the transcript marks as not speech in the recording (`[+ diary]`),
 made after admission checked that the output gave none of them timing (a
@@ -641,7 +645,7 @@ All previous `%xalign`/`%xrev` tiers are stripped, including on clean re-runs
 with no new decisions.
 
 Implementation: `crates/batchalign/src/chat_ops/fa/mod.rs:506-537`. The injection layer is in
-`crates/batchalign-transform/src/decisions/`.
+`crates/batchalign-transform/src/decisions.rs`.
 
 ### Durable alignment evidence
 

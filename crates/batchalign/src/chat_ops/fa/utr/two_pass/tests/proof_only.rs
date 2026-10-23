@@ -20,8 +20,12 @@ fn proof_only_overlap_avoids_unused_quadratic_inspection() {
     let mut tokens = make_asr_tokens(&[("start", 100, 200)]);
     tokens.extend(make_asr_tokens(&vec![("reference", 300, 400); 512]));
     tokens.extend(make_asr_tokens(&[("finish", 500, 600)]));
-    let reference =
-        super::super::lexical::UtrLexicalStream::within_window(&tokens, 0, 1000).texts();
+    let reference = super::super::lexical::UtrLexicalStream::within_window(
+        &super::super::PreparedUtrTokens::spaced(&tokens),
+        0,
+        1000,
+    )
+    .texts();
     let counter = PollAllowance(std::cell::Cell::new(usize::MAX));
     let proof = dp_align::CorrespondenceAdmission::observe_controlled(
         &words,
@@ -47,8 +51,8 @@ fn proof_only_overlap_avoids_unused_quadratic_inspection() {
         .is_err()
     );
     let result = recover_overlap_timing_controlled(
-        &words,
-        &tokens,
+        &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
         0,
         1000,
         MatchMode::Exact,

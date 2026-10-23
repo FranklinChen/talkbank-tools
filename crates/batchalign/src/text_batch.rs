@@ -570,10 +570,9 @@ mod tests {
             ),
             (
                 ServerError::from(
-                    crate::morphosyntax::AnalysisUnavailable::admit_primary(
+                    crate::morphosyntax::AnalysisUnavailable::primary_refusal_for_test(
                         &crate::api::LanguageCode3::try_new("que").unwrap(),
-                    )
-                    .unwrap_err(),
+                    ),
                 ),
                 FailureCategory::AnalysisUnavailable,
             ),

@@ -213,31 +213,6 @@ fn universal_pos_accepts_case_insensitive_names() {
 }
 
 #[test]
-fn stanza_language_support_matches_expected_examples() {
-    for code in ["eng", "spa", "fra", "deu", "zho", "jpn", "rus", "ara"] {
-        assert!(is_stanza_supported(
-            &LanguageCode::new(code).expect("valid test language code")
-        ));
-    }
-    for code in ["que", "jam", "nan", "taq", "und", "xmm", "jav", "wuu"] {
-        assert!(!is_stanza_supported(
-            &LanguageCode::new(code).expect("valid test language code")
-        ));
-    }
-    assert!(is_stanza_supported(
-        &LanguageCode::new("yue").expect("valid test language code")
-    ));
-    assert!(is_stanza_supported(
-        &LanguageCode::new("cmn").expect("valid test language code")
-    ));
-    for code in ["ben", "kan", "mal", "msa", "tgl", "ltz"] {
-        assert!(!is_stanza_supported(
-            &LanguageCode::new(code).expect("valid test language code")
-        ));
-    }
-}
-
-#[test]
 fn dep_rel_roundtrips_known_variants() {
     for rel in [
         "root",
@@ -303,7 +278,7 @@ fn bogus_lemma_detection_matches_expected_cases() {
 
 #[test]
 fn validate_and_clean_fixes_pad_deprel_and_bogus_lemma() {
-    let mut word = UdWord::from(UdWordAnalysis {
+    let mut word = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "hello".to_string(),
         lemma: ".".to_string(),
@@ -314,7 +289,8 @@ fn validate_and_clean_fixes_pad_deprel_and_bogus_lemma() {
         deprel: "<pad>".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     validate_and_clean(&mut word);
 
@@ -535,11 +511,11 @@ fn inject_one(
     let mor = utt
         .mor_tier()
         .map(|t| t.to_chat_string())
-        .unwrap_or_default();
+        .expect("injection writes %mor");
     let gra = utt
         .gra_tier()
         .map(|t| t.to_chat_string())
-        .unwrap_or_default();
+        .expect("injection writes %gra");
     (mor, gra, injection)
 }
 

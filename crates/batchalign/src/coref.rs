@@ -17,6 +17,7 @@ use crate::chat_ops::morphosyntax_ops::declared_languages;
 use crate::provenance::TextStamp;
 use crate::types::worker_v2::{CorefAnnotationV2, CorefItemResultV2};
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
+use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_coref_request_v2};
 use crate::worker::text_result_v2::parse_coref_result_v2;
@@ -384,7 +385,7 @@ async fn infer_batch(
 
     let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
     let result = parse_coref_result_v2(response)
-        .map_err(|error| coref_protocol_error(format!("invalid coref V2 result: {error}")))?;
+        .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     if result.items.len() != items.len() {
         return Err(coref_protocol_error(format!(
             "coref V2 returned {} items for {} requests",

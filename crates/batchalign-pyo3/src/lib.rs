@@ -62,6 +62,24 @@ fn init_rust_tracing() {
         .try_init();
 }
 
+/// The worker's FEATS repair, decided in Rust
+/// (`batchalign_types::worker_v2::repair_feats`): the FEATS left (`None` when
+/// no feature is left) and each removed `(feature, value)`, so the worker
+/// removes exactly what the server would refuse and never classifies a value
+/// itself.
+#[pyfunction]
+fn repair_feats(feats: &str) -> (Option<String>, Vec<(String, String)>) {
+    let repaired = batchalign_types::worker_v2::repair_feats(feats);
+    (
+        repaired.feats,
+        repaired
+            .removed
+            .into_iter()
+            .map(|removed| (removed.feature, String::from(removed.value)))
+            .collect(),
+    )
+}
+
 /// batchalign_core: Rust worker runtime for batchalign3.
 #[pymodule]
 fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -114,6 +132,10 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(worker_protocol::error_envelope, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        worker_protocol::error_kind_ends_worker,
+        m
+    )?)?;
     // The error kinds' wire spellings, from the one Rust list, so Python's
     // type-level spelling (the stub's `WorkerErrorKind`) is checked against
     // it rather than kept in step by hand.
@@ -124,6 +146,53 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
             batchalign_types::worker_v2::WorkerErrorKind::ALL
                 .iter()
                 .map(|kind| kind.wire_name()),
+        )?,
+    )?;
+
+    // ISO 639-3 to ISO 639-1, from the one Rust table, so the worker's
+    // Stanza capability table maps languages through the same standard the
+    // server does rather than through a second copy (`pycountry`).
+    m.add(
+        "ISO_639_1_PAIRS",
+        pyo3::types::PyTuple::new(
+            m.py(),
+            batchalign_types::iso639_part1::pairs()
+                .map(|(alpha_3, part1)| (alpha_3, part1.as_str())),
+        )?,
+    )?;
+
+    // What counts as model padding in a feature value, from the one Rust
+    // test the server's FEATS admission and repair deserialization use.
+    m.add_function(wrap_pyfunction!(repair_feats, m)?)?;
+
+    // Every processor a Stanza catalog entry can ship, in Rust's order: the
+    // closed set the server's registry parses a worker's catalog report by.
+    m.add(
+        "STANZA_PROCESSORS",
+        pyo3::types::PyTuple::new(
+            m.py(),
+            batchalign_types::stanza_catalog::StanzaProcessor::ALL
+                .map(|processor| processor.wire_name()),
+        )?,
+    )?;
+
+    // Each Stanza-backed command's processor requirement, from the one
+    // closed table the server admits languages by, so the worker builds its
+    // pipelines from the same sets rather than from copies.
+    m.add(
+        "STANZA_REQUIREMENTS",
+        pyo3::types::PyTuple::new(
+            m.py(),
+            batchalign_types::stanza_catalog::StanzaRequirement::ALL.map(|requirement| {
+                (
+                    requirement.wire_name(),
+                    requirement
+                        .processors()
+                        .iter()
+                        .map(|processor| processor.wire_name())
+                        .collect::<Vec<_>>(),
+                )
+            }),
         )?,
     )?;
 
@@ -152,6 +221,7 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         worker_media_exec::execute_speaker_embedding_request_v2,
         m
     )?)?;
+    m.add_class::<worker_text_results::PyRealignLanguage>()?;
     m.add_function(wrap_pyfunction!(worker_text_results::align_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(
         worker_text_exec::execute_morphosyntax_request_v2,

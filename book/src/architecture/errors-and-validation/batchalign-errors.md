@@ -1,7 +1,7 @@
 # Errors: Batchalign Runtime
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 How Batchalign produces, propagates, and surfaces errors specific to
 the ML runtime: parse modes, ML/IPC failures, network errors,
@@ -14,31 +14,17 @@ For the typed boundary between Python and Rust workers see
 standard that applies workspace-wide, see
 [error-diagnostics-ux](https://talkbank.github.io/chatter/architecture/errors-and-validation/error-diagnostics-ux.html).
 
-## Two Parse Modes
+## Parser and Command Failures
 
-### Strict (`ParsedChat.parse()`)
+CHAT parsing and validation run in Rust through Chatter. The former
+`ParsedChat.parse` / `parse_lenient` Python methods are retired. Command
+processing uses typed input admission and output states, not a choice of
+legacy Python parsing modes.
 
-Used by engines that require a valid AST to produce correct output:
-`add_morphosyntax_batched`, `extract_nlp_words`, etc.
-
-- **Rejects** on any error, raises `ValueError` in Python.
-- Error string includes all error codes and locations:
-
-```text
-Parse error: error[E316]: Could not parse content (line 5, bytes 100..120)
-```
-
-### Lenient (`ParsedChat.parse_lenient()`)
-
-Used by engines that can tolerate partial results:
-`parse_and_serialize`, `add_forced_alignment`, `add_translation`.
-
-- **Recovers** from errors using tree-sitter error recovery.
-- Tainted tiers are marked via `ParseHealth` flags so downstream
-  validation skips them.
-- Parse warnings are captured in `ParsedChat.warnings` and available
-  via `parse_warnings()` (JSON array).
-- Only rejects when the file is completely empty after recovery.
+A rejected input, a diagnosed generated transcript and an optional-stage
+shortfall have different output contracts. See
+[validation](validation.md) and
+[command contracts](../../batchalign/architecture/command-contracts.md).
 
 ## Structured Error Access (PyO3)
 
@@ -64,41 +50,21 @@ at `crates/batchalign-pyo3/src/error.rs:85`) with these fields:
 | `message` | `str` | Full diagnostic message |
 | `suggestion` | `Optional[str]` | Optional remediation hint |
 
-Python callers inspect `exc.errors[0].code` and friends rather than
+Python callers inspect `exc.errors[0]["code"]` and the other dictionary fields rather than
 parsing message text. The boundary contract is enforced by
 `batchalign/tests/test_pyo3_error_typing.py`.
 
-## Pre-Serialization Validation Gate
+## Output Admission
 
-After Rust-owned processing stages have injected their results and
-before final serialization, the production path validates the
-generated `ChatFile` again to catch bugs in our own generation code
-(MOR/GRA count mismatch, terminator identity errors). The check
-lives in `crates/talkbank-transform/src/validate.rs`:
+The writer consumes the command's admitted or explicitly diagnosed output
+state. `pipeline/post_validate.rs` owns checked output construction and
+retained findings; the command's pipeline determines whether a refused
+optional result keeps its predecessor or the file fails. A legacy
+`validate_output` call alone is not the complete admission contract.
 
-```rust,ignore
-use talkbank_transform::validate::{validate_output, validate_to_level};
-
-// Pre-validation: input must meet the command's required ValidityLevel.
-validate_to_level(&chat_file, &parse_errors, hooks.validity)?;
-// ... command body runs, mutates chat_file ...
-// Post-validation: catch regressions introduced by command code.
-validate_output(&chat_file, hooks.command)?;
-```
-
-Call sites: `crates/batchalign/src/pipeline/text_infer.rs` and
-`crates/batchalign/src/coref.rs` import both functions from
-`talkbank_transform::validate`. The exception message includes error
-codes and line numbers:
-
-```text
-Pre-serialization validation failed:
-  - E705: Main tier has 2 alignable items, but %mor tier has 1 items
-  - E716: Main tier terminator "." does not match %mor terminator "?" (line 23)
-```
-
-For full validation gates (G0-G14, validity levels L0-L2, post-serialization
-checks), see [validation](validation.md).
+See [CHAT validation failures](../../batchalign/developer/chat-validation-failures.md)
+for recovery and the distinction between a failed file and a retained
+diagnosed transcript.
 
 ## `CHATValidationException`
 
@@ -114,19 +80,15 @@ create_exception!(batchalign_core, CHATValidationException, BatchalignError);
 
 ```python
 # batchalign/errors.py
-from batchalign_core import (
-    BatchalignError,
-    CHATValidationException,
-    ...
-)
+from batchalign_core import BatchalignError, CHATValidationException
 ```
 
 When `BatchalignBoundaryError::ChatValidation { entries, .. }` crosses
 the PyO3 boundary, the `From<BatchalignBoundaryError> for PyErr` impl
 constructs the Python exception with a populated `errors:
 list[ValidationErrorEntry]`. Code that
-catches the exception inspects `exc.errors[i].code`,
-`exc.errors[i].line`, etc. for programmatic access without parsing
+catches the exception inspects `exc.errors[i]["code"]`,
+`exc.errors[i]["line"]`, etc. for programmatic access without parsing
 the message string.
 
 See [Python ↔ Rust errors](python-rust-errors.md) for the full
@@ -135,20 +97,18 @@ internals-leakage scan.
 
 ## Runtime Error Classification
 
-Error category mapping is centralized in `batchalign/errors.py`
-(`classify_error(exc)`) and used by server-side job accounting.
-Exceptions classify into four categories:
+Server accounting and retry policy are Rust-owned. Worker protocol failures
+retain their code in `ExecuteFailureRead`; `into_server_error` maps that
+code to a typed server error. `classify_server_error` and
+`classify_worker_error` in `runner/util/error_classification.rs` determine the
+`FailureCategory` consumed by `RetryPolicy::after_failure`.
 
-| Category | Meaning | Examples |
-|---|---|---|
-| `input` | Bad CHAT content | `CHATValidationException`, parse errors |
-| `media` | Missing audio/video files | `FileNotFoundError` |
-| `system` | Infrastructure failure | `MemoryError` |
-| `processing` | Unexpected errors during processing | Everything else |
-
-Classification is done by `classify_error(exc)`. Parse errors are
-identified by `CHATValidationException` type or by the
-`"Parse error"` prefix in `ValueError` messages.
+Downloads, device memory pressure, model access refusals, provider account
+refusals, quota exhaustion, malformed protocol and generic runtime failures
+are separate categories. The Python compatibility helper `classify_error`
+is not the server's retry authority. See
+[worker failure classification](../../batchalign/architecture/worker-failure-classification.md)
+for the exhaustive mapping and current retry policy.
 
 ## CLI Failure Summary
 
@@ -159,35 +119,16 @@ are derived from server `FileStatusEntry` fields (`error`,
 
 ## Error Flow
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                    Rust Parser                              │
-│  parse_chat_file() ──► ParseError { code, line, message }   │
-│  parse_chat_file_streaming() ──► ErrorSink collects warnings│
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  batchalign_core (PyO3)                     │
-│  parse_strict_pure()  ──► format!("{}", e) ──► ValueError   │
-│  parse_lenient_pure() ──► (ChatFile, warnings)              │
-│  validate_structured()──► errors_to_json() ──► JSON string  │
-│  parse_warnings()     ──► errors_to_json() ──► JSON string  │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Python API / Legacy adapters                   │
-│  batchalign/errors.py may wrap structured validation JSON   │
-│  into CHATValidationException(msg, errors=[...])            │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-              ┌────────┴────────┐
-              ▼                 ▼
-┌──────────────────┐  ┌──────────────────────────┐
-│        CLI       │  │    Processing Server     │
-│  polls file/job  │  │  validates generated AST │
-│  status, formats │  │  maps failures into      │
-│  failure summary │  │  FileStatusEntry metadata│
-└──────────────────┘  └──────────────────────────┘
+```mermaid
+flowchart TD
+    Chat["Chatter admission / command transform"] --> State["Admitted, diagnosed or refused command result"]
+    Worker["Python model host"] --> Wire["Typed execute response or worker transport failure"]
+    Wire --> Error["Rust ServerError / WorkerError"]
+    Error --> Policy["FailureCategory and bounded retry decision"]
+    State --> Record["File status, findings and shortfalls"]
+    Policy --> Record
+    Record --> UI["CLI / dashboard / API"]
 ```
+
+The extension's Python exception surface is a separate boundary for callers
+of that extension; the live server consumes typed worker protocol results.

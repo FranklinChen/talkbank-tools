@@ -842,7 +842,7 @@ mod tests {
     fn apply_component_rewrite_only_touches_head() {
         let over = &IT_COMPONENT_REWRITES[0];
         let components = vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "da".into(),
                 lemma: "da".into(),
@@ -853,8 +853,9 @@ mod tests {
                 deprel: "root".into(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "glie".into(),
                 lemma: "gli".into(),
@@ -865,7 +866,8 @@ mod tests {
                 deprel: "iobj".into(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ];
         let rewritten = apply_component_rewrite(over, &components);
         assert_eq!(rewritten.len(), 2);

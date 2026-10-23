@@ -4,8 +4,9 @@
 //! the aligned document and returns one of two states. Complete: every word
 //! has a positive interval. Partial: some do not, and the result carries a
 //! typed account of each utterance with untimed words, which words, and why
-//! (its audio window was refused, so no request was made; or a request was
-//! made and produced no usable interval). A partial result is still written:
+//! (its audio window was refused, so no request was made; requests covered it
+//! and produced no positive interval, with what they yielded counted; or
+//! nothing this run recorded explains it, said as such). A partial result is still written:
 //! the timing that was measured is kept, the untimed words stay in the
 //! transcript without bullets, and the file is reported diagnosed with the
 //! account as a shortfall. Nothing here can certify a partial result as
@@ -27,6 +28,7 @@ use crate::error::{AlignmentCompletionFailure, ServerError};
 use crate::pipeline::post_validate::PostValidated;
 use crate::types::results::FaResult;
 use crate::types::traces::RefusedWindowTrace;
+use batchalign_transform::decisions::{DecisionStrategy, FaStrategy, LineIdx};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use talkbank_model::alignment::helpers::{TierDomain, WordItem, counts_for_tier, walk_words};
@@ -175,10 +177,66 @@ pub(crate) enum UntimedCause {
     NotPlaced,
     /// No supplied timing or source-bound UTR search evidence; no request.
     LocalizationUnavailable,
-    /// No refusal names it, and the final document has no positive interval
-    /// for these words: the aligner returned none, or the words could not be
-    /// sent to it.
-    NoUsableTiming,
+    /// Requests covered it, and the final document has no positive interval
+    /// for these words. What those requests yielded is counted, from the
+    /// run's own group evidence, rather than summarised as a cause.
+    Requested(RequestCoverage),
+    /// No grouping decision names it and no request covered it: this run
+    /// recorded nothing that explains its untimed words. Said as such
+    /// rather than given a plausible cause it did not observe.
+    Unrecorded,
+}
+
+/// What the requests covering one utterance yielded, counted from the run's
+/// group evidence ([`crate::types::results::FaGroupEvidence`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RequestCoverage {
+    /// Requests that returned timing evidence: a worker's answer, the cache,
+    /// a replayed response, or reused `%wor`.
+    answered: u64,
+    /// Requests left unaligned: no worker evidence was obtained (a
+    /// request-local failure, or audio that decoded to no sample).
+    unaligned: u64,
+    /// Word ranges grouping left unrequested: an anchored piece whose
+    /// window could not be sent.
+    unrequested: u64,
+}
+
+impl RequestCoverage {
+    /// Add one group's requests, counted once, to an utterance it covers.
+    fn add(&mut self, group: Self) {
+        self.answered += group.answered;
+        self.unaligned += group.unaligned;
+        self.unrequested += group.unrequested;
+    }
+
+    /// Count one group's requests, which all cover each of its utterances.
+    fn count(&mut self, span: &crate::types::traces::FaGroupSpanTrace) {
+        use crate::types::traces::FaGroupSpanTrace;
+        match span {
+            FaGroupSpanTrace::Single { source, .. } => self.count_request(*source),
+            FaGroupSpanTrace::Anchored {
+                pieces,
+                unrequested,
+            } => {
+                for piece in pieces {
+                    self.count_request(piece.source);
+                }
+                self.unrequested += unrequested.len() as u64;
+            }
+        }
+    }
+
+    fn count_request(&mut self, source: crate::types::traces::FaEvidenceSourceTrace) {
+        use crate::types::traces::FaEvidenceSourceTrace;
+        match source {
+            FaEvidenceSourceTrace::WorReuse
+            | FaEvidenceSourceTrace::Cache
+            | FaEvidenceSourceTrace::RawEvidenceReplay
+            | FaEvidenceSourceTrace::Inference => self.answered += 1,
+            FaEvidenceSourceTrace::Unaligned => self.unaligned += 1,
+        }
+    }
 }
 
 /// Every utterance alignment left out because the transcript marks it as not
@@ -288,8 +346,14 @@ impl UntimedUtterance {
                 UntimedCause::LocalizationUnavailable => {
                     crate::api::UntimedCauseRecord::LocalizationUnavailable
                 }
-                UntimedCause::NoUsableTiming => crate::api::UntimedCauseRecord::NoUsableTiming,
-            },
+                UntimedCause::Requested(coverage) => crate::api::UntimedCauseRecord::Requested {
+                    answered: coverage.answered,
+                    unaligned: coverage.unaligned,
+                    unrequested: coverage.unrequested,
+                },
+                UntimedCause::Unrecorded => crate::api::UntimedCauseRecord::Unrecorded,
+            }
+            .into(),
         }
     }
 }
@@ -314,7 +378,12 @@ impl std::fmt::Display for UntimedAccount {
                 UntimedCause::LocalizationUnavailable => {
                     f.write_str(" (localization unavailable)")?
                 }
-                UntimedCause::NoUsableTiming => f.write_str(" (no usable timing)")?,
+                UntimedCause::Requested(coverage) => write!(
+                    f,
+                    " (requested: {} answered, {} unaligned, {} unrequested)",
+                    coverage.answered, coverage.unaligned, coverage.unrequested
+                )?,
+                UntimedCause::Unrecorded => f.write_str(" (no cause recorded)")?,
             }
         }
         Ok(())
@@ -498,29 +567,57 @@ impl RequiredFaTiming {
         // Why an utterance is untimed is decided by grouping, which records a
         // refused window, or a run it could not place, as a decision on the
         // utterance's line (grouping's line indices are the output's: no
-        // later step adds or removes a line). Indexed once: decisions and
-        // untimed utterances can each number in the thousands.
-        let unplaceable = batchalign_transform::decisions::FaStrategy::UnplaceableRun.as_str();
-        let unlocalized =
-            batchalign_transform::decisions::FaStrategy::LocalizationUnavailable.as_str();
-        let causes: BTreeMap<usize, UntimedCause> = result
+        // later step adds or removes a line). Read from the typed strategy,
+        // every FA strategy named, so a new one decides here whether it
+        // explains an untimed utterance. Indexed once: decisions and untimed
+        // utterances can each number in the thousands.
+        let causes: BTreeMap<LineIdx, UntimedCause> = result
             .result
             .decisions
             .iter()
-            .filter_map(|decision| match &decision.refused_window {
-                Some(window) => Some((
-                    decision.line_idx,
-                    UntimedCause::WindowRefused(window.clone()),
-                )),
-                None if decision.strategy == unplaceable => {
-                    Some((decision.line_idx, UntimedCause::NotPlaced))
-                }
-                None if decision.strategy == unlocalized => {
-                    Some((decision.line_idx, UntimedCause::LocalizationUnavailable))
-                }
-                None => None,
+            .filter_map(|decision| {
+                let cause = match &decision.strategy {
+                    DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => {
+                        UntimedCause::WindowRefused((*window).into())
+                    }
+                    DecisionStrategy::Fa(FaStrategy::UnplaceableRun) => UntimedCause::NotPlaced,
+                    DecisionStrategy::Fa(FaStrategy::LocalizationUnavailable) => {
+                        UntimedCause::LocalizationUnavailable
+                    }
+                    DecisionStrategy::Fa(
+                        FaStrategy::GapFilled
+                        | FaStrategy::BoundaryAveraged
+                        | FaStrategy::LisRemoval
+                        | FaStrategy::TimingStripped
+                        | FaStrategy::WordsTimingDropped
+                        | FaStrategy::NarrowBulletRescued
+                        | FaStrategy::KeptBulletWindowWidened
+                        | FaStrategy::WordsClampedToKeptBullet
+                        | FaStrategy::WordsUntimedForKeptAbsence
+                        | FaStrategy::TimingProvenance
+                        | FaStrategy::WindowSplitAtAnchors(_),
+                    )
+                    | DecisionStrategy::Utr(_)
+                    | DecisionStrategy::Monotonicity(_)
+                    | DecisionStrategy::Morphosyntax(_)
+                    | DecisionStrategy::Coref(_)
+                    | DecisionStrategy::Utseg(_) => return None,
+                };
+                Some((decision.line_idx, cause))
             })
             .collect();
+        // What the requests covering each utterance yielded, from the run's
+        // group evidence. An utterance no grouping decision names is
+        // explained by these, or by nothing: absence here is `Unrecorded`,
+        // never a cause the run did not observe.
+        let mut coverage: BTreeMap<UtteranceIdx, RequestCoverage> = BTreeMap::new();
+        for evidence in &result.result.group_evidence {
+            let mut group = RequestCoverage::default();
+            group.count(&evidence.group.span);
+            for &utterance in &evidence.group.utterances {
+                coverage.entry(utterance).or_default().add(group);
+            }
+        }
         let mut utterances = result
             .document
             .document()
@@ -560,10 +657,11 @@ impl RequiredFaTiming {
                             utterance: index,
                             words: expected.words.len(),
                             untimed: missing,
-                            cause: causes
-                                .get(&line)
-                                .cloned()
-                                .unwrap_or(UntimedCause::NoUsableTiming),
+                            cause: match (causes.get(&LineIdx::new(line)), coverage.get(&index)) {
+                                (Some(decided), _) => decided.clone(),
+                                (None, Some(requested)) => UntimedCause::Requested(*requested),
+                                (None, None) => UntimedCause::Unrecorded,
+                            },
                         });
                     }
                 }

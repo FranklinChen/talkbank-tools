@@ -1,286 +1,281 @@
 # Stanza Capability Registry
 
 **Status:** Current
-**Last updated:** 2026-05-06 21:30 EDT
+**Last updated:** 2026-10-24 21:36 EDT
 
-The Stanza capability registry replaces 7 scattered hardcoded language tables
-with a single runtime-authoritative data structure built from Stanza's own
-`resources.json`. It answers questions like "does Dutch have constituency
-parsing?" and "what is the alpha-2 code for Norwegian?" without any hardcoded
-assumptions about Stanza's feature matrix.
+One question decides whether morphosyntax can analyze a language: does the
+installed Stanza catalog ship a morphotag pipeline for it? One structure
+answers it. The worker builds a capability table from Stanza's own
+`resources.json` and Rust's ISO 639-1 table, reports it to the server, and the
+server keeps the first reported catalog as its `StanzaRegistry`. Every Stanza
+admission is decided by the registry and nothing else, and yields a proof
+(`Admitted<R>`) the stage carries; there is no static list of supported
+languages anywhere.
 
-## Why This Exists: One Authority for "Can Stanza Do X For Lang Y?"
+## Why one authority
 
-There are several places in the pipeline that need to ask the
-language-capability question, in two separate dimensions:
+Two questions have to have the same answer everywhere they are asked:
 
-- **What ISO-639-3 codes does Stanza support, and with which processors?**
-  (e.g. does `mar` have `tokenize`/`pos`/`lemma`/`depparse`? does `nld`
-  have `mwt`? does `eng` have `constituency`?)
-- **For a given ISO-639-3 code, what alpha-2 catalog key does Stanza
-  use?** (e.g. `mar` → `mr`, `yue` → `zh-hans`, `nor` → `nb`).
+- **Which processors does a language have?** (does `kaz` have
+  `tokenize`/`pos`/`lemma`/`depparse`? does `nld` have `mwt`?)
+- **Which catalog entry serves an ISO 639-3 code?** (`kaz` is `kk`, `yue` is
+  `zh-hans`, `nor` is `nb`, `grc` is `grc`).
 
-Both questions must always have the same answer at every site that
-asks them. **Two answers diverging is the recurring failure mode this
-registry exists to prevent.** Every drift incident has the same shape:
-one component (Rust validator, Python preflight, capability exporter)
-says "yes, lang X is supported"; another component (Stanza's actual
-`Pipeline()` constructor, the model loader, an alpha-2 lookup) says
-"no, lang X has no models." A worker dies during bootstrap, the user
-sees a generic IPC error, and the linguistic root cause is buried in
-stderr.
+Every failure of this kind has had the same shape: one component (a Rust
+list, a Python preflight, a code mapping) says a language is supported and
+another (the catalog, `stanza.Pipeline`) disagrees. Hand-edited mirrors of the
+catalog have refused languages the catalog serves in full (Kazakh, Serbian,
+Belarusian and dozens more) and crashed workers on languages it does not
+(a Swedish MWT model, a Dutch constituency model, a Marathi code passed
+through unmapped). So nothing mirrors the catalog: the table is derived from
+it, and every consumer reads the table.
 
-### Drift incident history
-
-The bug pattern keeps recurring. Each entry below is a real incident
-where the registry's invariant, *"every lookup of language capability
-goes through the same authority"*, was violated.
-
-| Date | What drifted | Symptom | Root cause |
-|------|--------------|---------|------------|
-| 2026-04-15 | `MWT_LANGS` (Python) said Swedish (`sv`) had MWT, but Stanza's catalog had dropped the Swedish MWT model. | Every Swedish worker spawn raised `UnsupportedProcessorError`; an overnight 500-file morphotag run lost an entire language batch. | Hand-edited mirror of Stanza's catalog drifted on upgrade. |
-| 2026-05-06 | `iso3_to_alpha2()` (Python) had a hardcoded ISO-3 → ISO-1 mapping that did **not** include Marathi (`mar` → `mr`); the capability table built via pycountry **did** include it. The bootstrap preflight said "yes, supports Marathi", then `iso3_to_alpha2` returned `"mar"` verbatim. | Worker for `[- mar]` whole-utterance utterance crashed with `ValueError: Language mar is currently unsupported` because Stanza catalog keys are alpha-2; `mar` is not a key. The worker never emitted its ready signal; the file failed with a generic worker-bootstrap error. | A second hardcoded language dict that needed to agree with the registry but didn't. |
-| (older) Dutch utseg crash | `CONSTITUENCY_LANGS` (Python utseg) included Dutch, but Stanza shipped no Dutch constituency model. | Every Dutch utseg request crashed Stanza. | Hand-edited mirror of Stanza's catalog drifted. |
-
-The pattern across all three: a hand-edited list of "which langs have
-processor X" or "which iso3 maps to which alpha-2" got out of sync
-with Stanza's installed catalog or with another component's view of
-the same question.
-
-### Former hardcoded tables
-
-Pre-registry, processor availability and code mapping were scattered
-across independent tables in Python and Rust. The registry is the
-single replacement for all of them.
-
-| Former table | Location | What it hardcoded | Now |
-|--------------|----------|-------------------|-----|
-| `MWT_LANGS` | Python inference | Languages with multi-word token expansion | Replaced by `StanzaRegistry::has_mwt()`. |
-| `SUPPORTED_STANZA_CODES` | `stanza_languages.rs` | ISO-639-3 codes Stanza could process | Hardcoded fallback only; live registry overrides. |
-| `iso3_to_alpha2` (hardcoded dict) | Python worker | ISO-639-3 → ISO-639-1 code mapping for Stanza model loading | Reduced to a small `_ISO3_OVERRIDES` (Stanza-specific deviations only) shared with the capability table builder. Standard 1-to-1 cases now go through `pycountry`. |
-| `CONSTITUENCY_LANGS` | Python utseg | Languages with constituency parsing | Replaced by `StanzaRegistry::has_constituency()`. |
-| ~~`STANZA_SUPPORTED_ISO3`~~ (removed) | `request.rs` | Was a duplicate of `SUPPORTED_STANZA_CODES` | Removed; submission validation delegates to the chat-ops list. |
-| Inline checks in `_stanza_loading.py` | Python worker | Ad hoc feature gating | Replaced by `StanzaRegistry` queries via the capability table. |
-| Inline checks in `batch.rs` | Rust morphosyntax | Language filtering | Replaced by registry queries. |
-
-### The principle (re-derive when in doubt)
-
-1. **Stanza's installed catalog (`resources.json`) is the only source
-   of truth** for which languages have which processors.
-2. **`pycountry` is the only source of truth** for the standard
-   ISO-639-3 ↔ ISO-639-1 mapping.
-3. **`_ISO3_OVERRIDES`** in `_stanza_capabilities.py` is the only
-   place to record Stanza-specific deviations from the standard
-   mapping (`yue/cmn/zho → zh-hans`, `nor → nb`, etc.).
-4. **Every iso3↔alpha2 conversion** in the worker imports
-   `_ISO3_OVERRIDES` from that one site rather than redefining it.
-   `iso3_to_alpha2` does this; do not reintroduce a second override
-   dict.
-5. **Every "is lang X supported" check** at submission, dispatch, or
-   load time goes through the live `StanzaRegistry` (with the chat-ops
-   `SUPPORTED_STANZA_CODES` list as a conservative fallback only when
-   the registry has not yet been populated by the first worker).
-
-## Architecture: Data Flow
-
-The registry is built once at worker startup and flows from Python to Rust
-through the worker capabilities IPC protocol.
+## Data flow
 
 ```mermaid
 flowchart TD
-    subgraph Python["Python Worker (batchalign/worker/)"]
-        resources["Stanza resources.json\n(installed package data)"]
-        builder["build_stanza_capability_table()\n(_stanza_capabilities.py)"]
-        pycountry["pycountry\n(ISO-639-3 to alpha-2)"]
-        overrides["_ISO3_OVERRIDES\n(nor→nb, yue→zh-hans, etc.)"]
-        table["StanzaCapabilityTable\n(dict: iso3 → StanzaLanguageCapability)"]
-        handlers["handle_capabilities()\n(_handlers.py)"]
-        response["CapabilitiesResponse\n(.stanza_capabilities field)"]
+    subgraph Python["Python worker (batchalign/worker/)"]
+        resources["Stanza resources.json\n(installed catalog)"]
+        iso["ISO_639_1_PAIRS\n(batchalign_core, from Rust's\niso639_part1 table)"]
+        policy["_STANZA_CODE_POLICY\n(cmn, yue → zh-hans)"]
+        builder["build_stanza_capability_table_from_resources()\n(_stanza_capabilities.py)"]
+        table["StanzaCapabilityTable\n(iso3 → StanzaLanguageCapability)"]
+        loaders["language_capability() / stanza_code_for()\n(_stanza_loading.py)"]
+        handlers["_capabilities()\n(_handlers.py)"]
     end
 
-    subgraph Rust["Rust Server (crates/batchalign/)"]
-        pool["WorkerPool\n(worker/pool/mod.rs)"]
-        oncelock["OnceLock&lt;StanzaRegistry&gt;\n(populated on first worker)"]
-        registry["StanzaRegistry\n(stanza_registry.rs)"]
-        validation["validate_language_with_registry()\n(types/request.rs)"]
-        dispatch["morphosyntax batch dispatch\n(morphosyntax/batch.rs)"]
-        utseg_dispatch["utseg dispatch\n(utseg.rs)"]
-    end
-
-    subgraph Fallback["Hardcoded Fallback"]
-        hardcoded["SUPPORTED_STANZA_CODES\n(stanza_languages.rs)\n~50 languages"]
+    subgraph Rust["Rust server (crates/batchalign/)"]
+        admit["StanzaRegistrySlot::record()\n(stanza_registry.rs)"]
+        pool["WorkerPool::stanza_registry()\n(the registry, or why there is none)"]
+        primary["primary @Languages admission\n(pipeline/morphosyntax/states.rs)"]
+        effective["effective utterance admission\n(morphosyntax/worker.rs)"]
+        l2["secondary (L2) dispatch\n(morphosyntax/batch.rs)"]
+        submission["submission check + help text\n(types/request.rs)"]
+        tail["transcribe tail plan\n(pipeline/transcribe.rs)"]
     end
 
     resources --> builder
-    pycountry --> builder
-    overrides --> builder
+    iso --> builder
+    policy --> builder
     builder --> table
-    table --> handlers --> response
-
-    response -->|"JSON-lines IPC\nWorkerCapabilities"| pool
-    pool -->|"record_capabilities()\nfirst worker only"| oncelock
-    oncelock --> registry
-
-    registry --> validation
-    registry --> dispatch
-    registry --> utseg_dispatch
-
-    hardcoded -.->|"used ONLY before\nfirst worker spawns"| validation
+    table --> loaders
+    table --> handlers
+    handlers -->|"stanza_catalog\n(StanzaCatalogReport)"| admit
+    admit --> pool
+    pool --> primary
+    primary -->|"Admitted, sibling"| effective
+    primary -->|"Admitted, sibling"| l2
+    pool --> submission
+    pool --> tail
 ```
 
 <!-- Verified against:
-  - batchalign/worker/_stanza_capabilities.py (builder, overrides, pycountry)
-  - batchalign/worker/_handlers.py (handle_capabilities, CapabilitiesResponse)
-  - crates/batchalign-types/src/worker.rs (WorkerCapabilities.stanza_capabilities, StanzaLanguageProcessors)
-  - crates/batchalign/src/worker/pool/mod.rs (OnceLock, record_capabilities)
-  - crates/batchalign/src/stanza_registry.rs (StanzaRegistry)
-  - crates/batchalign/src/types/request.rs (validate_language_with_registry, delegates to chat_ops::is_stanza_supported)
-  - crates/batchalign/src/morphosyntax/batch.rs (registry queries)
+  - batchalign/worker/_stanza_capabilities.py (builder, policy, table)
+  - batchalign/worker/_stanza_loading.py (language_capability, stanza_code_for)
+  - batchalign/worker/_handlers.py (_capabilities report)
+  - crates/batchalign-pyo3/src/lib.rs (ISO_639_1_PAIRS)
+  - crates/batchalign-types/src/stanza_catalog.rs (StanzaCatalogReport, StanzaProcessor, StanzaRequirement)
+  - crates/batchalign/src/stanza_registry.rs (StanzaRegistry, StanzaRegistrySlot, Admitted, StanzaGap)
+  - crates/batchalign/src/worker/pool/mod.rs (record_capabilities)
+  - crates/batchalign/src/morphosyntax/capability.rs (AnalysisUnavailable::admit)
 -->
 
-## Python Side: Building the Table
+## Python side: the capability table
 
-`batchalign/worker/_stanza_capabilities.py` is the single source of truth.
+`batchalign/worker/_stanza_capabilities.py` builds the table once per worker
+process (`get_cached_capability_table`, cached for the process lifetime; a
+fresh install downloads the catalog first).
 
-**`build_stanza_capability_table()`** reads `stanza.resources.common.load_resources_json()`,
-which returns the full Stanza resource dictionary keyed by alpha-2 language
-codes. For each language entry that has a `"tokenize"` key (filtering out
-non-language entries like `"default"`), it records which processors are
-available:
+Each catalog entry with a `tokenize` processor becomes a
+`StanzaLanguageCapability`: its catalog code (`stanza_code`, a `StanzaCode`)
+and the set of processors it ships, drawn from the closed
+`StanzaProcessorName` (`tokenize`, `mwt`, `pos`, `lemma`, `depparse`,
+`constituency`, `coref`). The catalog's alias entries (`{"alias": "nb"}` under
+`no`) are kept for resolution.
 
-| Processor | Stanza key | What it enables |
-|-----------|-----------|-----------------|
-| `tokenize` | `"tokenize"` | Basic tokenization |
-| `pos` | `"pos"` | Part-of-speech tagging |
-| `lemma` | `"lemma"` | Lemmatization |
-| `depparse` | `"depparse"` | Dependency parsing |
-| `mwt` | `"mwt"` | Multi-word token expansion (~45 languages) |
-| `constituency` | `"constituency"` | Constituency parsing (~11 languages) |
-| `coref` | `"coref"` | Coreference resolution |
+An ISO 639-3 code is served by the entry found by, in order:
 
-**ISO-639-3 mapping** is built in two passes:
+1. **`_STANZA_CODE_POLICY`**: Mandarin (`cmn`) and Cantonese (`yue`), which
+   have no ISO 639-1 code and no catalog entry of their own, use Stanza's
+   Simplified Chinese model (`zh-hans`). This is a choice BA3 makes, and the
+   only hand-written table in the mapping.
+2. **Its ISO 639-1 code**, from Rust's one ISO table
+   (`batchalign_types::iso639_part1`, exported to Python as
+   `batchalign_core.ISO_639_1_PAIRS`), looked up in the catalog directly or
+   through one of the catalog's aliases. `zho` reaches `zh-hans` through the
+   alias `zh`; `nor` reaches `nb` (Bokmål) through the alias `no`; `nob` and
+   `nno` reach `nb` and `nn` directly; `sme` reaches `sme` through `se`.
+3. **The code itself**, likewise: the catalog keys some languages by their
+   three-letter code (`grc`, `kmr`, `ckb`) and aliases others (`kaz` to
+   `kk`, `uzn` to `uz`).
 
-1. **`_ISO3_OVERRIDES`**: a small dict of codes where pycountry is wrong or
-   Stanza uses non-standard identifiers (e.g., `nor→nb`, `yue→zh-hans`,
-   `cmn→zh-hans`, `zho→zh-hans`, `msa→ms`).
-2. **`pycountry.languages`**: for all remaining standard mappings.
+A code none of these reaches is absent from the table, never passed through.
 
-The result is a `StanzaCapabilityTable` with `languages` keyed by ISO-639-3
-code and `iso3_to_alpha2` for the code mapping. This is cached with
-`@functools.lru_cache(maxsize=1)` for the process lifetime.
+The worker's pipeline loaders read the same table:
+`language_capability(lang)` returns the entry (raising
+`UnsupportedLanguageError` when Stanza is not installed or the table has no
+entry), and
+`stanza_code_for(lang)` its catalog code. MWT is requested exactly when the
+entry ships `mwt`. `load_stanza_models` refuses, before calling
+`stanza.Pipeline`, an entry without the four morphotag processors, and
+`load_utseg_pipeline` one without the three utterance segmentation processors.
 
-## IPC: Capabilities Response
+## IPC: the capabilities report
 
-When the Rust server queries a worker's capabilities (`_handlers.py:handle_capabilities()`),
-the handler converts the `StanzaCapabilityTable` into a
-`dict[str, StanzaLanguageProcessors]` (keyed by ISO-639-3, each value
-containing an `alpha2` string and a `processors` list). This is serialized
-as the `stanza_capabilities` field of `CapabilitiesResponse`
-(`batchalign/worker/_types.py`).
+The worker's capabilities response carries a required `stanza_catalog`, one
+of three outcomes by type (`StanzaCatalogReport` in Rust, a discriminated
+union in `_types.py`):
 
-On the Rust side, `WorkerCapabilities` in `crates/batchalign-types/src/worker.rs`
-mirrors this structure with `stanza_capabilities: BTreeMap<String, StanzaLanguageProcessors>`.
+| `kind` | Meaning |
+|--------|---------|
+| `catalog` | `languages: {iso3: [processor, ...]}`, the table the worker built |
+| `not_installed` | the `stanza` package does not import; `import_error` is the import exception's type and message (a test echo worker reports this too, saying it imports none) |
+| `failed` | Stanza imported but the table build failed; `reason` is the exception's type and message |
 
-## Rust Side: StanzaRegistry
+`import_error` and `reason` are a `StanzaReportReason`, which cannot be
+blank: a report always says something an operator can act on.
 
-`crates/batchalign/src/stanza_registry.rs` stores the deserialized
-capabilities and provides typed query methods:
+Only the `stanza` import itself counts as "not installed"
+(`get_cached_capability_table` returns `StanzaNotInstalled` for it); any
+other failure, such as a stale `batchalign_core` extension without
+`ISO_639_1_PAIRS`, propagates and is reported as `failed` with its reason.
+A failure is never an empty catalog. Rust parses the keys into `LanguageCode3`
+and the processors into the closed `StanzaProcessor` when it deserializes the
+report, so a malformed catalog is a malformed capabilities response.
 
-| Method | What it checks | Used by |
-|--------|---------------|---------|
-| `supports_morphosyntax(iso3)` | tokenize + pos + lemma + depparse | Submission validation, batch dispatch |
-| `has_mwt(iso3)` | `mwt` processor available | Morphosyntax pipeline (includes MWT step only when available) |
-| `has_constituency(iso3)` | `constituency` processor available | Utseg dispatch (falls back to sentence-boundary without it) |
-| `alpha2(iso3)` | ISO-639-3 to Stanza alpha-2 | Model loading configuration |
-| `supported_languages()` | All ISO-639-3 codes | Error messages, help text |
-| `is_populated()` | Non-empty registry | Fallback gating |
+## Rust side: `StanzaRegistry` and the admission proof
 
-### Storage: `OnceLock` in WorkerPool
+`WorkerPool::record_capabilities` hands each report to the pool's
+`StanzaRegistrySlot`, the one place a report reaches the registry. The first
+catalog becomes the `StanzaRegistry` (held as an `Arc`) and stays; a later
+catalog that differs (a TCP worker on another installation) is logged, not
+admitted. Until a catalog arrives, the most informative other report is the
+reason there is none (`StanzaRegistryUnavailable`: `NoReport`,
+`NotInstalled { worker, import_error }` or `ReportFailed { worker, reason }`):
+a failed report is not replaced by a later "not installed", which a worker
+serving no Stanza task reports.
 
-The registry is stored in `WorkerPool.stanza_registry: OnceLock<Box<StanzaRegistry>>`.
-`record_capabilities()` populates it from the first worker that reports
-non-empty `stanza_capabilities`. The `OnceLock` ensures this is a one-shot
-operation even under concurrent worker spawning.
+`WorkerPool::stanza_registry()` returns a `StanzaRegistryLookup`: the shared
+registry, or the reason there is none.
 
-Access is via `WorkerPool::stanza_registry() -> Option<&StanzaRegistry>`.
-`None` means no worker has reported yet.
-
-### Two-Phase Validation
-
-Submission validation runs in two phases:
-
-1. **Pre-filter** (`validate_language_support()` in `request.rs`):
-   delegates to `chat_ops::stanza_languages::is_stanza_supported`,
-   which consults the hardcoded `SUPPORTED_STANZA_CODES` set (~50
-   languages). This runs even before any worker has started, so it
-   catches obviously unsupported languages immediately.
-
-2. **Authoritative check** (`validate_language_with_registry()` in
-   `request.rs`): uses the live `StanzaRegistry` when available. This is
-   called from `materialize_submission_job()` in `routes/jobs/mod.rs`
-   where the registry is accessible via `AppState`.
-
-Once the registry is populated, it supersedes the hardcoded table. The
-hardcoded table exists only as a conservative safety net for the window
-between server startup and the first worker's capability report.
-
-## Per-Command Processor Requirements
-
-| Command | Required processors | Optional processors |
-|---------|-------------------|---------------------|
-| morphotag | tokenize + pos + lemma + depparse | mwt (if available) |
-| utseg | tokenize + pos | constituency (degrades to sentence-boundary without it) |
-| coref | English-only, uses Stanza coref | -- |
-| translate | Does not use Stanza | -- |
-| align/transcribe | Does not use Stanza directly | -- |
-
-## Graceful Degradation
-
-The registry enables graceful degradation rather than hard failures:
-
-- **No MWT:** Morphotag works without contraction expansion. The pipeline
-  simply omits the `mwt` processor from the Stanza pipeline configuration.
-- **No constituency:** Utseg falls back to sentence-boundary segmentation
-  (`_stanza_loading.py:UtsegConfigBuilder` checks the capability table).
-- **No depparse:** Morphotag is rejected at submission time with a clear
-  error message listing supported languages.
-- **Unknown language:** Rejected at submission with a formatted list of
-  all supported ISO-639-3 codes.
-
-## Maintaining the Fallback Table
-
-After upgrading Stanza, regenerate the hardcoded fallback table:
-
-```bash
-uv run scripts/generate_stanza_language_table.py
+```mermaid
+flowchart LR
+    report["worker report"] -->|record| slot["StanzaRegistrySlot"]
+    slot -->|lookup| reg["Arc&lt;StanzaRegistry&gt;"]
+    reg -->|"admit::&lt;R&gt;"| proof["Admitted&lt;R&gt;"]
+    proof -->|sibling| proof2["Admitted&lt;R&gt;\n(another language)"]
+    reg -->|"admit::&lt;R&gt; refused"| gap["StanzaGap&lt;R&gt;\n(missing processors)"]
 ```
 
-This reads the installed Stanza's `resources.json`. The historically
-hardcoded `SUPPORTED_STANZA_CODES` constant is no longer maintained;
-the authoritative table is built dynamically from the Python worker's
-live Stanza resources and sent to Rust via the capability response.
-Delegation paths in `request.rs` and the transcribe plan-time gate consult
-the live table (with chat-ops fallback if the registry is unavailable).
+The requirement is a type: `R` is a sealed marker, `Morphosyntax` or
+`UtteranceSegmentation`, naming one `StanzaRequirement`. `Admitted<R>` is
+minted only by `StanzaRegistry::admit::<R>(language)`; it names the language
+and holds the registry that admitted it. A stage that needs another language
+under the same requirement asks the proof it holds (`Admitted::sibling`), so
+past the first admission there is no "no registry" case and no stage re-reads
+the pool. A refusal is a `StanzaGap<R>`: `NotInCatalog`, or
+`ProcessorsUnavailable { missing }`, naming the processors the entry lacks.
+`languages_for::<R>()` lists the languages `R` is served for, for a refusal's
+help text.
 
-The Python worker also runs a typed `UnsupportedLanguageError`
-preflight in `_stanza_loading.py::load_stanza_models` that consults
-the live capability table, this is the authoritative drift safety
-net regardless of how stale the Rust fallback gets.
+## Admission
 
-## Key Source Files
+`AnalysisUnavailable::admit(requirement, language, lookup)` is morphotag's
+first admission, of the file's primary language. Its typed
+`AnalysisUnavailableReason` (`StanzaRefusal<Morphosyntax>`) is
+`RegistryUnavailable(StanzaRegistryUnavailable)`, carrying why there is no
+registry, or `Gap(StanzaGap<Morphosyntax>)`, and the refusal is a
+non-retryable `AnalysisUnavailable` failure, never a CHAT verdict. It returns
+the file's `Admitted<Morphosyntax>`, which the analysis carries; every later
+language of the file is that proof's sibling.
+
+| Where | Admitted by | No registry |
+|-------|-------------|-------------|
+| The file's primary `@Languages` (`FileLanguage::resolve`, at parse) | the pool's registry | refuses |
+| Each outstanding utterance's effective language (`DispatchPlan::admit`) | the file's proof (`AnalysisUnavailable::of_sibling`); a gap refuses | cannot arise |
+| Secondary (L2) `@s` spans (`dispatch_secondary_l2`) | the file's proof; a language without a pipeline is an exclusion (`L2|xxx`, reported unsupported) | cannot arise |
+| Submission (`validate_language_with_registry`, job-level languages of compare and utseg, each by its own requirement) | the registry in hand; early refusal naming the languages that are available | skipped; the job meets the registry after its capability probe |
+| Utseg dispatch (`UtsegRoute::admit`, after the capability probe) | the pool's registry, for the Stanza route only | refuses the job |
+| Transcribe's post-CHAT segmentation (`post_chat_route`, once recognition names the language, known or auto-detected) | the pool's registry, for the Stanza route only; a refusal is not applied, recorded as a `stage_not_applied` shortfall | not applied, recorded the same way |
+| Transcribe's morphosyntax (`prepare_tail`, a known language) | the pool's registry; a gap is not applied, recorded as a `stage_not_applied` shortfall | runs it; its own admission refuses and records a shortfall |
+
+Every worker-backed job probes its worker's capabilities before dispatch
+(`ensure_command_capabilities`), so a running job normally finds the registry
+admitted.
+
+## How a language becomes available
+
+Install or upgrade Stanza. A language is available when the installed catalog
+ships tokenize, pos, lemma and depparse for the entry its ISO 639-3 code
+resolves to; nothing in BA3 lists languages. A language whose entry lacks a
+processor (Maltese, Telugu, Thai and Vietnamese ship no trained lemmatizer
+in Stanza 1.15) is refused as `ProcessorsUnavailable`; one with no entry
+(Quechua) as `NotInCatalog`. Stanza's catalog names `lemma: identity` as the
+default for those four (it would copy each word as its lemma); BA3 requires a
+trained lemmatizer, a `lemma` model in the entry, for morphotag. Whether an
+identity lemma is acceptable for languages whose words do not inflect has not
+been decided. Utterance segmentation's Stanza route needs no lemmatizer but
+does need a constituency parser, which of the four only Vietnamese ships
+(the committed catalog snapshot gives Maltese, Telugu and Thai tokenize, pos
+and depparse alone), so only Vietnamese meets that requirement. Only a language whose code the ISO table and the catalog
+cannot connect needs a `_STANZA_CODE_POLICY` entry, and that is a decision
+about which model analyzes it.
+
+The census `batchalign/tests/test_stanza_language_census.py` measures the
+admitted set against a committed snapshot of the catalog's shape
+(`scripts/snapshot_stanza_catalog.py` writes it). After a Stanza upgrade,
+regenerate the snapshot and review the census.
+
+## Per-command processor requirements
+
+Each Stanza-backed command is admitted by its own requirement, the closed
+`StanzaRequirement` in `batchalign-types` (`stanza_catalog.rs`), as a marker
+type (`validate_language_with_registry` is an exhaustive match over the
+commands). The worker builds its pipelines from the same sets, read from Rust
+as `batchalign_core.STANZA_REQUIREMENTS` (`requirement_processors` in
+`_stanza_capabilities.py`), so what is admitted and what is loaded are one
+list.
+
+| Command | `StanzaRequirement` | Required processors | Added where the entry ships them |
+|---------|---------------------|---------------------|----------------------------------|
+| morphotag, compare | `Morphosyntax` | tokenize, pos, lemma, depparse | mwt |
+| utseg (Stanza route only) | `UtteranceSegmentation` | tokenize, pos, constituency | mwt |
+| coref | `Coreference` (the loader's list; no admission) | tokenize, coref | (English only) |
+| translate, align, transcribe | none | Stanza is not loaded for the job language (transcribe's optional utseg and morphosyntax stages use theirs) | |
+
+Coref has no admission: it is English-only by construction (no `--lang`,
+English files only, `file_has_english`), and its worker always builds the
+English pipeline from `Coreference`'s processor list.
+
+Utterance segmentation reads constituency trees and never lemmas, so it loads
+no lemmatizer, and it cannot segment without a constituency parser, so an
+entry without one is not admitted. Only the ROUTE that runs Stanza is
+admitted: a language with a TalkBank boundary model reads no Stanza output and
+is held to nothing here. The Stanza route is admitted before work at
+submission (`validate_language_with_registry`), at dispatch after the
+capability probe (`UtsegRoute::admit`, whose `ServableUtsegRoute` carries the
+`Admitted<UtteranceSegmentation>` and is the only route a utseg job is
+dispatched with), and in transcribe's post-CHAT stage once recognition has
+named the language.
+
+The worker builds utseg's constituency pipeline once per language, through the
+same cache and per-key construction slot as morphotag's (key `{lang}:utseg`),
+and every batch calls it through that entry's guard.
+
+## Key source files
 
 | File | Role |
 |------|------|
-| `batchalign/worker/_stanza_capabilities.py` | Reads `resources.json`, builds `StanzaCapabilityTable` |
-| `batchalign/worker/_handlers.py` | Serializes table into `CapabilitiesResponse.stanza_capabilities` |
-| `batchalign/worker/_types.py` | `CapabilitiesResponse`, `StanzaLanguageProcessors` Pydantic models |
-| `batchalign/worker/_stanza_loading.py` | Utseg config builder queries table for constituency/MWT |
-| `crates/batchalign-types/src/worker.rs` | `WorkerCapabilities`, `StanzaLanguageProcessors` Rust types |
-| `crates/batchalign/src/stanza_registry.rs` | `StanzaRegistry` with typed query methods |
-| `crates/batchalign/src/worker/pool/mod.rs` | `OnceLock<StanzaRegistry>` storage, `record_capabilities()` |
-| `crates/batchalign/src/types/request.rs` | Single Rust fallback via `is_stanza_supported_language()`; delegates to chat-ops |
-| `crates/batchalign/src/types/request.rs` | `validate_language_with_registry()`; submission-time gate delegates to chat-ops |
-| `crates/batchalign/src/pipeline/transcribe.rs` | Plan-time gate (registry first, chat-ops fallback) |
-| `batchalign/worker/_stanza_loading.py` | `UnsupportedLanguageError` preflight before `stanza.Pipeline` |
-| `crates/batchalign/src/morphosyntax/batch.rs` | Queries registry for language filtering |
-| `scripts/generate_stanza_language_table.py` | Regenerates Rust fallback tables from installed Stanza |
+| `batchalign/worker/_stanza_capabilities.py` | Builds `StanzaCapabilityTable` from the catalog, the ISO table and the policy |
+| `batchalign/worker/_stanza_loading.py` | `language_capability`, `stanza_code_for`; pipeline loaders |
+| `batchalign/worker/_handlers.py` | Reports the outcome as `stanza_catalog` (`_stanza_catalog_report`) |
+| `batchalign/worker/_types.py` | `StanzaCatalog`, `StanzaNotInstalledReport`, `StanzaCatalogFailed`, `StanzaProcessorName` |
+| `crates/batchalign-types/src/stanza_catalog.rs` | `StanzaCatalogReport`, `StanzaProcessor` |
+| `crates/batchalign-types/src/iso639_part1/` | The ISO 639-1 table and `pairs()` |
+| `crates/batchalign-pyo3/src/lib.rs` | Exports `ISO_639_1_PAIRS` to the worker |
+| `crates/batchalign/src/stanza_registry.rs` | `StanzaRegistry`, `StanzaRegistrySlot`, `StanzaRegistryUnavailable`, `Admitted<R>`, `StanzaGap<R>`, `StanzaRefusal<R>`, the requirement markers |
+| `crates/batchalign/src/worker/pool/mod.rs` | Records each report (`record_capabilities`) |
+| `crates/batchalign/src/morphosyntax/capability.rs` | `AnalysisUnavailable::admit`, `AnalysisUnavailable::of_sibling` |
+| `crates/batchalign/src/types/request.rs` | `validate_language_with_registry` |
+| `batchalign/tests/test_stanza_language_census.py` | The admitted set on a catalog snapshot |
+| `scripts/snapshot_stanza_catalog.py` | Writes that snapshot |

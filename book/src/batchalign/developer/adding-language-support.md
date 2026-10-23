@@ -28,8 +28,8 @@ need a "not available for X" line.
 
 | Capability | How to check | Affects |
 |------------|--------------|---------|
-| **ISO 639-3 code** | `pycountry`, `talkbank-types::LanguageCode3` | Everything downstream |
-| **Stanza pipeline?** | `python -c "import stanza; print('XXX' in stanza.resources.common.load_resources_json())"` AND check the entry has a `packages` key (not just charlm stubs) | morphotag, utseg, retokenize gating |
+| **ISO 639-3 code** | `talkbank-types::LanguageCode3`; its ISO 639-1 code from `batchalign_types::iso639_part1` | Everything downstream |
+| **Stanza pipeline?** | Build the worker's capability table and check the language: `uv run python -c "from batchalign.worker._stanza_capabilities import get_cached_capability_table as t; print(t().languages.get('XXX'))"`. Morphotag needs tokenize, pos, lemma and depparse on that entry | morphotag, utseg, retokenize gating |
 | **`num2words` backend?** (historical origin only) | `python -c "import num2words; print('XX' in num2words.CONVERTER_CLASSES)"` (use ISO 639-1 2-char code) as a sanity check. The cardinal table now lives in chatter, at `crates/talkbank-transform/data/num2lang.json` in the chatter repository; adding a language there is a chatter change, adopted here by bumping the pin. See [Number Expansion](../architecture/number-expansion.md) for the protocol. | Number expansion (E220 risk) |
 | **Rev.AI quality?** | Submit a sample to Rev.AI; check for hallucinations, script confusion, repetition. Document result in `book/src/batchalign/reference/revai-language-quality-strategy.md` | Default ASR engine choice |
 | **Stock Whisper quality?** | Same: run a representative sample, evaluate | Fallback ASR engine choice |
@@ -46,8 +46,11 @@ When the matrix is filled in, work through these in order:
 If Stanza ships a real pipeline (the `packages` key is populated, not
 just `backward_charlm`/`forward_charlm` stubs):
 
-- Add or verify the language in `batchalign/worker/_stanza_capabilities.py`
- , this is the runtime authority, NOT a hardcoded table.
+- Nothing to add: the capability table
+  (`batchalign/worker/_stanza_capabilities.py`) derives the language from
+  the installed catalog and Rust's ISO table, and the server's registry
+  admits it from the worker's report. Only a code that neither the ISO table
+  nor the catalog connects to an entry needs a `_STANZA_CODE_POLICY` entry.
 - Confirm MWT, POS, lemma, depparse, constituency availability via the
   capability table.
 - If MWT is present, the Stanza-induced retokenize path
@@ -60,9 +63,11 @@ just `backward_charlm`/`forward_charlm` stubs):
 
 If Stanza ships only stubs (no `packages`): the language is
 **transcribe-only**. Document this on the language's reference page.
-Morphotag, utseg, and Stanza-driven retokenize all skip silently
-through `with_morphosyntax=false` / `with_utseg=false` plan flags
-(`crates/batchalign/src/pipeline/transcribe.rs`).
+Morphotag refuses it with a typed `AnalysisUnavailable`
+(`ProcessorsUnavailable` or `NotInCatalog`), and transcribe does not apply
+its Stanza-backed stages for it, recording each as a `stage_not_applied`
+shortfall (`prepare_tail` and `post_chat_route` in
+`crates/batchalign/src/pipeline/transcribe.rs`).
 
 ### 2. Number expansion
 

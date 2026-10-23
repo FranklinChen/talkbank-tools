@@ -6,15 +6,19 @@ user-level Stanza cache on the CI runner.
 
 from __future__ import annotations
 
+import sys
 from unittest import mock
 
 import pytest
 
 from batchalign.worker._stanza_capabilities import (
+    StanzaCapabilityTable,
     StanzaCatalogDownloadError,
+    StanzaNotInstalled,
     build_stanza_capability_table_from_resources,
     get_cached_capability_table,
 )
+from batchalign_core import ISO_639_1_PAIRS
 
 _FIXTURE_RESOURCES = {
     "default": {},
@@ -53,12 +57,37 @@ _FIXTURE_RESOURCES = {
         "depparse": {},
         "mwt": {},
     },
-    "alias-en": "en",
+    "zh-hans": {
+        "tokenize": {},
+        "pos": {},
+        "lemma": {},
+        "depparse": {},
+    },
+    "nb": {
+        "tokenize": {},
+        "pos": {},
+        "lemma": {},
+        "depparse": {},
+    },
+    "grc": {
+        "tokenize": {},
+        "pos": {},
+        "lemma": {},
+        "depparse": {},
+    },
+    # Aliases as the catalog writes them.
+    "zh": {"alias": "zh-hans"},
+    "no": {"alias": "nb"},
+    "spa": {"alias": "es"},
+    # Not a language entry: a top-level string.
+    "url": "https://example.invalid/",
 }
 
 
 def build_fixture_table():
-    return build_stanza_capability_table_from_resources(_FIXTURE_RESOURCES)
+    return build_stanza_capability_table_from_resources(
+        _FIXTURE_RESOURCES, ISO_639_1_PAIRS
+    )
 
 
 def test_table_is_non_empty():
@@ -71,47 +100,73 @@ def test_english_has_constituency():
     """English is one of the fixture languages with constituency parsing."""
     table = build_fixture_table()
     assert "eng" in table.languages
-    assert table.languages["eng"].has_constituency
+    assert table.languages["eng"].has("constituency")
 
 
 def test_dutch_has_no_constituency():
     """Dutch does NOT have constituency, this caused an operator's crash."""
     table = build_fixture_table()
     assert "nld" in table.languages
-    assert not table.languages["nld"].has_constituency
+    assert not table.languages["nld"].has("constituency")
 
 
 def test_dutch_has_core_processors():
     """Dutch has tokenize, pos, lemma, depparse, morphotag should work."""
     table = build_fixture_table()
     nl = table.languages["nld"]
-    assert nl.has_tokenize
-    assert nl.has_pos
-    assert nl.has_lemma
-    assert nl.has_depparse
+    assert nl.has("tokenize")
+    assert nl.has("pos")
+    assert nl.has("lemma")
+    assert nl.has("depparse")
 
 
-def test_iso3_mapping_covers_fixture_languages():
-    """The derived iso3 mapping should cover every fixture language entry."""
+@pytest.mark.parametrize(
+    ("iso3", "stanza_code"),
+    [
+        # Through the ISO 639-1 table.
+        ("eng", "en"),
+        ("fra", "fr"),
+        ("jpn", "ja"),
+        ("nld", "nl"),
+        ("spa", "es"),
+        # ISO 639-1 resolved through a catalog alias.
+        ("zho", "zh-hans"),
+        ("nor", "nb"),
+        # ISO 639-1 directly.
+        ("nob", "nb"),
+        # The catalog's own three-letter key.
+        ("grc", "grc"),
+        # Policy: no ISO 639-1 code, no catalog entry of their own.
+        ("cmn", "zh-hans"),
+        ("yue", "zh-hans"),
+    ],
+)
+def test_iso3_codes_map_to_the_entry_that_serves_them(iso3, stanza_code):
+    """One mapping: the ISO table, then the catalog and its aliases."""
+    assert build_fixture_table().languages[iso3].stanza_code == stanza_code
+
+
+def test_every_key_is_iso_639_3_and_no_non_language_key_leaks():
+    """Only three-letter codes reach the report; `url` and aliases are not
+    languages, and two-letter keys are not ISO 639-3."""
     table = build_fixture_table()
-    expected = {"eng", "fra", "jpn", "nld", "spa"}
-    missing = expected - set(table.iso3_to_alpha2.keys())
-    assert not missing, f"Fixture languages should map cleanly: {missing}"
+    for code in table.languages:
+        assert len(code) == 3 and code.isalpha() and code.islower(), code
 
 
 def test_mwt_matches_resources():
     """MWT availability should come from resources, not a hardcoded list."""
     table = build_fixture_table()
-    assert table.languages["fra"].has_mwt
-    assert table.languages["eng"].has_mwt
-    assert not table.languages["jpn"].has_mwt
+    assert table.languages["fra"].has("mwt")
+    assert table.languages["eng"].has("mwt")
+    assert not table.languages["jpn"].has("mwt")
 
 
 def test_japanese_has_constituency():
     """Japanese has constituency parsing in the fixture resources."""
     table = build_fixture_table()
     ja = table.languages["jpn"]
-    assert ja.has_constituency
+    assert ja.has("constituency")
 
 
 def test_unsupported_language_not_in_table():
@@ -131,7 +186,7 @@ def test_unsupported_language_not_in_table():
 #   1. resources.json missing → download succeeds → table populated.
 #   2. resources.json missing → download fails    → typed
 #      StanzaCatalogDownloadError raised, NOT silent return None.
-#   3. Stanza package itself not installed         → return None (unchanged).
+#   3. Stanza package itself not installed         → StanzaNotInstalled.
 #
 # These exist because BA3 used to silently return None on any
 # ResourcesFileNotFoundError, which masked the fact that no language
@@ -173,9 +228,8 @@ def test_bootstrap_downloads_catalog_when_missing():
     ):
         table = get_cached_capability_table()
 
-    assert table is not None, (
-        "Bootstrap must download the catalog and return a populated table, "
-        "not silently return None"
+    assert isinstance(table, StanzaCapabilityTable), (
+        "Bootstrap must download the catalog and return a populated table"
     )
     assert "eng" in table.languages
     fake_download.assert_called_once()
@@ -208,18 +262,57 @@ def test_bootstrap_raises_typed_error_on_download_failure():
     )
 
 
-def test_stanza_not_installed_returns_none():
-    """ImportError on stanza import → return None (unchanged behavior).
-
-    This is the one legitimate silent-None path: BA3 deployed without
-    stanza in the venv. Distinct from "catalog missing".
-    """
-    # Force ImportError when build_stanza_capability_table imports stanza.
-    fake_load = mock.Mock(side_effect=ImportError("No module named 'stanza'"))
-    with mock.patch(
-        "batchalign.worker._stanza_capabilities.build_stanza_capability_table",
-        fake_load,
-    ):
+def test_stanza_not_installed_is_its_own_outcome():
+    """The ``stanza`` import failing is "not installed", reported as itself."""
+    with mock.patch.dict(sys.modules, {"stanza.resources.common": None}):
         result = get_cached_capability_table()
 
-    assert result is None
+    assert isinstance(result, StanzaNotInstalled)
+
+
+def test_a_failure_after_stanza_imports_is_not_not_installed():
+    """RED FIRST: the catch-all ``except ImportError`` around the whole build
+    turned a stale ``batchalign_core`` extension (no ``ISO_639_1_PAIRS``) into
+    "Stanza not installed", and the report into an empty catalog. Only the
+    ``stanza`` import is "not installed"; any other failure propagates with
+    its own type and message, and the capability report names it."""
+    from batchalign.worker._handlers import _stanza_catalog_report
+    from batchalign.worker._types import StanzaCatalogFailed
+
+    stale = ImportError("cannot import name 'ISO_639_1_PAIRS' from 'batchalign_core'")
+    with mock.patch(
+        "batchalign.worker._stanza_capabilities.build_stanza_capability_table",
+        mock.Mock(side_effect=stale),
+    ):
+        with pytest.raises(ImportError, match="ISO_639_1_PAIRS"):
+            get_cached_capability_table()
+        report = _stanza_catalog_report()
+
+    assert report == StanzaCatalogFailed(
+        reason="ImportError: cannot import name 'ISO_639_1_PAIRS' from 'batchalign_core'"
+    )
+
+
+def test_each_command_requirement_comes_from_rust():
+    """The worker's requirement sets are Rust's ``StanzaRequirement``, read
+    through ``batchalign_core``, not copies."""
+    from batchalign.worker._stanza_capabilities import (
+        processors_argument,
+        requirement_processors,
+    )
+
+    assert requirement_processors("morphosyntax") == {
+        "tokenize",
+        "pos",
+        "lemma",
+        "depparse",
+    }
+    assert requirement_processors("utterance_segmentation") == {
+        "tokenize",
+        "pos",
+        "constituency",
+    }
+    assert requirement_processors("coreference") == {"tokenize", "coref"}
+    assert (
+        processors_argument({"mwt", "depparse", "tokenize"}) == "tokenize,mwt,depparse"
+    )

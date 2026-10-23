@@ -563,7 +563,7 @@ mod alignment_completion_tests {
 
     #[test]
     fn alignment_completion_has_typed_http_and_retry_dispositions() {
-        use crate::runner::util::{classify_server_error, is_retryable_worker_failure};
+        use crate::runner::util::classify_server_error;
         use crate::scheduling::FailureCategory;
         // Untimed words are no longer a refusal (they are a partial result,
         // written and diagnosed); a changed lexical structure still is, and
@@ -589,7 +589,9 @@ mod alignment_completion_tests {
             let error = ServerError::from(failure);
             assert_eq!(classify_server_error(&error), category);
             assert_eq!(error.status_code(), status);
-            assert!(!is_retryable_worker_failure(category));
+            assert!(
+                !((category).retryability() == crate::types::scheduling::Retryability::Retryable)
+            );
         }
     }
 }
@@ -649,6 +651,9 @@ pub enum AsrProviderDisposition {
     /// Repeating the request cannot help (4xx, a job the provider failed, an
     /// undecodable response).
     Terminal,
+    /// The provider refuses the account itself (its key, its permission, its
+    /// credit): no request succeeds until an account holder acts.
+    AccountRefused,
 }
 
 impl std::fmt::Display for AsrProviderDisposition {
@@ -656,6 +661,7 @@ impl std::fmt::Display for AsrProviderDisposition {
         match self {
             Self::Transient => write!(f, "transient"),
             Self::Terminal => write!(f, "terminal"),
+            Self::AccountRefused => write!(f, "account_refused"),
         }
     }
 }
@@ -1048,7 +1054,7 @@ pub enum ServerError {
     #[error("model access required: {0}")]
     ModelAccessDenied(String),
 
-    /// An upstream ASR provider (Rev.AI) failed.
+    /// An upstream ASR provider failed.
     ///
     /// **HTTP 502.** Distinct from [`Validation`](Self::Validation), and for
     /// the same reason [`ModelAccessDenied`](Self::ModelAccessDenied) is:
@@ -1068,6 +1074,29 @@ pub enum ServerError {
         /// The provider error rendered with its full cause chain.
         message: String,
     },
+
+    /// An ASR worker reported models other than the ones the plan pinned.
+    ///
+    /// **HTTP 500.** A provenance fault on the server's side, never input the
+    /// client could fix: the worker runtime loaded a different composition or
+    /// revision than the manifest names, so writing its words would stamp a
+    /// transcript with a model that did not produce them. It recurs for every
+    /// request that worker serves, which is why it is classified with the
+    /// runtime identity mismatch (`WorkerBootstrap`) rather than retried.
+    #[error("ASR worker model identity disagrees with the plan: {0}")]
+    AsrModelIdentity(#[from] crate::types::worker_v2::AsrIdentityMismatchV2),
+
+    /// A provider refused the request because the account's quota or resource
+    /// pack is exhausted (worker protocol `ProviderQuotaExhausted`, such as
+    /// Tencent's `FailedOperation.UserHasNoAmount`).
+    ///
+    /// Its own variant, not a terminal [`Self::AsrProvider`]: it is the one
+    /// provider failure that no request can get past until an account holder
+    /// restores the quota, so it withholds the same-engine UTR fallback and
+    /// has its own category (`provider_quota_exhausted`). It is neither bad
+    /// input nor a transient fault.
+    #[error("provider quota exhausted: {0}")]
+    ProviderQuotaExhausted(String),
 
     /// A worker-protocol V2 retry loop
     /// ([`crate::infer_retry::dispatch_execute_v2_with_retry_and_progress`])
@@ -1323,7 +1352,8 @@ impl ServerError {
             // The server's own machine lacks Hub access/credentials; the
             // caller's request was fine.
             Self::ModelAccessDenied(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::AsrProvider { .. } => StatusCode::BAD_GATEWAY,
+            Self::AsrProvider { .. } | Self::ProviderQuotaExhausted(_) => StatusCode::BAD_GATEWAY,
+            Self::AsrModelIdentity(_) => StatusCode::INTERNAL_SERVER_ERROR,
             // Internal cancellation signal from a background retry loop;
             // never returned as an HTTP response (see the variant's doc).
             Self::Cancelled => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1364,7 +1394,7 @@ mod tests {
             EmbeddingInferenceFailure, EnrolledLabel, InvalidModelManifest, OutsidePreparedAudio,
             SpeakerIdentityFailure, TrackAnalysisFailure,
         };
-        use crate::runner::util::{classify_server_error, is_retryable_worker_failure};
+        use crate::runner::util::classify_server_error;
         use crate::scheduling::FailureCategory;
         use crate::worker::speaker_embedding_request_v2::{
             SpeakerEmbeddingRequestBuildErrorV2, SpeakerEmbeddingResultParseError,
@@ -1439,7 +1469,9 @@ mod tests {
             ),
         ] {
             assert_eq!(classify_server_error(&error), category);
-            assert!(!is_retryable_worker_failure(category));
+            assert!(
+                !((category).retryability() == crate::types::scheduling::Retryability::Retryable)
+            );
             let detail = error.to_string();
             let response = axum::response::IntoResponse::into_response(error);
             assert_eq!(response.status(), status);
@@ -1456,13 +1488,13 @@ mod tests {
         use crate::morphosyntax::AnalysisUnavailable;
         let language = crate::api::LanguageCode3::try_new("que").unwrap();
         let error =
-            super::ServerError::from(AnalysisUnavailable::admit_primary(&language).unwrap_err());
+            super::ServerError::from(AnalysisUnavailable::primary_refusal_for_test(&language));
         let category = crate::runner::util::classify_server_error(&error);
         assert_eq!(
             category,
             crate::scheduling::FailureCategory::AnalysisUnavailable
         );
-        assert!(!crate::runner::util::is_retryable_worker_failure(category));
+        assert!(!((category).retryability() == crate::types::scheduling::Retryability::Retryable));
         let message = error.to_string();
         assert!(message.contains("que") && message.contains("Keep truthful language declarations"));
         assert!(!message.contains("internal error") && !message.contains("Fix the @Languages"));
@@ -1506,7 +1538,9 @@ mod tests {
             );
             let category = crate::runner::util::classify_server_error(&error);
             assert_eq!(category, crate::scheduling::FailureCategory::System);
-            assert!(!crate::runner::util::is_retryable_worker_failure(category));
+            assert!(
+                !((category).retryability() == crate::types::scheduling::Retryability::Retryable)
+            );
             let detail = error.to_string();
             let response = axum::response::IntoResponse::into_response(error);
             assert_eq!(

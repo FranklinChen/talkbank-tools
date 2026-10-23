@@ -2,8 +2,8 @@ use batchalign_types::domain::AudioPositionSeconds;
 
 use super::han_script::{HanScriptNormalization, NormalizationChangedLength};
 use super::{
-    AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, cleanup,
-    merge_compounds, num2text,
+    AsrElement, AsrNormalizedText, AsrPipelineSnapshot, AsrTextLanguage, AsrWord,
+    UnwritableEndMark, cleanup, merge_compounds, num2text,
 };
 
 /// Stages 1-3: compound merging, timed word extraction with separator strip,
@@ -294,6 +294,16 @@ fn split_chunk_word(word: AsrWord, lang: &str) -> Vec<AsrWord> {
             rest = &rest[ordinal.len()..];
             continue;
         }
+        // A run of periods (`...`) and a pause (`(.)`) end an utterance but
+        // are not CHAT terminators. Split per character, a run would reach
+        // retokenization as separate periods, the first of which closes the
+        // utterance as an observed `.` nobody wrote; so each is one token.
+        if let Some((mark, len)) = leading_unwritable_mark(rest) {
+            flush_current(&mut parts, &mut current);
+            parts.push((mark.text().to_owned(), true));
+            rest = &rest[len..];
+            continue;
+        }
         rest = &rest[ch.len_utf8()..];
 
         if ch.is_whitespace() {
@@ -360,6 +370,17 @@ fn split_chunk_word(word: AsrWord, lang: &str) -> Vec<AsrWord> {
             AsrWord::new(text, start_ms, end_ms)
         })
         .collect()
+}
+
+/// The unwritable ending mark `rest` starts with, and how many bytes it
+/// spans: `(.)`, or the whole of a run of two or more periods.
+fn leading_unwritable_mark(rest: &str) -> Option<(UnwritableEndMark, usize)> {
+    let pause = UnwritableEndMark::Pause.text();
+    if rest.starts_with(pause) {
+        return Some((UnwritableEndMark::Pause, pause.len()));
+    }
+    let run = rest.len() - rest.trim_start_matches('.').len();
+    (run >= 2).then_some((UnwritableEndMark::Ellipsis, run))
 }
 
 fn expand_language_part(text: String, lang: &str) -> Vec<(String, bool)> {

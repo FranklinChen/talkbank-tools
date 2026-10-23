@@ -41,13 +41,19 @@ fn dense_overlap_counterfactual_retains_sound_exclusion_without_changing_default
     ]);
     let mut included = admitted.clone();
     let mut excluded = admitted;
-    let default = TwoPassOverlapUtr::new().inject(&mut included, &tokens);
+    let default = TwoPassOverlapUtr::new().inject(
+        &mut included,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     let alternative = TwoPassOverlapUtr::new()
         .with_config(TwoPassConfig {
             max_exclusion_density: "1.0".parse().expect("checked density"),
             ..TwoPassConfig::default()
         })
-        .inject(&mut excluded, &tokens);
+        .inject(
+            &mut excluded,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
     assert_eq!((default.injected(), alternative.injected()), (3, 3));
     for (index, expected) in [(0, (100, 3000)), (1, (1800, 2200)), (2, (5000, 7500))] {
         assert_eq!(
@@ -89,7 +95,10 @@ fn test_two_pass_correctly_times_lazy_overlap() {
         ("some", 6300, 6600),
         ("groceries", 6700, 7500),
     ]);
-    let result = utr::TwoPassOverlapUtr::new().inject(&mut chat, &tokens);
+    let result = utr::TwoPassOverlapUtr::new().inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
 
     // PAR's two utterances + INV's backchannel should all get timing
     assert_eq!(
@@ -133,7 +142,10 @@ fn test_global_utr_misaligns_lazy_overlap_backchannel() {
         ("some", 6300, 6600),
         ("groceries", 6700, 7500),
     ]);
-    let result = utr::GlobalUtr.inject(&mut chat, &tokens);
+    let result = utr::GlobalUtr.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
 
     // GlobalUtr may still inject timing for INV, but the timing will be wrong:
     // the DP assigns "mhm" to the token at its position in the global sequence
@@ -183,8 +195,14 @@ fn test_two_pass_identical_without_lazy_overlap() {
     let mut chat_global = parse_chat(chat_text);
     let mut chat_two_pass = parse_chat(chat_text);
 
-    let r1 = utr::GlobalUtr.inject(&mut chat_global, &tokens);
-    let r2 = utr::TwoPassOverlapUtr::new().inject(&mut chat_two_pass, &tokens);
+    let r1 = utr::GlobalUtr.inject(
+        &mut chat_global,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
+    let r2 = utr::TwoPassOverlapUtr::new().inject(
+        &mut chat_two_pass,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
 
     assert_eq!(r1.injected(), r2.injected(), "injected count should match");
     assert_eq!(
@@ -244,7 +262,10 @@ fn test_two_pass_dense_backchannels() {
         ("two", 10000, 10300),
     ]);
 
-    let result = utr::TwoPassOverlapUtr::new().inject(&mut chat, &tokens);
+    let result = utr::TwoPassOverlapUtr::new().inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
 
     // Independent local windows leave repeated oh/mhm ambiguous. The whole
     // source episode preserves the following speaker's complete chain, so
@@ -305,7 +326,10 @@ fn test_select_strategy_chooses_correctly() {
         ("some", 6300, 6600),
         ("groceries", 6700, 7500),
     ]);
-    let result = strategy.inject(&mut chat, &tokens);
+    let result = strategy.inject(
+        &mut chat,
+        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+    );
     assert_eq!(result.injected(), 3, "should use two-pass and time all 3");
 
     // select_strategy on a non-+< file should use GlobalUtr

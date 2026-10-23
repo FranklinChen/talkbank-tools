@@ -265,7 +265,7 @@ mod tests {
                 evidence
                     .isolation(i)
                     .map(WordIsolation::is_isolated)
-                    .unwrap_or(false)
+                    .expect("an index below len has its isolation")
             })
             .collect()
     }

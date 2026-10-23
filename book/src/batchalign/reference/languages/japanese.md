@@ -81,12 +81,9 @@ detailed whitespace handling documentation.
   `deterministic_mapping_succeeds_for_split_and_merge` at `:287`).
 - Stanza `combined` package loads correctly for `ja`
   (`batchalign/worker/_stanza_loading.py:196-207`).
-- MWT exclusion: `should_request_mwt()` reports `has_mwt=False` for
-  `ja`; the retokenize/utseg path uses a local
-  `mwt_exclude = {"zh", "ja", "ko", "th", "vi", "my"}` set at
-  `batchalign/worker/_stanza_loading.py:310`. The global
-  `_MWT_EXCLUSION` was retired alongside `MWT_LANGS` (see
-  [Stanza Limitations Defect 5](../stanza-limitations.md)).
+- MWT exclusion: the `ja` catalog entry reports `not has("mwt")`, and
+  both morphotag and utseg read that entry; no language list decides it
+  (see [Stanza Limitations Defect 5](../stanza-limitations.md)).
 
 ## Open Questions
 
@@ -105,7 +102,7 @@ overrides, and whitespace artifact handling, see:
 
 | File | Role |
 |------|------|
-| `batchalign/worker/_stanza_loading.py` | Japanese `combined` package selection (`:196-207`); MWT eligibility via `should_request_mwt()` |
+| `batchalign/worker/_stanza_loading.py` | Japanese `combined` package selection (`:196-207`); MWT eligibility from the catalog entry (`language_capability()`) |
 | `batchalign/inference/morphosyntax.py` | Stanza inference (shared with all languages) |
 | `crates/batchalign-transform/src/retokenize.rs` + `crates/batchalign-transform/src/retokenize/{parse_helpers,rebuild}.rs` | AST rewrite for merged/split tokens |
 | `crates/batchalign-transform/src/morphosyntax/lang_ja.rs` | POS mapping with Japanese-specific rules |

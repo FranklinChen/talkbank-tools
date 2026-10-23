@@ -24,7 +24,9 @@ Protocol:
         {"op": "capabilities", "response": <CapabilitiesResponse>}
         {"op": "ensure_task", "response": <EnsureTaskResponse>}
         {"op": "shutdown"}
-        {"op": "error", "error": "...", "kind": "runtime" | "bootstrap" | "invalid_request",
+        {"op": "error", "error": "...",
+         "kind": "runtime" | "bootstrap" | "download" | "out_of_memory"
+                 | "invalid_request",
          "request_id": "..." (present when the failed request carried one: a V2
          dispatch, or a capabilities or ensure_task control request)}
 

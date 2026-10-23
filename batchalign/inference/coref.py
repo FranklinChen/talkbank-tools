@@ -189,6 +189,10 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
                 # plus the ontonotes coref package) on first use; surface the
                 # wait through the progress channel.
                 from batchalign.worker._progress import emit_download_event
+                from batchalign.worker._stanza_capabilities import (
+                    processors_argument,
+                    requirement_processors,
+                )
 
                 emit_download_event(
                     stage="downloading_stanza_coref_eng",
@@ -200,7 +204,9 @@ def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
                 )
                 pipeline = stanza.Pipeline(
                     lang="en",
-                    processors="tokenize, coref",
+                    processors=processors_argument(
+                        requirement_processors("coreference")
+                    ),
                     package={"coref": _COREF_PACKAGE},
                     tokenize_pretokenized=True,
                 )

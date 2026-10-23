@@ -7,9 +7,9 @@
 //! admission accepted and what the decoder is told cannot disagree. The same
 //! table ([`WhisperLanguageToken`]) answers both.
 //!
-//! This is policy, not model identity: it is not part of the pinned model
-//! composition, the loaded identity, or any cache namespace. A worker's key
-//! already carries its language, so one key yields one decision.
+//! This is decoding policy, separate from pinned model composition and loaded
+//! identity. A worker's key carries its language; response-cache producers
+//! must account for changes to the decoding policy for that language.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,18 +61,12 @@ impl WhisperDecodeLanguageV2 {
 
     /// The decision for one concrete language.
     ///
-    /// Cantonese is left to detection although Whisper has its `yue` token:
-    /// the worker never forced it (its rule said even stock Whisper lacks a
-    /// clean hint for Cantonese), and this keeps that behaviour as a decision
-    /// about the language rather than a comparison against a display name.
+    /// A resolved language always uses its Whisper token and transcription
+    /// task. Only an explicitly automatic worker may detect its language.
     pub fn for_language(language: &LanguageCode3) -> Result<Self, WhisperDecodeLanguageError> {
         let token = WhisperLanguageToken::for_language(language)
             .ok_or_else(|| WhisperDecodeLanguageError::NoToken(language.clone()))?;
-        if *language == LanguageCode3::yue() {
-            Ok(Self::Detect)
-        } else {
-            Ok(Self::Force { token })
-        }
+        Ok(Self::Force { token })
     }
 }
 
@@ -99,8 +93,11 @@ mod tests {
         );
         assert_eq!(
             WhisperDecodeLanguageV2::for_worker_language(&resolved("yue")),
-            Ok(WhisperDecodeLanguageV2::Detect),
-            "Cantonese keeps its detect rule"
+            Ok(WhisperDecodeLanguageV2::Force {
+                token: WhisperLanguageToken::for_language(&LanguageCode3::yue())
+                    .expect("Whisper supports Cantonese"),
+            }),
+            "a resolved Cantonese worker must transcribe Cantonese"
         );
         assert!(matches!(
             WhisperDecodeLanguageV2::for_worker_language(&resolved("nan")),

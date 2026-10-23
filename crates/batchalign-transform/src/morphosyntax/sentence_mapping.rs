@@ -288,7 +288,7 @@ mod tests {
         head: usize,
         deprel: &str,
     ) -> UdWord {
-        UdWord::from(UdWordAnalysis {
+        UdWord::try_from(UdWordAnalysis {
             id: UdId::Single(id),
             text: text.to_string(),
             lemma: lemma.to_string(),
@@ -300,6 +300,7 @@ mod tests {
             deps: None,
             misc: None,
         })
+        .expect("test analysis carries no padding feature")
     }
 
     #[test]

@@ -337,9 +337,12 @@ updating model files outside of a normal batchalign upgrade.
 
 ## UTR ASR results after an upgrade
 
-UTR ASR results are stored under a namespace naming the timing-recovery engine
-AND the models it ran, for example
-`utr-asr-v1:whisper_utr:whisper|asr=openai/whisper-large-v3@06f233fe...`.
+UTR ASR results are stored under a namespace naming what produced them, the
+timing-recovery engine, AND the models it ran, for example
+`utr-asr-open-begin-v5:decode={"kind":"force","token":"en"}:whisper_utr:whisper|asr=openai/whisper-large-v3@06f233fe...`.
+For stock Whisper the producer includes the decode decision its worker is
+given for the transcript's language, so a change to that decision for a
+language moves only that language's rows.
 Earlier builds stored them under the forced-alignment engine's version instead,
 and then under the recovery engine's name alone. The first `align` run on this
 build therefore misses those older UTR ASR entries once, recomputes them, and

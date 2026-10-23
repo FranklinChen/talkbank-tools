@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 from batchalign.inference._domain_types import AudioPath, LanguageCode
+from batchalign.inference._provider_errors import ProviderQuotaExhaustedError
 from batchalign.worker._types_v2 import (
     IntegratedDiarizationV2,
     NotRequestedDiarizationV2,
@@ -94,6 +95,9 @@ class TencentRecognizer:
         """
         try:
             from tencentcloud.asr.v20190614 import models
+            from tencentcloud.common.exception.tencent_cloud_sdk_exception import (
+                TencentCloudSDKException,
+            )
         except Exception as exc:
             raise ImportError(
                 "Tencent engine dependencies are missing from this "
@@ -167,6 +171,14 @@ class TencentRecognizer:
                         f"Tencent ASR task {task_id} timed out after {_MAX_POLL_SECONDS}s"
                     )
                 time.sleep(self._poll_interval_s)
+        except TencentCloudSDKException as error:
+            if error.get_code() == "FailedOperation.UserHasNoAmount":
+                raise ProviderQuotaExhaustedError(
+                    "Tencent ASR resource pack exhausted. Restore the account's "
+                    "ASR quota/resource pack before retrying; repeating this "
+                    f"request cannot fix it. Provider detail: {error}"
+                ) from error
+            raise
         finally:
             try:
                 self._bucket.delete_object(Bucket=self._bucket_name, Key=upload_key)

@@ -48,7 +48,9 @@ pub enum PackedSearchStatus {
     /// The complete search returned an observation.
     Completed,
     /// A named finite budget prevented completion.
-    Refused(LocalInterleavingRefusal),
+    Refused(LocalInterleavingBudget),
+    /// The search contradicted its own admission and refused; not a budget.
+    Inconsistent(LocalInterleavingInconsistency),
     /// The caller interrupted computation; no observation was returned.
     Interrupted,
 }
@@ -58,6 +60,7 @@ impl PackedSearchStatus {
         match self {
             Self::Completed => "completed",
             Self::Refused(_) => "refused",
+            Self::Inconsistent(_) => "inconsistent",
             Self::Interrupted => "interrupted",
         }
     }
@@ -171,7 +174,9 @@ impl<'p, 'g, 's, 'c, C: WorkControl + ?Sized> Ledger<'p, 'g, 's, 'c, C> {
         let required = self.used.get().saturating_add(units);
         if required > WORK_CELLS {
             self.denied.set(Some(required));
-            return Err(Stop::Refused(work_refusal(required)));
+            return Err(Stop::Refused(LocalInterleavingRefusal::Budget(
+                work_refusal(required),
+            )));
         }
         self.used.set(required);
         let charged = &self.charged[S::ID as usize];
@@ -220,6 +225,9 @@ impl<C: WorkControl + ?Sized, S: Stage> PackedControl for Scope<'_, '_, '_, '_, 
     }
     fn profile_width(&self, words: usize) {
         self.ledger.peak.set(self.ledger.peak.get().max(words));
+    }
+    fn refuse(&self, inconsistency: LocalInterleavingInconsistency) -> Self::Error {
+        Stop::Refused(LocalInterleavingRefusal::Inconsistent(inconsistency))
     }
 }
 

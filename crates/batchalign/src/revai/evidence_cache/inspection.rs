@@ -182,7 +182,13 @@ async fn inspect_utr_response(
     let models = crate::model_manifest::utr_pinned_models(engine, language)
         .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
     let crate::cache::UtrAsrCacheEligibility::Pinned(namespace) =
-        crate::cache::UtrAsrCacheNamespace::for_pinned_plan(engine, &models)
+        crate::cache::UtrAsrCacheNamespace::for_pinned_plan(
+            engine,
+            &models,
+            // The language a UTR pass requests recognition in.
+            &crate::transcribe::SingleAsrLanguage::One(language.clone()),
+        )
+        .map_err(|error| CliError::InvalidArgument(error.to_string()))?
     else {
         return Err(CliError::InvalidArgument(
             "floating UTR model plan cannot admit a cache row".into(),
@@ -535,7 +541,12 @@ mod tests {
         let models =
             crate::model_manifest::utr_pinned_models(&engine, &LanguageCode3::eng()).unwrap();
         let crate::cache::UtrAsrCacheEligibility::Pinned(namespace) =
-            crate::cache::UtrAsrCacheNamespace::for_pinned_plan(&engine, &models)
+            crate::cache::UtrAsrCacheNamespace::for_pinned_plan(
+                &engine,
+                &models,
+                &crate::transcribe::SingleAsrLanguage::One(LanguageCode3::eng()),
+            )
+            .unwrap()
         else {
             panic!("pinned Rev model")
         };

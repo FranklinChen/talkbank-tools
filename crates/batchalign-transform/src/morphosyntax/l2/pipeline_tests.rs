@@ -52,10 +52,10 @@ pub(crate) fn ud_sentence(rows: &str) -> UdSentence {
                 serde_json::from_value(serde_json::Value::String(upos.to_string()))
                     .expect("fixture UPOS must be a UD tag");
             let absent = |value: &str| (value != "_").then(|| value.to_string());
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id,
                 text: text.to_string(),
-                lemma: absent(lemma).unwrap_or_default(),
+                lemma: wire_lemma(lemma),
                 upos: UdPunctable::Value(upos),
                 xpos: None,
                 feats: absent(feats),
@@ -64,6 +64,7 @@ pub(crate) fn ud_sentence(rows: &str) -> UdSentence {
                 deps: None,
                 misc: None,
             })
+            .expect("test analysis carries no padding feature")
         })
         .collect();
     UdSentence { words }
@@ -264,12 +265,23 @@ fn mor_items(mor: &str) -> Vec<&str> {
     mor.trim_start_matches("%mor:\t").split(' ').collect()
 }
 
+/// A fixture lemma column as the worker sends it. CoNLL-U writes "no lemma"
+/// (a multi-word token's range row) as `_`, and the worker's wire writes the
+/// same absence as the empty string (`UdWord.lemma` defaults to `""` for a
+/// range): two spellings of one fact, mapped here, not an invented lemma.
+fn wire_lemma(column: &str) -> String {
+    match column {
+        "_" => String::new(),
+        lemma => lemma.to_owned(),
+    }
+}
+
 /// The `%gra` relation of chunk `index` (1-based), label included.
 fn relation(gra: &str, index: usize) -> &str {
     gra.trim_start_matches("%gra:\t")
         .split(' ')
         .nth(index - 1)
-        .unwrap_or("")
+        .expect("the %gra line has a relation at this index")
 }
 
 /// The English secondary analysis of `wake up .` / `give up .`, Stanza

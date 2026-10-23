@@ -122,7 +122,7 @@ impl CommandKernelPlan {
             worker_bootstrap: host_policy.bootstrap_mode,
             execution_lane,
             file_parallelism_hint,
-            execution_budget_mb: runtime::command_execution_budget_mb(command.as_ref()),
+            execution_budget_mb: runtime::command_execution_budget_mb(command),
             per_file_buffer_mb: runtime::mb_per_file_mb(),
             uses_host_memory_gate: family.uses_host_memory_gate(),
         }
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(plan.file_parallelism_hint, 1);
         assert_eq!(
             plan.execution_budget_mb,
-            runtime::command_execution_budget_mb("compare")
+            runtime::command_execution_budget_mb(batchalign_types::api::ReleasedCommand::Compare)
         );
     }
 

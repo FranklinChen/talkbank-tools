@@ -3,8 +3,10 @@
 A pinned model artifact can fail to download for reasons that are a
 configuration problem on the OPERATOR's machine, not a defect in batchalign:
 the artifact's repository requires accepting license terms, the operator has
-no Hub token, the token lacks access, or the Hub is unreachable and no cached
-copy exists. Left unclassified, that failure surfaces at the worker boundary
+no Hub token, the token lacks access, or the machine is offline and no cached
+copy exists. A download that failed in transit (a connection, a timeout, the
+Hub's own outage) is not one of these: it is left to
+:mod:`batchalign.inference._transient_failures`, and retried. Left unclassified, that failure surfaces at the worker boundary
 as an undifferentiated runtime crash, which the server reports as a
 generic/validation-class failure, which the dashboard used to label a
 pipeline bug (it now labels validation "Input Refused"), even though neither
@@ -22,6 +24,8 @@ identity the Rust worker boundary can recognize via
 from __future__ import annotations
 
 import re
+
+from batchalign.inference._transient_failures import is_model_download_failure
 
 
 class ModelAccessDeniedError(RuntimeError):
@@ -92,8 +96,14 @@ def classify_huggingface_access_error(
             "its repository was not found, or is private and this machine has no access",
         )
     if isinstance(error, LocalEntryNotFoundError):
+        # Raised from a connection failure, a timeout or a Hub outage, it is
+        # a download that failed in transit: left as it is, it is classified
+        # as one (``_transient_failures``) and retried. Only the uncaused
+        # case (offline mode, no cached copy) is this machine's condition.
+        if is_model_download_failure(error):
+            return None
         return ModelAccessDeniedError(
-            str(error), "no cached copy exists and the Hugging Face Hub is unreachable"
+            str(error), "no cached copy exists and this machine is offline"
         )
     if isinstance(error, HfHubHTTPError):
         status = error.response.status_code if error.response is not None else None

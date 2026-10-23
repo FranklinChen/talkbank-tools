@@ -409,8 +409,8 @@ CheckpointPinnedLanguage`, and `gen_kwargs()` is an exhaustive match on it:
 
 | Decoding | Chosen by | `generate()` receives |
 | --- | --- | --- |
-| `Force { token }` | The control plane, for a stock checkpoint | the stock knobs, `task="transcribe"`, `language=<token>` |
-| `Detect` | The control plane (`--lang auto`, and Cantonese) | the stock knobs only |
+| `Force { token }` | The control plane, for a stock checkpoint and any resolved language | the stock knobs, `task="transcribe"`, `language=<token>` |
+| `Detect` | The control plane, for an automatic (`--lang auto`) worker only | the stock knobs only |
 | `CheckpointPinnedLanguage` | A fine-tune's loader | `max_new_tokens=444` only |
 
 The stock decisions are the control plane's (see

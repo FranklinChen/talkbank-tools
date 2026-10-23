@@ -16,15 +16,15 @@ use crate::pipeline::PipelineServices;
 use crate::recipe_runner::runtime::plan_work_units_for_job;
 use crate::recipe_runner::work_unit::{BenchmarkWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
-use crate::scheduling::{FailureCategory, RetryPolicy, WorkUnitKind};
+use crate::scheduling::{FailureCategory, NextAttempt, RetryPolicy, StopReason, WorkUnitKind};
 use crate::store::RunnerJobSnapshot;
 use crate::transcribe::TranscribeOptions;
 use crate::worker::pool::WorkerPool;
 
 use super::super::util::{
     FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    drain_supervised_file_tasks, is_retryable_worker_failure, spawn_observed_progress_forwarder,
-    spawn_supervised_file_task, user_facing_error,
+    drain_supervised_file_tasks, spawn_observed_progress_forwarder, spawn_supervised_file_task,
+    user_facing_error,
 };
 use super::BenchmarkDispatchPlan;
 use super::asr_media::{prepare_asr_media_input, preserved_media_name_for_chat};
@@ -364,14 +364,14 @@ async fn process_one_benchmark_file(
                     "Benchmark error (raw)"
                 );
                 let err_msg = user_facing_error(category, "Benchmark", filename, &raw_msg);
-                let has_retry_budget = attempt_number < retry_policy.max_attempts;
-
-                if matches!(&err, crate::error::ServerError::Worker(_))
-                    && is_retryable_worker_failure(category)
-                    && has_retry_budget
-                {
-                    let retry_number = attempt_number;
-                    let backoff_ms = retry_policy.backoff_for_retry(retry_number);
+                // Only a worker's failure is retried here; the policy decides
+                // whether this one is, from its category and the budget.
+                let next = if let crate::error::ServerError::Worker(_) = &err {
+                    retry_policy.after_failure(attempt_number, category)
+                } else {
+                    NextAttempt::Stop(StopReason::Final)
+                };
+                if let NextAttempt::RetryAfter(backoff_ms) = next {
                     lifecycle
                         .retry_after(backoff_ms.duration(), category, &err_msg)
                         .await;

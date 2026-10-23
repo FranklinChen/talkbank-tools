@@ -432,12 +432,30 @@ pub enum ProtocolErrorCodeV2 {
     ModelUnavailable,
     /// Runtime failed while executing the task.
     RuntimeFailure,
+    /// The provider refused execution because its quota/resource pack is
+    /// exhausted. Requires account intervention, not input repair or retry.
+    ProviderQuotaExhausted,
     /// A pinned Hugging Face Hub artifact refused this machine's request: a
     /// gated repository requiring accepted terms, a missing/invalid token,
     /// or no cached copy while offline. Distinct from `RuntimeFailure` so
     /// callers can categorize it as a configuration/credential condition on
     /// the OPERATOR's machine rather than a batchalign defect.
     ModelAccessDenied,
+    /// The worker has no pipeline for the requested language: its Stanza
+    /// catalog lacks the language, or lacks a processor the task needs.
+    /// Distinct from `InvalidPayload` (the request was well formed) and from
+    /// `RuntimeFailure` (nothing ran): the same request fails identically on
+    /// every retry until the worker's catalog changes.
+    UnsupportedLanguage,
+    /// A model or catalog download the task needed failed in transit (a
+    /// connection, a timeout, the Hub's own outage). The worker
+    /// configuration is sound and a later attempt may get through, so it is
+    /// retried; distinct from `ModelAccessDenied`, which a retry cannot fix.
+    ModelDownloadFailed,
+    /// The accelerator ran out of memory while running the task
+    /// (`torch.OutOfMemoryError`). The input is not at fault: the same
+    /// request may fit once concurrent work releases memory.
+    DeviceOutOfMemory,
 }
 
 impl ProtocolErrorCodeV2 {
@@ -458,7 +476,11 @@ impl ProtocolErrorCodeV2 {
             Self::AttachmentUnreadable => "attachment_unreadable",
             Self::ModelUnavailable => "model_unavailable",
             Self::RuntimeFailure => "runtime_failure",
+            Self::ProviderQuotaExhausted => "provider_quota_exhausted",
             Self::ModelAccessDenied => "model_access_denied",
+            Self::UnsupportedLanguage => "unsupported_language",
+            Self::ModelDownloadFailed => "model_download_failed",
+            Self::DeviceOutOfMemory => "device_out_of_memory",
         }
     }
 }
@@ -480,7 +502,11 @@ mod protocol_error_code_tests {
             ProtocolErrorCodeV2::AttachmentUnreadable,
             ProtocolErrorCodeV2::ModelUnavailable,
             ProtocolErrorCodeV2::RuntimeFailure,
+            ProtocolErrorCodeV2::ProviderQuotaExhausted,
             ProtocolErrorCodeV2::ModelAccessDenied,
+            ProtocolErrorCodeV2::UnsupportedLanguage,
+            ProtocolErrorCodeV2::ModelDownloadFailed,
+            ProtocolErrorCodeV2::DeviceOutOfMemory,
         ];
         for code in all {
             // Compared as `Option`, so a serialization failure shows up as a
@@ -894,13 +920,56 @@ pub struct UtsegRequestV2 {
     pub payload_ref_id: WorkerArtifactIdV2,
     /// Number of utterance items frozen into the prepared batch payload.
     pub item_count: u32,
-    /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback for unsupported languages. Set by the
-    /// `--utseg-fallback-stanza` CLI flag. Defaults to `false` so
-    /// older clients (and any non-CLI caller) refuse silent
-    /// substitution by default.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_stanza_fallback: bool,
+    /// The segmenter the control plane admitted for this language. The
+    /// worker runs exactly this one: it never chooses between them from what
+    /// it happens to have loaded.
+    pub segmenter: UtsegSegmenterV2,
+}
+
+/// The utterance segmenter a request names, decided by the Rust control
+/// plane from the language and the operator's fallback policy, and admitted
+/// against the worker's Stanza catalog when it runs Stanza.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UtsegSegmenterV2 {
+    /// The language's pinned TalkBank boundary model, which the worker loaded
+    /// at startup from the pin the control plane sent it.
+    BoundaryModel,
+    /// Stanza constituency parsing, the operator-authorized fallback for a
+    /// language with no boundary model.
+    StanzaConstituency,
+}
+
+impl UtsegSegmenterV2 {
+    /// Every segmenter; the wire-spelling test below iterates it.
+    pub const ALL: [Self; 2] = [Self::BoundaryModel, Self::StanzaConstituency];
+
+    /// The wire spelling of this segmenter, which the PyO3 executor hands to
+    /// the Python runner. Pinned against serde by the test below.
+    #[must_use]
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::BoundaryModel => "boundary_model",
+            Self::StanzaConstituency => "stanza_constituency",
+        }
+    }
+}
+
+#[cfg(test)]
+mod utseg_segmenter_tests {
+    use super::UtsegSegmenterV2;
+
+    /// Every variant's `as_wire_str` must equal what serde serializes it to.
+    #[test]
+    fn wire_spelling_matches_serde() {
+        for segmenter in UtsegSegmenterV2::ALL {
+            assert_eq!(
+                serde_json::to_string(&segmenter).ok(),
+                Some(format!("\"{}\"", segmenter.as_wire_str())),
+                "wire spelling drifted for {segmenter:?}"
+            );
+        }
+    }
 }
 
 /// Translation backend selected by the Rust control plane.

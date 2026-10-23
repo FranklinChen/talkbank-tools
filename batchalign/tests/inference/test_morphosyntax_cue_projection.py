@@ -1,10 +1,10 @@
 """Native UD/model-boundary regressions; no CHAT or model download fixtures."""
 
-import threading
 from copy import deepcopy
 
 import pytest
 
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._morphosyntax_graph import AnalyzableSentence, DependencyGraph
 from batchalign.inference._tokenizer_realign import TokenizerContext
 from batchalign.inference.morphosyntax import RepairedSentence, batch_infer_morphosyntax
@@ -33,7 +33,7 @@ def _word(index, text, head, relation="dep"):
 
 def _run(rows, words):
     """Exercise the actual batch-infer producer, replacing only external NLP."""
-    context = TokenizerContext()
+    context = TokenizerContext(StanzaCode("fr"))
 
     def nlp(text):
         assert text == " ".join([*words, "."])
@@ -55,8 +55,6 @@ def _run(rows, words):
     response = batch_infer_morphosyntax(
         request,
         static_pipelines({"fra": nlp}, {"fra": context}),
-        threading.Lock(),
-        free_threaded=False,
     )
     assert context.original_words == []
     return response.results[0]
@@ -66,7 +64,7 @@ def _run(rows, words):
     "retry_kind", ["valid", "missing_head", "wrong_count", "raises"]
 )
 def test_ambiguous_cue_uses_one_model_owned_lexical_retry(retry_kind):
-    context = TokenizerContext()
+    context = TokenizerContext(StanzaCode("fr"))
     calls = []
     ambiguous = [_word(1, "alpha", 3), _word(2, "beta", 3), _word(3, ".", 0, "root")]
 
@@ -100,8 +98,6 @@ def test_ambiguous_cue_uses_one_model_owned_lexical_retry(retry_kind):
             ],
         ),
         static_pipelines({"fra": nlp}, {"fra": context}),
-        threading.Lock(),
-        free_threaded=False,
     )
     assert calls == [
         ("alpha beta .", [["alpha", "beta", "."]]),
@@ -253,7 +249,7 @@ def test_owned_sentence_does_not_leak_mutable_wire_rows():
 
 @pytest.mark.parametrize("bad_shape", [False, True])
 def test_projection_failure_does_not_poison_other_items_in_language_group(bad_shape):
-    ctx = TokenizerContext()
+    ctx = TokenizerContext(StanzaCode("fr"))
     good = [_word(1, "alpha", 0, "root"), _word(2, ".", 1, "punct")]
     bad = [_word(1, "beta", 7), _word(2, ".", 1, "punct")]
     if bad_shape:
@@ -273,8 +269,6 @@ def test_projection_failure_does_not_poison_other_items_in_language_group(bad_sh
             ],
         ),
         static_pipelines({"fra": lambda text: BatchDocument()}, {"fra": ctx}),
-        threading.Lock(),
-        free_threaded=False,
     )
     assert result.results[0].result["kind"] == "analyzed"
     assert result.results[1].result is None
@@ -299,8 +293,6 @@ def test_free_tokenization_does_not_claim_positional_cue_ownership():
             ],
         ),
         static_pipelines({"fra": lambda text: _Document(rows)}),
-        threading.Lock(),
-        free_threaded=False,
     )
     assert [row["id"] for row in response.results[0].result["raw_sentences"][0]] == [
         1,
@@ -344,7 +336,7 @@ def test_cantonese_pos_sees_only_projected_lexical_rows(monkeypatch):
     monkeypatch.setattr(
         "batchalign.inference.morphosyntax._override_pos_with_pycantonese", tag
     )
-    ctx = TokenizerContext()
+    ctx = TokenizerContext(StanzaCode("zh-hant"))
     rows = [_word(1, "alpha", 2), _word(2, ".", 0, "root")]
     result = batch_infer_morphosyntax(
         BatchInferRequest(
@@ -360,8 +352,6 @@ def test_cantonese_pos_sees_only_projected_lexical_rows(monkeypatch):
             ],
         ),
         static_pipelines({"yue": lambda text: _Document(rows)}, {"yue": ctx}),
-        threading.Lock(),
-        free_threaded=False,
     ).results[0]
     assert result.error is None
     assert [(row["text"], row["head"]) for row in seen] == [("alpha", 0)]

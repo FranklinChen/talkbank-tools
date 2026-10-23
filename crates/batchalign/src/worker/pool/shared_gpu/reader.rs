@@ -325,7 +325,7 @@ fn offer_control(routes: &Routes, pid: WorkerPid, line: ControlLine) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::util::{classify_worker_error, is_retryable_worker_failure};
+    use crate::runner::util::classify_worker_error;
     use crate::types::worker_v2::WorkerErrorKind;
     use crate::worker::InferTask;
     use crate::worker::error::WorkerError;
@@ -426,7 +426,10 @@ mod tests {
             matches!(&error, WorkerError::RequestRefused(message) if message.contains("ValidationError")),
             "{error:?}"
         );
-        assert!(!is_retryable_worker_failure(classify_worker_error(&error)));
+        assert!(
+            !((classify_worker_error(&error)).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
         assert_eq!(routes.pending.waiting(), 0);
     }
 
@@ -460,8 +463,14 @@ mod tests {
             r#"{"op":"error","error":"model missing","kind":"bootstrap","request_id":"asr-v2-request-5"}"#,
         );
         let error = answered(receipt).await.expect_err("a reported failure");
-        assert!(matches!(error, WorkerError::Bootstrap(_)), "got {error:?}");
-        assert!(!is_retryable_worker_failure(classify_worker_error(&error)));
+        assert!(
+            matches!(error, WorkerError::Bootstrap { .. }),
+            "got {error:?}"
+        );
+        assert!(
+            !((classify_worker_error(&error)).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     /// An untagged `op=error` that no sequential op is waiting for fails no
@@ -593,7 +602,7 @@ mod tests {
             .answer;
         route(
             &routes,
-            r#"{"op":"capabilities","response":{"commands":[],"free_threaded":false,"infer_tasks":["fa"],"engine_versions":{"fa":null}}}"#,
+            r#"{"op":"capabilities","response":{"commands":[],"free_threaded":false,"infer_tasks":["fa"],"engine_versions":{"fa":null},"stanza_catalog":{"kind":"not_installed","import_error":"No module named 'stanza'"}}}"#,
         );
         assert!(control.try_recv().is_err());
     }
@@ -667,7 +676,8 @@ mod tests {
             "{error:?}"
         );
         assert!(
-            is_retryable_worker_failure(classify_worker_error(&error)),
+            ((classify_worker_error(&error)).retryability()
+                == crate::types::scheduling::Retryability::Retryable),
             "the worker is retired and the request runs again: {error:?}"
         );
     }

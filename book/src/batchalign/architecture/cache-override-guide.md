@@ -62,7 +62,7 @@ run on every invocation.
 |-------|---------------|------|
 | Full-file key: `BLAKE3(utr_asr_v2 \| UTR engine \| audio_identity \| lang)` | Boundary | `chat_ops/fa/utr.rs` |
 | Segment key: `BLAKE3(utr_asr_segment_v2 \| UTR engine \| audio_identity \| start_ms \| end_ms \| lang)` | Boundary | `chat_ops/fa/utr.rs` |
-| Namespace: `utr-asr-v1:<UTR engine>:<composition>` then one `\|<role>=<id>@<revision>` per model (`UtrAsrCacheNamespace`, the only namespace type `cache::tasks::UTR_ASR` accepts), the UTR engine's own and its pinned models, never the FA engine's. A plan that is not fully pinned is `Floating` and is neither read nor written | Boundary | `cache/mod.rs` |
+| Namespace: `<producer>:<UTR engine>:<composition>` (producer `utr-asr-v1`, or for stock Whisper `utr-asr-open-begin-v5:decode=<decode decision JSON>`) then one `\|<role>=<id>@<revision>` per model (`UtrAsrCacheNamespace`, the only namespace type `cache::tasks::UTR_ASR` accepts), the UTR engine's own and its pinned models, never the FA engine's. A plan that is not fully pinned is `Floating` and is neither read nor written | Boundary | `cache/mod.rs` |
 | ASR inference → `Vec<AsrTimingToken>` | **Inside** | Python `asr.py` |
 | Global Hirschberg DP alignment (words ↔ ASR tokens) | Outside | `runner/dispatch/utr.rs` |
 | Utterance bullet injection | Outside | `runner/dispatch/utr.rs` |

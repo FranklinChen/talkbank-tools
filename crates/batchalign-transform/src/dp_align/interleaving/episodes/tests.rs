@@ -358,7 +358,9 @@ fn budget_admission_precedes_graph_construction() {
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &a)];
     assert!(matches!(
         LocalInterleaving::observe(&turns, &reference, MatchMode::Exact),
-        Err(LocalInterleavingRefusal::MemoryBudgetExceeded)
+        Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::MemoryBudgetExceeded
+        ))
     ));
 }
 
@@ -500,7 +502,9 @@ fn projection_refuses_excess_empty_turns_at_its_constructor() {
     let turns = vec![SpeakerTurn::new("A", &empty); SCORE_CELLS / 6];
     assert!(matches!(
         projection::SearchProjection::admit(&turns, &empty, MatchMode::Exact, &Uninterrupted),
-        Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded))
+        Ok(Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::MemoryBudgetExceeded
+        )))
     ));
 }
 

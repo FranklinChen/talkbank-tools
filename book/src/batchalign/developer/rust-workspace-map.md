@@ -1,7 +1,7 @@
 # Rust Workspace Map
 
 **Status:** Current
-**Last updated:** 2026-10-15 13:28 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 The Batchalign code lives inside the `talkbank-tools` Cargo workspace
 as sibling crates under `crates/`. Generic CHAT parser/model/transform crates
@@ -94,8 +94,8 @@ cargo test --manifest-path crates/batchalign-pyo3/Cargo.toml
    dispatch shapes.
 4. `crates/batchalign/src/routes/`: Axum HTTP routes.
 5. `crates/batchalign/src/worker/`: worker pool and IPC.
-6. `crates/batchalign/src/commands/`: released-command specs and
-   command-owned wrappers.
+6. `crates/batchalign/src/recipe_runner/catalog.rs`: released-command metadata and
+   recipe declarations.
 7. `crates/batchalign-pyo3/src/lib.rs`: PyO3 module organization and
    entry points.
 

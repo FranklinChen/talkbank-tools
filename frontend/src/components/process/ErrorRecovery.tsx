@@ -108,6 +108,15 @@ const RECOVERY: Record<FailureCategory, ErrorInfo> = {
       "Check the network connection and free disk space, then run again",
     ],
   },
+  local_runtime: {
+    title: "Local processing error",
+    explanation:
+      "The local processing engine reported a runtime failure. Automatic retries are bounded; the error alone does not identify the cause.",
+    suggestions: [
+      "Read the error message next to the file for the engine's details",
+      "If the failure persists, report it with the command and engine you used",
+    ],
+  },
   provider_transient: {
     title: "Temporary service error",
     explanation: "The cloud ASR service (Rev.AI) returned a temporary error.",
@@ -124,6 +133,24 @@ const RECOVERY: Record<FailureCategory, ErrorInfo> = {
       "Check that your Rev.AI API key is valid and has remaining credit",
       "The audio file may be in an unsupported format",
       "Try switching to Whisper (local) as the ASR engine",
+    ],
+  },
+  provider_quota_exhausted: {
+    title: "Provider quota exhausted",
+    explanation:
+      "The provider refused the request because its account quota or resource pack is used up. This is not a problem with your input files, and retrying will not help until the quota is restored.",
+    suggestions: [
+      "Ask whoever manages the provider account to restore its quota or resource pack",
+      "Or choose a different engine for this job",
+    ],
+  },
+  provider_account_refused: {
+    title: "Provider account refused",
+    explanation:
+      "The provider refused the account the request was sent from: its key is not accepted, the account is not permitted, or it has no credit left. This is not a problem with your input files, and retrying will not help until the account is fixed.",
+    suggestions: [
+      "Check the provider API key and that the account has remaining credit",
+      "Or choose a different engine for this job",
     ],
   },
   memory_pressure: {

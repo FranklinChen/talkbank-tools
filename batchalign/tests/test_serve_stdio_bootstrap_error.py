@@ -7,21 +7,23 @@ Python worker (exit code 1). The Rust orchestrator saw ``ProcessExited`` →
 attempt, and a single-host instance of this loop produced multi-GB
 ``server.log`` spam from a deterministic Stanza-catalog miss.
 
-Post-fix behavior:
+Current behavior, by the exception's class:
 
-- Bootstrap-class exceptions (``StanzaCatalogDownloadError``,
-  ``UnsupportedLanguageError``) → emit
-  ``{"op": "error", "error": "...", "kind": "bootstrap"}``. The Rust
-  side classifies as terminal and surfaces the verbatim message to the
-  user.
-- Other exceptions → emit ``{"op": "error", "error": "...", "kind":
-  "runtime"}``. The Rust side keeps existing retry semantics.
+- A deterministic load failure (``UnsupportedLanguageError``) emits
+  ``{"op": "error", "error": "...", "kind": "bootstrap"}``. The Rust side
+  classifies it as terminal and surfaces the verbatim message.
+- A download that failed in transit (``StanzaCatalogDownloadError``, a Hub or
+  ``requests`` connection failure) emits ``kind: "download"``, which the Rust
+  side retries.
+- A ``torch.OutOfMemoryError`` emits ``kind: "out_of_memory"``, retried after
+  a backoff.
+- Anything else emits ``kind: "runtime"``.
 
-The worker process never dies from a per-request exception, except when
-``kind == "bootstrap"``, in which case the worker DOES exit (cleanly,
-after emitting the error) so the pool tears it down. That exit is safe
-because the orchestrator has already classified the error as
-non-retryable, so no retry storm follows.
+The worker keeps serving after a ``runtime`` or ``out_of_memory`` report. It
+stops after a ``bootstrap`` or ``download`` report (a model may be half
+loaded), for exactly the kinds after which the Rust readers retire it
+(``batchalign_core.error_kind_ends_worker``), so a retry never lands on the
+exited process.
 """
 
 from __future__ import annotations
@@ -59,10 +61,10 @@ from batchalign.worker._protocol import (
             "_protocol.dispatch_prepared_protocol_message = fail\n"
             "_protocol._serve_stdio_concurrent(max_threads=2)\n",
             {"op": "ensure_task", "request": {"task": "morphosyntax"}},
-            {"op": "error", "error": "offline test catalog", "kind": "bootstrap"},
+            {"op": "error", "error": "offline test catalog", "kind": "download"},
         ),
     ],
-    ids=["shutdown", "bootstrap"],
+    ids=["shutdown", "download"],
 )
 def test_concurrent_stdio_exits_with_parent_stdin_still_open(
     code: str, message: dict[str, object], expected: dict[str, object]
@@ -125,14 +127,26 @@ def test_concurrent_stdio_eof_drains_queued_requests() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_classify_stanza_catalog_download_error_is_bootstrap():
-    """A typed catalog-download failure must classify as bootstrap-kind."""
+def test_classify_stanza_catalog_download_error_is_download():
+    """RED FIRST: a catalog download that failed in transit was
+    bootstrap-kind, the deterministic class, so the server never retried it
+    and it withheld a same-engine UTR fallback that a later attempt could
+    have served. It is its own kind now; the worker still exits after it."""
     from batchalign.worker._stanza_capabilities import (
         StanzaCatalogDownloadError,
     )
 
     exc = StanzaCatalogDownloadError("network unreachable")
-    assert _classify_dispatch_exception(exc) == "bootstrap"
+    assert _classify_dispatch_exception(exc) == "download"
+
+
+def test_classify_a_model_download_connection_failure_is_download():
+    """A Hugging Face model download that loses its connection is the same
+    in-transit failure."""
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    exc = RequestsConnectionError("Max retries exceeded with url")
+    assert _classify_dispatch_exception(exc) == "download"
 
 
 def test_classify_unsupported_language_error_is_bootstrap():
@@ -192,13 +206,33 @@ def _run_serve_stdio_with_one_message(message_json: str, dispatch_side_effect):
 
 
 def test_serve_stdio_emits_bootstrap_kind_on_typed_bootstrap_error():
-    """A bootstrap-class exception must produce a ``kind=bootstrap`` envelope.
+    """A deterministic load failure produces a ``kind=bootstrap`` envelope.
 
     This is the canonical regression for the bootstrap-retry-classification
     fix. Pre-fix, this exception would propagate up and kill the worker;
     post-fix, the worker emits a structured error and the Rust classifier
     (separately tested in Rust) treats it as terminal.
     """
+    from batchalign.worker._language_errors import UnsupportedLanguageError
+
+    def fake_dispatch(_message):
+        raise UnsupportedLanguageError("no Stanza pipeline for 'que'")
+
+    envelopes = _run_serve_stdio_with_one_message(
+        '{"op": "ensure_task", "request": {"task": "morphosyntax"}}',
+        fake_dispatch,
+    )
+
+    assert len(envelopes) == 1, f"Expected exactly one error envelope; got: {envelopes}"
+    env = envelopes[0]
+    assert env["op"] == "error"
+    assert env["kind"] == "bootstrap"
+    assert "que" in env["error"]
+
+
+def test_serve_stdio_emits_download_kind_for_a_catalog_download_in_transit():
+    """A catalog download that failed in transit produces ``kind=download``,
+    which the server retries, rather than the terminal bootstrap kind."""
     from batchalign.worker._stanza_capabilities import (
         StanzaCatalogDownloadError,
     )
@@ -218,7 +252,7 @@ def test_serve_stdio_emits_bootstrap_kind_on_typed_bootstrap_error():
     assert len(envelopes) == 1, f"Expected exactly one error envelope; got: {envelopes}"
     env = envelopes[0]
     assert env["op"] == "error"
-    assert env["kind"] == "bootstrap"
+    assert env["kind"] == "download"
     assert "connection refused" in env["error"]
 
 

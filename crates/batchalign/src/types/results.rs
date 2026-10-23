@@ -11,9 +11,9 @@ use batchalign_transform::asr_postprocess::AsrPipelineSnapshot;
 use talkbank_model::ChatFile;
 
 use super::traces::{
-    AsrPipelineTrace, AsrTokenTrace, FaDecisionTrace, FaFallbackEventTrace, FaGroupTrace,
-    FaTimelineTrace, FaTimingDecisionTrace, RetokenizationTrace, TimedWordTrace, TimingTrace,
-    UtteranceTrace, WordTrace,
+    AsrPipelineTrace, AsrTokenTrace, FaFallbackEventTrace, FaGroupTrace, FaTimelineTrace,
+    FaTimingDecisionTrace, RetokenizationTrace, TimedWordTrace, TimingTrace, UtteranceTrace,
+    WordTrace,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,8 +43,9 @@ pub(crate) struct FaResult<O = FaOutput> {
     /// The FA engine the selected worker reported: the namespace every cache
     /// row and evidence envelope of this run was read and written under.
     pub(crate) cache_namespace: crate::engine_reports::FaCacheNamespace,
-    /// Decisions made while injecting and enforcing final timing invariants.
-    pub(crate) decisions: Vec<FaDecisionTrace>,
+    /// Decisions made while injecting and enforcing final timing invariants,
+    /// typed until the trace is written ([`Self::into_timeline_trace`]).
+    pub(crate) decisions: Vec<batchalign_transform::decisions::DecisionRecord>,
     /// Numeric monotonicity effects corresponding to the generic decisions.
     pub(crate) timing_decisions: Vec<FaTimingDecisionTrace>,
     /// Gap-healing policy used for this run.
@@ -80,8 +81,38 @@ impl FaOutput {
 /// parallel fields kept the same length by a cardinality check.
 #[derive(Debug)]
 pub(crate) struct FaGroupEvidence {
-    pub(crate) group: FaGroupTrace,
+    pub(crate) group: FaGroupContents,
     pub(crate) pre_injection_timings: Vec<Option<TimingTrace>>,
+}
+
+/// What one FA group held and how it was executed, typed: the run's
+/// completion account reads it, and its wire form ([`FaGroupTrace`]) is
+/// written from it only when the timeline trace is ([`Self::into_trace`]),
+/// so there is no second copy of the group's utterances to keep in step.
+#[derive(Debug)]
+pub(crate) struct FaGroupContents {
+    pub(crate) audio_start_ms: crate::api::DurationMs,
+    pub(crate) audio_end_ms: crate::api::DurationMs,
+    /// The utterances the group's requests covered.
+    pub(crate) utterances: Vec<talkbank_model::UtteranceIdx>,
+    pub(crate) words: Vec<String>,
+    pub(crate) word_ids: Vec<String>,
+    /// How the group was executed, with each request's evidence.
+    pub(crate) span: crate::types::traces::FaGroupSpanTrace,
+}
+
+impl FaGroupContents {
+    /// The group's wire trace.
+    fn into_trace(self) -> FaGroupTrace {
+        FaGroupTrace {
+            audio_start_ms: self.audio_start_ms,
+            audio_end_ms: self.audio_end_ms,
+            utterance_indices: self.utterances.iter().map(|idx| idx.raw()).collect(),
+            words: self.words,
+            word_ids: self.word_ids,
+            span: self.span,
+        }
+    }
 }
 
 impl FaResult<ChatFile> {
@@ -135,7 +166,7 @@ impl<O> FaResult<O> {
         written: crate::chat_ops::fa::WrittenFaDecisions,
     ) -> Self {
         let (records, effects) = written.into_evidence();
-        self.decisions = records.into_iter().map(Into::into).collect();
+        self.decisions = records;
         self.timing_decisions = effects.into_iter().map(Into::into).collect();
         self
     }
@@ -151,7 +182,7 @@ impl<O> FaResult<O> {
         let mut groups = Vec::with_capacity(self.group_evidence.len());
         let mut pre_injection_timings = Vec::with_capacity(self.group_evidence.len());
         for evidence in self.group_evidence {
-            groups.push(evidence.group);
+            groups.push(evidence.group.into_trace());
             pre_injection_timings.push(evidence.pre_injection_timings);
         }
         FaTimelineTrace {
@@ -161,7 +192,7 @@ impl<O> FaResult<O> {
             groups,
             pre_injection_timings,
             post_injection_timings: Vec::new(), // TODO Phase 4
-            decisions: self.decisions,
+            decisions: self.decisions.into_iter().map(Into::into).collect(),
             // Derived from the effects immediately above, never carried
             // beside them: one producer, so the flat section and the tagged
             // union cannot drift, and no drop can reach one without the
@@ -244,6 +275,18 @@ pub fn snapshot_into_pipeline_trace(snapshot: AsrPipelineSnapshot) -> AsrPipelin
             .map(|u| UtteranceTrace {
                 speaker: u.speaker.as_usize(),
                 words: u.words.iter().map(asr_word_to_timed_trace).collect(),
+                end: match &u.end {
+                    batchalign_transform::asr_postprocess::UtteranceEnd::Observed(terminator) => {
+                        crate::traces::UtteranceEndTrace::Observed {
+                            terminator: talkbank_model::model::WriteChat::to_chat_string(
+                                terminator,
+                            ),
+                        }
+                    }
+                    batchalign_transform::asr_postprocess::UtteranceEnd::Synthesized(cause) => {
+                        crate::traces::UtteranceEndTrace::Synthesized { cause: *cause }
+                    }
+                },
             })
             .collect(),
     }

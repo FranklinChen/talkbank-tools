@@ -1116,7 +1116,7 @@ mod tests {
         assert!(f.iter().all(|path| {
             !path
                 .file_name()
-                .unwrap_or_default()
+                .expect("a file path")
                 .to_string_lossy()
                 .to_ascii_lowercase()
                 .ends_with(".gold.cha")

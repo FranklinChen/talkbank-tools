@@ -13,15 +13,15 @@ that the worker honors that capability table and never asks Stanza for
 a processor it does not ship.
 
 NO MOCKS. Pipeline configuration is verified by reading the loader source
-and by exercising the pure ``should_request_mwt`` helper against the live
-catalog.
+and by reading each language's entry in the capability table built from the
+live catalog.
 """
 
 from __future__ import annotations
 
 
 class TestMwtCapabilityDriven:
-    """Verify ``should_request_mwt`` matches the real Stanza catalog.
+    """Verify the capability table's MWT flags match the real Stanza catalog.
 
     The 2026-04-15 Swedish bootstrap failure was caused by a hardcoded
     ``MWT_LANGS`` set that listed ``"sv"`` even though Stanza does not
@@ -46,14 +46,14 @@ class TestMwtCapabilityDriven:
         import pytest
 
         from batchalign.worker._stanza_capabilities import (
+            StanzaNotInstalled,
             get_cached_capability_table,
         )
-        from batchalign.worker._stanza_loading import should_request_mwt
 
         table = get_cached_capability_table()
-        if table is None:
+        if isinstance(table, StanzaNotInstalled):
             pytest.skip("Stanza resources.json not available in this environment")
-        assert should_request_mwt("sv", table) is False, (
+        assert table.languages["swe"].has("mwt") is False, (
             "Swedish must not be requested with the mwt processor, "
             "Stanza does not ship a Swedish MWT model. See the "
             "2026-04-15 chunk_106 outage."
@@ -69,14 +69,14 @@ class TestMwtCapabilityDriven:
         import pytest
 
         from batchalign.worker._stanza_capabilities import (
+            StanzaNotInstalled,
             get_cached_capability_table,
         )
-        from batchalign.worker._stanza_loading import should_request_mwt
 
         table = get_cached_capability_table()
-        if table is None:
+        if isinstance(table, StanzaNotInstalled):
             pytest.skip("Stanza resources.json not available in this environment")
-        assert should_request_mwt("en", table) is True
+        assert table.languages["eng"].has("mwt") is True
 
     def test_loader_no_longer_imports_a_hardcoded_mwt_set(self) -> None:
         """The hardcoded ``MWT_LANGS`` set must stay deleted.
@@ -104,7 +104,7 @@ class TestMwtCapabilityDriven:
                     if isinstance(target, ast.Name) and target.id == "MWT_LANGS":
                         raise AssertionError(
                             "MWT_LANGS was reintroduced in _stanza_loading.py. "
-                            "Use the capability table (should_request_mwt) "
+                            "Use the capability table's per-language has_mwt "
                             "instead: see 2026-04-15 outage notes."
                         )
 

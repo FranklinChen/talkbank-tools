@@ -4,7 +4,7 @@
 
 use super::*;
 
-use crate::chat_ops::fa::utr::{AsrTimingToken, inject_utr_timing};
+use crate::chat_ops::fa::utr::{AsrTimingToken, inject_spaced};
 
 /// A transcript of invented utterances; `body` is its utterance lines.
 fn transcript(body: &str) -> talkbank_model::model::ChatFile {
@@ -53,7 +53,7 @@ fn recovery_matches_no_word_of_a_diary_note() {
         end_ms,
     })
     .collect();
-    inject_utr_timing(&mut chat, &tokens);
+    inject_spaced(&mut chat, &tokens);
     let [diary, spoken] = bullets(&chat)[..] else {
         panic!("two utterances");
     };

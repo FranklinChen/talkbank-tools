@@ -590,6 +590,9 @@ fn splice_span(
 }
 
 #[cfg(test)]
+mod oracle_tests;
+
+#[cfg(test)]
 mod cardinality_tests {
     use super::*;
     use crate::morphosyntax::l2::deprel::UdDeprel;
@@ -2688,7 +2691,7 @@ mod cardinality_tests {
         };
         utt.gra_tier()
             .map(|gra| gra.to_chat_string())
-            .unwrap_or_default()
+            .expect("the fixture line has a %gra tier")
     }
 
     /// A corrected relation is counted only where it was written.

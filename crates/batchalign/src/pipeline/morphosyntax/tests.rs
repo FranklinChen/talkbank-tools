@@ -50,7 +50,8 @@ async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_
     let mut params = test_params(&mwt);
     params.tokenization_mode = TokenizationMode::Preserve;
     let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
-    let ParsedFile::Analyze(parsed) = ParsedFile::parse(&chat, params.policy.ca_policy).unwrap()
+    let ParsedFile::Analyze(parsed) =
+        ParsedFile::parse(&chat, params.policy.ca_policy, &test_registry()).unwrap()
     else {
         panic!("analysis");
     };
@@ -89,100 +90,70 @@ async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_
 
 /// Exercises primary injection, real secondary dispatch admission, final CHAT
 /// judgement and the wire report together, without loading a model.
+///
+/// The secondary language is admitted by the registry that admitted the
+/// file, so a language it does not serve is an exclusion. "No registry" was
+/// a second outcome here (a `registry_unavailable` failure), reachable only
+/// by a test: a file is analyzed only once its primary language was
+/// admitted, by a registry its proof now carries.
 #[tokio::test]
-async fn secondary_unavailability_is_diagnosed_but_unsupported_language_is_excluded() {
-    use crate::api::{
-        OutputExclusionRecord, OutputShortfallRecord, SecondaryMorphologyFailureKind,
-    };
+async fn an_unsupported_secondary_language_is_excluded() {
+    use crate::api::OutputExclusionRecord;
     use crate::pipeline::post_validate::{OutputReport, ProducedOutput};
     let chat = ADMISSION_CHAT.replace("hello world", "hello mundo@s:spa");
     let temp = tempfile::tempdir().unwrap();
     let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
         .await
         .unwrap();
-    for has_registry in [false, true] {
-        let pool = if has_registry {
-            WorkerPool::with_test_stanza_registry(
-                crate::stanza_registry::StanzaRegistry::from_capabilities(
-                    &std::collections::BTreeMap::new(),
-                ),
-            )
-        } else {
-            WorkerPool::new(PoolConfig::default())
-        };
-        let mwt = MwtDict::default();
-        let mut params = test_params(&mwt);
-        params.tokenization_mode = TokenizationMode::Preserve;
-        let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
-        let ParsedFile::Analyze(parsed) =
-            ParsedFile::parse(&chat, params.policy.ca_policy).unwrap()
-        else {
-            panic!("ordinary CHAT must be analyzed");
-        };
-        let response = serde_json::from_str(
-            r#"{"sentences":[{"words":[
-            {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"},
-            {"id":2,"text":"xbxxx","lemma":"xbxxx","upos":"NOUN","head":1,"deprel":"obj"},
-            {"id":3,"text":".","lemma":".","upos":"PUNCT","head":1,"deprel":"punct"}
-        ]}]}"#,
-        )
-        .unwrap();
-        let output = parsed
-            .collect(&options)
-            .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
-                response, "9.9.9", "eng",
-            )])
-            .unwrap()
-            .apply(&options)
-            .await
-            .unwrap()
-            .postcheck(&options)
-            .unwrap()
-            .serialize();
-        let (proof, report) = output.into_parts();
-        assert!(
-            proof.as_str().contains("intj|hello L2|xxx ."),
-            "{}",
-            proof.as_str()
-        );
-        let (shortfalls, exclusions) = report.into_records();
-        let produced = ProducedOutput::Admitted(proof);
-        if has_registry {
-            assert!(shortfalls.is_empty());
-            assert!(matches!(
-                OutputReport::of(&produced, &shortfalls),
-                OutputReport::Clean
-            ));
-            assert!(
-                matches!(&exclusions[..], [OutputExclusionRecord::UnsupportedSecondaryMorphology { spans: 1, words: 1, first_spans }]
-                if first_spans[0].utterance == 1 && first_spans[0].first_word == 2)
-            );
-        } else {
-            assert!(exclusions.is_empty());
-            assert!(
-                matches!(&shortfalls[..], [OutputShortfallRecord::SecondaryMorphologyIncomplete { spans: 1, words: 1, first_spans }]
-                if first_spans[0].cause == SecondaryMorphologyFailureKind::RegistryUnavailable)
-            );
-            let OutputReport::Diagnosed(draft) = OutputReport::of(&produced, &shortfalls) else {
-                panic!("a requested unavailable analysis must not report clean completion");
-            };
-            let diagnostics = draft.record(&temp.path().join("findings.json")).await;
-            assert_eq!(diagnostics.finding_count(), 0);
-            assert!(
-                crate::cli::progress::diagnosed_summary(Some(&diagnostics))
-                    .contains("secondary morphology incomplete")
-            );
-            let wire = serde_json::to_value(&diagnostics).unwrap();
-            assert_eq!(
-                wire["shortfalls"][0]["first_spans"][0]["cause"],
-                "registry_unavailable"
-            );
-            assert_eq!(
-                serde_json::from_value::<crate::api::FileOutputDiagnostics>(wire).unwrap(),
-                diagnostics
-            );
-        }
-    }
+    // The pool holds no registry; the file's proof does.
+    let pool = WorkerPool::new(PoolConfig::default());
+    let mwt = MwtDict::default();
+    let mut params = test_params(&mwt);
+    params.tokenization_mode = TokenizationMode::Preserve;
+    let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
+    let english_only = Ok(crate::stanza_registry::StanzaRegistry::admitting(&["eng"]).shared());
+    let ParsedFile::Analyze(parsed) =
+        ParsedFile::parse(&chat, params.policy.ca_policy, &english_only).unwrap()
+    else {
+        panic!("ordinary CHAT must be analyzed");
+    };
+    let response = serde_json::from_str(
+        r#"{"sentences":[{"words":[
+        {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"},
+        {"id":2,"text":"xbxxx","lemma":"xbxxx","upos":"NOUN","head":1,"deprel":"obj"},
+        {"id":3,"text":".","lemma":".","upos":"PUNCT","head":1,"deprel":"punct"}
+    ]}]}"#,
+    )
+    .unwrap();
+    let output = parsed
+        .collect(&options)
+        .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
+            response, "9.9.9", "eng",
+        )])
+        .unwrap()
+        .apply(&options)
+        .await
+        .unwrap()
+        .postcheck(&options)
+        .unwrap()
+        .serialize();
+    let (proof, report) = output.into_parts();
+    assert!(
+        proof.as_str().contains("intj|hello L2|xxx ."),
+        "{}",
+        proof.as_str()
+    );
+    let (shortfalls, exclusions) = report.into_records();
+    let produced = ProducedOutput::Admitted(proof);
+    assert!(shortfalls.is_empty());
+    assert!(matches!(
+        OutputReport::of(&produced, &shortfalls),
+        OutputReport::Clean
+    ));
+    assert!(
+        matches!(&exclusions[..], [OutputExclusionRecord::UnsupportedSecondaryMorphology { spans: 1, words: 1, first_spans }]
+        if first_spans[0].utterance == 1 && first_spans[0].first_word == 2)
+    );
 }
 
 #[test]
@@ -207,16 +178,16 @@ fn regeneration_admission_distinguishes_replaced_and_retained_faults() {
     use crate::options::CaMorphotagPolicy::{Analyze, Honor};
     let broken_mor = ADMISSION_CHAT.replace("@End", "%mor:\tnoun|hello\n@End");
     assert!(matches!(
-        ParsedFile::parse(&broken_mor, Honor),
+        ParsedFile::parse(&broken_mor, Honor, &test_registry()),
         Ok(ParsedFile::Analyze(_))
     ));
     let ca_broken_mor = broken_mor.replace("@ID:", "@Options:\tCA\n@ID:");
     assert!(matches!(
-        ParsedFile::parse(&ca_broken_mor, Honor),
+        ParsedFile::parse(&ca_broken_mor, Honor, &test_registry()),
         Err(crate::error::ServerError::ChatReplacementAdmission(_))
     ));
     assert!(matches!(
-        ParsedFile::parse(&ca_broken_mor, Analyze),
+        ParsedFile::parse(&ca_broken_mor, Analyze, &test_registry()),
         Ok(ParsedFile::Analyze(_))
     ));
 
@@ -224,7 +195,7 @@ fn regeneration_admission_distinguishes_replaced_and_retained_faults() {
     let drifted_wor = ADMISSION_CHAT.replace("@End", "%wor:\thello .\n@End");
     for policy in [Honor, Analyze] {
         assert!(matches!(
-            ParsedFile::parse(&drifted_wor, policy),
+            ParsedFile::parse(&drifted_wor, policy, &test_registry()),
             Ok(ParsedFile::Analyze(_))
         ));
     }
@@ -237,7 +208,7 @@ fn regeneration_admission_distinguishes_replaced_and_retained_faults() {
         for policy in [Honor, Analyze] {
             assert!(
                 matches!(
-                    ParsedFile::parse(&input, policy),
+                    ParsedFile::parse(&input, policy, &test_registry()),
                     Err(crate::error::ServerError::ChatReplacementAdmission(_))
                 ),
                 "retained fault must refuse before collection: {input}"
@@ -284,7 +255,7 @@ async fn incremental_morphology_discards_invalid_prior_and_analyzes_current() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = registry_pool();
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
     // Fresh analysis of this valid nonlexical current file needs no worker.
@@ -324,11 +295,32 @@ fn parse(text: &str) -> talkbank_model::model::ChatFile {
     chat_file
 }
 
+/// The registry a worker reporting these tests' languages would produce:
+/// English, Spanish and Czech with every morphotag processor, and nothing
+/// else (`que` is the language no catalog serves).
+fn test_catalog() -> crate::stanza_registry::StanzaRegistry {
+    crate::stanza_registry::StanzaRegistry::admitting(&["eng", "spa", "ces"])
+}
+
+/// [`test_catalog`] as an admitted pool's lookup finds it.
+fn test_registry() -> crate::stanza_registry::StanzaRegistryLookup {
+    Ok(test_catalog().shared())
+}
+
+/// A pool whose admitted registry is [`test_catalog`]; it spawns no worker.
+fn registry_pool() -> WorkerPool {
+    WorkerPool::with_test_stanza_registry(test_catalog())
+}
+
 fn primary_capability(
     chat: &talkbank_model::model::ChatFile,
 ) -> Result<(), crate::error::ServerError> {
     let language = super::resolve_per_file_lang(chat)?;
-    crate::morphosyntax::AnalysisUnavailable::admit_primary(&language)?;
+    crate::morphosyntax::AnalysisUnavailable::admit(
+        crate::morphosyntax::AnalysisLanguageRequirement::PrimaryHeader,
+        &language,
+        &test_registry(),
+    )?;
     Ok(())
 }
 
@@ -348,7 +340,7 @@ async fn incremental_morphology_copies_only_admitted_prior_analysis_without_infe
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = registry_pool();
     let output = crate::morphosyntax::process_morphosyntax_incremental(
         &before,
         &after,
@@ -381,7 +373,7 @@ async fn reused_morphology_carries_its_own_stamps_without_requiring_readable_met
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = registry_pool();
     let morphology = "%mor:\tintj|hello noun|world .\n%gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n";
     let other_stamp = "[ba3 transcribe | asr=whisper | 2026-03-28T10:00:00-04:00]";
     for prior_stamp in [
@@ -440,23 +432,30 @@ fn unsupported_primary_language_returns_actionable_error_message() {
     let chat = "@UTF8\n\
                 @PID:\t11312/c-test\n\
                 @Begin\n\
-                @Languages:\tsrp\n\
+                @Languages:\tque\n\
                 @Participants:\tCHI Target_Child\n\
-                @ID:\tsrp|test|CHI||female|||Target_Child|||\n\
-                *CHI:\tnešto .\n\
+                @ID:\tque|test|CHI||female|||Target_Child|||\n\
+                *CHI:\twasi .\n\
                 @End\n";
     let chat_file = parse(chat);
-    let msg = primary_capability(&chat_file)
-        .expect_err("unsupported primary language must refuse analysis")
-        .to_string();
+    let error = primary_capability(&chat_file)
+        .expect_err("a language the registry does not serve must refuse analysis");
+    let crate::error::ServerError::AnalysisUnavailable(ref unavailable) = error else {
+        panic!("expected typed analysis unavailability, got {error}");
+    };
+    let crate::stanza_registry::StanzaRefusal::Gap(gap) = unavailable.reason() else {
+        panic!("a served registry refuses with a gap");
+    };
+    assert_eq!(gap.kind(), &crate::stanza_registry::GapKind::NotInCatalog);
+    let msg = error.to_string();
     assert!(
-        msg.contains("srp"),
+        msg.contains("que"),
         "error must name the unsupported lang: {msg}"
     );
     assert!(
-        msg.contains("not supported by Stanza"),
-        "error must explicitly call out unsupported-by-Stanza so the \
-         operator sees the cause in the dashboard: {msg}"
+        msg.contains("Stanza catalog has no model"),
+        "error must call out the missing Stanza model so the operator sees \
+         the cause in the dashboard: {msg}"
     );
     assert!(
         msg.contains("Keep truthful language declarations") && !msg.contains("Fix the @Languages"),
@@ -493,9 +492,20 @@ fn a_language_support_predicate_is_not_complete_input_admission() {
                 *CHI:\thello .\n\
                 @End\n";
     let english = crate::api::LanguageCode3::eng();
-    assert!(crate::morphosyntax::AnalysisUnavailable::admit_primary(&english).is_ok());
+    assert!(
+        crate::morphosyntax::AnalysisUnavailable::admit(
+            crate::morphosyntax::AnalysisLanguageRequirement::PrimaryHeader,
+            &english,
+            &test_registry(),
+        )
+        .is_ok()
+    );
     assert!(matches!(
-        ParsedFile::parse(chat, crate::options::CaMorphotagPolicy::Honor),
+        ParsedFile::parse(
+            chat,
+            crate::options::CaMorphotagPolicy::Honor,
+            &test_registry()
+        ),
         Err(crate::error::ServerError::ChatReplacementAdmission(_))
     ));
 }
@@ -593,16 +603,16 @@ async fn unsupported_primary_language_returns_typed_analysis_unavailable() {
     let chat = "@UTF8\n\
                 @PID:\t11312/c-test\n\
                 @Begin\n\
-                @Languages:\tsrp\n\
+                @Languages:\tque\n\
                 @Participants:\tCHI Target_Child\n\
-                @ID:\tsrp|test|CHI||female|||Target_Child|||\n\
-                *CHI:\tnešto .\n\
+                @ID:\tque|test|CHI||female|||Target_Child|||\n\
+                *CHI:\twasi .\n\
                 @End\n";
     let tempdir = tempfile::tempdir().expect("tempdir");
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = registry_pool();
     let services = PipelineServices::new(&pool, &cache);
 
     let mwt = MwtDict::default();
@@ -617,12 +627,12 @@ async fn unsupported_primary_language_returns_typed_analysis_unavailable() {
         crate::error::ServerError::AnalysisUnavailable(_)
     ));
     assert!(
-        msg.contains("srp"),
+        msg.contains("que"),
         "error must name the unsupported lang: {msg}"
     );
     assert!(
-        msg.contains("not supported by Stanza"),
-        "error must call out unsupported-by-Stanza: {msg}"
+        msg.contains("Stanza catalog has no model"),
+        "error must call out the missing Stanza model: {msg}"
     );
 }
 
@@ -632,19 +642,7 @@ async fn effective_precode_capability_refuses_without_inference_or_partial_outpu
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let caps = std::collections::BTreeMap::from([(
-        "eng".to_string(),
-        crate::types::worker::StanzaLanguageProcessors {
-            alpha2: "en".to_string(),
-            processors: ["tokenize", "pos", "lemma", "depparse"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        },
-    )]);
-    let pool = WorkerPool::with_test_stanza_registry(
-        crate::stanza_registry::StanzaRegistry::from_capabilities(&caps),
-    );
+    let pool = registry_pool();
     // Supported English registry but no workers: refusal happens at admission,
     // not a worker timeout or missing response. Mixed files refuse as a whole.
     for main in [
@@ -690,7 +688,7 @@ async fn incremental_complete_unsupported_precode_needs_no_model_capability() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = registry_pool();
     let output = crate::morphosyntax::process_morphosyntax_incremental(
         &before,
         &chat,
@@ -728,20 +726,32 @@ fn unsupported_primary_nonlexical_policy_and_ca_disposition_remain_distinct() {
     let chat = ADMISSION_CHAT
         .replace("eng", "que")
         .replace("hello world", "xxx");
-    let error = ParsedFile::parse(&chat, crate::options::CaMorphotagPolicy::Honor)
-        .err()
-        .expect("primary support policy also applies to nonlexical files");
+    let error = ParsedFile::parse(
+        &chat,
+        crate::options::CaMorphotagPolicy::Honor,
+        &test_registry(),
+    )
+    .err()
+    .expect("primary support policy also applies to nonlexical files");
     assert!(matches!(
         error,
         crate::error::ServerError::AnalysisUnavailable(_)
     ));
     let ca = chat.replace("@ID:", "@Options:\tCA\n@ID:");
     assert!(matches!(
-        ParsedFile::parse(&ca, crate::options::CaMorphotagPolicy::Honor),
+        ParsedFile::parse(
+            &ca,
+            crate::options::CaMorphotagPolicy::Honor,
+            &test_registry()
+        ),
         Ok(ParsedFile::PassThrough(_))
     ));
     assert!(matches!(
-        ParsedFile::parse(&ca, crate::options::CaMorphotagPolicy::Analyze),
+        ParsedFile::parse(
+            &ca,
+            crate::options::CaMorphotagPolicy::Analyze,
+            &test_registry()
+        ),
         Err(crate::error::ServerError::AnalysisUnavailable(_))
     ));
 }
@@ -770,7 +780,7 @@ async fn noalign_files_get_morphotagged_with_provenance() {
     let params = test_params(&mwt);
     let options = RunOptions::new(services, &params);
     let ParsedFile::Analyze(parsed) =
-        ParsedFile::parse(chat, params.policy.ca_policy).expect("parse")
+        ParsedFile::parse(chat, params.policy.ca_policy, &test_registry()).expect("parse")
     else {
         panic!("NoAlign must not bypass morphology");
     };
@@ -842,7 +852,7 @@ async fn morphotag_provenance_names_the_worker_reported_model() {
     let params = test_params(&mwt);
     let options = RunOptions::new(services, &params);
     let ParsedFile::Analyze(parsed) =
-        ParsedFile::parse(chat, params.policy.ca_policy).expect("parse stage")
+        ParsedFile::parse(chat, params.policy.ca_policy, &test_registry()).expect("parse stage")
     else {
         panic!("expected analysis");
     };
@@ -897,7 +907,7 @@ fn worker_response_count_failure_cannot_admit_inference_or_blame_valid_chat() {
     let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
     for count in [0, 2] {
         let ParsedFile::Analyze(parsed) =
-            ParsedFile::parse(ADMISSION_CHAT, params.policy.ca_policy)
+            ParsedFile::parse(ADMISSION_CHAT, params.policy.ca_policy, &test_registry())
                 .expect("valid source admission")
         else {
             panic!("analysis expected")
@@ -973,7 +983,7 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
             params.tokenization_mode = mode;
             let options = RunOptions::new(services, &params);
             let ParsedFile::Analyze(parsed) =
-                ParsedFile::parse(chat, params.policy.ca_policy).expect("parse")
+                ParsedFile::parse(chat, params.policy.ca_policy, &test_registry()).expect("parse")
             else {
                 panic!("lexical CHAT requires analysis");
             };
@@ -1053,13 +1063,14 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
     params.policy.ca_policy = crate::options::CaMorphotagPolicy::Analyze;
     let options = RunOptions::new(services, &params);
     let ParsedFile::Analyze(parsed) =
-        ParsedFile::parse(chat, params.policy.ca_policy).expect("parse stage")
+        ParsedFile::parse(chat, params.policy.ca_policy, &test_registry()).expect("parse stage")
     else {
         panic!("expected analysis");
     };
     let collected = parsed.collect(&options);
-    let ParsedFile::Analyze(reparsed) = ParsedFile::parse(chat, params.policy.ca_policy)
-        .expect("parse again for missing-response boundary")
+    let ParsedFile::Analyze(reparsed) =
+        ParsedFile::parse(chat, params.policy.ca_policy, &test_registry())
+            .expect("parse again for missing-response boundary")
     else {
         panic!("expected analysis");
     };
@@ -1121,7 +1132,7 @@ async fn pos_hint_evidence_survives_retokenization() {
     params.policy.pos_hints = crate::params::PosHintPolicy::Honor;
     let options = RunOptions::new(services, &params);
     let ParsedFile::Analyze(parsed) =
-        ParsedFile::parse(chat, params.policy.ca_policy).expect("parse stage")
+        ParsedFile::parse(chat, params.policy.ca_policy, &test_registry()).expect("parse stage")
     else {
         panic!("expected analysis");
     };
@@ -1204,8 +1215,9 @@ async fn morphosyntax_pos_hints_follow_admitted_mor_positions() {
                 params.tokenization_mode = mode;
                 params.policy.pos_hints = policy;
                 let options = RunOptions::new(services, &params);
-                let ParsedFile::Analyze(parsed) = ParsedFile::parse(&chat, params.policy.ca_policy)
-                    .expect("fully admitted source")
+                let ParsedFile::Analyze(parsed) =
+                    ParsedFile::parse(&chat, params.policy.ca_policy, &test_registry())
+                        .expect("fully admitted source")
                 else {
                     panic!("expected analysis");
                 };
@@ -1326,6 +1338,7 @@ async fn a_diagnosed_transcript_is_tagged_outside_its_faulty_utterance() {
     let LocalizedParse::Analyze(parsed) = ParsedFile::from_localized(
         transcript_diagnosed_in_its_second_utterance(),
         params.policy.ca_policy,
+        &test_registry(),
     )
     .expect("an English transcript is analyzable") else {
         panic!("a transcript without @Options: CA is analyzed");

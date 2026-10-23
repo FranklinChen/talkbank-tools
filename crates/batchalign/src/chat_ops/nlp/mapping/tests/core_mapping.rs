@@ -16,7 +16,7 @@ fn test_simple_noun_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "dog".to_string(),
         lemma: "dog".to_string(),
@@ -27,7 +27,8 @@ fn test_simple_noun_mapping() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -41,7 +42,7 @@ fn test_sanitization_prevents_corruption() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "bad|word".to_string(),
         lemma: "bad|word".to_string(), // Lemma contains a reserved CHAT character!
@@ -52,7 +53,8 @@ fn test_sanitization_prevents_corruption() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -73,7 +75,7 @@ fn test_mwt_assembly_english_dont() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "don't".to_string(),
                 lemma: "do not".to_string(),
@@ -84,8 +86,9 @@ fn test_mwt_assembly_english_dont() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "do".to_string(),
                 lemma: "do".to_string(),
@@ -96,8 +99,9 @@ fn test_mwt_assembly_english_dont() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "n't".to_string(),
                 lemma: "not".to_string(),
@@ -108,7 +112,8 @@ fn test_mwt_assembly_english_dont() {
                 deprel: "advmod".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
 
@@ -129,7 +134,7 @@ fn test_gra_index_shifting_with_mwt() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Range(1, 2),
                 text: "don't".to_string(),
                 lemma: "do not".to_string(),
@@ -140,8 +145,9 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "do".to_string(),
                 lemma: "do".to_string(),
@@ -152,8 +158,9 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "n't".to_string(),
                 lemma: "not".to_string(),
@@ -164,8 +171,9 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "advmod".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "go".to_string(),
                 lemma: "go".to_string(),
@@ -176,7 +184,8 @@ fn test_gra_index_shifting_with_mwt() {
                 deprel: "conj".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
 
@@ -212,7 +221,7 @@ fn test_feature_mapping_plural() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "dogs".to_string(),
         lemma: "dog".to_string(),
@@ -223,7 +232,8 @@ fn test_feature_mapping_plural() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -237,7 +247,7 @@ fn test_feature_mapping_past_tense() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "walked".to_string(),
         lemma: "walk".to_string(),
@@ -248,7 +258,8 @@ fn test_feature_mapping_past_tense() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -263,7 +274,7 @@ fn test_english_gerund_fix() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "walking".to_string(),
         lemma: "walk".to_string(),
@@ -274,7 +285,8 @@ fn test_english_gerund_fix() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -455,7 +467,7 @@ fn test_gra_talkbank_conventions() {
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::from(UdWordAnalysis {
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(1),
                 text: "the".to_string(),
                 lemma: "the".to_string(),
@@ -466,8 +478,9 @@ fn test_gra_talkbank_conventions() {
                 deprel: "det".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(2),
                 text: "dog".to_string(),
                 lemma: "dog".to_string(),
@@ -478,8 +491,9 @@ fn test_gra_talkbank_conventions() {
                 deprel: "root".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(3),
                 text: "that".to_string(),
                 lemma: "that".to_string(),
@@ -490,8 +504,9 @@ fn test_gra_talkbank_conventions() {
                 deprel: "nsubj".to_string(),
                 deps: None,
                 misc: None,
-            }),
-            UdWord::from(UdWordAnalysis {
+            })
+            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(UdWordAnalysis {
                 id: UdId::Single(4),
                 text: "barks".to_string(),
                 lemma: "bark".to_string(),
@@ -503,7 +518,8 @@ fn test_gra_talkbank_conventions() {
                 deprel: "acl:relcl".to_string(),
                 deps: None,
                 misc: None,
-            }),
+            })
+            .expect("test analysis carries no padding feature"),
         ],
     };
 

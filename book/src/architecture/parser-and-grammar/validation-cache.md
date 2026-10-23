@@ -1,14 +1,15 @@
 # Validation Cache
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:57 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 The CHAT-core validation cache, used by `chatter validate`. Distinct from the
 [audio-task cache](../runtime/audio-task-cache.md) used by Batchalign
 for FA / UTR ASR / media conversion: this cache stores
 **parse + validate** results keyed by file path + options.
 
-`crates/talkbank-transform/src/unified_cache/`.
+Owned by Chatter, in its `crates/talkbank-cache/` crate. Paths on this
+page are relative to the Chatter repository, not this repository.
 
 ## Architecture
 
@@ -39,7 +40,7 @@ flowchart TD
 ## Schema
 
 `file_cache` table (see
-`crates/talkbank-transform/migrations/20260101000000_initial.sql`):
+`crates/talkbank-cache/migrations/20260101000000_initial.sql`):
 
 | Column | Role |
 |---|---|
@@ -74,9 +75,8 @@ secondary index used by maintenance operations (orphan pruning, etc.).
 - **Manual**: pass `--force` to bypass cache lookups for a
   particular validation run.
 
-Per project policy, do not delete the cache directory without
-explicit request, see the cache-policy section of
-`talkbank-tools/AGENTS.md`.
+Cache maintenance belongs to Chatter's cache commands; clearing this cache
+does not clear Batchalign's model-inference cache.
 
 ## See also
 

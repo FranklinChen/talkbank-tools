@@ -195,7 +195,9 @@ mod tests {
     fn the_recorded_line_is_one_based_and_points_at_the_main_tier() {
         let read = read_utterances(&parsed(), &TierSelection::AllTiers);
         let text = sample();
-        let line = text.lines().nth(read[0].line - 1).unwrap_or_default();
+        let Some(line) = text.lines().nth(read[0].line - 1) else {
+            panic!("line {} is in the sample", read[0].line);
+        };
         assert!(line.starts_with("*INV:"), "got {line:?}");
     }
 }

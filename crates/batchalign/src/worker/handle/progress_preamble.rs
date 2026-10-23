@@ -195,7 +195,7 @@ mod progress_preamble_tests {
         "\n",
     );
     const CAPABILITIES_RESPONSE: &str = concat!(
-        r#"{"op": "capabilities", "response": {"commands": ["morphotag"], "free_threaded": false, "infer_tasks": ["morphosyntax"], "engine_versions": {"morphosyntax": null}}}"#,
+        r#"{"op": "capabilities", "response": {"commands": ["morphotag"], "free_threaded": false, "infer_tasks": ["morphosyntax"], "engine_versions": {"morphosyntax": null}, "stanza_catalog": {"kind": "not_installed", "import_error": "No module named 'stanza'"}}}"#,
         "\n",
     );
 
@@ -501,7 +501,7 @@ mod progress_preamble_tests {
     /// makes the stream untrusted, a retryable `OutputNoise`.
     #[tokio::test]
     async fn a_run_of_noise_lines_reaching_the_limit_is_retryable_output_noise() {
-        use crate::runner::util::{classify_worker_error, is_retryable_worker_failure};
+        use crate::runner::util::classify_worker_error;
         let below = format!(
             "{}{}",
             "banner\n42\n"
@@ -532,7 +532,10 @@ mod progress_preamble_tests {
             matches!(error, WorkerError::OutputNoise { .. }),
             "{error:?}"
         );
-        assert!(is_retryable_worker_failure(classify_worker_error(&error)));
+        assert!(
+            ((classify_worker_error(&error)).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     /// A limit too long for the clock is a wait with no end, not a panic.

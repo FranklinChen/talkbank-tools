@@ -83,7 +83,6 @@ def test_only_forced_alignment_names_an_engine_in_capabilities(
     gate refuses a report that names one, so nothing loaded may leak a name in.
     """
     monkeypatch.setattr(_state, "loaded_tasks", {task.value for task in InferTask})
-    monkeypatch.setattr(_state, "utseg_config_builder", lambda langs: (langs, {}))
     for task in InferTask:
         if task is not InferTask.FA:
             assert _reported_engine(task) is None, task

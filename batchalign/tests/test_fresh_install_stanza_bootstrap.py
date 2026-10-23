@@ -92,15 +92,16 @@ def test_fresh_install_bootstraps_catalog_on_first_call(
     )
 
     from batchalign.worker._stanza_capabilities import (
+        StanzaCapabilityTable,
         get_cached_capability_table,
     )
 
     table = get_cached_capability_table()
 
     # The bootstrap must produce a usable table without manual seeding.
-    assert table is not None, (
+    assert isinstance(table, StanzaCapabilityTable), (
         "On-demand contract violated: get_cached_capability_table() "
-        "returned None on a fresh install. The bootstrap path in "
+        "returned no table on a fresh install. The bootstrap path in "
         "_stanza_capabilities.py should have downloaded resources.json "
         "and rebuilt the table."
     )

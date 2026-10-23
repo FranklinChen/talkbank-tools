@@ -18,7 +18,7 @@ pub(crate) fn word(
     head: usize,
     deprel: &str,
 ) -> UdWord {
-    UdWord::from(UdWordAnalysis {
+    UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(id),
         text: text.to_string(),
         lemma: lemma.to_string(),
@@ -30,6 +30,7 @@ pub(crate) fn word(
         deps: None,
         misc: None,
     })
+    .expect("test analysis carries no padding feature")
 }
 
 /// A punctuation token with the given UD id.

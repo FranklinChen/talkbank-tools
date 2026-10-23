@@ -28,8 +28,8 @@
 //!
 //! Today, every `ChatWordText` value is a proof that:
 //!
-//! 1. The contained text is either a known CHAT terminator
-//!    (`Terminator::is_chat_terminator`) or
+//! 1. The contained text is either a CHAT morphological punctuation mark
+//!    (a separator such as `,`) or
 //! 2. Parses cleanly via `TreeSitterParser::parse_word_fragment`, and
 //! 3. (For the `try_from_lang*` variants) satisfies every language-aware
 //!    word-level rule `talkbank_model::Validate for Word` applies under
@@ -185,38 +185,47 @@ impl PartialEq<&str> for AsrNormalizedText {
     }
 }
 
-/// Text ready for CHAT assembly via `TreeSitterParser`.
+/// Text ready for CHAT assembly, with what it parsed to.
 ///
 /// Constructible only via fallible conversion, see the module docstring
 /// for the full invariant and the four variants (`try_from`,
 /// `try_from_with_parser`, `try_from_lang`, `try_from_lang_with_parser`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct ChatWordText(String);
+/// The construction parses the token once and keeps the result
+/// ([`Self::content`]), so CHAT assembly builds from the parsed word rather
+/// than parsing the text a second time and handling a refusal that a
+/// constructed value cannot have. There is no deserializer: a value that
+/// skipped the parse would be a route around the proof.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatWordText {
+    text: String,
+    content: ChatWordContent,
+}
 
-/// Closed-set CHAT terminator shortcut + structural word-fragment parse.
+/// What an admitted token is: a main-tier word, or a morphological
+/// separator (`,`, tag `„`, vocative `‡`), which is main-tier content but
+/// not a word.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatWordContent {
+    /// The parsed word.
+    Word(Box<talkbank_model::model::Word>),
+    /// The separator.
+    Separator(talkbank_model::model::Separator),
+}
+
+/// Closed-set separator shortcut + structural word-fragment parse.
 ///
-/// Returns `Ok(Some(Word))` when `s` parses cleanly as a main-tier word
-/// (caller may run further language-level checks on the Word). Returns
-/// `Ok(None)` when `s` is a CHAT terminator (`.`, `?`, `!`, `+...`,
-/// etc.): valid main-tier content but not a word, so no Word AST to
-/// hand back. Returns `Err(errors)` when the fragment parser rejects
-/// the input.
+/// A morphological punctuation mark (`,`, `„`, `‡`) is a separator; anything
+/// else must parse cleanly as a main-tier word. Returns `Err(errors)` when
+/// the fragment parser rejects the input.
 ///
-/// `ChatWordText`'s vocabulary is "a token on the main tier", broader
-/// than `parse_word_fragment`'s "a word", the ASR pipeline emits each
-/// utterance's terminator as an `AsrWord` entry, so the shortcut is
-/// load-bearing, not an optimisation.
+/// A terminator is not content and is refused like any non-word: an
+/// utterance's end is its own field (`UtteranceEnd`), never a word.
 fn structural_check(
     s: &str,
     parser: &talkbank_parser::TreeSitterParser,
-) -> Result<Option<talkbank_model::model::Word>, Vec<talkbank_model::ParseError>> {
-    if talkbank_model::model::Terminator::is_chat_terminator(s) {
-        return Ok(None);
-    }
-    if super::MOR_PUNCT.contains(&s) {
-        return Ok(None);
+) -> Result<ChatWordContent, Vec<talkbank_model::ParseError>> {
+    if let Some(separator) = crate::build_chat::tag_marker_separator(s) {
+        return Ok(ChatWordContent::Separator(separator));
     }
     let errors = talkbank_model::ErrorCollector::new();
     let outcome = parser.parse_word_fragment(s, 0, &errors);
@@ -224,7 +233,9 @@ fn structural_check(
     // Enumerated for the file's ratchet; both remaining cases are the same
     // failure here, and `ParseOutcome` has only these two variants.
     match outcome {
-        talkbank_model::ParseOutcome::Parsed(w) if collected.is_empty() => Ok(Some(w)),
+        talkbank_model::ParseOutcome::Parsed(w) if collected.is_empty() => {
+            Ok(ChatWordContent::Word(Box::new(w)))
+        }
         talkbank_model::ParseOutcome::Parsed(_) | talkbank_model::ParseOutcome::Rejected => {
             Err(collected)
         }
@@ -255,12 +266,17 @@ where
 impl ChatWordText {
     /// Borrows the word text for read-only use.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
+    }
+
+    /// What the text parsed to.
+    pub fn content(&self) -> &ChatWordContent {
+        &self.content
     }
 
     /// Structural-only fallible constructor using a caller-supplied parser.
     ///
-    /// Accepts closed-set CHAT terminators and anything
+    /// Accepts the closed set of morphological punctuation marks and anything
     /// `parse_word_fragment` parses cleanly. For language-level rules
     /// (notably E220 digit policy) see
     /// [`try_from_lang_with_parser`][lang]. Hot paths should reuse one
@@ -272,7 +288,10 @@ impl ChatWordText {
         s: &str,
         parser: &talkbank_parser::TreeSitterParser,
     ) -> Result<Self, Vec<talkbank_model::ParseError>> {
-        structural_check(s, parser).map(|_| Self(s.to_owned()))
+        structural_check(s, parser).map(|content| Self {
+            text: s.to_owned(),
+            content,
+        })
     }
 
     /// Language-aware fallible constructor using a caller-supplied parser.
@@ -294,31 +313,34 @@ impl ChatWordText {
     ) -> Result<Self, Vec<talkbank_model::ParseError>> {
         use talkbank_model::validation::Validate;
 
-        let Some(word) = structural_check(s, parser)? else {
-            // Terminator: no further language-level checks apply.
-            return Ok(Self(s.to_owned()));
-        };
-
-        // Single-language context triggers E220's single-candidate
-        // path. Code-switching semantics live at the full-file layer.
-        let ctx = talkbank_model::validation::ValidationContext::new()
-            .with_default_language(lang.clone())
-            .with_declared_languages(vec![lang.clone()])
-            .with_tier_language(Some(lang.clone()));
-        let errors = talkbank_model::ErrorCollector::new();
-        word.validate(&ctx, &errors);
-        let errs = errors.into_vec();
-        if errs.is_empty() {
-            Ok(Self(s.to_owned()))
-        } else {
-            Err(errs)
+        let content = structural_check(s, parser)?;
+        if let ChatWordContent::Word(word) = &content {
+            // Single-language context triggers E220's single-candidate
+            // path. Code-switching semantics live at the full-file layer.
+            let ctx = talkbank_model::validation::ValidationContext::new()
+                .with_default_language(lang.clone())
+                .with_declared_languages(vec![lang.clone()])
+                .with_tier_language(Some(lang.clone()));
+            let errors = talkbank_model::ErrorCollector::new();
+            word.validate(&ctx, &errors);
+            let errs = errors.into_vec();
+            if !errs.is_empty() {
+                return Err(errs);
+            }
         }
+        // A separator: no language-level checks apply.
+        Ok(Self {
+            text: s.to_owned(),
+            content,
+        })
     }
 
     /// Language-aware fallible constructor using a thread-local parser.
     ///
     /// Convenience wrapper over [`try_from_lang_with_parser`] for callers
     /// that don't already own a `TreeSitterParser`.
+    ///
+    /// [`try_from_lang_with_parser`]: ChatWordText::try_from_lang_with_parser
     pub fn try_from_lang(
         s: &str,
         lang: &talkbank_model::model::LanguageCode,
@@ -342,38 +364,25 @@ impl TryFrom<&str> for ChatWordText {
     type Error = Vec<talkbank_model::ParseError>;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        thread_local! {
-            /// Per-thread parser handle. `TreeSitterParser::new()` can
-            /// fail only on ABI mismatch between the grammar and the
-            /// tree-sitter runtime: an environmental impossibility at
-            /// runtime. If it ever does fail, construction here would
-            /// panic on first use; migrating to a `try_init`-based
-            /// handle would be a follow-up and is documented in the
-            /// plan's risk list.
-            #[allow(clippy::expect_used)]
-            static PARSER: talkbank_parser::TreeSitterParser =
-                talkbank_parser::TreeSitterParser::new()
-                    .expect("tree-sitter-talkbank grammar must load");
-        }
-        PARSER.with(|p| Self::try_from_with_parser(s, p))
+        with_thread_local_parser(|p| Self::try_from_with_parser(s, p))
     }
 }
 
 impl fmt::Display for ChatWordText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        f.write_str(&self.text)
     }
 }
 
 impl AsRef<str> for ChatWordText {
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.text
     }
 }
 
 impl PartialEq<&str> for ChatWordText {
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        self.text == *other
     }
 }
 

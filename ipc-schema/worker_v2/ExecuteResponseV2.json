@@ -721,6 +721,13 @@
           "description": "Stanza analyzed the item.",
           "type": "object",
           "properties": {
+            "feature_repairs": {
+              "description": "Every feature value the worker removed from `raw_sentences`, in\nthe order it removed them. Empty means it removed nothing.\nRequired, with no serde default, for `repairs`' reason.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UdFeatureRepairV2"
+              }
+            },
             "kind": {
               "type": "string",
               "const": "analyzed"
@@ -746,7 +753,8 @@
             "kind",
             "raw_sentences",
             "model",
-            "repairs"
+            "repairs",
+            "feature_repairs"
           ]
         },
         {
@@ -959,6 +967,11 @@
         "success"
       ]
     },
+    "PaddingValue": {
+      "description": "A feature value that is model padding: an angle-bracketed placeholder such as <PAD> or <UNK>.",
+      "type": "string",
+      "pattern": "^<.*>$"
+    },
     "ProtocolErrorCodeV2": {
       "description": "Error category for protocol-level failures.",
       "oneOf": [
@@ -993,9 +1006,29 @@
           "const": "runtime_failure"
         },
         {
+          "description": "The provider refused execution because its quota/resource pack is\nexhausted. Requires account intervention, not input repair or retry.",
+          "type": "string",
+          "const": "provider_quota_exhausted"
+        },
+        {
           "description": "A pinned Hugging Face Hub artifact refused this machine's request: a\ngated repository requiring accepted terms, a missing/invalid token,\nor no cached copy while offline. Distinct from `RuntimeFailure` so\ncallers can categorize it as a configuration/credential condition on\nthe OPERATOR's machine rather than a batchalign defect.",
           "type": "string",
           "const": "model_access_denied"
+        },
+        {
+          "description": "The worker has no pipeline for the requested language: its Stanza\ncatalog lacks the language, or lacks a processor the task needs.\nDistinct from `InvalidPayload` (the request was well formed) and from\n`RuntimeFailure` (nothing ran): the same request fails identically on\nevery retry until the worker's catalog changes.",
+          "type": "string",
+          "const": "unsupported_language"
+        },
+        {
+          "description": "A model or catalog download the task needed failed in transit (a\nconnection, a timeout, the Hub's own outage). The worker\nconfiguration is sound and a later attempt may get through, so it is\nretried; distinct from `ModelAccessDenied`, which a retry cannot fix.",
+          "type": "string",
+          "const": "model_download_failed"
+        },
+        {
+          "description": "The accelerator ran out of memory while running the task\n(`torch.OutOfMemoryError`). The input is not at fault: the same\nrequest may fit once concurrent work releases memory.",
+          "type": "string",
+          "const": "device_out_of_memory"
         }
       ]
     },
@@ -1682,6 +1715,43 @@
       },
       "required": [
         "items"
+      ]
+    },
+    "UdFeatureRepairKindV2": {
+      "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_feature_value"
+        }
+      ]
+    },
+    "UdFeatureRepairV2": {
+      "description": "One feature value a worker removed from an analysis it returned.\n\nThe worker is the only witness, as for a relation repair: the removed value\nis not in the analysis the server receives. Each removed value is its own\nrepair, so `Case=Nom,<PAD>` losing `<PAD>` is one repair and keeps `Nom`.",
+      "type": "object",
+      "properties": {
+        "feature": {
+          "description": "The feature whose value it was (`Case`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which repair this is.",
+          "$ref": "#/$defs/UdFeatureRepairKindV2"
+        },
+        "removed_value": {
+          "description": "The removed value, verbatim (`<PAD>`): padding, by type.",
+          "$ref": "#/$defs/PaddingValue"
+        },
+        "word": {
+          "description": "Surface form of the word the value was removed from.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "feature",
+        "removed_value"
       ]
     },
     "UdRelationRepairKindV2": {

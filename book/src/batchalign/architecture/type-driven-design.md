@@ -1,7 +1,7 @@
 # Type-Driven Design
 
 **Status:** Current
-**Last updated:** 2026-10-06 11:44 EDT
+**Last updated:** 2026-10-25 08:21 EDT
 
 Batchalign uses Rust's type system to encode domain invariants at compile time. This document catalogs the patterns in use, explains when to reach for each one, and records the serde techniques that keep the wire format stable while the internal types evolve.
 
@@ -457,8 +457,45 @@ serde attribute changes the wire format, the snapshot diff will catch it.
 | 2026-09 | `LanguagePair`, `AsrLanguageRequest`, `AdmittedAsrLanguage`, `RevLanguage`, `SingleAsrLanguage`, `TranscriptLanguage`, `AsrTextLanguage` | Typestate graph | Code-switched transcription: a pair can reach only Rev.AI, per-file cannot reach transcription, Rev.AI's unmapped-language `auto` fallback and its second table were deleted, and a pair's numerals are never written out in a guessed language |
 | 2026-10 | `FeatName`, `UdFeats`, `FeatValue`, `Suffix`, `Slot`, `LexicalMark`, `MorPos`, `MappedItem` | Provenance graph | Every `%mor` suffix says where its value came from; replaced 13 scattered `unwrap_or` defaults, three sentinel defaults, string feature keys, a `_ =>` catch-all over UPOS, an unreachable Japanese branch and the per-word `HashMap` |
 | 2026-10 | `WordFeatures`, `FeatSource`, `CuratedFeats`, `UdWordAnalysis` | Provenance graph | A feature value carries its source, the analysis or a curated table, as a field; FEATS is private to `UdWord`, admitted from the analysis only through `UdWordAnalysis` and written from a table only by `UdWord::apply_curated`; a table's FEATS string is checked by a `const fn`. Replaced the MISC-column provenance codec, `Suffix::Observed`/`Suffix::Curated`, and three FEATS splitters ([POS Mapping](../reference/morphosyntax.md)) |
+| 2026-10 | `UnrepairedPaddingFeature`, `UdFeatureRepairV2`, `PaddingValue` | Validated constructor | Model padding (`<PAD>`, `<UNK>`) cannot be a FEATS value: the worker removes it as a reported `pad_feature_value` repair, `WordFeatures::from_analysis` (behind `TryFrom<UdWordAnalysis>`) refuses one that arrives anyway, as `CuratedFeats::new` does at compile time, and a repair's `removed_value` is a `PaddingValue`, so a repair of a real value is refused at deserialization. Python calls Rust's repair itself (`repair_feats`), so it never classifies a value. Replaced writing `noun|...-<PAD>` into `%mor` ([POS Mapping](../reference/morphosyntax.md)) |
 | 2026-10 | `UdHead`, `UdWordId` | Sentinel becomes a node | A UD word's head is `UdHead::Root` or `UdHead::Word(UdWordId)`, converted from the analysis's `HEAD = 0` once where the analysis is admitted; nothing downstream compares a head with 0. The contraction expansion and the copula-progressive rescue move heads as typed ids. A synthesized word is built at its real id (`UdWord::synthetic` takes it), and a table's reading of an existing word (`UdWord::curated_reading`) takes that word's id, head and relation, so no word carries the id 0 |
 | 2026-10 | `LegacyFill` retired | Unrepresentable invention | The eleven values written without evidence were removed with authorization: `Suffix::Filled`, `Slot::Filled`, `LegacyFill`, `LegacyFills`, `FillTally`, `InjectionResult::legacy_fills`, `MappedWord`, `MappedSentence`, the `map_ud_sentence*_mapped` variants and `map_ud_word_to_mor` are gone, so a suffix can only be a feature value, derived or lexical. Proved on an 80-file harness sample: the only `%mor` changes were the removed fills, matching the old tally exactly ([POS Mapping](../reference/morphosyntax.md)) |
+| 2026-10 | `StanzaCatalogReport`, `StanzaRegistryUnavailable` | Sum type for an outcome | A worker reports its Stanza catalog as one of three outcomes: the catalog (`LanguageCode3` keys, `StanzaProcessor` sets, parsed at deserialization), Stanza not installed, or the failure that stopped the table build, with its reason. The registry lookup is the registry or why there is none, and every morphotag refusal carries that reason. Replaced a defaulted map that a failed build left empty, the string keys and processor names `StanzaRegistry::admit` re-parsed, its `StanzaRegistryRefusal`, and the unused `alpha2` field |
+| 2026-10 | `Admitted<R>`, `Requirement` (`Morphosyntax`, `UtteranceSegmentation`), `StanzaGap<R>`, `StanzaRefusal<R>`, `StanzaReportReason` | Proof graph | A Stanza admission is a proof: `StanzaRegistry::admit::<R>` is the only way to an `Admitted<R>`, which holds the `Arc` registry that admitted it, so a file's utterance and `@s` languages are admitted as its siblings and "no registry" cannot arise past the first admission. A gap names the missing processors; a report's reason cannot be blank. Replaced `admits -> Result<(), _>`, the re-reads of the pool's registry and their unreachable `RegistryUnavailable` arms, `SecondaryMorphologyFailureKind::RegistryUnavailable`, `AnalysisUnavailableReason::check`, the dead `Coreference` admission, and a public `from_catalog` ([Stanza Capability Registry](stanza-capability-registry.md)) |
+| 2026-10 | `UtteranceEnd { Observed(Terminator), Synthesized(SynthesisCause) }`, `BuiltChat`, `UtteranceBody` | Field for a fact | An utterance's end is a field of the utterance, not a word: a synthesized terminator cannot be written as text, a synthesized end names its closed cause (no mark, or `...`/`(.)`), and the built file reports where it synthesized one. Replaced `WordKind::SynthesizedTerminator`, `MissingTerminator`, and the bridge's last-word check ([Terminator Architecture](../developer/terminator-architecture.md)) |
+| 2026-10 | `TerminalScore::of_end_row`, `LocalInterleavingRefusal { Budget, Inconsistent }` | Validated constructor | The interleaved search's terminal bound is checked in every build and an inconsistent search is its own refusal, never counted as a budget refusal ([Forced Alignment](../reference/forced-alignment.md)) |
+| 2026-10 | `FaWorkerFailure`, `FaFailureClass`, `read_fa_payload`, `ModelLocality`, `TextResultRefusal` | Classification at the producer | A worker failure keeps its protocol code until one function decides its server category; an FA response is read once; local and remote runtime failures retain distinct categories with bounded retries ([Worker Failure Classification](worker-failure-classification.md)) |
+| 2026-10 | `LoadedRunner`, `ProtocolErrorCodeV2::UnsupportedLanguage` | Typed operation | Every executor calls its Python runner through `LoadedRunner::call1`, which classifies what it raises by class; the text executor's copy of the classifier and eleven stringifying `map_err`s are gone |
+| 2026-10 | `RealignLanguage { English, French, Italian, Other }` | Closed set from a code | A tokenizer realignment's language is read from the pipeline's Stanza code once; the empty-string default and the Python copy of the contraction rule are gone ([MWT Handling](../reference/mwt-handling.md)) |
+| 2026-10 | `UtrUnitOfWord::units_of`, punctuation-free `UtrLexicalUnits::split` | Single constructor | A word's units are built together, so `part < parts`; a token's unit count is the count of what can match ([Forced Alignment](../reference/forced-alignment.md)) |
+| 2026-10 | `PackedBits`, `ZeroPadded`, `WindowStart` | Declared length | A packed score vector's zero-extension has one owner; reads past either end go through typed windows, and `Profile`/`Suffix` derive `last` from the vector's length |
+| 2026-10 | `GilProcessNeed::Never { threaded_base_mb }` | Field that only some states use | A thread budget exists only for a command that can run on threads, and every budget table is generated from `base_mb_for_runtime` |
+| 2026-10 | `StoredUntimedCause { Written, Retired }` | Read type apart from written type | The causes only earlier builds wrote are a separate enum the writer cannot produce; FA's untimed causes are read from typed `DecisionStrategy` values |
+| 2026-10 | `TranscriptLanguages`, `UtteranceDesc.lang: Option<LanguageCode>` | Parse at the boundary | A description's languages are parsed once where the ASR bridge builds it, primary first and never empty; assembly has no `eng` default, no per-code parse and no empty check. The JSON entry point (`build_chat_from_json`), which had no caller, is removed with the description's deserializer |
+| 2026-10 | `FaGroupContents` | One owner per fact | A group's evidence holds its utterances typed, once; the wire trace (`FaGroupTrace`) is built from it only in `into_timeline_trace`, so no second list of utterance indices travels beside it |
+| 2026-10 | `UtrAsrUnitOrdinal`, `admit_endpoints(&UtrChatUnits)` | Name every space | A token's unit ordinal is a unit, not a word, on the wire too (`unit_index`, eval schema 13); endpoint admission reads the utterance's own units rather than a count handed beside them |
+| 2026-10 | `ChatWordText { text, content: ChatWordContent }` | Build the proof where the value is born | A word token keeps what its admission parsed (a word or a separator), so assembly builds from it instead of parsing the text again; with no deserializer, nothing can carry text the constructors would refuse |
+
+Media-analysis dispatch retains `ServerError` until the file retry decision,
+instead of pairing a rendered worker message with a separately selected
+category. This removes two transport-to-category mappings, two unconditional
+terminal mappings of execute failures, and diarization's duplicate retryability
+branch. `AdmittedOpenSmileResult` is the writer's input; failed or wrong-task
+wire responses cannot reach that writer.
+
+Unclassified local failures have a distinct `LocalRuntime` category consumed
+by the existing `NextAttempt` transition. FA no longer has a generic
+`FaFailureClass::Runtime` group-local state: removing it eliminates both
+primary and fallback skip branches for unknown failures. Only an admitted
+engine constraint retains that group recovery. This changes the states the
+transport can act on, without a separate retry flag or message-based OOM guess.
+
+`UtrChatUnits` consumes and owns the source words alongside their derived unit
+texts and word addresses. `UtrUtteranceInfo` no longer carries a separate word
+vector that could disagree with that projection: one independently paired
+field and three separate constructor pairings are removed. Consumers receive
+read-only views of the same owner. The schema-13 replay report remains a
+reviewed transport record; serialization must complete before publication.
 
 ## Typestate Ledger
 
@@ -468,12 +505,16 @@ belongs in the Decision Record) or is decided against (with the reason).
 
 | Seam | Today | The type | Why not yet |
 |------|-------|----------|-------------|
-| FEATS admission | `WordFeatures::parse`, run once where the analysis is admitted (`From<UdWordAnalysis>`), logs a pair without `=` and drops it | a fallible admission (`TryFrom<UdWordAnalysis>`, serde `try_from`) whose malformed pair is a boundary error naming the word | the error would fail the whole response the word arrived in; decide first whether a malformed pair fails the utterance or only its word |
+| FEATS admission | `WordFeatures::from_analysis`, run once where the analysis is admitted (`TryFrom<UdWordAnalysis>`, serde `try_from`), refuses an unrepaired padding value but still logs a pair without `=` and drops it | the same admission refusing a malformed pair as a boundary error naming the word | the error would fail the whole response the word arrived in; decide first whether a malformed pair fails the utterance or only its word |
 | `UdWord.deprel` | `String`, parsed by `dep_rel()` at each use | a `DepRel` field, parsed at the same admission as FEATS | the rewrites (`english_contractions`, the copula-progressive rescue) write relations as strings; about 130 fixtures build `UdWordAnalysis` with string relations, which stays the wire form |
 | `UdWord.misc` | `Option<String>`; the English rescue reads `VerbReadingLemma=` through `ud_pair_value`, a key spelled in both Rust and Python | a typed optional field on the worker's UD word | the same admission as `deprel`, plus the worker wire schema |
 | Worker feature-name repair | `UD_FEATURE_NAME_ALIASES`, a string table in `batchalign/inference/morphosyntax.py` (`Verbform`) | the typed parse above, admitting known misspellings explicitly | folds into the FEATS admission row |
 | `UdId` | `Single(usize)`, `Range(usize, usize)`: raw ids; a range row's head is the root because the worker fills `HEAD = 0` on range rows (`stanza_raw::normalize_word_dict`) | `UdId::Single(UdWordId)`, and range rows as their own row kind with no head | every UD fixture builds `UdId` from integers; the contraction expansion renumbers ids arithmetically |
 | Language rules in mapping | `lang2(&ctx.lang) == "en"` string comparisons across the mapper | a closed enum of the languages with rules, resolved once into `MappingContext` | touches every `lang_*` module; no defect is known to come from it |
+| Transcribe morphology admission | `prepare_tail` checks a known language and discards successful `Admitted<Morphosyntax>`; the generated document is admitted again in `ParsedFile::from_output` | one transition from the actual generated document into an admitted optional analysis or a typed refusal | known-language gaps currently skip the optional stage before recognition, while auto-language admission failures propagate; preserve or explicitly resolve that policy when unifying the transition |
+| Optional-stage capability refusal | `StageRefusalRecord::Unestablished` stores the formatted Stanza gap or utseg refusal | a serializable capability-refusal variant retaining the closed cause | changes stored diagnostics and generated API consumers; output-validation refusals remain a separate meaning |
+| Tokenizer language admission | `RealignLanguage::of_stanza_code` rejects an empty code but maps every other unknown spelling to `Other`; production callers use the catalog's code | a catalog-admitted code at the rule-selection boundary | the public PyO3 constructor still accepts a string; distinguish valid languages with no special rule from malformed codes without introducing a second catalog |
+| FA constraint classification | three engine exception phrases select `FaEngineConstraint` from `RuntimeFailure` | explicit engine constraint codes produced by the inference boundary | upstream engines expose these cases as generic exceptions; move the distinction only with reliable typed evidence, not another copy of the message classifier |
 
 ## Guidelines
 

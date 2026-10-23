@@ -257,7 +257,10 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     let route = ctx.state.segmentation.as_ref().ok_or_else(|| {
         ServerError::Validation("pre-CHAT segmentation requested from a disabled plan".into())
     })?;
-    let Some(route) = route.model().filter(|model| model.uses_boundary_model()) else {
+    let Some(route) = route
+        .model()
+        .and_then(crate::utseg_route::UtsegRoute::boundary_model)
+    else {
         return Ok(PostprocessedSpeech {
             utterances: punctuation_utterances(
                 prepared_chunks,
@@ -280,9 +283,8 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     let items = build_prechat_utseg_items(&prepared_chunks);
     let predictions = crate::utseg::infer_utseg_predictions_with_policy(
         ctx.services.pool,
-        route.language(),
+        &route,
         &items,
-        route.fallback().is_allowed(),
         pre_chat_policy,
         transcribe_cancellation(),
     )

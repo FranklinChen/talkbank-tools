@@ -185,10 +185,46 @@ impl<'p, 'g, 's, D: Direction> Frontier<'p, 'g, 's, D> {
 }
 
 type Snapshot = Vec<(usize, Row)>;
+
+/// The score of a complete composition: the end node's viable row read at
+/// the full reference length, at least the feasible witness's. [`Self::of_end_row`]
+/// is the only constructor, so an optimum exists only where the forward pass
+/// actually reached one that admission's lower bound allows, in every build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalScore(usize);
+
+impl TerminalScore {
+    /// The terminal score of the end node's viable `profile`.
+    ///
+    /// # Errors
+    ///
+    /// The profile does not cover the whole reference
+    /// ([`LocalInterleavingInconsistency::NoCompleteComposition`]), or its
+    /// score is below `feasible`, the matched count admission's witness
+    /// exhibits ([`LocalInterleavingInconsistency::OptimumBelowFeasible`]).
+    fn of_end_row(
+        profile: &Profile,
+        length: usize,
+        feasible: usize,
+    ) -> Result<Self, LocalInterleavingInconsistency> {
+        match profile.score(length) {
+            None => Err(LocalInterleavingInconsistency::NoCompleteComposition),
+            Some(optimum) if optimum < feasible => {
+                Err(LocalInterleavingInconsistency::OptimumBelowFeasible { optimum, feasible })
+            }
+            Some(optimum) => Ok(Self(optimum)),
+        }
+    }
+
+    fn get(self) -> usize {
+        self.0
+    }
+}
+
 struct CompleteForward<'l, 'p, 'g, 's, 'c, C: ?Sized> {
     ledger: &'l Ledger<'p, 'g, 's, 'c, C>,
     snapshots: Vec<Snapshot>,
-    optimum: usize,
+    optimum: TerminalScore,
 }
 struct Block<'o, 'l, 'p, 'g, 's, 'c, C: ?Sized> {
     owner: &'o CompleteForward<'l, 'p, 'g, 's, 'c, C>,
@@ -237,7 +273,9 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> CompleteForward<'l, 'p, 'g, 's
         let control = ledger.stage::<ForwardWork>();
         let mut frontier = Frontier::<PrefixDirection>::new(plan);
         let mut snapshots = Vec::new();
-        let mut optimum = 0;
+        // Unset until the end node's viable row is computed; then that row's
+        // admitted terminal score, or the inconsistency it shows.
+        let mut terminal: Option<Result<TerminalScore, LocalInterleavingInconsistency>> = None;
         for slot in 0..plan.graph().order.len() {
             control.check()?;
             if slot % plan.geometry().block == 0 {
@@ -257,15 +295,32 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> CompleteForward<'l, 'p, 'g, 's
                 && let Row::Viable(profile) = &row
             {
                 control.charge(profile.bits().len() + 1)?;
-                optimum = profile.score(plan.length()).unwrap_or(0);
+                terminal = Some(TerminalScore::of_end_row(
+                    profile,
+                    plan.length(),
+                    plan.admitted.refused().feasible(),
+                ));
             }
             let _ = frontier.commit(slot, row);
         }
-        debug_assert!(optimum >= plan.admitted.refused().feasible());
+        let terminal = match terminal {
+            Some(Ok(terminal)) => terminal,
+            Some(Err(inconsistency)) => {
+                return Err(Stop::Refused(LocalInterleavingRefusal::Inconsistent(
+                    inconsistency,
+                )));
+            }
+            // The end node's row was never viable.
+            None => {
+                return Err(Stop::Refused(LocalInterleavingRefusal::Inconsistent(
+                    LocalInterleavingInconsistency::NoCompleteComposition,
+                )));
+            }
+        };
         Ok(Self {
             ledger,
             snapshots,
-            optimum,
+            optimum: terminal,
         })
     }
     fn reconstruct(
@@ -340,7 +395,14 @@ fn execute<C: WorkControl + ?Sized>(
     let result = CompleteForward::observe(&ledger).and_then(|forward| forward.finish());
     let status = match &result {
         Ok(Ok(_)) => PackedSearchStatus::Completed,
-        Ok(Err(refusal)) | Err(Stop::Refused(refusal)) => PackedSearchStatus::Refused(*refusal),
+        Ok(Err(LocalInterleavingRefusal::Budget(budget)))
+        | Err(Stop::Refused(LocalInterleavingRefusal::Budget(budget))) => {
+            PackedSearchStatus::Refused(*budget)
+        }
+        Ok(Err(LocalInterleavingRefusal::Inconsistent(inconsistency)))
+        | Err(Stop::Refused(LocalInterleavingRefusal::Inconsistent(inconsistency))) => {
+            PackedSearchStatus::Inconsistent(*inconsistency)
+        }
         Err(Stop::Cancelled(_)) => PackedSearchStatus::Interrupted,
     };
     ledger.report(status);
@@ -377,4 +439,40 @@ pub(super) fn testing_full<C: WorkControl + ?Sized>(
     };
     plan.admitted.geometry_mut().block = block;
     execute(&plan, control)
+}
+
+#[cfg(test)]
+mod terminal_score_tests {
+    use super::*;
+
+    /// An end row that does not reach the reference's length was read as an
+    /// optimum of zero (`unwrap_or(0)`), so the proof would have searched for
+    /// zero-score paths and reported every word unmatched. Such a row has no
+    /// terminal score; the forward pass refuses instead.
+    #[test]
+    fn only_an_end_row_covering_the_reference_has_a_terminal_score() {
+        assert_eq!(
+            TerminalScore::of_end_row(&Profile::zero(3), 5, 0),
+            Err(LocalInterleavingInconsistency::NoCompleteComposition)
+        );
+        assert_eq!(
+            TerminalScore::of_end_row(&Profile::zero(5), 5, 0).map(TerminalScore::get),
+            Ok(0)
+        );
+    }
+
+    /// RED FIRST: the lower bound (the optimum is at least what admission's
+    /// feasible witness matched) was a `debug_assert!`, so a release build
+    /// accepted an end row scoring below it and reported the words the
+    /// witness matched as missing. It is checked in every build.
+    #[test]
+    fn a_terminal_score_below_the_feasible_witness_is_refused() {
+        assert_eq!(
+            TerminalScore::of_end_row(&Profile::zero(5), 5, 1),
+            Err(LocalInterleavingInconsistency::OptimumBelowFeasible {
+                optimum: 0,
+                feasible: 1,
+            })
+        );
+    }
 }

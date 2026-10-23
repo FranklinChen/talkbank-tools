@@ -24,6 +24,7 @@ use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
 use crate::types::worker_v2::WordSegmenterV2;
 use crate::worker::error::WorkerError;
+use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{
     PreparedTextRequestIdsV2, build_word_segmentation_request_v2,
@@ -96,9 +97,8 @@ pub(crate) async fn segment_words(
         ))
     })?;
     let response = dispatch_execute_v2_with_retry(pool, language, &request, cancellation).await?;
-    let result = parse_word_segmentation_result_v2(response).map_err(|error| {
-        segmentation_protocol_error(format!("invalid word-segmentation V2 result: {error}"))
-    })?;
+    let result = parse_word_segmentation_result_v2(response)
+        .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     let monologues = plan.apply(result.items).map_err(|refusal| {
         segmentation_protocol_error(format!(
             "word segmentation refused for this file: {refusal}"

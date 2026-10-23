@@ -31,7 +31,7 @@ use batchalign::chat_ops::{UtteranceIdx, WordIdx};
 use batchalign::media::probe::MediaProbe;
 use batchalign::media::tools::MediaTool;
 use batchalign::worker::artifacts_v2::PreparedArtifactStoreV2;
-use batchalign::worker::fa_result_v2::parse_forced_alignment_result_v2;
+use batchalign::worker::fa_result_v2::read_fa_payload;
 use batchalign::worker::request_builder_v2::{
     ForcedAlignmentBuildInputV2, PreparedFaRequestIdsV2, build_forced_alignment_request_v2,
 };
@@ -159,8 +159,9 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
     let response: batchalign::types::worker_v2::ExecuteResponseV2 =
         serde_json::from_slice(&fs::read(&response_path).expect("read staged response"))
             .expect("staged response should parse");
-    let timings = parse_forced_alignment_result_v2(
-        &response,
+    let payload = read_fa_payload(&response).expect("a staged FA response reads as timings");
+    let timings = batchalign::chat_ops::fa::align_fa_response(
+        payload,
         &make_words(&["hello", "world"]),
         &FaWindow::within(&recording, FileMs::new(0), FileMs::new(800))
             .expect("window inside the recording"),

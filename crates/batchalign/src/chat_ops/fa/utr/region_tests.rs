@@ -147,7 +147,7 @@ fn long_turn_dialogue_recovers_with_and_without_anchors() {
     let mut turns = long_turns(|_| false);
     let tokens = heard(&turns);
     let mut document = chat(&turns);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     assert_eq!((result.injected(), result.unmatched()), (280, 0));
     let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
         panic!("global plan");
@@ -169,7 +169,7 @@ fn long_turn_dialogue_recovers_with_and_without_anchors() {
         turn.timed = index % 2 == 0;
     }
     let mut anchored = chat(&turns);
-    let result = inject_utr_timing(&mut anchored, &tokens);
+    let result = inject_spaced(&mut anchored, &tokens);
     assert_eq!(
         (result.injected(), result.skipped(), result.unmatched()),
         (140, 140, 0)
@@ -196,7 +196,7 @@ fn formerly_over_budget_file_recovers_fully_through_its_anchors() {
         "the exact band also admits the formerly refused whole-file problem"
     );
     let mut document = chat(&turns);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     assert_eq!(
         (result.injected(), result.skipped(), result.unmatched()),
         (600, 600, 0),
@@ -227,7 +227,7 @@ fn long_unanchored_dialogue_with_missing_end_words_recovers_proven_interior_turn
     tokens.first_mut().expect("first token").text = "absentfirst".into();
     tokens.last_mut().expect("last token").text = "absentlast".into();
     let mut document = chat(&turns);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     let recovered = bullets(&document);
     assert_eq!(result.injected(), turns.len() - 2);
     assert_eq!(
@@ -278,7 +278,7 @@ fn one_oversized_region_is_refused_alone_and_its_neighbours_recover() {
         .collect();
     let mut document = chat(&turns);
     let before = bullets(&document);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     let after = bullets(&document);
 
     let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
@@ -381,7 +381,7 @@ fn previously_work_refused_reversed_region_is_proved_without_inventing_hints() {
     }
     let mut document = chat(&turns);
     let before = bullets(&document);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     let after = bullets(&document);
     let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
         panic!("global plan");
@@ -413,7 +413,7 @@ fn large_unmatchable_region_completes_without_budget_refusal_or_invented_timing(
     }
     let mut document = chat(&turns);
     let before = bullets(&document);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     let after = bullets(&document);
     let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
         panic!("global plan");
@@ -488,7 +488,7 @@ fn interior_only_evidence_bounds_search_between_proved_neighbours_without_a_hint
     })
     .collect();
     let mut document = chat(&turns);
-    let result = inject_utr_timing(&mut document, &tokens);
+    let result = inject_spaced(&mut document, &tokens);
     assert_eq!(bullets(&document)[1], None, "interior proof is not a hint");
     let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
         panic!("global plan");
@@ -567,7 +567,7 @@ fn a_token_claimed_across_an_anchor_by_two_regions_is_withdrawn_from_both() {
         token("kaeight", 4300),
         token("kanine", 4600),
     ];
-    let result = inject_utr_timing(&mut chat, &tokens);
+    let result = inject_spaced(&mut chat, &tokens);
     let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
         panic!("global plan");
     };
@@ -635,7 +635,7 @@ fn a_withdrawn_endpoint_token_does_not_bound_its_turn() {
         token("kaeight", 4300),
         token("kanine", 4600),
     ];
-    let result = inject_utr_timing(&mut chat, &tokens);
+    let result = inject_spaced(&mut chat, &tokens);
     let UtrAlignmentEvidence::Global { plan } = &result.alignment else {
         panic!("global plan");
     };
@@ -672,4 +672,65 @@ fn a_withdrawn_endpoint_token_does_not_bound_its_turn() {
         "no hint whose hull reaches the withdrawn token"
     );
     assert_eq!(hints[3], None);
+}
+
+/// The evidence wire form of each search inconsistency, as a region of a real
+/// plan reports it. The serializer was hand-written beside the type it
+/// spelled and untested, so a variant or field renamed in the search changed
+/// stored evidence silently; it is the type's own derive now, held here.
+#[test]
+fn a_search_inconsistency_is_reported_in_the_evidence_with_its_fields() {
+    use batchalign_transform::dp_align::interleaving::LocalInterleavingInconsistency;
+    let turns = dialogue(3, |index| index != 1);
+    let mut document = chat(&turns);
+    let result = inject_spaced(&mut document, &heard(&turns));
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    let region = plan.regions()[0].span();
+    let wire = |inconsistency| {
+        serde_json::to_value(evidence::UtrUnsearchedRegion::Inconsistent(
+            evidence::UtrSearchInconsistency {
+                region,
+                inconsistency,
+            },
+        ))
+        .expect("evidence serializes")["inconsistent"]["inconsistency"]
+            .clone()
+    };
+    insta::assert_json_snapshot!(
+        [
+            wire(LocalInterleavingInconsistency::NoCompleteComposition),
+            wire(LocalInterleavingInconsistency::OptimumBelowFeasible {
+                optimum: 3,
+                feasible: 5,
+            }),
+            wire(LocalInterleavingInconsistency::ReconstructionMismatch {
+                selected: 4,
+                optimum: 5,
+            }),
+            wire(LocalInterleavingInconsistency::TracebackStalled { reference: 7 }),
+        ],
+        @r#"
+    [
+      {
+        "kind": "no_complete_composition"
+      },
+      {
+        "feasible": 5,
+        "kind": "optimum_below_feasible",
+        "optimum": 3
+      },
+      {
+        "kind": "reconstruction_mismatch",
+        "optimum": 5,
+        "selected": 4
+      },
+      {
+        "kind": "traceback_stalled",
+        "reference": 7
+      }
+    ]
+    "#
+    );
 }

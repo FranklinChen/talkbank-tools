@@ -31,15 +31,17 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TextIO, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 import batchalign_core
 
 if TYPE_CHECKING:
     # What an ``{"op": "error"}`` line reports, and so what a retry could
     # change: ``runtime`` (the admitted work failed; another attempt may
-    # succeed), ``bootstrap`` (a deterministic model-load, catalog or import
-    # failure) or ``invalid_request`` (the request was refused as sent).
+    # succeed), ``bootstrap`` (a deterministic model-load or import failure),
+    # ``download`` (a download failed in transit), ``out_of_memory`` (the
+    # accelerator ran out of memory) or ``invalid_request`` (the request was
+    # refused as sent).
     # Required on the wire. Spelled once, in the extension's stub, against
     # Rust's own list (``batchalign_core.WORKER_ERROR_KINDS``).
     from batchalign_core.batchalign_core import WorkerErrorKind
@@ -287,37 +289,43 @@ def _write_error(
     _write_json(error_envelope(message, kind, correlation))
 
 
-def _classify_dispatch_exception(
-    exc: BaseException,
-) -> Literal["runtime", "bootstrap"]:
-    """Return ``"bootstrap"`` for typed bootstrap-class exceptions, else ``"runtime"``.
+def _classify_dispatch_exception(exc: BaseException) -> WorkerErrorKind:
+    """Return the wire kind of a dispatch exception, by its class.
 
-    The set of bootstrap-class exception types is small and stable
-    every typed error raised by a model-load / catalog-download path
-    inherits from one of the named classes here. New bootstrap-class
-    error types added to the worker must extend this match.
+    ``"download"`` for a model or catalog download that failed in transit,
+    and ``"out_of_memory"`` for an accelerator that ran out of memory: both
+    decided by :mod:`batchalign.inference._transient_failures`, the module the
+    Rust worker boundary reads for the same two questions, so a failure is
+    classified alike whether it escapes an op or a model host's request. A
+    later attempt may succeed after either. ``"bootstrap"`` for the typed
+    deterministic load failure, which recurs identically. ``"runtime"`` for
+    everything else.
 
     Side-effect-free: takes the exception, returns the wire kind.
-    Imports the type modules lazily so a missing optional dep can't crash
-    the classifier itself.
     """
-    bootstrap_types: list[type[BaseException]] = []
-    try:
-        from batchalign.worker._stanza_capabilities import (
-            StanzaCatalogDownloadError,
-        )
+    from batchalign.inference._transient_failures import (
+        is_device_out_of_memory,
+        is_model_download_failure,
+    )
+    from batchalign.worker._language_errors import UnsupportedLanguageError
 
-        bootstrap_types.append(StanzaCatalogDownloadError)
-    except ImportError:
-        pass
-    try:
-        from batchalign.worker._stanza_loading import UnsupportedLanguageError
+    if is_model_download_failure(exc):
+        return "download"
+    if is_device_out_of_memory(exc):
+        return "out_of_memory"
+    if isinstance(exc, UnsupportedLanguageError):
+        return "bootstrap"
+    return "runtime"
 
-        bootstrap_types.append(UnsupportedLanguageError)
-    except ImportError:
-        pass
 
-    return "bootstrap" if isinstance(exc, tuple(bootstrap_types)) else "runtime"
+def _ends_worker(kind: WorkerErrorKind) -> bool:
+    """Whether the worker stops serving after reporting ``kind``.
+
+    Rust owns the decision (``WorkerErrorKind::worker_after``), because its
+    readers act on the same fact: a worker that stops serving is retired, not
+    sent the retry.
+    """
+    return batchalign_core.error_kind_ends_worker(kind)
 
 
 def _print_ready() -> None:
@@ -383,13 +391,11 @@ def _serve_stdio() -> None:
                 correlation=ErrorCorrelation.of_message(message),
                 kind=kind,
             )
-            # Bootstrap-class failures may have left the worker in a
-            # partially-initialized state; safest to exit so the pool
-            # tears the worker down. The Rust side classifies the typed
-            # error as non-retryable, so this exit does NOT produce a
-            # retry storm: unlike the pre-fix path that retried every
-            # worker exit-1 as a transient crash.
-            if kind == "bootstrap":
+            # A bootstrap or download failure may have left a model half
+            # loaded, so the worker stops serving and the pool replaces it.
+            # The Rust readers retire it for the same kinds (one owner,
+            # `_ends_worker`), so a retry never lands on this process.
+            if _ends_worker(kind):
                 break
             continue
 
@@ -440,7 +446,7 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
                     ErrorCorrelation.of_message(request.message),
                 )
             )
-            if kind == "bootstrap":
+            if _ends_worker(kind):
                 reader.stop()
             return
 
@@ -559,11 +565,9 @@ def _handle_tcp_connection_sequential(
                 )
                 wfile.write(error_payload + "\n")
                 wfile.flush()
-                if kind == "bootstrap":
-                    # Worker is in a partially-initialized state; tear the
-                    # connection down so the pool spawns a replacement.
-                    # The orchestrator's terminal classification of
-                    # bootstrap errors prevents this from cascading.
+                if _ends_worker(kind):
+                    # A model may be half loaded; close the connection, and
+                    # the Rust handle retires itself for the same kinds.
                     return
                 continue
 
@@ -631,7 +635,7 @@ def _handle_tcp_connection_concurrent(
                     wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     _stop_reading()
-            if kind == "bootstrap":
+            if _ends_worker(kind):
                 _stop_reading()
             return
 

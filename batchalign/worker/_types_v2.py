@@ -146,6 +146,8 @@ class ProtocolErrorCodeV2(str, Enum):
     ATTACHMENT_UNREADABLE = "attachment_unreadable"
     MODEL_UNAVAILABLE = "model_unavailable"
     RUNTIME_FAILURE = "runtime_failure"
+    # Raised from a structured provider quota refusal, never message matching.
+    PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     # A pinned Hugging Face Hub artifact refused this machine's request: a
     # gated repository requiring accepted terms, a missing/invalid token, or
     # no cached copy while offline. Distinct from RUNTIME_FAILURE so the
@@ -154,6 +156,17 @@ class ProtocolErrorCodeV2(str, Enum):
     # worker boundary when a Python runner call raises
     # `batchalign.inference._model_access_errors.ModelAccessDeniedError`.
     MODEL_ACCESS_DENIED = "model_access_denied"
+    # The worker has no pipeline for the requested language. Set by the Rust
+    # worker boundary when a runner call raises
+    # `batchalign.worker._language_errors.UnsupportedLanguageError`; the same
+    # request fails identically until the worker's catalog changes.
+    UNSUPPORTED_LANGUAGE = "unsupported_language"
+    # A download the task needed failed in transit; retried. Set by the Rust
+    # worker boundary when `batchalign.inference._transient_failures` says so.
+    MODEL_DOWNLOAD_FAILED = "model_download_failed"
+    # The accelerator ran out of memory (`torch.OutOfMemoryError`); retried
+    # after a backoff. Set by the Rust worker boundary from the same module.
+    DEVICE_OUT_OF_MEMORY = "device_out_of_memory"
 
 
 class FaTextModeV2(str, Enum):
@@ -353,6 +366,16 @@ class MorphosyntaxRequestV2(BaseModel):
     retokenize: bool = False
 
 
+class UtsegSegmenterV2(str, Enum):
+    """Utterance segmenter named by Rust: the worker runs exactly this one.
+
+    Mirrors `crates/batchalign-types/src/worker_v2/requests.rs::UtsegSegmenterV2`.
+    """
+
+    BOUNDARY_MODEL = "boundary_model"
+    STANZA_CONSTITUENCY = "stanza_constituency"
+
+
 class UtsegRequestV2(BaseModel):
     """V2 utterance-segmentation request payload (internally tagged as ``"utseg"``)."""
 
@@ -360,13 +383,10 @@ class UtsegRequestV2(BaseModel):
     lang: LanguageCode
     payload_ref_id: WorkerArtifactIdV2
     item_count: int = Field(ge=0)
-    # Operator opt-in to the legacy Stanza constituency-parser
-    # fallback for unsupported languages. Surfaced as
-    # `--utseg-fallback-stanza` on the CLI. Defaults to `False` so a
-    # request from an older client that omits the field deserializes
-    # with the safe "refuse" behavior; replaces the previous
-    # `BA3_UTSEG_FALLBACK_STANZA` env-var control flow.
-    allow_stanza_fallback: bool = False
+    # The segmenter the control plane admitted for the language (the
+    # language's boundary model, or the operator-authorized Stanza
+    # constituency fallback). Required: the worker never chooses one.
+    segmenter: UtsegSegmenterV2
 
 
 class TranslateRequestV2(BaseModel):
@@ -1119,19 +1139,39 @@ class UdRelationRepairV2(BaseModel):
     to_relation: str
 
 
+class UdFeatureRepairKindV2(str, Enum):
+    """Why a feature value a worker received from Stanza is not in its analysis.
+
+    Closed on both sides of the boundary, like ``UdRelationRepairKindV2``.
+    """
+
+    PAD_FEATURE_VALUE = "pad_feature_value"
+    """Padding (``<PAD>``, ``<UNK>``) as a feature value, which is no value."""
+
+
+class UdFeatureRepairV2(BaseModel):
+    """One feature value a worker removed from an analysis it returned."""
+
+    kind: UdFeatureRepairKindV2
+    word: str
+    feature: str
+    removed_value: str
+
+
 class MorphosyntaxAnalyzedItemV2(BaseModel):
     """An item Stanza analyzed, with the model that analyzed it.
 
-    ``repairs`` is required, with no default, for the reason ``model`` is: a
-    default would make "this worker repaired nothing" and "this worker does
-    not report repairs" the same value, which is the shape that let a rewrite
-    live only in a log line.
+    ``repairs`` and ``feature_repairs`` are required, with no default, for the
+    reason ``model`` is: a default would make "this worker repaired nothing"
+    and "this worker does not report repairs" the same value, which is the
+    shape that let a rewrite live only in a log line.
     """
 
     kind: Literal["analyzed"] = "analyzed"
     raw_sentences: list[WorkerJSONValue]
     model: MorphosyntaxModelIdentityV2
     repairs: list[UdRelationRepairV2]
+    feature_repairs: list[UdFeatureRepairV2]
 
 
 class MorphosyntaxNoWordsItemV2(BaseModel):

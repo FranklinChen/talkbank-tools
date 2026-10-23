@@ -5,6 +5,431 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Small corrections
+
+- Unclassified local model runtime failures now retry within the existing
+  bounded policy (three total attempts by default), under a distinct
+  `local_runtime` category. Forced alignment no longer treats an unknown
+  runtime cause as permission to leave a group unaligned. Recognized engine
+  constraints retain their declared fallback behavior; typed access, quota,
+  bootstrap and protocol refusals remain terminal. Older binaries cannot read
+  the new stored category, so rollback requires compatible readers.
+
+- openSMILE and AVQI flattened typed worker failures into terminal errors,
+  preventing download and device-memory failures from reaching the retry
+  policy. Their response admission now preserves the execution error until
+  the file's retry decision; access and quota refusals keep their own
+  categories, and a response for another task is a protocol fault. The
+  openSMILE writer accepts only an admitted successful response.
+- On a free-threaded runtime, the process-isolated commands (morphotag,
+  coref, utseg, opensmile, compare, avqi) were budgeted at a thread
+  worker's memory by the execution plan and the worker, though they run in
+  processes and the host planner already budgeted them as processes. Every
+  budget table is now generated from the one figure the host planner reads,
+  so they are budgeted as the processes they are.
+- `batchalign3 replay` started its worker with the request's own task
+  spelling and nothing else, so a forced-alignment or speaker-embedding dump
+  started no worker, and a dump from a worker with engine overrides (Qwen3
+  ASR, Cantonese FA), a profile or device flags replayed on a default-engine
+  worker. Failure dumps now record the worker's launch (`worker_launch`), and
+  the replay spawns that worker through the pool's own handle, loading the
+  request's task first when the worker loads on demand. A dump written
+  before the record existed is refused, since it cannot say which worker
+  ran it.
+- The `batchalign_core` extension's module docstring had moved onto a
+  function; it is the module's again.
+- The worker's morphotag FEATS repair is Rust's (`batchalign_core.repair_feats`):
+  the worker no longer classifies a feature value as padding itself. An
+  angle-bracketed value containing a line break is no longer padding, as
+  the IPC schema's `^<.*>$` already said.
+
+### A search that contradicts itself refuses in every build
+
+- The scalar banded UTR traceback checked that each step was explained by
+  its forward rows only with a debug assertion, so in a release build a step
+  no edge explained looped forever on the same cell. It is refused as a
+  search inconsistency (`traceback_stalled`), as the packed search already
+  refuses its own. The packed profile arithmetic's four debug assertions (a
+  row more than one match short of its node, two rows of different bases
+  merged, an edge cut not adjoining its domain, a score read outside its
+  row) are refusals in every build too, each its own inconsistency kind in
+  the UTR evidence.
+- A UTR region's `inconsistent` evidence is serialized by the inconsistency
+  type's own derive, as before in shape (`{"kind": ..., <its fields>}`).
+
+### A token's punctuation no longer counts as a unit of it
+
+- In Cantonese UTR, a recognizer token with punctuation beside its
+  characters (`嘢?`, `嘢…`, `?嘢`) counted the punctuation as a unit, so it
+  never equalled the one-character word it held: the word was matched but
+  never anchored at the token's time. Punctuation-only pieces are now no
+  unit on either side, in every language, so such a token anchors its word.
+
+### A model host's exception keeps its class at the worker boundary
+
+- A worker with no Stanza pipeline for a file's language raised a typed
+  `UnsupportedLanguageError`, which the text executor read as a malformed
+  payload (it subclasses `ValueError`) and the server then reported as a
+  protocol fault with the message hidden. It is now its own protocol code,
+  `unsupported_language`, and the job fails as the deterministic bootstrap
+  failure it is, with the worker's message.
+- The text tasks (morphotag, utseg, translate, coref, word segmentation)
+  flattened every worker failure into a message their callers labelled for
+  themselves: invalid output for morphotag, invalid input for utseg and
+  translate. Each failure now keeps its protocol code, so a gated model, an
+  exhausted provider quota and a local model's crash are categorized as they
+  are on the audio tasks. A remote translation provider's runtime failure is
+  retried; a local translation model's is not.
+- Forced alignment, openSMILE, AVQI and local Whisper ASR reported every
+  exception their model raised as a runtime failure, so a gated Hugging Face
+  model or a missing model was reported as a crash. Every executor now
+  classifies by one rule, by exception class: a plain `ValueError` is a
+  runtime failure, and only a pydantic validation failure is a malformed
+  payload.
+
+### Retries and UTR fallbacks follow what a failure belongs to
+
+- A Rev.AI account refusal (HTTP 401, 402 or 403 on a submission: the key,
+  the account's permission, its credit) was a terminal failure of the
+  request and kept the same-engine UTR fallback, which the same account is
+  refused. It is its own category, `provider_account_refused`: not retried,
+  fallback withheld, and the dashboard says what to fix. The same status on
+  a job's status or transcript request stays a terminal failure of that
+  request, since it may refuse only that job. Rollback note: a build older
+  than this one cannot read a stored `provider_account_refused` category.
+- A Rev.AI 429 (rate limited) was terminal, so the request was not retried
+  and the UTR fallback was sent into the same limit. It is transient on
+  every request now, and retried.
+- A model or catalog download that failed in transit was a deterministic
+  bootstrap failure: never retried, and it withheld the UTR fallback. A
+  Hugging Face download that could not connect was worse: the Hub raises
+  "no cached copy" from the connection failure, which was reported as
+  `model_access_denied`, telling the operator to fix credentials. Download
+  failures are now recognised by exception class in one place (`httpx2`,
+  which the Hub downloads through, `requests`, Stanza's catalog fetch, a Hub
+  outage status, and the Hub's "no cached copy" raised from one of those),
+  which the worker's request loop and its model hosts both consult: a
+  download that fails while a worker loads a model, inside a request (an
+  `auto` utseg worker loading a language's Stanza pipeline), or at worker
+  startup is reported as a download (`download` error kind,
+  `model_download_failed` protocol code), retried, and leaves the fallback
+  in place. A 401 or 403 from the Hub, and offline mode with no cached
+  copy, stay `model_access_denied`.
+- A worker that stops serving after a download or bootstrap failure (it
+  exits, or a TCP daemon closes the connection) was returned to its pool as
+  reusable, so the retry a download is granted landed on the dead handle as
+  a worker crash and spent the retry budget. It is retired now, and the
+  retry runs on a fresh worker.
+- A worker that cannot load its models at startup now says why on its
+  protocol stream in place of its ready line, so a startup download failure
+  is retried rather than reported as a system failure.
+- A GPU running out of memory (`torch.OutOfMemoryError`) was a local
+  model's runtime failure and so not retried. It is its own protocol code,
+  `device_out_of_memory`, classified `memory_pressure` and retried after a
+  backoff. A refused worker spawn (`memory_pressure` too) is now retried
+  after a backoff as well. An Apple MPS shortfall is still a runtime
+  failure: torch raises a plain `RuntimeError` for it, which no class
+  distinguishes.
+- A local model's runtime failure (Whisper, Qwen, FunASR, pyannote, NeMo, a
+  forced-alignment engine failing on this file's input) was retried up to
+  three times although the same input fails the same way. It is not retried
+  now; a remote provider's runtime failure still is, as are a download that
+  failed in transit and a device out of memory, which have codes of their
+  own.
+
+### A Stanza admission is a proof each stage carries
+
+- A file's utterance languages and its `@s` languages are now admitted by the
+  registry that admitted the file's primary language, under the same
+  requirement, instead of each re-reading the pool's registry. The
+  `registry_unavailable` cause of a secondary-morphology failure, which could
+  not occur once the primary was admitted, is no longer written. Stored
+  records that carry it are still read, as a retired cause, so crash
+  recovery keeps their file's diagnostics.
+- A language refused for a Stanza stage names the processors its catalog
+  entry lacks (for example `missing lemma`), not only the requirement.
+- A worker's "Stanza not installed" report carries its import error, and the
+  server's refusal names it. A report's reason cannot be blank. A failed
+  catalog report is no longer replaced, as the stated reason there is no
+  registry, by a later "not installed" report from a worker that serves no
+  Stanza task. A later catalog that differs from the admitted one is logged.
+- `coref` had a Stanza requirement that no admission consulted. It is
+  removed: coref is English-only by construction, and its worker builds the
+  English pipeline from the same processor list.
+
+### Utseg's admitted route reaches the worker, and a skipped stage is recorded
+
+- The utseg worker request carried only `allow_stanza_fallback`, and the
+  worker chose its segmenter itself: the boundary model whenever it had one
+  loaded, else Stanza when the flag was set. That was a second route decision
+  beside the control plane's. The request now names the admitted segmenter
+  (`segmenter`: `boundary_model` or `stanza_constituency`) and the worker runs
+  that one; a boundary-model request reaching a worker with no model loaded
+  is refused (`UtsegModelNotFoundError`, reported as `model_unavailable`,
+  not as a local model failing on the input). The legacy `batch_infer` operation,
+  which cannot name a segmenter, refuses utseg.
+- A utseg worker started for `auto` or `per-file` had no Stanza loader
+  installed, so every Stanza request it received failed with "No utseg
+  Stanza loader installed". The Stanza route now loads the request
+  language's pipeline on first use in every worker language mode.
+- `transcribe` with a known language whose installed Stanza catalog cannot
+  serve post-CHAT segmentation or morphosyntax skipped the stage with only a
+  log line, so the job record said nothing. Segmentation is now decided once,
+  after recognition, for a known and an auto-detected language alike, and
+  each such skip is a `stage_not_applied` shortfall naming why.
+
+### Utseg's Stanza route is admitted only where it can segment, and loaded once
+
+- The Stanza constituency route was admitted for a language whose installed
+  catalog entry had tokenize and pos but no constituency parser, and then
+  every multi-word item failed at the worker with "produced no tree". The
+  route now requires the constituency parser, and a language without one is
+  refused before any work: at submission, at dispatch after the capability
+  probe, and in transcribe's post-CHAT stage, which records the skipped
+  stage as a `stage_not_applied` shortfall naming why.
+- A `utseg` language with a TalkBank boundary model is no longer held to any
+  Stanza requirement (it reads no Stanza output), and a `utseg` language with
+  no segmenter at all is refused at submission, naming the remedy, instead of
+  at dispatch.
+- The Stanza route built a new constituency pipeline for every batch, a
+  model load of hundreds of megabytes each time. It is now built once per
+  worker and language, through the pipeline cache morphotag uses, and called
+  through that pipeline's own guard. A request with no language is refused
+  rather than segmented with an English pipeline.
+
+### A terminator the pipeline adds is recorded in the file
+
+- When the recognizer left an utterance without ending punctuation, ASR
+  post-processing closed it with a `.` indistinguishable from observed
+  punctuation, and CHAT assembly invented one more for any word-level
+  utterance that still had none. An utterance's end is now its own field,
+  observed (the recognizer's terminator) or synthesized, never a word, and a
+  synthesized end names its cause (no mark, or a mark CHAT cannot write):
+  transcribe's provenance stamp counts the utterances CHAT assembly closed
+  itself (`asr_synthesized_terminators=N`; a later utseg split's cuts are
+  not counted there), and assembly invents nothing.
+- An utterance ending in `...` or `(.)`, which end an utterance but are not
+  CHAT terminators, is closed with a synthesized end naming the mark instead
+  of failing the file. Preparation used to split a provider's `so...` into
+  separate periods before this decision, so the first period closed the
+  utterance as an observed `.` the provider never wrote; a run of periods
+  and `(.)` are now kept whole. A mark with nothing before it no longer
+  closes an empty utterance.
+- A transcript of nothing but punctuation is refused as an empty
+  transcription even when it names no speaker.
+- A serialized utterance end states its kind (`{"observed": "?"}`, or a
+  synthesized end with its cause, `{"synthesized": "no_mark"}`); a
+  terminator is not a word.
+- `build_chat_from_json`, the JSON entry point of `batchalign-transform`'s
+  CHAT assembly, is removed: nothing called it. `TranscriptDescription` is
+  built in Rust only, with its languages parsed once
+  (`TranscriptLanguages`, primary first, never empty) and each word token
+  parsed once (`ChatWordText` keeps the parsed word). Assembly no longer
+  substitutes `eng` for an empty language list, re-parses a language code,
+  or parses each word a second time.
+
+### An untimed utterance's cause is what the run recorded, never a guess
+
+- An align `timing_incomplete` record gave an utterance the cause
+  `no_usable_timing` ("the aligner returned none, or the words could not be
+  sent to it") whenever no grouping decision named it, including when no
+  request ever covered it. The cause is now `requested`, with counts of what
+  the requests covering the utterance yielded (`answered`, `unaligned`,
+  `unrequested`) from the run's own group evidence, or `unrecorded` when
+  nothing the run recorded explains it. Stored records with
+  `no_usable_timing` are still read and shown.
+
+### A UTR fallback that cannot succeed is no longer attempted
+
+- A first UTR pass that failed because this machine is refused the engine's
+  model (`model_access_denied`) or because the engine's worker cannot start
+  (`worker_bootstrap`) still granted the same-engine fallback pass, which
+  asks the same worker for the same model and fails the same way. Those
+  failures now withhold it, as an exhausted provider quota already did; the
+  failed pass is still recorded in the file's shortfalls.
+
+### An unusable ASR response is not reported as invalid input
+
+- An ASR response the server could not lower, and one naming models other
+  than the ones the plan pinned, failed the file as `validation` ("Input
+  Refused"). The first is now `worker_protocol` (the worker broke the
+  protocol); the second is its own error, `AsrModelIdentity`, classified
+  `worker_bootstrap` like the runtime identity mismatch it resembles, so it
+  is not retried.
+
+### A failed alignment request is classified by its type, not its message
+
+- What a failed forced-alignment request does next (retry on the engine's
+  fallback, leave its words unaligned, or fail the file) was decided by
+  searching a rendered error message for `RuntimeFailure:`, a fallback
+  constraint phrase, or `ModelUnavailable: no whisper FA host loaded`. The
+  worker's failure is now classified once, by its protocol code, where the
+  response is read, and each leg decides with one exhaustive match. The
+  outcomes are unchanged, with one exception: a fallback that lands on a
+  worker with no fallback model is left unaligned whatever that model's
+  message says, not only when it names Whisper.
+- A failed request that does fail its file is no longer reported as
+  `validation` ("Input Refused"). It keeps the category its protocol code
+  names (a missing primary model is `worker_bootstrap`, a refused request
+  `worker_protocol`, a denied model `model_access_denied`), and a response
+  that does not fit its request is `worker_protocol`.
+
+### No language is invented as English
+
+- `LanguageCode3` no longer has a `Default` (it was `eng`); nothing in the
+  workspace used it, so no caller can reach an invented English again.
+- `batchalign3 replay` booted its worker for English when the dump's worker
+  label named no language, and for morphosyntax when the captured request
+  named no task. It now replays on the worker the dump records (see
+  above), and a `--lang` that is not a worker language (misspelled) is
+  refused.
+- A text-mode utterance in a transcript description is parsed under the
+  description's admitted primary language, not under a fallback `eng`.
+
+### An inconsistent interleaved UTR search is refused, not read as matches
+
+- If the packed interleaved correspondence search ever reached no complete
+  composition, it took an optimum of zero and would have reported every word
+  of the region unmatched. A release build also accepted an optimum below
+  the feasible witness admission had proved (checked only by a debug
+  assertion), and a reconstruction of a different size than its optimum.
+  Each is now checked in every build and refuses the region as its own
+  outcome, not as a budget: `inconsistent` in the alignment evidence, with
+  the review decision `correspondence_search_inconsistent`, and an error
+  log line, since it means the search is wrong rather than bounded.
+
+### One Stanza pipeline is never called by two threads at once
+
+- On free-threaded Python, morphotag skipped its Stanza lock, assuming one
+  pipeline could be called from several threads at once. Stanza does not
+  promise that, and its next release turns on a lemma results cache that is
+  not thread-safe. Every call on a loaded pipeline now goes through that
+  pipeline's own guard, in every interpreter mode. GIL builds (what is
+  deployed) were already serialized and behave as before.
+- A Stanza worker now serves one request per process on free-threaded Python
+  too, scaling to more processes per key, rather than multiplexing requests
+  that would only queue on the guarded pipeline of their language. Its memory
+  budget is accordingly a process budget in every runtime.
+
+### Morphotag analyzes every language the installed Stanza catalog serves
+
+- `morphotag` refused a primary `@Languages` code unless a hand-maintained
+  list of 53 codes named it, although Stanza's catalog serves many more in
+  full (Kazakh failed with "not supported by Stanza"). The list is gone. The
+  worker's capability table, built from the installed catalog and the ISO
+  639-1 table, is reported to the server, and that one registry now decides
+  the primary language, each utterance's effective language, secondary
+  (`@s`) dispatch, and the submission check and its list of available
+  languages. A server with no admitted registry refuses morphotag
+  (`RegistryUnavailable`) instead of guessing, and the refusal says why:
+  no worker has reported yet, Stanza is not installed, or the worker could
+  not build its report (with its error, such as a stale `batchalign_core`
+  extension), which is never read as an empty catalog.
+- Newly available with Stanza 1.15.0 (57 codes): `abk`, `ang`, `asm`, `bel`,
+  `bor`, `bxr`, `chu`, `ckb`, `cop`, `egy`, `frm`, `fro`, `glv`, `got`,
+  `grc`, `hat`, `hbo`, `hsb`, `hyw`, `kaz`, `kir`, `kmr`, `kpv`, `lij`,
+  `lzh`, `mar`, `myv`, `naq`, `nds`, `nno`, `nob`, `oci`, `ori`, `orv`,
+  `ory`, `ota`, `pan`, `pcm`, `qaf`, `qpm`, `qtd`, `san`, `say`, `sdh`,
+  `sme`, `snd`, `sqi`, `srp`, `uig`, `uzb`, `uzn`, `wol`, `xcl`, `ydd`,
+  `yid`, `yrl`, `zza`.
+- No longer admitted for morphotag: `mlt`, `tel`, `tha` and `vie`. Stanza
+  1.15 ships no trained lemmatizer for them; its catalog names `lemma:
+  identity` (each word copied as its own lemma) as their default. BA3
+  requires a trained lemmatizer for morphotag, so the refusal names that
+  cause (`ProcessorsUnavailable`). Whether an identity lemma would be
+  acceptable for these languages is undecided. A file whose primary language
+  is one of them but whose utterances are all in other languages used to
+  pass and now fails at the file level.
+- Each Stanza-backed command is admitted by its own processor requirement
+  instead of morphotag's: `utseg` needs tokenize, pos and constituency (it reads
+  constituency trees and never lemmas, so it no longer loads a lemmatizer),
+  `coref` needs tokenize and coref, `compare` morphotags and needs
+  morphotag's. Vietnamese, which ships constituency but no lemmatizer, is
+  available for `utseg`, and `transcribe` no longer skips utterance
+  segmentation for it; Maltese, Telugu and Thai ship no constituency parser
+  and are refused for that route. The worker reads each requirement from Rust
+  (`batchalign_core.STANZA_REQUIREMENTS`) rather than keeping its own copy.
+- A refusal names its typed reason: no model in the catalog
+  (`NotInCatalog`), missing processors (`ProcessorsUnavailable`), or no
+  admitted registry.
+- The worker maps ISO 639-3 codes to Stanza codes in one place, its
+  capability table, using Rust's ISO 639-1 table instead of `pycountry`.
+  A code with no catalog entry is refused instead of being passed to
+  Stanza unchanged. `nor` still analyzes with Norwegian Bokmål; `cmn` and
+  `yue` with Simplified Chinese.
+- `utseg` and `compare` submissions are no longer pre-filtered by the old
+  list before a worker has reported; the job meets the registry after its
+  capability probe, and a worker asked for a language its catalog lacks
+  refuses it.
+
+### Padding feature values no longer reach `%mor`
+
+- A Stanza-trained model can emit padding as a feature value (`Case=<PAD>`),
+  and morphotag wrote it into `%mor` (`noun|кітап-<PAD>`). The worker now
+  removes every padding value (`<PAD>`, `<UNK>`, any angle-bracketed
+  placeholder), keeps the rest of the word's features (`Case=Nom,<PAD>`
+  keeps `Case=Nom`), and reports each removal as a `pad_feature_value`
+  repair. `ud_repairs=` in the provenance comment counts these together with
+  relation repairs.
+- An analysis that still carries a padding value is refused where its
+  features are admitted, and its file fails, instead of the value being
+  written.
+- Worker protocol: an analyzed morphosyntax item carries a required
+  `feature_repairs` list (`UdFeatureRepairV2`) beside `repairs`. A repair
+  whose removed value is not padding is refused as a malformed response.
+
+### Stock Whisper transcribes Cantonese as Cantonese
+
+- A stock Whisper worker for a resolved Cantonese (`yue`) language was left
+  to detect both its language and its task, although the pinned checkpoint
+  has a Cantonese token. It is now told that token and the transcription
+  task, like every other resolved language; only a `--lang auto` worker
+  detects. This changes `transcribe --lang yue --asr-engine whisper` and
+  Whisper timing recovery (UTR) for Cantonese transcripts.
+- A Whisper UTR cache namespace now names the decode decision its worker is
+  given for the language, so a change to that decision moves the language's
+  rows without a list of languages to maintain. Cached Whisper UTR responses
+  from earlier builds (any language) are therefore not reused: the first UTR
+  run after upgrading asks Whisper again, once. Rev.AI and Tencent keep their
+  cached responses.
+
+### A provider's exhausted quota is a provider failure, not bad input
+
+- When Tencent refused recognition with `FailedOperation.UserHasNoAmount`
+  (its ASR resource pack is exhausted), the worker reported a generic runtime
+  failure and the server classed it as an input validation error. It now has
+  its own failure category, `provider_quota_exhausted`, shown by the CLI and
+  the dashboard with the remedy, and any timing the transcript already had is
+  kept.
+- That refusal alone withholds the single same-engine UTR fallback retry a
+  failed first UTR pass otherwise earns, since no request succeeds until the
+  quota is restored. Other provider failures of the first pass (a Rev.AI
+  4xx, a failed job) keep the fallback, which is a different request.
+- A worker's ASR or speaker failure now keeps the category its protocol code
+  names instead of becoming "Input Refused": a runtime failure (such as a
+  provider SDK's internal error) is retried like other worker runtime
+  failures, a model that cannot load is a worker setup failure, and a
+  refused request is a protocol failure.
+
+### Cantonese timing recovery matches in characters on both sides
+
+- Recognizers return Cantonese as phrases (Whisper) or as words, and
+  Cantonese transcripts are written both one character per word and in
+  multi-character words, so UTR compared units that could not be equal and
+  found almost no matches. Timing recovery for a Cantonese transcript now
+  projects both the recognizer's tokens and the transcript's words into
+  characters (other runs, such as English words, stay whole), so any
+  segmentation meets any other. A token keeps its own measured interval;
+  its characters are never given invented times.
+- A transcript word anchors a cut point for splitting a long utterance only
+  when one recognizer token is exactly that word: a word matched in part,
+  across tokens, or inside a phrase is not anchored.
+- The UTR token debug dump shows the recognizer's own text rather than the
+  character projection.
+- `batchalign3 eval utr-alignment` reports schema 12: `lexical_units`
+  names the projection, and each transcript match address names its
+  `unit_index` and the word it belongs to (`word_index`, `part`, `parts`).
+
 ### Taiwanese transcripts are written in words
 
 - `transcribe --lang nan` wrote one main-tier word per Han character, because

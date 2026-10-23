@@ -10,7 +10,7 @@ use talkbank_model::UtteranceIdx;
 use talkbank_model::model::WriteChat;
 
 use crate::chat_ops::fa::coordinates::Ms;
-use crate::chat_ops::fa::utr::{AsrTimingToken, inject_utr_timing};
+use crate::chat_ops::fa::utr::{AsrTimingToken, inject_spaced};
 
 const BUDGET_MS: u64 = 15_000;
 
@@ -45,7 +45,7 @@ fn tokens_at(starts_ms: &[u64]) -> Vec<AsrTimingToken> {
 /// UTR over the fixture, then grouping with the anchors UTR observed.
 fn group_after_utr(starts_ms: &[u64], recording_ms: u64) -> Grouping {
     let mut chat = parse_chat(&untimed_twelve_words());
-    let mut utr = inject_utr_timing(&mut chat, &tokens_at(starts_ms));
+    let mut utr = inject_spaced(&mut chat, &tokens_at(starts_ms));
     assert_eq!(utr.injected(), 1, "UTR placed the utterance");
     let anchors = utr.take_anchors();
     group_utterances(&chat, BUDGET_MS, &test_recording(recording_ms), &anchors)
@@ -157,7 +157,7 @@ fn a_minutes_long_anchor_gap_is_refused_for_review() {
 fn without_anchors_an_over_budget_utterance_is_refused_as_before() {
     let mut chat = parse_chat(&untimed_twelve_words());
     let starts: Vec<u64> = (0..12).map(|i| i * 3_000).collect();
-    let _ = inject_utr_timing(&mut chat, &tokens_at(&starts));
+    let _ = inject_spaced(&mut chat, &tokens_at(&starts));
     let grouped = group_utterances(
         &chat,
         BUDGET_MS,
@@ -185,7 +185,7 @@ fn a_multi_word_token_is_not_an_anchor() {
     // "three four" as one provider segment.
     tokens[2].text = "three four".to_owned();
     tokens.remove(3);
-    let anchors = inject_utr_timing(&mut chat, &tokens).take_anchors();
+    let anchors = inject_spaced(&mut chat, &tokens).take_anchors();
     let AnchorLookup::Anchored(utterance) = anchors.lookup(UtteranceIdx::new(0)) else {
         panic!("the single-word tokens still anchor");
     };

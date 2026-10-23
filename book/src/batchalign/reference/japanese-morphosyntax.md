@@ -58,16 +58,14 @@ processor would load a mismatched model.
 
 ### MWT Exclusion
 
-Japanese never loads the `mwt` processor. The historical hardcoded
-`_MWT_EXCLUSION` frozenset was retired in favour of the runtime
-capability-driven helper `should_request_mwt()` at
-`batchalign/worker/_stanza_loading.py:40` (see Defect 5 in
+Japanese never loads the `mwt` processor, because its catalog entry
+ships none: the entry is read by `language_capability()` in
+`batchalign/worker/_stanza_loading.py` (see Defect 5 in
 [Stanza Defect Mitigation Map](../architecture/stanza-defect-mitigation-map.md)):
-the helper consults the live Stanza capability table and excludes
-`mwt` for any language whose model does not ship that processor.
-Japanese falls into the exclusion naturally, its `combined`
-package does not include an `mwt` processor, so `should_request_mwt`
-returns `False` for `ja` without a per-language entry. The package
+`mwt` is requested only for a language whose catalog entry ships that
+processor. Japanese falls into the exclusion naturally, its `combined`
+package does not include an `mwt` processor, so its entry reports
+`not has("mwt")` without a per-language rule. The package
 override above is needed regardless of MWT mode, so the two
 concerns stay independent.
 
@@ -354,7 +352,7 @@ of the current public runtime contract.
 
 | Concept | File | Anchor |
 |---------|------|--------|
-| Capability-driven MWT exclusion (retired the historical `_MWT_EXCLUSION` frozenset) | `batchalign/worker/_stanza_loading.py` | `should_request_mwt()` @40 |
+| Capability-driven MWT exclusion (the catalog entry, no exclusion list) | `batchalign/worker/_stanza_loading.py` | `language_capability()` |
 | `combined` package forcing for Japanese | `batchalign/worker/_stanza_loading.py` | :196-209 (`if alpha2 == "ja"` branch) |
 | Stanza config (keep-tokens vs no-MWT) modes | `batchalign/worker/_stanza_loading.py` | `load_stanza_models()` @126 |
 | Token text whitespace strip | `crates/batchalign-transform/src/morphosyntax/injection.rs` | retokenize-mode token sanitizer |

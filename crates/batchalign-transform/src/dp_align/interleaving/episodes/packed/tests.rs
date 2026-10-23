@@ -241,7 +241,7 @@ fn partial_reordering_retains_a_real_work_refusal_after_fusion() {
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
     assert!(matches!(
         LocalInterleaving::observe(&turns, &reference, MatchMode::Exact),
-        Err(LocalInterleavingRefusal::WorkBudgetExceeded { phase:LocalInterleavingWorkPhase::PackedSearch, required_at_least }) if required_at_least > WORK_CELLS
+        Err(LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded { phase:LocalInterleavingWorkPhase::PackedSearch, required_at_least })) if required_at_least > WORK_CELLS
     ));
 }
 
@@ -398,15 +398,17 @@ fn full_fallback_candidate_refusal_never_returns_partial_inspection() {
     };
     assert!(matches!(
         refused.refusal(),
-        LocalInterleavingRefusal::WorkBudgetExceeded {
+        LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
             phase: LocalInterleavingWorkPhase::BandedSearch,
             ..
-        }
+        })
     ));
     let observer = Observer(Cell::new(0));
     assert!(matches!(
         uninterrupted(observe(refused, &observer)),
-        Err(LocalInterleavingRefusal::CandidateBudgetExceeded)
+        Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::CandidateBudgetExceeded
+        ))
     ));
     assert_eq!(
         observer.0.get(),
@@ -467,10 +469,12 @@ fn ascii_policy_budget_admission_and_fuzzy_nonadmission_remain_explicit() {
     let work = uninterrupted(Geometry::observe(&graph, WORK_CELLS, 0, &Uninterrupted));
     assert!(matches!(
         work,
-        Err(LocalInterleavingRefusal::WorkBudgetExceeded {
-            phase: LocalInterleavingWorkPhase::PackedSearch,
-            ..
-        })
+        Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::WorkBudgetExceeded {
+                phase: LocalInterleavingWorkPhase::PackedSearch,
+                ..
+            }
+        ))
     ));
     let memory = uninterrupted(Geometry::observe(
         &graph,
@@ -480,6 +484,8 @@ fn ascii_policy_budget_admission_and_fuzzy_nonadmission_remain_explicit() {
     ));
     assert!(matches!(
         memory,
-        Err(LocalInterleavingRefusal::MemoryBudgetExceeded)
+        Err(LocalInterleavingRefusal::Budget(
+            LocalInterleavingBudget::MemoryBudgetExceeded
+        ))
     ));
 }

@@ -15,8 +15,7 @@ use crate::chat_ops::CacheKey;
 use crate::error::{MissingRequiredEvidence, MissingSpeakerEvidence, ServerError};
 use crate::params::CachePolicy;
 use crate::types::worker_v2::{
-    DecodeBudgetSeconds, ProtocolErrorCodeV2, SpeakerBackendV2, SpeakerInferenceEvidenceV2,
-    SpeakerSegmentV2,
+    DecodeBudgetSeconds, SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2,
 };
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::asr_request_v2::{
@@ -228,7 +227,7 @@ async fn infer_asr_via_worker_v2(
         &models,
         worker_mode.as_v2_backend(),
     )
-    .map_err(|error| ServerError::Validation(format!("ASR V2 response parse failed: {error}")))
+    .map_err(ServerError::from)
 }
 
 /// Call the live V2 Python worker path for dedicated speaker diarization on a
@@ -267,32 +266,35 @@ async fn infer_speaker(
 
     parse_speaker_result_v2(&response)
         .map(|result| result.evidence.clone())
-        .map_err(speaker_parse_failure_to_server_error)
+        .map_err(|error| {
+            speaker_parse_failure_to_server_error(
+                error,
+                crate::worker::execute_result_v2::ModelLocality::of_speaker(backend),
+            )
+        })
 }
 
 /// Route a speaker V2 parse failure to its category, instead of collapsing
 /// every failure into `ServerError::Validation`.
 ///
-/// A worker-reported PROTOCOL failure (`SpeakerResultParseError::Protocol`)
-/// carries a [`ProtocolErrorCodeV2`] the worker itself classified; a Hugging
-/// Face Hub access denial becomes `ServerError::ModelAccessDenied`, a
-/// configuration/credential condition on the SERVER's machine, never
-/// `Validation`, which describes a refused CLIENT input (the dashboard
-/// labels it "Input Refused"). Every
-/// other protocol code, and a shape mismatch
-/// (`SpeakerResultParseError::UnexpectedPayload`), stays `Validation`: those
-/// really are "the response this server got does not make sense".
-fn speaker_parse_failure_to_server_error(error: SpeakerResultParseError) -> ServerError {
+/// A worker-reported PROTOCOL failure keeps the category its
+/// [`ProtocolErrorCodeV2`] names, through the one exhaustive mapping
+/// ([`ExecuteFailureRead::into_server_error`](crate::worker::execute_result_v2::ExecuteFailureRead::into_server_error)):
+/// a Hugging Face Hub access denial is `ModelAccessDenied`, an exhausted
+/// provider quota is `ProviderQuotaExhausted`, a runtime failure is a worker
+/// response. A success whose payload is not a speaker result is the worker
+/// breaking the protocol. None of these is `Validation`, which describes a
+/// refused CLIENT input (the dashboard labels it "Input Refused").
+fn speaker_parse_failure_to_server_error(
+    error: SpeakerResultParseError,
+    locality: crate::worker::execute_result_v2::ModelLocality,
+) -> ServerError {
     match error {
-        SpeakerResultParseError::Protocol {
-            code: ProtocolErrorCodeV2::ModelAccessDenied,
-            message,
-        } => ServerError::ModelAccessDenied(message),
-        SpeakerResultParseError::Protocol { message, .. } => {
-            ServerError::Validation(format!("speaker V2 response parse failed: {message}"))
-        }
+        SpeakerResultParseError::Protocol(failure) => failure.into_server_error(locality),
         SpeakerResultParseError::UnexpectedPayload(message) => {
-            ServerError::Validation(format!("speaker V2 response parse failed: {message}"))
+            ServerError::Worker(crate::worker::error::WorkerError::Protocol(format!(
+                "speaker V2 response was not a speaker result: {message}"
+            )))
         }
     }
 }
@@ -412,6 +414,7 @@ fn speaker_resolution_error_to_server_error(error: SpeakerEvidenceResolutionErro
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::types::worker_v2::ProtocolErrorCodeV2;
     use std::path::Path;
 
     /// The regression this function exists for (2026-09-02): a worker
@@ -424,14 +427,16 @@ mod tests {
     /// credentials.
     #[test]
     fn model_access_denied_protocol_failure_never_becomes_validation() {
-        let error = SpeakerResultParseError::Protocol {
-            code: ProtocolErrorCodeV2::ModelAccessDenied,
-            message: "could not download the Hugging Face model at \
-                      pyannote/speaker-diarization-community-1: its repository is gated"
-                .to_owned(),
-        };
+        let error = protocol_failure(
+            ProtocolErrorCodeV2::ModelAccessDenied,
+            "could not download the Hugging Face model at \
+             pyannote/speaker-diarization-community-1: its repository is gated",
+        );
 
-        let mapped = speaker_parse_failure_to_server_error(error);
+        let mapped = speaker_parse_failure_to_server_error(
+            error,
+            crate::worker::execute_result_v2::ModelLocality::Remote,
+        );
 
         assert!(
             matches!(mapped, ServerError::ModelAccessDenied(_)),
@@ -440,26 +445,92 @@ mod tests {
         assert!(!matches!(mapped, ServerError::Validation(_)));
     }
 
-    /// Every OTHER protocol code, and a shape mismatch, still becomes
-    /// `Validation`: those genuinely are "the response this server got does
-    /// not make sense", unlike a Hub access denial.
-    #[test]
-    fn other_protocol_failures_and_shape_mismatches_still_become_validation() {
-        let protocol_runtime = SpeakerResultParseError::Protocol {
-            code: ProtocolErrorCodeV2::RuntimeFailure,
-            message: "boom".to_owned(),
-        };
-        assert!(matches!(
-            speaker_parse_failure_to_server_error(protocol_runtime),
-            ServerError::Validation(_)
-        ));
+    fn protocol_failure(code: ProtocolErrorCodeV2, message: &str) -> SpeakerResultParseError {
+        SpeakerResultParseError::Protocol(
+            crate::worker::execute_result_v2::ExecuteFailureRead::for_test(code, message),
+        )
+    }
 
+    /// RED FIRST: every protocol code but a Hub denial fell into a catch-all
+    /// `Validation` ("Input Refused"), so a future pyannoteAI quota refusal
+    /// or a provider's runtime failure read as bad client input. Each code
+    /// now has its own category, and none of them, nor a shape mismatch, is
+    /// `Validation`. (The cases are a remote provider's, pyannoteAI's.)
+    #[test]
+    fn no_speaker_protocol_failure_or_shape_mismatch_is_validation() {
+        use crate::runner::util::classify_server_error;
+        use crate::scheduling::FailureCategory;
+        use crate::worker::execute_result_v2::ModelLocality;
+        let cases = [
+            (
+                ProtocolErrorCodeV2::ProviderQuotaExhausted,
+                FailureCategory::ProviderQuotaExhausted,
+            ),
+            (
+                ProtocolErrorCodeV2::RuntimeFailure,
+                FailureCategory::ProviderTransient,
+            ),
+            (
+                ProtocolErrorCodeV2::ModelUnavailable,
+                FailureCategory::WorkerBootstrap,
+            ),
+            (
+                ProtocolErrorCodeV2::InvalidPayload,
+                FailureCategory::WorkerProtocol,
+            ),
+            (
+                ProtocolErrorCodeV2::ModelAccessDenied,
+                FailureCategory::ModelAccessDenied,
+            ),
+        ];
+        for (code, category) in cases {
+            let mapped = speaker_parse_failure_to_server_error(
+                protocol_failure(code, "boom"),
+                ModelLocality::Remote,
+            );
+            assert_eq!(classify_server_error(&mapped), category, "{code:?}");
+        }
         let shape_mismatch =
             SpeakerResultParseError::UnexpectedPayload("wrong payload kind".to_owned());
+        assert_eq!(
+            classify_server_error(&speaker_parse_failure_to_server_error(
+                shape_mismatch,
+                ModelLocality::Remote
+            )),
+            FailureCategory::WorkerProtocol
+        );
+    }
+
+    /// Local and remote runtime failures both receive bounded retries, but
+    /// the local failure must not be described as a transient remote outage.
+    #[test]
+    fn a_local_model_runtime_failure_retries_with_its_own_category() {
+        use crate::runner::util::classify_server_error;
+        use crate::types::worker_v2::SpeakerBackendV2;
+        use crate::worker::execute_result_v2::ModelLocality;
+        let local = speaker_parse_failure_to_server_error(
+            protocol_failure(ProtocolErrorCodeV2::RuntimeFailure, "CUDA kernel failed"),
+            ModelLocality::of_speaker(SpeakerBackendV2::Pyannote),
+        );
+        let category = classify_server_error(&local);
+        assert_eq!(category, crate::scheduling::FailureCategory::LocalRuntime);
+        let policy = crate::scheduling::RetryPolicy::default();
         assert!(matches!(
-            speaker_parse_failure_to_server_error(shape_mismatch),
-            ServerError::Validation(_)
+            policy.after_failure(1, category),
+            crate::scheduling::NextAttempt::RetryAfter(_)
         ));
+        assert_eq!(
+            policy.after_failure(policy.max_attempts, category),
+            crate::scheduling::NextAttempt::Stop(crate::scheduling::StopReason::BudgetSpent)
+        );
+        let remote = speaker_parse_failure_to_server_error(
+            protocol_failure(ProtocolErrorCodeV2::RuntimeFailure, "upstream 503"),
+            ModelLocality::of_speaker(SpeakerBackendV2::PyannoteAi),
+        );
+        assert!(
+            ((classify_server_error(&remote)).retryability()
+                == crate::types::scheduling::Retryability::Retryable)
+        );
     }
 
     /// `Auto` is ACCEPTED on the native whisper-rs path (whisper.cpp's

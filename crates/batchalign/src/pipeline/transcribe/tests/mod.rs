@@ -264,3 +264,55 @@ fn only_a_refused_stage_output_is_a_shortfall() {
         "any other failure stays the file's error"
     );
 }
+
+/// RED FIRST: for a known language whose catalog cannot serve a Stanza
+/// stage, `prepare_tail` skipped the stage with only an info line, so the
+/// job record said nothing (an auto-detected language's segmentation was
+/// already recorded as `stage_not_applied`). Segmentation is now decided
+/// once, after recognition, for both (`post_chat_route`); morphosyntax is
+/// decided here and its skip is a recorded shortfall.
+#[tokio::test]
+async fn a_known_language_the_catalog_cannot_serve_is_decided_once_and_recorded() {
+    use crate::stanza_registry::StanzaProcessor::{Depparse, Mwt, Pos, Tokenize};
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+        .await
+        .expect("cache");
+    // Dutch as Stanza ships it: no constituency parser, so no Stanza
+    // segmentation; and, here, no lemmatizer either, so no morphosyntax.
+    let pool =
+        WorkerPool::with_test_stanza_registry(crate::stanza_registry::StanzaRegistry::serving(&[
+            ("nld", &[Tokenize, Pos, Depparse, Mwt]),
+        ]));
+    let services = PipelineServices::new(&pool, &cache);
+    let dutch = LanguageCode3::try_new("nld").expect("ISO 639-3");
+    let mut opts = test_transcribe_options_in(None, dutch.into());
+    opts.plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
+        opts.plan.asr().clone(),
+        true,
+        UtsegFallbackPolicy::AllowStanza,
+    )
+    .expect("authorized Stanza route");
+    opts.with_morphosyntax = true;
+    let execution = TranscribeUtsegExecution::production(opts.plan.with_utseg());
+
+    let (tail, progress) = prepare_tail(&services, &opts, execution, None);
+
+    assert!(
+        tail.post_chat.is_some(),
+        "segmentation is decided once, after recognition, not skipped silently here"
+    );
+    let MorphosyntaxTail::Unservable(Shortfall::StageNotApplied { stage, refusal }) =
+        tail.morphosyntax
+    else {
+        panic!("a known language the catalog cannot analyze records the skipped stage");
+    };
+    assert_eq!(stage, OptionalStage::Morphosyntax);
+    let crate::api::StageRefusalRecord::Unestablished { reason } = refusal else {
+        panic!("the refusal states why");
+    };
+    assert!(reason.contains("nld"), "{reason}");
+    // Recognition, diarization, post-processing, build and serialize, plus
+    // the segmentation stage that will decide; no morphosyntax stage.
+    assert_eq!(progress.total, 4 + 1 + 1);
+}

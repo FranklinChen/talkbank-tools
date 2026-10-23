@@ -311,6 +311,53 @@ class TestWorkerV2Conformance:
             variant.value for variant in UdRelationRepairKindV2
         }
 
+    def test_ud_feature_repair(self) -> None:
+        """A removed feature value must read the same on both sides, for the
+        relation repair's reason: one the other side could not read is one the
+        file's provenance would never count."""
+        from batchalign.worker._types_v2 import (
+            UdFeatureRepairKindV2,
+            UdFeatureRepairV2,
+        )
+
+        schema = _load_schema("worker_v2", "UdFeatureRepairV2")
+        _assert_fields_match(schema, UdFeatureRepairV2)
+        kind = schema.get("$defs", {}).get("UdFeatureRepairKindV2")
+        assert kind is not None, "schema lost the UdFeatureRepairKindV2 definition"
+        assert _schema_enum_values(kind) == {
+            variant.value for variant in UdFeatureRepairKindV2
+        }
+
+    def test_utseg_request(self) -> None:
+        """The segmenter a utseg request names reads the same on both sides.
+
+        The Python ``UtsegSegmenterV2`` is a hand mirror of Rust's; a
+        segmenter one side does not know would be refused by the other at
+        dispatch, after the work that produced the request was done.
+        """
+        from batchalign.worker._types_v2 import UtsegRequestV2, UtsegSegmenterV2
+
+        schema = _load_schema("worker_v2", "UtsegRequestV2")
+        # `kind` is the tag the tagged payload enum adds at serialization.
+        _assert_fields_match(
+            schema, UtsegRequestV2, known_extra_python=frozenset({"kind"})
+        )
+        segmenter = schema.get("$defs", {}).get("UtsegSegmenterV2")
+        assert segmenter is not None, "schema lost the UtsegSegmenterV2 definition"
+        assert _schema_enum_values(segmenter) == {
+            variant.value for variant in UtsegSegmenterV2
+        }
+
+    def test_protocol_error_codes(self) -> None:
+        """Every protocol error code reads the same on both sides: a code one
+        side cannot read turns a classified failure into a protocol fault."""
+        from batchalign.worker._types_v2 import ProtocolErrorCodeV2
+
+        schema = _load_schema("worker_v2", "ProtocolErrorCodeV2")
+        assert _schema_enum_values(schema) == {
+            variant.value for variant in ProtocolErrorCodeV2
+        }
+
     def test_whisper_chunk_span(self) -> None:
         from batchalign.worker._types_v2 import WhisperChunkSpanV2
 
@@ -433,16 +480,9 @@ class TestWorkerV2Conformance:
         )
 
 
-def test_worker_error_kinds_match_rust() -> None:
-    """The stub's ``WorkerErrorKind`` spells exactly Rust's error kinds.
-
-    Rust's list (``batchalign_types::worker_v2::WorkerErrorKind::ALL``) is
-    exported as ``batchalign_core.WORKER_ERROR_KINDS``; the stub's ``Literal``
-    is the one Python spelling, which mypy checks every use against.
-    """
+def _stub_literal(alias: str) -> tuple[object, ...]:
+    """The values the extension stub's ``Literal`` alias ``alias`` spells."""
     import ast
-
-    import batchalign_core
 
     stub = ROOT / "stubs" / "batchalign_core" / "batchalign_core.pyi"
     tree = ast.parse(stub.read_text())
@@ -451,15 +491,45 @@ def test_worker_error_kinds_match_rust() -> None:
         for node in tree.body
         if isinstance(node, ast.Assign)
         and any(
-            isinstance(target, ast.Name) and target.id == "WorkerErrorKind"
+            isinstance(target, ast.Name) and target.id == alias
             for target in node.targets
         )
     )
     assert isinstance(literal, ast.Subscript)
     assert isinstance(literal.slice, ast.Tuple)
-    spelled = tuple(
+    return tuple(
         element.value
         for element in literal.slice.elts
         if isinstance(element, ast.Constant)
     )
-    assert spelled == tuple(batchalign_core.WORKER_ERROR_KINDS)
+
+
+def test_worker_error_kinds_match_rust() -> None:
+    """The stub's ``WorkerErrorKind`` spells exactly Rust's error kinds.
+
+    Rust's list (``batchalign_types::worker_v2::WorkerErrorKind::ALL``) is
+    exported as ``batchalign_core.WORKER_ERROR_KINDS``; the stub's ``Literal``
+    is the one Python spelling, which mypy checks every use against.
+    """
+    import batchalign_core
+
+    assert _stub_literal("WorkerErrorKind") == tuple(batchalign_core.WORKER_ERROR_KINDS)
+
+
+def test_stanza_names_match_rust() -> None:
+    """The stub's ``StanzaProcessorName`` and ``StanzaRequirementName`` spell
+    exactly Rust's closed sets, in Rust's order.
+
+    Rust exports ``StanzaProcessor::ALL`` as ``STANZA_PROCESSORS`` and
+    ``StanzaRequirement::ALL`` (with processors) as ``STANZA_REQUIREMENTS``;
+    the worker reads both at runtime, and mypy reads the stub's ``Literal``.
+    They used to be hand-written ``Literal`` copies in the worker modules.
+    """
+    import batchalign_core
+
+    assert _stub_literal("StanzaProcessorName") == tuple(
+        batchalign_core.STANZA_PROCESSORS
+    )
+    assert _stub_literal("StanzaRequirementName") == tuple(
+        name for name, _ in batchalign_core.STANZA_REQUIREMENTS
+    )

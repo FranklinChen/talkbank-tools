@@ -35,7 +35,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias, final
 
 from batchalign.inference._domain_types import LanguageCode
 
@@ -55,7 +55,8 @@ language and at most one secondary at a time". It does not. The keys a single
 morphotag batch can want are: the primary language; every utterance-level
 ``[- xxx]`` precode language in the file; the ``:retok`` variant of the
 primary, for a Mandarin retokenize job; and the ``:mwtprobe`` variant, for
-Italian. A Mandarin retokenize job over a file with one precode language
+Italian. A utseg worker keeps one more kind, ``:utseg``, the constituency
+pipeline of its Stanza fallback route. A Mandarin retokenize job over a file with one precode language
 therefore has a working set of three and WILL thrash at this ceiling.
 
 That is the trade, stated rather than denied: a lookup that misses asks the
@@ -91,22 +92,64 @@ def mwt_probe_key(lang: LanguageCode) -> str:
     return f"{lang}:mwtprobe"
 
 
+def utseg_key(lang: LanguageCode) -> str:
+    """Key of utseg's Stanza constituency pipeline for ``lang``."""
+    return f"{lang}:utseg"
+
+
 # ---------------------------------------------------------------------------
 # Entries and install outcomes
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
+@final
 class LoadedPipeline:
-    """One loaded pipeline together with the tokenizer context built for it.
+    """One loaded pipeline, the tokenizer context built for it, and the guard
+    every call on it goes through.
 
-    Held as one value so the two cannot be evicted apart. ``context`` is
+    Held as one value so the three cannot be separated. ``context`` is
     ``None`` for the MWT probe pipeline, which has no realignment context: an
     honest absence rather than an empty context that would read as one.
+
+    ONE STANZA PIPELINE IS NEVER CALLED BY TWO THREADS AT ONCE, in any
+    interpreter mode. Stanza does not promise that a pipeline is safe to call
+    concurrently, and its processors keep mutable state across calls (the
+    lemmatizer's results cache in Stanza's development branch is an
+    unsynchronized ``OrderedDict`` LRU). The pipeline is therefore private and
+    reachable only through :meth:`calling`, which holds this entry's own lock
+    for the call. Parallelism, where a worker wants it, comes from distinct
+    pipeline instances (one per language or variant key), never from sharing
+    one. The batch used to skip its lock on free-threaded Python, on the
+    assumption that Stanza was thread-safe; there is no longer a route to the
+    pipeline that can skip it.
     """
 
-    nlp: StanzaNLP
-    context: TokenizerContext | None
+    __slots__ = ("_calls", "_context", "_nlp")
+
+    def __init__(self, nlp: StanzaNLP, context: TokenizerContext | None) -> None:
+        self._nlp = nlp
+        self._context = context
+        # Reentrant, because the one same-thread re-entry is legitimate: the
+        # Italian MWT policy reads this pipeline's lexicon from inside the
+        # tokenizer postprocessor, during a call already holding the guard.
+        # A second THREAD still waits.
+        self._calls = threading.RLock()
+
+    @property
+    def context(self) -> TokenizerContext | None:
+        """The tokenizer context built for this pipeline, if it has one."""
+        return self._context
+
+    @contextlib.contextmanager
+    def calling(self) -> Iterator[StanzaNLP]:
+        """The pipeline, held exclusively for the duration of the block.
+
+        Everything one call depends on belongs inside the block: setting the
+        realignment context, the call, and any follow-up call that reads the
+        same pipeline's state (the English verb-reading lemmas).
+        """
+        with self._calls:
+            yield self._nlp
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +157,7 @@ class InstalledWithoutEviction:
     """The install fitted under the ceiling and dropped nothing."""
 
     key: str
+    entry: LoadedPipeline
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +166,7 @@ class InstalledEvicting:
 
     key: str
     evicted: str
+    entry: LoadedPipeline
 
 
 InstallOutcome: TypeAlias = InstalledWithoutEviction | InstalledEvicting
@@ -182,7 +227,7 @@ def static_pipelines(
     )
 
 
-class StanzaPipelineCache(Mapping[str, "StanzaNLP"]):
+class StanzaPipelineCache(Mapping[str, LoadedPipeline]):
     """LRU cache of loaded Stanza pipelines, safe to share between threads.
 
     Thread safety is required, not defensive: the worker serves requests from
@@ -209,16 +254,18 @@ class StanzaPipelineCache(Mapping[str, "StanzaNLP"]):
 
     # -- Mapping interface, which is also the "use" interface ---------------
 
-    def __getitem__(self, key: str) -> StanzaNLP:
-        """Return the pipeline for ``key`` and mark it most recently used.
+    def __getitem__(self, key: str) -> LoadedPipeline:
+        """Return the entry for ``key`` and mark it most recently used.
 
         Reading IS using: this is what makes eviction order meaningful, so
         there is deliberately no side-effect-free peek in the public surface.
+        The entry, not the bare pipeline, so a reader can only call it through
+        its guard.
         """
         with self._lock:
             entry = self._entries[key]
             self._entries.move_to_end(key)
-            return entry.nlp
+            return entry
 
     def loaded(self, key: str) -> LoadedPipeline | None:
         """Return the pipeline AND its context in one locked read.
@@ -282,20 +329,23 @@ class StanzaPipelineCache(Mapping[str, "StanzaNLP"]):
     ) -> InstallOutcome:
         """Install a freshly loaded pipeline, evicting if the ceiling is crossed.
 
-        Returns what it did. Re-installing an existing key replaces it in
+        Returns what it did, carrying the ONE entry (and so the one guard) the
+        pipeline now has: a caller that needs the pipeline uses that entry and
+        never wraps the bare pipeline in a second one. Re-installing an existing key replaces it in
         place and cannot evict, which is what makes a reload of an already
         resident language free of collateral damage.
         """
         evicted: str | None = None
+        entry = LoadedPipeline(nlp=nlp, context=context)
         with self._lock:
-            self._entries[key] = LoadedPipeline(nlp=nlp, context=context)
+            self._entries[key] = entry
             self._entries.move_to_end(key)
             if len(self._entries) > self._capacity:
                 # popitem(last=False) is the least recently used end.
                 evicted, _dropped = self._entries.popitem(last=False)
 
         if evicted is None:
-            return InstalledWithoutEviction(key=key)
+            return InstalledWithoutEviction(key=key, entry=entry)
 
         # Outside the lock, deliberately, and this is a policy rather than an
         # oversight: `gc.collect()` walks the whole heap and takes long enough
@@ -313,7 +363,7 @@ class StanzaPipelineCache(Mapping[str, "StanzaNLP"]):
             evicted,
             self._capacity,
         )
-        return InstalledEvicting(key=key, evicted=evicted)
+        return InstalledEvicting(key=key, evicted=evicted, entry=entry)
 
     # -- Contexts ------------------------------------------------------------
 

@@ -660,11 +660,13 @@ linguistically invalid. BA3's approach is to fail honestly, an empty
 that the language needs attention rather than hiding the problem behind
 plausible-looking garbage.
 
-The supported language set is maintained in
-`crates/batchalign-transform/src/morphosyntax/pos_hints.rs::is_stanza_supported`
-(Rust-side gate, called before dispatch in `crates/batchalign/src/morphosyntax/batch.rs`)
-and `batchalign/worker/_stanza_loading.py` (Python-side mapping). Both
-must stay in sync.
+The supported language set is not maintained anywhere: it is what the
+installed Stanza catalog serves. The worker's capability table
+(`batchalign/worker/_stanza_capabilities.py`) derives it from the catalog and
+Rust's ISO 639-1 table, and the server admits the worker's report as its
+`StanzaRegistry`, the one authority for the primary language, each
+utterance's effective language, secondary (L2) dispatch and the submission
+check. See [Stanza Capability Registry](../architecture/stanza-capability-registry.md).
 
 ### Processor capability discovery
 
@@ -675,11 +677,11 @@ when a language lacked an assumed processor.
 | Behavior | BA2 | BA3 (before registry) | BA3 (with registry) |
 |----------|-----|----------------------|---------------------|
 | Capability source | Hardcoded in code | Hardcoded in 7 tables | Stanza `resources.json` (authoritative) |
-| Dutch utseg | **Crash** ("constituency not known for nl") | **Crash** (same bug) | Graceful (constituency omitted, sentence-boundary fallback) |
+| Dutch utseg | **Crash** ("constituency not known for nl") | **Crash** (same bug) | Refused before work: the Stanza route requires a constituency parser |
 | MWT detection | BA2 exclusion-list inversion | Copy of BA2 exclusion list (`MWT_LANGS`) | Per-language from `resources.json` |
 | Unsupported language | Wrong model (MultilingualPipeline fallback) | Reject/skip at dispatch | Reject at submission with clear error |
-| iso3→alpha2 mapping | Hardcoded dict (56 codes) | Hardcoded dict (3 copies: Python + 2 Rust) | Derived from `pycountry` + `resources.json` |
-| Constituency availability | Always requested (crashed for 180+ languages) | Always requested (same) | Per-language check (~11 languages have it) |
+| iso3→Stanza code mapping | Hardcoded dict (56 codes) | Hardcoded dict (3 copies: Python + 2 Rust) | Derived from Rust's ISO 639-1 table + `resources.json` (one table) |
+| Constituency availability | Always requested (crashed for 180+ languages) | Always requested (same) | Required by the Stanza route and checked per language before work |
 
 The capability table (`batchalign/worker/_stanza_capabilities.py`) reads
 Stanza's `resources.json` once at worker startup and reports per-language

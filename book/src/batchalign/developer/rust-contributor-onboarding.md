@@ -1,7 +1,7 @@
 # Rust Contributor Onboarding
 
 **Status:** Current
-**Last updated:** 2026-09-05 03:20 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This page is the shortest path to productive work on the Rust side of Batchalign3.
 
@@ -53,7 +53,7 @@ Rebuild rule of thumb while iterating:
 
 ## Where To Work
 
-- CLI flags, args parsing, cache, daemon, dispatch: `crates/batchalign/src/cli/`, `crates/batchalign/src/cache/`, `crates/batchalign/src/daemon.rs`
+- CLI flags, args parsing, cache, daemon, dispatch: `crates/batchalign/src/cli/`, `crates/batchalign/src/cache/`, `crates/batchalign/src/cli/daemon.rs`
 - Server routes, jobs, persistence, OpenAPI: `crates/batchalign/src/server.rs`, `crates/batchalign/src/routes/`, `crates/batchalign/src/openapi.rs`
 - Worker pool, IPC, daemon spawn: `crates/batchalign/src/worker/`
 - Shared CHAT transformations and morphosyntax / FA / UTR / mapping logic: `crates/batchalign-transform/` (and `crates/batchalign/src/chat_ops/` for the batchalign-side adapters that route through it)

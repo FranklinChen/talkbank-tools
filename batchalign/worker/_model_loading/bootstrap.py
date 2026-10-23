@@ -26,7 +26,7 @@ from batchalign.worker._model_loading.forced_alignment import load_fa_engine
 from batchalign.worker._model_loading.translation import load_translation_engine
 from batchalign.worker._model_loading.utterance import load_utterance_model
 from batchalign.worker._progress import emit_download_event
-from batchalign.worker._stanza_loading import load_stanza_models, load_utseg_builder
+from batchalign.worker._stanza_loading import load_stanza_models, prepare_utseg_stanza
 from batchalign.worker._types import (
     PROFILE_TASKS,
     FiniteNonNegativeFloat,
@@ -279,6 +279,11 @@ def _load_single_task(task: str, bootstrap: WorkerBootstrapRuntime) -> None:
             build_morphosyntax_batch_infer_handler(),
         )
     elif task in ("utterance", InferTask.UTSEG.value):
+        # A worker with no resolved language has no boundary-model pin (Rust
+        # injects the pin for a resolved language only), so it loads none; it
+        # loads a request language's Stanza pipeline on first use. Rust
+        # dispatches utseg on the route's resolved language, so a
+        # boundary-model request reaches a worker that loaded its pin.
         if bootstrap.lang in ("auto", "per-file"):
             L.info(
                 "Skipping eager utseg-model load for non-ISO lang '%s'; "
@@ -286,7 +291,7 @@ def _load_single_task(task: str, bootstrap: WorkerBootstrapRuntime) -> None:
                 bootstrap.lang,
             )
         else:
-            load_utseg_builder(bootstrap.lang)
+            prepare_utseg_stanza(bootstrap.lang)
             load_utterance_model(bootstrap.lang, bootstrap.engine_overrides)
         _state.register_batch_infer_handler(
             InferTask.UTSEG,

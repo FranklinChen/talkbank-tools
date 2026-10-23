@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-10-21 17:09 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -124,7 +124,7 @@ sync:
 | Python code only (`batchalign/`) | Nothing; the next worker process picks up the change |
 | Rust CLI / server (`crates/batchalign/`) | `cargo build -p batchalign` |
 | Shared logic feeding the PyO3 bridge, or the bridge itself (`crates/batchalign-pyo3/`) | `make batchalign-develop` for editable iteration; `make batchalign-python-prepare` for wheel qualification. Also rebuild the CLI if you will run it after a shared-crate change. |
-| Command/orchestrator changes (`crates/batchalign/src/commands/`, `compare.rs`, `benchmark.rs`, `transcribe/`, `fa/`, `morphosyntax/`, `command_family.rs`, `text_batch.rs`) | `cargo build -p batchalign`, and `make batchalign-python-prepare` if the PyO3 bridge surface changed |
+| Command/orchestrator changes (`crates/batchalign/src/recipe_runner/catalog.rs`, `compare.rs`, `benchmark.rs`, `transcribe/`, `fa/`, `morphosyntax/`, `recipe_runner/command_spec.rs`, `text_batch.rs`) | `cargo build -p batchalign`, and `make batchalign-python-prepare` if the PyO3 bridge surface changed |
 | Cross-cutting or dashboard changes | `make build` (requires Node.js + npm because it rebuilds the embedded dashboard, then runs `cargo build --workspace --release`) |
 
 ## Rebuilding the Rust Extension
@@ -297,21 +297,21 @@ wheel still builds but `batchalign3 --help` will fail at runtime with
 
 ## Where Command Logic Should Live
 
-If you are changing command behavior, the first stop should be the owning
-command module in `crates/batchalign/src/commands/` and then the module
+If you are changing command behavior, the first stop should be the command
+entry in `crates/batchalign/src/recipe_runner/catalog.rs` and then the module
 that actually owns the algorithmic or orchestration semantics (`compare.rs`,
 `benchmark.rs`, `transcribe/`, `fa/`, `morphosyntax/`, etc.).
 
-- `crates/batchalign/src/commands/` owns released-command identity, specs,
-  and the top-level contributor-facing entrypoints.
-- `crates/batchalign/src/command_family.rs` keeps the small command-shape
+- `crates/batchalign/src/recipe_runner/catalog.rs` declares command metadata and its
+  recipe; `command_model/` exposes the lookup.
+- `crates/batchalign/src/recipe_runner/command_spec.rs` keeps the small command-shape
   enum used by command metadata.
 - `crates/batchalign/src/text_batch.rs` keeps reusable text-batch helper
   types for commands such as `utseg`, `translate`, and `coref`.
 - `crates/batchalign/src/runner/` owns job lifecycle, queueing, and shared
   dispatch machinery.
 - `crates/batchalign/src/runner/dispatch/` (benchmark_pipeline.rs,
-  fa_pipeline.rs, transcribe_pipeline.rs, infer_batched.rs, audio_task.rs,
+  fa_pipeline.rs, transcribe_pipeline.rs, audio_task.rs,
   asr_media.rs, media_analysis_v2.rs, options.rs, plan.rs, utr.rs) should
   stay thin and focus on argument parsing, capability gating, and whether
   a command runs locally or through the server.

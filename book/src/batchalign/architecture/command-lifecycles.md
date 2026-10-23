@@ -11,7 +11,7 @@ projection, composite workflow, or media analysis. For per-command
 option-driven flowcharts, see [Command Flowcharts](command-flowcharts.md).
 
 Contributor rule of thumb: if you are adding new command semantics, start in
-`crates/batchalign/src/commands/` and then jump to the owning module
+`crates/batchalign/src/recipe_runner/catalog.rs` and then jump to the owning module
 (`compare.rs`, `benchmark.rs`, `transcribe/`, `fa/`, `morphosyntax/`, etc.).
 `runner/` owns lifecycle and queueing; `dispatch/` should remain thin.
 
@@ -109,9 +109,9 @@ sequenceDiagram
     Pool->>W2: spawn (command=align, lang=eng)
 
     loop For each file (concurrent, bounded by num_workers semaphore)
+        Server->>Server: Admit source-bound word-timing plan and any active prior
         Server->>Server: resolve audio via media_mappings
         Server->>Server: ensure_wav(): convert mp4→wav if needed (cached)
-        Server->>Server: parse_lenient()
 
         alt Complete reusable %wor timing
             Note over Server: Cheap rerun path:<br/>verify main↔%wor mapping,<br/>rehydrate main-tier word bullets,<br/>refresh utterance bullets / %wor
@@ -130,7 +130,7 @@ sequenceDiagram
                 Note over Server: Skip UTR (use existing bullets;<br/>refuse unsupported localization)
             end
 
-            Server->>Server: pre-validate (MainTierValid)
+            Server->>Server: Observe timing on the admitted working document
             Server->>Server: group_utterances() → time windows
 
             Server->>Cache: batch lookup (BLAKE3 keys: words + audio identity + window)
@@ -232,12 +232,12 @@ sequenceDiagram
     Note over Server: Runner: mark Running, select dispatch_morphotag_job
 
     loop For each file (concurrent, bounded by num_workers semaphore)
-        Server->>Server: parse_lenient()
-        alt @Options: CA in header
-            Server->>Server: serialize parsed file as-is (no %mor/%gra added)
+        Server->>Server: ParsedFile::parse(): admit retained CHAT under selected plan
+        alt @Options: CA and policy is Honor
+            Server->>Server: Preserve admitted source (no %mor/%gra added)
             Server->>JobStore: Mark file Done
         else
-        Server->>Server: clear existing %mor/%gra
+        Note over Server: Replacement plan already discarded old %mor/%gra
         Server->>Server: collect_payloads()
 
         Server->>Cache: batch lookup all utterances
@@ -315,6 +315,7 @@ sequenceDiagram
     alt Missing gold companion
         Server->>Server: Mark file Error
     else Gold companion present
+        Server->>Server: Admit gold source -> AdmittedComparisonReference
         Server->>Pool: checkout worker
         Pool-->>Server: CheckedOutWorker
         Server->>W: execute_v2(task="morphosyntax", main transcript only)
@@ -322,7 +323,7 @@ sequenceDiagram
         Note over Server: Worker returned to pool
 
         Server->>Server: PostValidated::into_judged_document() -> AST_main
-        Server->>Server: parse_lenient(raw gold) -> AST_gold
+        Server->>Server: Consume admitted reference -> AST_gold (no reparse)
         Server->>Cmp: compare(AST_main, AST_gold)
         Note over Cmp: conform -> one whole-file alignment -> per-utterance views projected from it<br/>main view + gold view + structural word matches + metrics
         Cmp-->>Server: ComparisonBundle

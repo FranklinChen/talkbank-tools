@@ -1,7 +1,7 @@
 # NLP Pipeline Decision Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-15 18:33 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This chapter documents how batchalign3's four NLP pipelines (morphotag,
 utseg, coref, forced alignment) represent per-utterance decisions, how
@@ -525,13 +525,13 @@ Invariant enforcement:
 
 Tests that pin the architecture:
 
-- `crates/batchalign/tests/mor_count_parity_reference_corpus.rs`
+- `crates/batchalign/tests/chat_ops_mor_count_parity_reference_corpus.rs`
  , cross-walker count parity across the 98-file reference corpus
 - `batchalign/tests/inference/test_morphosyntax_realignment_contract.py`
  , Python contract test pinning `tok_ctx.original_words` sequencing
 - `crates/batchalign-transform/src/morphosyntax/outcome.rs`
   `#[cfg(test)]`: per-variant classification tests
-- `crates/batchalign/src/eval_cmd/l2_morphotag/tests.rs`
+- `crates/batchalign/src/cli/eval_cmd/l2_morphotag/tests.rs`
  , `UtteranceOutcome` classifier truth table
 
 Deep-dive pages:

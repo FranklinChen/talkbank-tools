@@ -126,7 +126,9 @@ impl<'band, 'graph, 'source> ForwardScores<'band, 'graph, 'source> {
                 let plan = StoragePlan::observe(&row);
                 let required = retained.saturating_add(plan.cells);
                 if required.saturating_add(band.scoring_cells) > SCORE_CELLS {
-                    return Ok(Err(LocalInterleavingRefusal::MemoryBudgetExceeded));
+                    return Ok(Err(LocalInterleavingRefusal::Budget(
+                        LocalInterleavingBudget::MemoryBudgetExceeded,
+                    )));
                 }
                 retained = required;
                 checkpoints.push(plan.retain());
@@ -161,10 +163,19 @@ impl<'band, 'graph, 'source> ForwardScores<'band, 'graph, 'source> {
         Ok(ScoreBlock { start, rows })
     }
 
+    /// Reconstruct the selected matches from the end node back to the start.
+    ///
+    /// Every step either consumes a reference position, or moves to an
+    /// earlier node of the acyclic graph, so the walk ends. A step no edge
+    /// explains (the current cell is unreachable, or no incoming edge yields
+    /// its score) is the search contradicting its own forward pass, and is
+    /// refused as [`LocalInterleavingInconsistency::TracebackStalled`] in every
+    /// build: a debug assertion there left a release build looping forever on
+    /// the same cell.
     pub(in super::super) fn traceback<C: WorkControl + ?Sized>(
         &self,
         control: &C,
-    ) -> Result<Vec<Selected>, C::Error> {
+    ) -> Result<Result<Vec<Selected>, LocalInterleavingInconsistency>, C::Error> {
         let mut node = self.band.graph.end;
         let mut k = self.band.reference_len;
         let mut selected = Vec::new();
@@ -174,39 +185,42 @@ impl<'band, 'graph, 'source> ForwardScores<'band, 'graph, 'source> {
                 control.check()?;
                 let current = &block.rows[k - block.start];
                 let previous = &block.rows[k - block.start - 1];
-                let score = current.get(self.band.graph.rank[node]);
-                debug_assert!(score.is_some());
-                if score == previous.get(self.band.graph.rank[node]) {
+                let stalled = LocalInterleavingInconsistency::TracebackStalled { reference: k };
+                let Some(score) = current.get(self.band.graph.rank[node]) else {
+                    return Ok(Err(stalled));
+                };
+                if previous.get(self.band.graph.rank[node]) == Some(score) {
                     k -= 1;
                     continue;
                 }
-                let mut advanced = false;
-                for edge in &self.band.graph.incoming[node] {
+                let step = self.band.graph.incoming[node].iter().find_map(|edge| {
                     let from = self.band.graph.rank[edge.to];
-                    if let Some(word) = edge.word
-                        && self.band.relation.matches(word, k - 1)
-                        && increment(previous.get(from)) == score
-                    {
-                        selected.push(Selected {
-                            source: word,
-                            reference: k - 1,
-                        });
-                        node = edge.to;
-                        k -= 1;
-                        advanced = true;
-                        break;
+                    match edge.word {
+                        Some(word)
+                            if self.band.relation.matches(word, k - 1)
+                                && increment(previous.get(from)) == Some(score) =>
+                        {
+                            Some((edge.to, Some(word)))
+                        }
+                        Some(_) | None if current.get(from) == Some(score) => Some((edge.to, None)),
+                        Some(_) | None => None,
                     }
-                    if current.get(from) == score {
-                        node = edge.to;
-                        advanced = true;
-                        break;
-                    }
+                });
+                let Some((to, matched)) = step else {
+                    return Ok(Err(stalled));
+                };
+                if let Some(word) = matched {
+                    selected.push(Selected {
+                        source: word,
+                        reference: k - 1,
+                    });
+                    k -= 1;
                 }
-                debug_assert!(advanced);
+                node = to;
             }
         }
         selected.reverse();
-        Ok(selected)
+        Ok(Ok(selected))
     }
 }
 

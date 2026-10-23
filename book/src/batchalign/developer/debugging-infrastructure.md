@@ -1,7 +1,7 @@
 # Debugging Infrastructure
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:35 EDT
+**Last updated:** 2026-10-24 21:32 EDT
 
 > Release note: this document describes the current source tree. The
 > fail-closed FA/speaker evidence and content-addressed worker identity added in
@@ -49,7 +49,7 @@ regardless of whether `--debug-dir` was specified:
 
 | Dump file | Trigger | Contents |
 |-----------|---------|----------|
-| `failed_ipc_{timestamp}.json` | Any worker IPC failure (timeout, crash, protocol) | Full request JSON, error type/message, worker PID + label, response fragment |
+| `failed_ipc_{timestamp}.json` | Any worker IPC failure (timeout, crash, protocol) | Full request JSON, error type/message, worker PID, label and launch record (`worker_launch`), response fragment |
 
 These dumps are small (word lists, not audio) and the failure rate is low,
 so disk impact is negligible. They accumulate until manually cleaned.
@@ -160,7 +160,7 @@ An AI can:
    process it serves and must exit with; `$$` is the calling shell)
 4. Compare the output to the dump
 
-This is the foundation for the planned `batchalign3 replay` tool.
+`batchalign3 replay` does this with the worker the dump records (below).
 
 ### 4. Pattern Recognition Across Failures
 
@@ -225,7 +225,19 @@ pipeline, missing processors) before they become production failures.
 ### `batchalign3 replay`
 
 Takes a `failed_ipc_{timestamp}.json` dump and replays the exact request
-against a fresh worker. Enables:
+against a fresh worker: the worker the dump records. Every dump carries
+`worker_launch` (`WorkerLaunch`, built from the failing worker's
+`WorkerConfig`: profile or task, language, engine overrides, force-CPU and
+MPS flags, bootstrap mode, concurrent capacity), and the replay turns it back
+into a `WorkerConfig` and spawns through the pool's own `WorkerHandle::spawn`
+and command builder. A worker that loads on demand is asked to load the
+request's task first (`ensure_task`, with the same overrides the pool derives
+in `worker::pool::ensure_task_params`). So a Qwen3 ASR or Cantonese FA dump
+replays on a worker with that engine, not on a default-engine worker for the
+request's task. `--lang` replays under another language, as the operator's
+stated choice. A dump written before the record existed is refused: it
+cannot say which worker ran it.
+Enables:
 - Reproduction without the server
 - Cross-machine comparison
 - Post-fix verification

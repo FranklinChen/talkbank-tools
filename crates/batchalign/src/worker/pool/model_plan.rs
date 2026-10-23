@@ -333,7 +333,7 @@ impl GpuRoute {
 
     /// Refuse a request that is not this route's task or names other engines.
     pub(super) fn admit(&self, request: &ExecuteRequestV2) -> Result<(), WorkerError> {
-        let requested = infer_task_for_execute_v2(request.task)?;
+        let requested = infer_task_for_execute_v2(request.task);
         if requested != self.task.infer_task() {
             return Err(PlanMismatch::Task {
                 request: requested,

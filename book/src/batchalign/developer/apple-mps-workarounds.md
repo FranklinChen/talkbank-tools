@@ -1,13 +1,14 @@
 # Apple MPS Workarounds
 
 **Status:** Current
-**Last updated:** 2026-07-17 09:12 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 ## MPS Exclusion Policy
 
-**MPS is excluded from ALL model loaders.** All GPU-profile workers
-(ASR, FA, Speaker) run on CPU when CUDA is unavailable. MPS is never
-used, on any fleet machine.
+**MPS is excluded by default.** ASR and forced-alignment loaders select CPU
+when CUDA is unavailable unless the operator explicitly enables `--allow-mps`.
+Local speaker engines exclude MPS even with that opt-in. `--force-cpu`
+overrides accelerator selection. The opt-in is described below.
 
 ### Why: confirmed unsafe behavior
 
@@ -157,10 +158,9 @@ only when CUDA is available.
 
 ### Implications for platform strategy
 
-MPS exclusion means Apple Silicon machines run all ML inference on CPU.
-On Apple Silicon (e.g. an M3 Ultra Mac Studio), Whisper, Wav2Vec2, and
-Stanza all run on CPU; cache/temp-space pressure can dominate host
-behavior on long jobs.
+Without the MPS opt-in, Apple Silicon machines run these PyTorch ASR and FA
+models on CPU. Cache/temp-space pressure can dominate host behavior on long
+jobs. This policy does not describe non-PyTorch backends such as whisper.cpp.
 
 The code is CUDA-ready: all model loaders select CUDA first when
 available, `gpu_thread_pool_size` activates, and the worker profiles
@@ -351,20 +351,21 @@ the corresponding workaround.
 
 When adding a new inference module that loads a PyTorch model:
 
-1. **Never use MPS.** Our standard device selection is CUDA > CPU. MPS is
-   permanently excluded due to kernel-level deadlocks.
-2. **Use `force_cpu_preferred()` as the first check**: respect the operator's
-   CPU override.
+1. **Use the shared device policy.** ASR/FA loaders call
+   `resolve_inference_device`; the default is CUDA > CPU, and MPS requires
+   explicit opt-in. Speaker loaders keep their separate MPS exclusion.
+2. **Respect the CPU override**: `DevicePolicy.force_cpu` takes precedence
+   over accelerator availability and MPS opt-in.
 3. **Test device selection**: add a parametrized test with
-   `(force_cpu, cuda_available, mps_available)` that verifies MPS availability
-   is ignored and CPU is selected when CUDA is unavailable.
-4. **Use `float16` on CUDA, `float32` on CPU**: unless the model specifically
-   requires a different dtype.
+   `(force_cpu, allow_mps, cuda_available, mps_available)` covering the default,
+   opt-in and CPU override. Speaker tests must retain exclusion under opt-in.
+4. **Keep each model's CUDA dtype and use `float32` on CPU/MPS**, unless the
+   model specifically requires a different dtype.
 
 ## Test Coverage
 
-Device selection is covered by parametrized tests that verify MPS is ignored
-and CPU is selected when CUDA is unavailable:
+The default-policy cases below verify CPU selection when only MPS is
+available; they do not mean the explicit opt-in is unavailable:
 
 | Test | File | What it verifies |
 |------|------|-----------------|

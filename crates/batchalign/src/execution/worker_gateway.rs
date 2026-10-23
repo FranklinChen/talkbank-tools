@@ -12,6 +12,7 @@ use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
 use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
 use crate::translate::TranslationRoute;
+use crate::utseg_route::ServableUtsegRoute;
 use crate::worker::pool::WorkerPool;
 
 /// Runtime morphotag options resolved from command options for execution.
@@ -78,17 +79,12 @@ pub(crate) trait WorkerGateway: Send + Sync {
 
     /// Run utterance segmentation over one cross-file batch of CHAT inputs.
     ///
-    /// `allow_stanza_fallback` propagates the
-    /// `--utseg-fallback-stanza` operator opt-in: when `true`, the
-    /// worker engages the legacy Stanza constituency-parser segmenter
-    /// for languages without a TalkBank BERT utseg model. When
-    /// `false` (default), the worker raises `UtsegModelNotFoundError`
-    /// rather than silently substituting one model for another.
+    /// `route` is the admitted route: its language and the one segmenter the
+    /// worker request names, so the worker never chooses a segmenter itself.
     async fn utseg_batch(
         &self,
         files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
-        allow_stanza_fallback: bool,
+        route: &ServableUtsegRoute,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults;
 
@@ -214,18 +210,10 @@ impl WorkerGateway for PooledWorkerGateway {
     async fn utseg_batch(
         &self,
         files: &[TextBatchFileInput],
-        lang: &LanguageCode3,
-        allow_stanza_fallback: bool,
+        route: &ServableUtsegRoute,
         cancellation: Cancellation<'_>,
     ) -> TextBatchFileResults {
-        crate::utseg::process_utseg_batch(
-            files,
-            lang,
-            &self.pool,
-            allow_stanza_fallback,
-            cancellation,
-        )
-        .await
+        crate::utseg::process_utseg_batch(files, route, &self.pool, cancellation).await
     }
 
     async fn translate_file(

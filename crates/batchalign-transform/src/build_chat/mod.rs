@@ -1,18 +1,18 @@
 //! Build a CHAT file from a structured transcript description.
 //!
-//! This module constructs a [`ChatFile`] AST from structured input, either
-//! a JSON transcript description (for PyO3 bridge compatibility) or typed
-//! Rust structs (for the Rust server's transcribe orchestrator).
+//! This module constructs a [`ChatFile`] AST from a typed
+//! [`TranscriptDescription`] (the Rust server's transcribe orchestrator
+//! builds one from ASR utterances).
 //!
 //! The implementation is split by responsibility so contributors can find the
-//! schema bridge, parser setup, header synthesis, and utterance assembly logic
-//! without paging through the full end-to-end pipeline in one file.
+//! ASR bridge, header synthesis, and utterance assembly logic without paging
+//! through the full end-to-end pipeline in one file.
 //!
-//! # Two entry points
+//! # Entry point
 //!
-//! - [`build_chat`]: takes a typed [`TranscriptDescription`] struct
-//! - [`build_chat_from_json`]: deserializes JSON into `TranscriptDescription`,
-//!   then calls `build_chat`. Used by the PyO3 bridge to delegate here.
+//! - [`build_chat`]: takes a typed [`TranscriptDescription`]. Its languages
+//!   ([`TranscriptLanguages`]) and words (`ChatWordText`) were parsed where
+//!   they were built, so assembly parses neither again.
 //!
 //! # Convenience
 //!
@@ -21,7 +21,6 @@
 
 mod bridge;
 mod headers;
-mod parser;
 mod schema;
 #[cfg(test)]
 mod tests;
@@ -31,15 +30,15 @@ use talkbank_model::model::{ChatFile, Header, Line};
 
 pub use bridge::{
     AsrDiagnosticError, AsrTranscript, LanguageInvalidWord, NamedAsrUtterances,
-    TranscriptBuildError, build_chat_from_json, transcript_from_asr_utterances,
+    TranscriptBuildError, transcript_from_asr_utterances,
 };
 pub use schema::{
-    DescribedTiming, ParticipantDesc, TranscriptDescription, UtteranceDesc, WordDesc,
+    DescribedTiming, ParticipantDesc, TranscriptDescription, TranscriptLanguages, UtteranceBody,
+    UtteranceDesc, WordDesc,
 };
 pub use utterances::tag_marker_separator;
 
 use headers::{build_header_lines, build_participant_map};
-use parser::BuildChatContext;
 use utterances::build_utterance_lines;
 
 /// Why building a CHAT file from a [`TranscriptDescription`] failed.
@@ -58,24 +57,6 @@ pub enum BuildChatError {
     /// The tree-sitter parser could not be created.
     #[error("failed to create parser: {0}")]
     ParserInit(String),
-
-    /// A supplied word was refused or required parser recovery.
-    #[error("word {text:?} could not be parsed cleanly as CHAT: {diagnostics:?}")]
-    Word {
-        /// The supplied token, without an invented replacement.
-        text: String,
-        /// Parser diagnostics retained for callers, including recovery evidence.
-        diagnostics: Vec<talkbank_model::ParseError>,
-    },
-
-    /// A language code in `@Languages` or on an utterance is not valid.
-    #[error("invalid language code {code:?}: {source}")]
-    LanguageCode {
-        /// The rejected code.
-        code: String,
-        /// Why the model rejected it.
-        source: talkbank_model::model::LanguageCodeError,
-    },
 
     /// An utterance body could not be parsed as CHAT.
     #[error("failed to parse utterance for speaker {speaker}: {message}")]
@@ -120,32 +101,69 @@ pub enum BuildChatError {
     },
 }
 
-/// Build a CHAT file from a typed transcript description.
-pub fn build_chat(desc: &TranscriptDescription) -> Result<ChatFile, BuildChatError> {
+/// A built CHAT file, with every utterance whose terminator the description's
+/// producer synthesized: CHAT has no notation for a terminator nobody heard,
+/// so this list is where the difference survives.
+///
+/// `#[must_use]`: a caller that wants only the file says so, in a line a
+/// reader can see ([`Self::into_file`]).
+#[must_use]
+#[derive(Debug)]
+pub struct BuiltChat {
+    /// The CHAT file.
+    pub file: ChatFile,
+    /// The utterances written with a synthesized terminator, in order.
+    pub synthesized_ends: Vec<SynthesizedEnd>,
+}
+
+impl BuiltChat {
+    /// The file alone, the synthesized ends deliberately set aside.
+    pub fn into_file(self) -> ChatFile {
+        self.file
+    }
+}
+
+/// An utterance written with a terminator this pipeline added, not one its
+/// source observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesizedEnd {
+    /// Its position among the file's utterances, counting from 1.
+    pub utterance: usize,
+    /// Its speaker code (e.g. `"PAR1"`).
+    pub speaker: String,
+}
+
+/// Build a CHAT file from a typed transcript description: the last
+/// transition of transcript assembly. ASR utterances are named
+/// (`NamedAsrUtterances`), admitted into a description whose languages and
+/// words are parsed (`into_transcript`), and the description is consumed
+/// here into the built file, so a description is built from once and never
+/// re-checked.
+pub fn build_chat(desc: TranscriptDescription) -> Result<BuiltChat, BuildChatError> {
+    let desc = &desc;
+    // An empty transcript before participants: a description with no
+    // utterance also names no speaker (the ASR bridge lists only speakers it
+    // observed), and "no participants" would hide what produced nothing.
+    // The languages were parsed where the description was built.
+    let parser = talkbank_parser::TreeSitterParser::new()
+        .map_err(|e| BuildChatError::ParserInit(e.to_string()))?;
+    if desc.utterances.is_empty() {
+        return Err(BuildChatError::NoUtterances);
+    }
     if desc.participants.is_empty() {
         return Err(BuildChatError::NoParticipants);
     }
-
-    let context = BuildChatContext::new(desc)?;
-    // Headers first, so a document with a bad language code is still refused
-    // for its language code rather than for the emptiness below.
-    let mut lines = build_header_lines(desc, context.langs())?;
-    let utterances = build_utterance_lines(
-        desc,
-        context.parser(),
-        context.langs(),
-        context.primary_lang(),
-    )?;
+    let mut lines = build_header_lines(desc)?;
+    let utterances::BuiltUtterances {
+        lines: utterances,
+        synthesized_ends,
+    } = build_utterance_lines(desc, &parser)?;
     // The built LINES are what decides, not the described utterances: a
     // description can carry words that all reduce to nothing, and it is the
     // absence of an utterance line that makes the output an empty transcript.
     if utterances.is_empty() {
-        return Err(if desc.utterances.is_empty() {
-            BuildChatError::NoUtterances
-        } else {
-            BuildChatError::NoUtteranceSurvivedBuild {
-                described: desc.utterances.len(),
-            }
+        return Err(BuildChatError::NoUtteranceSurvivedBuild {
+            described: desc.utterances.len(),
         });
     }
     lines.extend(utterances);
@@ -157,6 +175,9 @@ pub fn build_chat(desc: &TranscriptDescription) -> Result<ChatFile, BuildChatErr
     // Programmatically assembled CHAT carries the same typed participant
     // metadata as parsed CHAT; `ChatFile::new`'s empty map is for parser
     // intermediates only (see `build_participant_map`).
-    let participants = build_participant_map(desc, context.langs());
-    Ok(ChatFile::with_participants(lines, participants))
+    let participants = build_participant_map(desc);
+    Ok(BuiltChat {
+        file: ChatFile::with_participants(lines, participants),
+        synthesized_ends,
+    })
 }

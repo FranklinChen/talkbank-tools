@@ -23,6 +23,7 @@ pub mod machine_time;
 pub mod memory;
 pub mod paths;
 pub mod scheduling;
+pub mod stanza_catalog;
 pub mod whisper_language;
 pub mod worker;
 pub mod worker_profile;

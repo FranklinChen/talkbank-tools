@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._tokenizer_realign import (
     TokenizerContext,
     make_tokenizer_postprocessor,
@@ -36,8 +37,8 @@ def english_pipeline_with_postprocessor():
     import stanza
     from stanza import DownloadMethod
 
-    ctx = TokenizerContext()
-    pp = make_tokenizer_postprocessor(ctx, alpha2="en")
+    ctx = TokenizerContext(StanzaCode("en"))
+    pp = make_tokenizer_postprocessor(ctx)
     nlp = stanza.Pipeline(
         lang="en",
         processors=_ENGLISH_PROCESSORS,

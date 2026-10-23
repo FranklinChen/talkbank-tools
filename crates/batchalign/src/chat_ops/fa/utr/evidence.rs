@@ -199,15 +199,74 @@ impl UtrWordOrdinal {
     }
 }
 
+/// Zero-based lexical-unit ordinal within one CHAT utterance: the position
+/// UTR matches at. Equal to the word ordinal when a word is one unit; a
+/// Cantonese word of several characters has one unit per character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
+pub(super) struct UtrUnitOrdinal(pub(super) usize);
+
+impl UtrUnitOrdinal {
+    pub(super) fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// The transcript word a lexical unit belongs to, and where in it.
+///
+/// The fields are private and [`Self::units_of`] is the only constructor: it
+/// yields every unit of a word at once, so `parts` is the word's real unit
+/// count, never zero, and `part < parts` for every value that exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(super) struct UtrUnitOfWord {
+    /// The alignable word (forced alignment's word space).
+    word_index: UtrWordOrdinal,
+    /// This unit's position within the word.
+    part: usize,
+    /// How many units the word has.
+    parts: std::num::NonZeroUsize,
+}
+
+impl UtrUnitOfWord {
+    /// Every unit of word `word_index`, which has `parts` units, in order.
+    pub(super) fn units_of(
+        word_index: UtrWordOrdinal,
+        parts: std::num::NonZeroUsize,
+    ) -> impl Iterator<Item = Self> {
+        (0..parts.get()).map(move |part| Self {
+            word_index,
+            part,
+            parts,
+        })
+    }
+
+    /// The alignable word the unit belongs to.
+    pub(super) fn word_index(self) -> UtrWordOrdinal {
+        self.word_index
+    }
+
+    /// This unit's position within its word, below [`Self::parts`].
+    pub(super) fn part(self) -> usize {
+        self.part
+    }
+
+    /// How many units the word has.
+    pub(super) fn parts(self) -> std::num::NonZeroUsize {
+        self.parts
+    }
+}
+
 /// Zero-based token ordinal in the admitted ASR timing stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(transparent)]
 pub(super) struct UtrAsrTokenOrdinal(pub(super) usize);
 
-/// Zero-based whitespace-delimited word ordinal within one provider token.
+/// Zero-based lexical-unit ordinal within one provider token: a unit, not a
+/// word (a Cantonese token's characters are its units, and punctuation is
+/// none), counted in the same projection as the CHAT side's units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(transparent)]
-pub(super) struct UtrAsrWordOrdinal(pub(super) usize);
+pub(super) struct UtrAsrUnitOrdinal(pub(super) usize);
 
 impl UtrAsrTokenOrdinal {
     pub(super) fn index(self) -> usize {
@@ -215,36 +274,40 @@ impl UtrAsrTokenOrdinal {
     }
 }
 
-/// Stable address of one alignable CHAT word in the UTR payload.
+/// Stable address of one lexical unit of an alignable CHAT word in the UTR
+/// payload: the unit's position in its utterance, and the word it belongs to.
+///
+/// On the wire `utterance_index`, `unit_index`, then the word's `word_index`,
+/// `part` and `parts`. A word that is one unit has `part` 0 of 1 and a
+/// `unit_index` equal to its `word_index`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct UtrWordAddress {
     /// Zero-based utterance ordinal among main tiers.
     pub(super) utterance_index: UtrUtteranceOrdinal,
-    /// Zero-based ordinal among alignable words in that utterance.
-    pub(super) word_index: UtrWordOrdinal,
+    /// Zero-based ordinal among the utterance's lexical units.
+    pub(super) unit_index: UtrUnitOrdinal,
+    /// The word the unit belongs to.
+    #[serde(flatten)]
+    pub(super) of_word: UtrUnitOfWord,
 }
 
 impl UtrWordAddress {
-    /// The same word addressed in the file's census instead of a region's.
+    /// The same unit addressed in the file's census instead of a region's.
     pub(super) fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
-        let Self {
-            utterance_index,
-            word_index,
-        } = self;
         Self {
-            utterance_index: utterance_index.placed_after(region_start),
-            word_index,
+            utterance_index: self.utterance_index.placed_after(region_start),
+            ..self
         }
     }
 
-    /// Main-tier utterance containing this word.
+    /// Main-tier utterance containing this unit.
     pub fn utterance_index(self) -> usize {
         self.utterance_index.index()
     }
 
-    /// Alignable-word ordinal within the containing utterance.
+    /// Alignable-word ordinal of the word containing this unit.
     pub fn word_index(self) -> usize {
-        self.word_index.0
+        self.of_word.word_index().0
     }
 }
 
@@ -253,8 +316,9 @@ impl UtrWordAddress {
 pub struct UtrAsrTokenAddress {
     /// Zero-based token ordinal in the exact ASR stream given to UTR.
     pub(super) token_index: UtrAsrTokenOrdinal,
-    /// Word position within that token's original text, without inferred timing.
-    pub(super) word_index: UtrAsrWordOrdinal,
+    /// Lexical-unit position within that token's text, without inferred
+    /// timing (`unit_index` on the wire, as on the CHAT side).
+    pub(super) unit_index: UtrAsrUnitOrdinal,
 }
 
 impl UtrAsrTokenAddress {
@@ -263,9 +327,9 @@ impl UtrAsrTokenAddress {
         self.token_index.index()
     }
 
-    /// Word ordinal after splitting the original token on Unicode whitespace.
-    pub fn word_index(self) -> usize {
-        self.word_index.0
+    /// Lexical-unit ordinal within the token's text.
+    pub fn unit_index(self) -> usize {
+        self.unit_index.0
     }
 }
 
@@ -485,9 +549,9 @@ mod interval_tests {
     #[test]
     fn packed_joint_refusal_preserves_the_named_budget_wire_contract() {
         use batchalign_transform::dp_align::interleaving::{
-            LocalInterleavingRefusal, LocalInterleavingWorkPhase,
+            LocalInterleavingBudget, LocalInterleavingWorkPhase,
         };
-        let budget = UtrSearchBudget::interleaved(LocalInterleavingRefusal::WorkBudgetExceeded {
+        let budget = UtrSearchBudget::interleaved(LocalInterleavingBudget::WorkBudgetExceeded {
             phase: LocalInterleavingWorkPhase::PackedSearch,
             required_at_least: 64_000_001,
         });
@@ -623,15 +687,16 @@ pub enum UtrUtteranceAlignmentEvidence {
         inspection_refusal: Option<batchalign_transform::dp_align::InspectionBudget>,
     },
     /// Already timed and kept unchanged. Its region's correspondence search
-    /// exceeded its budget, so no word correspondence (and no forced-alignment
-    /// word anchor) was observed for it. Timing is never refused.
+    /// did not complete (a budget, or an inconsistency), so no word
+    /// correspondence (and no forced-alignment word anchor) was observed for
+    /// it. Timing is never refused.
     RetainedUnsearched {
         /// Source utterance ordinal.
         utterance_index: UtrUtteranceOrdinal,
         /// Number of alignable CHAT words.
         alignable_words: usize,
-        /// The region and the budget it exceeded.
-        unsearched: UtrBudgetRefusal,
+        /// The region, and why its search did not complete.
+        unsearched: UtrUnsearchedRegion,
         /// Independent diagnostic refusal, not a refusal of retained timing.
         #[serde(skip_serializing_if = "Option::is_none")]
         inspection_refusal: Option<batchalign_transform::dp_align::InspectionBudget>,
@@ -1027,6 +1092,9 @@ pub enum UtrCorrespondenceRefusal {
     /// The utterance's region exceeded a fixed search budget. Says nothing
     /// about lexical absence or ambiguity, and nothing about other regions.
     BudgetExhausted(UtrBudgetRefusal),
+    /// The utterance's region's search contradicted its own admission and
+    /// refused. Not a budget; says nothing about other regions.
+    Inconsistent(UtrSearchInconsistency),
 }
 
 /// One region's correspondence search exceeding one fixed budget.
@@ -1086,6 +1154,46 @@ pub enum UtrSearchBudget {
     },
 }
 
+/// One region whose interleaved correspondence search contradicted its own
+/// admission and refused. Not a budget, and never counted as one: the search
+/// is wrong for this region, not bounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct UtrSearchInconsistency {
+    /// The refused region; no other region is affected.
+    pub(super) region: super::regions::UtrRegionSpan,
+    /// What the search contradicted (serialized by its own derive).
+    pub(super) inconsistency:
+        batchalign_transform::dp_align::interleaving::LocalInterleavingInconsistency,
+}
+
+impl UtrSearchInconsistency {
+    /// The refused region.
+    pub fn region(&self) -> super::regions::UtrRegionSpan {
+        self.region
+    }
+}
+
+/// A region whose correspondence was not searched to completion: a budget
+/// stopped it, or the search contradicted itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UtrUnsearchedRegion {
+    /// A fixed search budget was exceeded.
+    BudgetExhausted(UtrBudgetRefusal),
+    /// The search contradicted its admission.
+    Inconsistent(UtrSearchInconsistency),
+}
+
+impl UtrUnsearchedRegion {
+    /// The region.
+    pub fn region(&self) -> super::regions::UtrRegionSpan {
+        match self {
+            Self::BudgetExhausted(refusal) => refusal.region(),
+            Self::Inconsistent(inconsistency) => inconsistency.region(),
+        }
+    }
+}
+
 impl UtrSearchBudget {
     /// The monotonic correspondence producer's named budget.
     pub(super) fn monotonic(budget: batchalign_transform::dp_align::CorrespondenceBudget) -> Self {
@@ -1099,23 +1207,24 @@ impl UtrSearchBudget {
 
     /// The interleaved correspondence producer's named budget.
     pub(super) fn interleaved(
-        refusal: batchalign_transform::dp_align::interleaving::LocalInterleavingRefusal,
+        budget: batchalign_transform::dp_align::interleaving::LocalInterleavingBudget,
     ) -> Self {
-        use batchalign_transform::dp_align::interleaving::LocalInterleavingRefusal;
-        let limit = refusal.limit();
-        match refusal {
-            LocalInterleavingRefusal::WorkBudgetExceeded {
+        use batchalign_transform::dp_align::interleaving::LocalInterleavingBudget;
+        match budget {
+            LocalInterleavingBudget::WorkBudgetExceeded {
                 phase,
                 required_at_least,
             } => Self::InterleavingWork {
-                limit,
+                limit: LocalInterleavingBudget::WORK_CELLS,
                 phase: phase.name(),
                 required_at_least,
             },
-            LocalInterleavingRefusal::MemoryBudgetExceeded => Self::InterleavingMemory { limit },
-            LocalInterleavingRefusal::CandidateBudgetExceeded => {
-                Self::InterleavingCandidates { limit }
-            }
+            LocalInterleavingBudget::MemoryBudgetExceeded => Self::InterleavingMemory {
+                limit: LocalInterleavingBudget::SCORE_CELLS,
+            },
+            LocalInterleavingBudget::CandidateBudgetExceeded => Self::InterleavingCandidates {
+                limit: LocalInterleavingBudget::CANDIDATES,
+            },
         }
     }
 }

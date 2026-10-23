@@ -16,6 +16,7 @@ use batchalign_types::api::NonNegativeSeconds;
 use batchalign_types::worker_v2::{
     ExecuteRequestV2, ExecuteResponseV2, ProtocolErrorCodeV2, TaskRequestV2, TaskResultV2,
 };
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 
 use crate::error::BatchalignBoundaryError;
@@ -40,6 +41,21 @@ pub(crate) enum ExecuteFailure {
     /// by [`classify_runner_error`], which recognizes the raised Python
     /// exception by CLASS, never by parsing its message text.
     ModelAccessDenied(String),
+    /// A provider's structured quota refusal; no identical-request retry can
+    /// succeed until the account's allocation changes.
+    ProviderQuotaExhausted(String),
+    /// The worker has no pipeline for the requested language. Produced only
+    /// by [`classify_runner_error`], from the Python class
+    /// `UnsupportedLanguageError`, which subclasses `ValueError` and so used
+    /// to be read as a malformed payload.
+    UnsupportedLanguage(String),
+    /// A model or catalog download the task needed failed in transit.
+    /// Produced only by [`classify_runner_error`], from the Python owner of
+    /// that question (`batchalign.inference._transient_failures`).
+    ModelDownloadFailed(String),
+    /// The accelerator ran out of memory (`torch.OutOfMemoryError`).
+    /// Produced only by [`classify_runner_error`], from the same owner.
+    DeviceOutOfMemory(String),
     /// The task ran and failed.
     Runtime(String),
 }
@@ -59,37 +75,147 @@ impl ExecuteFailure {
             Self::InvalidPayload(message) => (ProtocolErrorCodeV2::InvalidPayload, message),
             Self::ModelUnavailable(message) => (ProtocolErrorCodeV2::ModelUnavailable, message),
             Self::ModelAccessDenied(message) => (ProtocolErrorCodeV2::ModelAccessDenied, message),
+            Self::ProviderQuotaExhausted(message) => {
+                (ProtocolErrorCodeV2::ProviderQuotaExhausted, message)
+            }
+            Self::UnsupportedLanguage(message) => {
+                (ProtocolErrorCodeV2::UnsupportedLanguage, message)
+            }
+            Self::ModelDownloadFailed(message) => {
+                (ProtocolErrorCodeV2::ModelDownloadFailed, message)
+            }
+            Self::DeviceOutOfMemory(message) => (ProtocolErrorCodeV2::DeviceOutOfMemory, message),
             Self::Runtime(message) => (ProtocolErrorCodeV2::RuntimeFailure, message),
         }
     }
 }
 
-// The stable identity of the Python exception raised for a Hugging Face Hub
-// access/credential failure. Maps a Python class to a Rust marker type at
-// compile time, so `classify_runner_error` below can check the ACTUAL
-// exception class raised, never its message text (see
-// `batchalign/inference/_model_access_errors.py`, the module this exception
-// is defined in).
+// The stable identities of the Python exceptions the classifier below
+// recognises. Each maps a Python class to a Rust marker type at compile time,
+// so `classify_runner_error` checks the ACTUAL exception class raised, never
+// its message text. Each class lives in a module that holds nothing heavier,
+// so the first failure a worker classifies does not import a model library.
 pyo3::import_exception!(
     batchalign.inference._model_access_errors,
     ModelAccessDeniedError
 );
 
+pyo3::import_exception!(
+    batchalign.inference._provider_errors,
+    ProviderQuotaExhaustedError
+);
+
+pyo3::import_exception!(batchalign.worker._language_errors, UnsupportedLanguageError);
+
+pyo3::import_exception!(batchalign.worker._model_errors, ModelNotLoadedError);
+
+// pydantic's validation failure: what a runner adapter raises when the batch
+// or request it parses has the wrong shape.
+pyo3::import_exception!(pydantic, ValidationError);
+
+/// The Python module that owns the two transient-failure questions (is this
+/// a download that failed in transit; is this an accelerator out of memory),
+/// which the Python request loops read as well, so a failure is classified
+/// alike whether it escapes an op or a request.
+const TRANSIENT_FAILURES_MODULE: &str = "batchalign.inference._transient_failures";
+
+/// Which of the owner's questions to ask.
+#[derive(Clone, Copy)]
+enum TransientQuestion {
+    ModelDownload,
+    DeviceOutOfMemory,
+}
+
+impl TransientQuestion {
+    const fn function(self) -> &'static str {
+        match self {
+            Self::ModelDownload => "is_model_download_failure",
+            Self::DeviceOutOfMemory => "is_device_out_of_memory",
+        }
+    }
+
+    /// The failure a yes answer makes of the runner's error.
+    fn failure(self, message: String) -> ExecuteFailure {
+        match self {
+            Self::ModelDownload => ExecuteFailure::ModelDownloadFailed(message),
+            Self::DeviceOutOfMemory => ExecuteFailure::DeviceOutOfMemory(message),
+        }
+    }
+
+    /// Ask the owner about `error`. The owner reads exception classes, and
+    /// the cause of a Hub "no cached copy" error, which no single
+    /// `import_exception!` class can express.
+    fn ask(self, py: Python<'_>, error: &PyErr) -> PyResult<bool> {
+        py.import(TRANSIENT_FAILURES_MODULE)?
+            .getattr(self.function())?
+            .call1((error.value(py),))?
+            .extract()
+    }
+}
+
 /// Classify a `PyErr` raised by an inference-runner callback into the shared
-/// V2 failure taxonomy.
+/// V2 failure taxonomy: the one classifier every executor uses.
 ///
-/// Distinguishes [`ModelAccessDeniedError`] (matched by EXCEPTION CLASS
-/// identity, never by parsing the error's message text) from every other
-/// exception, which stays a generic [`ExecuteFailure::Runtime`]. Python is
-/// the only side that inspects the underlying `huggingface_hub` exception
-/// classes (see `classify_huggingface_access_error`); this function exists
-/// so that reclassification does not have to be repeated at every Rust call
-/// site that invokes a Python runner.
-pub(crate) fn classify_runner_error(py: Python<'_>, error: PyErr) -> ExecuteFailure {
+/// By exception class, never message text, most specific first:
+///
+/// | Python class | Failure |
+/// | --- | --- |
+/// | `ModelAccessDeniedError` | `ModelAccessDenied` |
+/// | `ProviderQuotaExhaustedError` | `ProviderQuotaExhausted` |
+/// | a download that failed in transit (see `_transient_failures`) | `ModelDownloadFailed` |
+/// | `torch.OutOfMemoryError` (see `_transient_failures`) | `DeviceOutOfMemory` |
+/// | `UnsupportedLanguageError` | `UnsupportedLanguage` |
+/// | `ModelNotLoadedError` (e.g. `UtsegModelNotFoundError`) | `ModelUnavailable` |
+/// | `NotImplementedError` | `ModelUnavailable` |
+/// | pydantic `ValidationError` | `InvalidPayload` |
+/// | anything else | `Runtime` |
+///
+/// A plain `ValueError` is a runtime failure, not a malformed payload: models
+/// raise it for input they cannot process (a forced-alignment window too
+/// short for its transcript, say), and the server recognises those
+/// constraints only among runtime failures. Only pydantic's validation
+/// failure says the payload's shape was wrong. `UnsupportedLanguageError`
+/// subclasses `ValueError`, and `ModelAccessDeniedError` and
+/// `ModelNotLoadedError` `RuntimeError`, so the specific classes are checked
+/// first.
+///
+/// If the transient-failure owner cannot be asked (it failed to import, a
+/// packaging defect), the failure is a runtime failure whose message says
+/// so beside the original, never a silent guess.
+fn classify_runner_error(py: Python<'_>, error: PyErr) -> ExecuteFailure {
+    let message = error.to_string();
     if error.is_instance_of::<ModelAccessDeniedError>(py) {
-        ExecuteFailure::ModelAccessDenied(error.to_string())
+        return ExecuteFailure::ModelAccessDenied(message);
+    }
+    if error.is_instance_of::<ProviderQuotaExhaustedError>(py) {
+        return ExecuteFailure::ProviderQuotaExhausted(message);
+    }
+    for question in [
+        TransientQuestion::ModelDownload,
+        TransientQuestion::DeviceOutOfMemory,
+    ] {
+        match question.ask(py, &error) {
+            Ok(true) => return question.failure(message),
+            Ok(false) => {}
+            Err(unclassifiable) => {
+                return ExecuteFailure::Runtime(format!(
+                    "{message} (the failure could not be classified: \
+                     {TRANSIENT_FAILURES_MODULE}.{}: {unclassifiable})",
+                    question.function()
+                ));
+            }
+        }
+    }
+    if error.is_instance_of::<UnsupportedLanguageError>(py) {
+        ExecuteFailure::UnsupportedLanguage(message)
+    } else if error.is_instance_of::<ModelNotLoadedError>(py)
+        || error.is_instance_of::<PyNotImplementedError>(py)
+    {
+        ExecuteFailure::ModelUnavailable(message)
+    } else if error.is_instance_of::<ValidationError>(py) {
+        ExecuteFailure::InvalidPayload(message)
     } else {
-        ExecuteFailure::Runtime(error.to_string())
+        ExecuteFailure::Runtime(message)
     }
 }
 
@@ -119,7 +245,37 @@ pub(crate) fn extract_task_payload<'a, T>(
     })
 }
 
-/// One owner of the "this runner is not loaded" refusal every executor makes.
+/// A loaded inference runner: the Python callable an executor hands its
+/// prepared inputs to.
+///
+/// The field is private and the only way to call it is [`Self::call1`], which
+/// classifies whatever the runner raises through [`classify_runner_error`].
+/// Executors used to call the raw `Py<PyAny>` and map its error themselves,
+/// and half of them stringified every exception into a runtime failure, so a
+/// gated model or an unsupported language was reported as a crash on those
+/// paths and correctly on the others.
+pub(crate) struct LoadedRunner(Py<PyAny>);
+
+impl LoadedRunner {
+    /// Call the runner with positional `args`, classifying a raised exception
+    /// into the shared failure taxonomy.
+    pub(crate) fn call1<'py, A>(
+        &self,
+        py: Python<'py>,
+        args: A,
+    ) -> Result<Bound<'py, PyAny>, ExecuteFailure>
+    where
+        A: pyo3::call::PyCallArgs<'py>,
+    {
+        self.0
+            .bind(py)
+            .call1(args)
+            .map_err(|error| classify_runner_error(py, error))
+    }
+}
+
+/// One owner of the "this runner is not loaded" refusal every executor makes,
+/// and the only constructor of a [`LoadedRunner`].
 ///
 /// The message stays the caller's, because it names the specific runner
 /// ("no wave2vec FA host loaded ...", "no pyannote speaker host loaded ...");
@@ -128,8 +284,10 @@ pub(crate) fn extract_task_payload<'a, T>(
 pub(crate) fn require_runner(
     runner: Option<Py<PyAny>>,
     unavailable_message: &str,
-) -> Result<Py<PyAny>, ExecuteFailure> {
-    runner.ok_or_else(|| ExecuteFailure::ModelUnavailable(unavailable_message.to_owned()))
+) -> Result<LoadedRunner, ExecuteFailure> {
+    runner
+        .map(LoadedRunner)
+        .ok_or_else(|| ExecuteFailure::ModelUnavailable(unavailable_message.to_owned()))
 }
 
 fn parse_execute_request(request: &Bound<'_, PyAny>) -> PyResult<ExecuteRequestV2> {
@@ -282,6 +440,14 @@ mod tests {
             (
                 ExecuteFailure::Runtime("m".to_owned()),
                 ProtocolErrorCodeV2::RuntimeFailure,
+            ),
+            (
+                ExecuteFailure::ProviderQuotaExhausted("m".to_owned()),
+                ProtocolErrorCodeV2::ProviderQuotaExhausted,
+            ),
+            (
+                ExecuteFailure::UnsupportedLanguage("m".to_owned()),
+                ProtocolErrorCodeV2::UnsupportedLanguage,
             ),
         ];
         for (failure, expected) in cases {

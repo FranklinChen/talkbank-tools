@@ -240,7 +240,7 @@ impl TranscribeDispatchPlan {
             merge_abbrev,
             cache_policies,
             wor_tier,
-            allow_stanza_fallback_utseg,
+            utseg_fallback,
             batch_size: _,
             engine_extras,
         } = extract_transcribe_dispatch_params(&job.dispatch.options, cache_policies)
@@ -271,7 +271,7 @@ impl TranscribeDispatchPlan {
         let plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
             asr,
             with_utseg,
-            allow_stanza_fallback_utseg.into(),
+            utseg_fallback,
         )?;
 
         Ok(Self {

@@ -29,32 +29,33 @@ impl LoadingOverhead {
     }
 }
 
-/// Whether a command needs a process-isolated worker.
+/// Whether a command needs a process-isolated worker, which decides its
+/// memory budget.
 ///
-/// Trinary because the historical TOML's `process_commands.gil` and
-/// `process_commands.free_threaded` lists are NOT mutually exclusive
-/// some commands (`opensmile`, `avqi`, `compare`) appear in both,
-/// indicating "needs a process worker in both runtime modes."
+/// The process-isolated commands are the TOML's `process_commands` list. The
+/// Stanza commands are among them: a Stanza worker serves one request per
+/// process in every runtime (`WorkerServing::decide`), so each process loads
+/// its own models whether or not Python is free-threaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GilProcessNeed {
-    /// Needs a process worker regardless of runtime (in BOTH TOML lists).
+    /// Needs a process worker regardless of runtime (in the TOML's
+    /// `process_commands`): its budget is the process budget in every
+    /// runtime.
     Always,
-    /// Needs a process worker only when GIL is enabled
-    /// (in `process_commands.gil` only).
-    OnlyInGilRuntime,
-    /// Always thread-safe (in NEITHER list). No commands today; the
-    /// variant exists so the type captures the full classification space.
-    Never,
+    /// Shares one process's models on threads in a free-threaded runtime
+    /// (not in `process_commands`), where it has its own, smaller budget.
+    Never {
+        /// Base memory budget when running on a thread worker.
+        threaded_base_mb: MemoryMb,
+    },
 }
 
 impl GilProcessNeed {
-    /// Whether THIS runtime needs a process worker for the command.
-    pub fn needs_process(self, is_free_threaded_runtime: bool) -> bool {
-        match (self, is_free_threaded_runtime) {
-            (Self::Always, _) => true,
-            (Self::OnlyInGilRuntime, false) => true,
-            (Self::OnlyInGilRuntime, true) => false,
-            (Self::Never, _) => false,
+    /// Whether the command needs a process worker; the same in every runtime.
+    pub fn needs_process(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never { .. } => false,
         }
     }
 }
@@ -87,20 +88,40 @@ pub struct CommandSpec {
     pub gil_process_need: GilProcessNeed,
     /// Base memory budget when running on a process worker.
     pub base_mb_process: MemoryMb,
-    /// Base memory budget when running on a thread worker.
-    pub base_mb_threaded: MemoryMb,
     /// Multiplier applied to the base budget for the model-loading spike.
     pub loading_overhead: LoadingOverhead,
 }
 
+/// Which Python runtime the workers run on, which decides a command's
+/// memory budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonRuntime {
+    /// GIL-enabled CPython: thread workers cannot share a model.
+    Gil,
+    /// Free-threaded CPython (`PYTHON_GIL=0`): a command that does not need
+    /// a process may share one process's models on threads.
+    FreeThreaded,
+}
+
 impl CommandSpec {
-    /// Pick the base budget appropriate for the runtime.
-    pub fn base_mb_for_runtime(&self, is_free_threaded_runtime: bool) -> MemoryMb {
-        if is_free_threaded_runtime && !self.gil_process_need.needs_process(true) {
-            self.base_mb_threaded
-        } else {
-            self.base_mb_process
+    /// Pick the base budget appropriate for the runtime: the one figure
+    /// every budget table is generated from.
+    pub fn base_mb_for_runtime(&self, runtime: PythonRuntime) -> MemoryMb {
+        match (self.gil_process_need, runtime) {
+            (GilProcessNeed::Never { threaded_base_mb }, PythonRuntime::FreeThreaded) => {
+                threaded_base_mb
+            }
+            (GilProcessNeed::Never { .. }, PythonRuntime::Gil) | (GilProcessNeed::Always, _) => {
+                self.base_mb_process
+            }
         }
+    }
+
+    /// The command's execution reservation in `runtime`: its base budget
+    /// with the model-loading spike. The one computation the execution plan
+    /// and the host planner both read.
+    pub fn execution_budget_mb(&self, runtime: PythonRuntime) -> MemoryMb {
+        MemoryMb((self.base_mb_for_runtime(runtime).0 as f64 * self.loading_overhead.0) as u64)
     }
 }
 
@@ -120,10 +141,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         task_label: "fa",
         profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
-        // Not in process_commands.{gil,free_threaded} in the TOML.
-        gil_process_need: GilProcessNeed::Never,
+        // Not in process_commands in the TOML.
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(4_000),
+        },
         base_mb_process: MemoryMb(4_000),
-        base_mb_threaded: MemoryMb(4_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -132,10 +154,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         task_label: "asr",
         profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
-        // Not in process_commands.{gil,free_threaded} in the TOML.
-        gil_process_need: GilProcessNeed::Never,
+        // Not in process_commands in the TOML.
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(1_500),
+        },
         base_mb_process: MemoryMb(1_500),
-        base_mb_threaded: MemoryMb(1_500),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -144,10 +167,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         task_label: "asr",
         profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
-        // Not in process_commands.{gil,free_threaded} in the TOML.
-        gil_process_need: GilProcessNeed::Never,
+        // Not in process_commands in the TOML.
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(2_500),
+        },
         base_mb_process: MemoryMb(2_500),
-        base_mb_threaded: MemoryMb(2_500),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -156,10 +180,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         task_label: "translate",
         profile: Some(WorkerProfile::Io),
         // Io (API-call) worker; no subprocess isolation needed.
-        // Not in process_commands.{gil,free_threaded} in the TOML.
-        gil_process_need: GilProcessNeed::Never,
+        // Not in process_commands in the TOML.
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(4_000),
+        },
         base_mb_process: MemoryMb(4_000),
-        base_mb_threaded: MemoryMb(4_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -167,9 +192,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[InferTask::Morphosyntax],
         task_label: "morphosyntax",
         profile: Some(WorkerProfile::Stanza),
-        gil_process_need: GilProcessNeed::OnlyInGilRuntime,
+        gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(8_000),
-        base_mb_threaded: MemoryMb(2_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -177,9 +201,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[InferTask::Coref],
         task_label: "coref",
         profile: Some(WorkerProfile::Stanza),
-        gil_process_need: GilProcessNeed::OnlyInGilRuntime,
+        gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(4_000),
-        base_mb_threaded: MemoryMb(2_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -189,9 +212,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         // is "utterance", not "utseg". Task 5 codegen emits this verbatim.
         task_label: "utterance",
         profile: Some(WorkerProfile::Stanza),
-        gil_process_need: GilProcessNeed::OnlyInGilRuntime,
+        gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(6_000),
-        base_mb_threaded: MemoryMb(2_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -204,10 +226,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         task_label: "asr,eval",
         profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply.
-        // Not in process_commands.{gil,free_threaded} in the TOML.
-        gil_process_need: GilProcessNeed::Never,
+        // Not in process_commands in the TOML.
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(1_500),
+        },
         base_mb_process: MemoryMb(1_500),
-        base_mb_threaded: MemoryMb(1_500),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -215,11 +238,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[InferTask::Opensmile],
         task_label: "opensmile",
         profile: Some(WorkerProfile::Io),
-        // In both process_commands.gil and process_commands.free_threaded
-        // needs process isolation regardless of runtime.
+        // In the TOML's process_commands: needs process isolation in every
+        // runtime.
         gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(500),
-        base_mb_threaded: MemoryMb(500),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -227,10 +249,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[InferTask::Morphosyntax],
         task_label: "morphosyntax",
         profile: Some(WorkerProfile::Stanza),
-        // In both process_commands.gil and process_commands.free_threaded.
+        // In the TOML's process_commands: needs process isolation in every
+        // runtime.
         gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(8_000),
-        base_mb_threaded: MemoryMb(2_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -238,10 +260,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[InferTask::Avqi],
         task_label: "avqi",
         profile: Some(WorkerProfile::Io),
-        // In both process_commands.gil and process_commands.free_threaded.
+        // In the TOML's process_commands: needs process isolation in every
+        // runtime.
         gil_process_need: GilProcessNeed::Always,
         base_mb_process: MemoryMb(1_500),
-        base_mb_threaded: MemoryMb(1_500),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -251,9 +273,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         profile: Some(WorkerProfile::Gpu),
         // GPU workers handle process isolation; GIL does not apply
         // (same footing as the transcribe_s speaker stage).
-        gil_process_need: GilProcessNeed::Never,
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(2_500),
+        },
         base_mb_process: MemoryMb(2_500),
-        base_mb_threaded: MemoryMb(2_500),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -261,7 +284,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[InferTask::Speaker],
         task_label: "speaker",
         profile: Some(WorkerProfile::Gpu),
-        gil_process_need: GilProcessNeed::Never,
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(1_000),
+        },
         // Lower than diarization deliberately: the embedding graph is one
         // ~26 MB ONNX model run over a few seconds of audio at a time, where
         // diarization loads a segmentation network plus a clustering pipeline
@@ -269,7 +294,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         // idle memory this command never uses and make the admission gate
         // refuse spawns it should have allowed.
         base_mb_process: MemoryMb(1_000),
-        base_mb_threaded: MemoryMb(1_000),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
     CommandSpec {
@@ -277,9 +301,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tasks: &[],
         task_label: "",
         profile: None,
-        gil_process_need: GilProcessNeed::Never,
+        gil_process_need: GilProcessNeed::Never {
+            threaded_base_mb: MemoryMb(256),
+        },
         base_mb_process: MemoryMb(256),
-        base_mb_threaded: MemoryMb(256),
         loading_overhead: LoadingOverhead::new_unchecked(1.5),
     },
 ];
@@ -328,9 +353,13 @@ mod tests {
     fn morphotag_classification_matches_toml() {
         let spec = command_spec_for(ReleasedCommand::Morphotag);
         assert_eq!(spec.profile, Some(WorkerProfile::Stanza));
-        assert_eq!(spec.gil_process_need, GilProcessNeed::OnlyInGilRuntime);
+        assert_eq!(spec.gil_process_need, GilProcessNeed::Always);
         assert_eq!(spec.base_mb_process.0, 8_000);
-        assert_eq!(spec.base_mb_threaded.0, 2_000);
+        // Process-isolated in every runtime, so its budget is the process one.
+        assert_eq!(
+            spec.base_mb_for_runtime(PythonRuntime::FreeThreaded),
+            spec.base_mb_process
+        );
         assert_eq!(spec.tasks, &[InferTask::Morphosyntax]);
         assert_eq!(spec.task_label, "morphosyntax");
     }

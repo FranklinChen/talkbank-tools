@@ -3,10 +3,12 @@ use std::borrow::Cow;
 use super::han_script::NormalizationChangedLength;
 use super::{
     AsrNormalizedText, AsrOutput, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, ENDING_PUNCT,
-    MOR_PUNCT, MonologueWords, PreparedMonologueChunk, RTL_PUNCT, SpeakerIndex, Utterance, cleanup,
-    finalize_words_to_chunks_with_snapshot, prepare_words_pre_expansion_with_snapshot,
-    write_word_forms,
+    MOR_PUNCT, MonologueWords, PreparedMonologueChunk, RTL_PUNCT, SpeakerIndex, SynthesisCause,
+    UnwritableEndMark, Utterance, UtteranceEnd, cleanup, finalize_words_to_chunks_with_snapshot,
+    prepare_words_pre_expansion_with_snapshot, write_word_forms,
 };
+use talkbank_model::Location;
+use talkbank_model::model::Terminator;
 
 /// Run the full ASR post-processing pipeline on raw ASR output.
 ///
@@ -162,12 +164,11 @@ pub fn finalize_utterances(utterances: &mut Vec<Utterance>, lang: &str) {
 }
 
 /// Whether retokenization ends an utterance after this word: the word is, or
-/// ends with, a sentence terminator, after the `。` normalization
-/// [`retokenize`] applies. The one statement of that rule for code that must
-/// agree with retokenization, such as where a long turn is cut.
+/// ends with, a closing mark, after the `。` normalization [`retokenize`]
+/// applies. The one statement of that rule for code that must agree with
+/// retokenization, such as where a long turn is cut.
 pub(super) fn ends_utterance(word: &AsrWord) -> bool {
-    let text = retokenize_text(word.text.as_str());
-    is_ending_punct(&text) || ends_with_ending_punct(&text)
+    split_closing_mark(&retokenize_text(word.text.as_str())).is_some()
 }
 
 /// The text [`retokenize`] judges a word by: Japanese `。` as `.`, and the
@@ -181,122 +182,117 @@ fn retokenize_text(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// Check if a word is or ends with a sentence-ending punctuation mark.
-fn is_ending_punct(word: &str) -> bool {
-    if ENDING_PUNCT.contains(&word) {
-        return true;
-    }
-    // Check RTL punctuation
-    for (rtl, _) in RTL_PUNCT {
-        if word == *rtl {
-            return true;
-        }
-    }
-    false
+/// A mark that closes an utterance in retokenization, read once: a CHAT
+/// terminator, or a mark CHAT cannot write as one.
+#[derive(Debug, Clone)]
+enum ClosingMark {
+    Terminator(Terminator),
+    Unwritable(UnwritableEndMark),
 }
 
-/// Check if a word ends with ending punctuation (last char).
-fn ends_with_ending_punct(word: &str) -> bool {
-    match word.chars().last() {
-        Some(c) => {
-            let mut buf = [0u8; 4];
-            is_ending_punct(c.encode_utf8(&mut buf))
+impl ClosingMark {
+    /// The mark `text` is, whole, with right-to-left punctuation read as its
+    /// ASCII equivalent; `None` when it is no closing mark.
+    fn parse(text: &str) -> Option<Self> {
+        if let Some(mark) = UnwritableEndMark::parse(text) {
+            return Some(Self::Unwritable(mark));
         }
-        None => false,
+        let text = normalize_punct(text);
+        if !ENDING_PUNCT.contains(&text) {
+            return None;
+        }
+        Terminator::try_from_chat_str(Location::Unlocated, text).map(Self::Terminator)
+    }
+
+    /// The end this mark states.
+    fn into_end(self) -> UtteranceEnd {
+        match self {
+            Self::Terminator(terminator) => UtteranceEnd::Observed(terminator),
+            Self::Unwritable(mark) => {
+                UtteranceEnd::Synthesized(SynthesisCause::UnwritableMark(mark))
+            }
+        }
     }
 }
 
-/// Normalize RTL punctuation to ASCII equivalent.
-fn normalize_punct(word: &str) -> String {
-    for (rtl, ascii) in RTL_PUNCT {
-        if word == *rtl {
-            return ascii.to_string();
-        }
+/// The closing mark `text` is or ends with, and the word before it (empty
+/// when the whole text is the mark): a whole mark first, then a trailing
+/// `(.)` or run of periods, then a final terminator character.
+fn split_closing_mark(text: &str) -> Option<(&str, ClosingMark)> {
+    if let Some(mark) = ClosingMark::parse(text) {
+        return Some(("", mark));
     }
-    word.to_string()
+    if let Some((before, mark)) = UnwritableEndMark::split_trailing(text) {
+        return Some((before, ClosingMark::Unwritable(mark)));
+    }
+    let (last_char_boundary, _) = text.char_indices().next_back()?;
+    let (before, last) = text.split_at(last_char_boundary);
+    ClosingMark::parse(last).map(|mark| (before, mark))
+}
+
+/// Read right-to-left punctuation as its ASCII equivalent.
+fn normalize_punct(word: &str) -> &str {
+    RTL_PUNCT
+        .iter()
+        .find(|(rtl, _)| *rtl == word)
+        .map_or(word, |(_, ascii)| ascii)
 }
 
 /// Split a word list into utterances based on punctuation boundaries.
 ///
-/// This is the simple punctuation-based retokenizer (no BERT model).
-///
-/// # Panic safety
-///
-/// The `unwrap()` calls on `buf.last()`, `buf.last_mut()`, and `buf.pop()` are
-/// all immediately preceded by `buf.push(word)` within the same loop iteration,
-/// so `buf` is guaranteed non-empty at each call site.
-#[allow(clippy::unwrap_used)]
+/// This is the simple punctuation-based retokenizer (no BERT model), and the
+/// one producer of utterances: the pre-CHAT boundary-model route cuts chunks
+/// and then comes through here too. A closing mark closes the utterance and
+/// becomes its [`UtteranceEnd`], never one of its words: a CHAT terminator
+/// is observed, and `...` or `(.)`, which CHAT cannot write as a terminator,
+/// is a synthesized end naming the mark. A chunk that ends without one is
+/// closed with a synthesized end too. A mark with no words before it (a
+/// second mark in a row, or one opening the chunk) closes nothing and emits
+/// no utterance.
 pub(super) fn retokenize(speaker: SpeakerIndex, words: Vec<AsrWord>) -> Vec<Utterance> {
     let mut utterances = Vec::new();
     let mut buf: Vec<AsrWord> = Vec::new();
 
     for word in words {
         // Normalize Japanese period and remove inverted punctuation
-        let word = AsrWord {
-            text: word.text.map(|t| retokenize_text(t).into_owned()),
-            ..word
-        };
-
-        buf.push(word);
-
-        // `buf.push(word)` immediately above guarantees `buf` is
-        // non-empty at this point.
-        #[allow(clippy::unwrap_used)]
-        let last_text = buf.last().unwrap().text.as_str();
-
-        if is_ending_punct(last_text) {
-            // Whole word is ending punct, flush utterance
-            let punct = normalize_punct(last_text);
-            // Same `buf.push` guarantee above.
-            #[allow(clippy::unwrap_used)]
-            {
-                buf.last_mut().unwrap().text = AsrNormalizedText::new(punct);
-            }
-            utterances.push(Utterance {
-                speaker,
-                words: std::mem::take(&mut buf),
-                lang: None,
+        let text = retokenize_text(word.text.as_str());
+        let Some((word_part, mark)) = split_closing_mark(&text) else {
+            buf.push(AsrWord {
+                text: AsrNormalizedText::new(text.into_owned()),
+                ..word
             });
-        } else if ends_with_ending_punct(last_text) {
-            // Last character is ending punct, split the word.
-            // `buf.push` above guarantees pop() returns Some.
-            #[allow(clippy::unwrap_used)]
-            let text = buf.pop().unwrap();
-            let s = text.text.as_str();
-            let last_char_boundary = s.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
-            let word_part = &s[..last_char_boundary];
-            let punct_part = &s[last_char_boundary..];
-
-            if !word_part.is_empty() {
-                buf.push(AsrWord::new(word_part, text.start_ms, text.end_ms));
-            }
-            buf.push(AsrWord::new(normalize_punct(punct_part), None, None));
+            continue;
+        };
+        if !word_part.is_empty() {
+            buf.push(AsrWord::new(word_part, word.start_ms, word.end_ms));
+        }
+        if !buf.is_empty() {
             utterances.push(Utterance {
                 speaker,
                 words: std::mem::take(&mut buf),
+                end: mark.into_end(),
                 lang: None,
             });
         }
     }
 
     // Flush remaining words
+    // Remove trailing MOR_PUNCT
+    while buf
+        .last()
+        .is_some_and(|w| MOR_PUNCT.contains(&w.text.as_str()))
+    {
+        buf.pop();
+    }
     if !buf.is_empty() {
-        // Remove trailing MOR_PUNCT
-        while buf
-            .last()
-            .is_some_and(|w| MOR_PUNCT.contains(&w.text.as_str()))
-        {
-            buf.pop();
-        }
-        if !buf.is_empty() {
-            // Append terminator
-            buf.push(AsrWord::new(".", None, None));
-            utterances.push(Utterance {
-                speaker,
-                words: buf,
-                lang: None,
-            });
-        }
+        // The chunk ended with no ending punctuation, and CHAT requires a
+        // terminator: the utterance's end is this pipeline's own.
+        utterances.push(Utterance {
+            speaker,
+            words: buf,
+            end: UtteranceEnd::Synthesized(SynthesisCause::NoMark),
+            lang: None,
+        });
     }
 
     utterances

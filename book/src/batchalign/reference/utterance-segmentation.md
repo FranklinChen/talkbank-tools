@@ -1,7 +1,7 @@
 # Utterance Segmentation
 
 **Status:** Current
-**Last updated:** 2026-09-16 09:47 EDT
+**Last updated:** 2026-10-24 19:19 EDT
 
 Utterance segmentation splits continuous ASR output into individual utterances
 for CHAT transcription. This is a critical step, CHAT requires one utterance
@@ -207,9 +207,13 @@ Before splitting:
 
 ### Split Rules
 
-1. If a word **is** a terminator → flush the current utterance
-2. If a word **ends with** a terminator character → split the word, flush
-3. If no terminator is found → auto-append `.` at the end
+1. If a word **is** an ending mark → flush the current utterance, with the
+   mark as its end (`UtteranceEnd::Observed`), not as a word
+2. If a word **ends with** an ending mark → split the word, flush likewise
+3. If no ending mark is found, or the mark is not a CHAT terminator (`...`,
+   `(.)`) → the utterance's end is `UtteranceEnd::Synthesized`, written as `.`
+   and counted in the file's provenance stamp, so it is never mistaken for the
+   recognizer's punctuation
 4. Trailing morphological punctuation (‡, „, ,) is stripped before flush
 
 ### Long Turn Splitting
@@ -235,12 +239,13 @@ direct typed assignments; for the Stanza path it returns raw constituency trees
 and Rust computes assignments locally.
 
 **Not all languages have constituency parsing.** Stanza has constituency
-models for ~11 languages (en, de, es, it, pt, da, id, ja, tr, vi, zh-hans).
-For other languages (e.g. Dutch, Polish, Russian), the utseg config builder
-omits the constituency processor and falls back to sentence-boundary
-segmentation. This is handled automatically by the Stanza capability table
-(`batchalign/worker/_stanza_capabilities.py`), which reads Stanza's
-`resources.json` to discover per-language processor availability.
+models for a minority of its languages. The Stanza route requires one
+(`StanzaRequirement::UtteranceSegmentation`: tokenize, pos, constituency), so a
+language whose installed catalog entry has none (Dutch, Polish, Russian) is
+refused before any work, at submission and again at dispatch, with the
+processors it lacks named. The capability table
+(`batchalign/worker/_stanza_capabilities.py`), read from Stanza's
+`resources.json`, is what the server's registry admits by.
 
 This is a different mechanism from the pre-CHAT utterance models above: it
 operates on already-built CHAT text and can refine boundaries using syntactic

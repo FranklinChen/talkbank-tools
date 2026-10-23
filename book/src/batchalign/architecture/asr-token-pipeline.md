@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-21 14:20 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -309,7 +309,8 @@ timestamps are retained. Multiple or crossing matches refuse the response as
 ambiguous instead of choosing a deletion. Shared observations anchor the
 remaining word order, including untimed words between anchors. This is a
 conservative observation rule, not proof that model timestamps are acoustically
-correct. The Whisper UTR namespace `utr-asr-owned-windows-v4` excludes all
+correct. The Whisper UTR producer revision (`utr-asr-open-begin-v5`, see the
+[UTR ASR cache](../reference/forced-alignment.md#utr-asr-cache)) excludes all
 earlier, already-merged cache evidence. The frozen direct Python compatibility
 helper explicitly selects the old observation mode; managed inference does not.
 
@@ -412,7 +413,7 @@ fixtures this way.
 |------|-----------|----------|-------------|
 | `AsrRawText` | `AsrElement.value` | Raw provider output: digits, spaces, provider markers | `AsrRawText::new(s)`: infallible |
 | `AsrNormalizedText` | `AsrWord.text` | Compound-merged, number-expanded, disfluency-marked text | `AsrNormalizedText::new(s)`: infallible |
-| `ChatWordText` | `WordDesc.text` | **A runtime-checked proof** that `s` is either a closed-set CHAT terminator / `MOR_PUNCT` separator (`.`, `?`, `!`, `+...`, `,`, `‡`, `„`), or text the tree-sitter word-fragment parser accepts as a legal main-tier word, and (for the `_lang` variants) satisfies every word-level rule `talkbank_model::Validate for Word` applies under the declared language including E220 digit policy. | **Fallible only:** `ChatWordText::try_from`, `try_from_with_parser`, `try_from_lang`, `try_from_lang_with_parser`. No infallible `new`. |
+| `ChatWordText` | `WordDesc.text` | **A runtime-checked proof** that `s` is either a `MOR_PUNCT` separator (`,`, `‡`, `„`), or text the tree-sitter word-fragment parser accepts as a legal main-tier word, and (for the `_lang` variants) satisfies every word-level rule `talkbank_model::Validate for Word` applies under the declared language including E220 digit policy. | **Fallible only:** `ChatWordText::try_from`, `try_from_with_parser`, `try_from_lang`, `try_from_lang_with_parser`. No infallible `new`. |
 
 The progression is **asymmetric on purpose**: `AsrRawText` and
 `AsrNormalizedText` are pipeline-internal and carry whatever the
@@ -424,16 +425,18 @@ fails loudly at the boundary with a typed error naming the offending
 utterance, speaker, language, and token, rather than producing a
 `ChatFile` that fails silently at a downstream parse gate.
 
-The constructors above check their inputs, but transparent JSON decoding does
-not invoke them. CHAT assembly therefore requires a clean word-fragment parse
-before attaching timing or forming regular/retraced word nodes. Refusal or
-recovery returns `BuildChatError::Word` with the supplied token and structured
-diagnostics; no unchecked word is substituted and no partial file is returned.
-This is structural admission, not a replacement for language-aware validation.
+Admission retains the parsed `ChatWordContent` (a word or separator) beside
+its text. `ChatWordText` has no deserializer, so JSON cannot bypass that
+admission. Assembly uses the retained content without reparsing each word.
+An utterance's closing is a separate `UtteranceEnd` field; a terminator cannot
+be constructed as word content. `TranscriptLanguages` similarly retains
+parsed languages with a required primary language. `build_chat` consumes the
+typed description; there is no `build_chat_from_json` entry point.
 
-All three types use `#[serde(transparent)]`, `as_str()`, `Display`,
-`AsRef<str>`. `AsrNormalizedText` additionally provides `map()` for
-pipeline stage transformations and `push_str()` for hyphen-joining.
+`AsrRawText` and `AsrNormalizedText` use transparent serde representations.
+All three text types expose `as_str()`, `Display`, and `AsRef<str>`.
+`AsrNormalizedText` additionally provides `map()` for pipeline transformations
+and `push_str()` for hyphen-joining.
 
 ## Construction-Time Validation
 
@@ -446,7 +449,8 @@ back into a new model, every edit requires fresh admission, and the final
 writer receives the proof. A document that does not pass, typically because a
 structurally-only legal word (E220) was kept verbatim for review, is a
 `DiagnosedOutput`: segmentation runs outside the utterances its findings belong
-to, morphology is skipped (each recorded as a shortfall), and it is written
+to. Morphology analyzes localized unaffected utterances; document-wide findings
+skip the stage with a shortfall. The diagnosed output is written
 with every finding, so the file is reported `diagnosed` instead of
 failing. An optional stage whose own output is refused keeps the admitted
 document from before it, also recorded as a shortfall. The
@@ -456,18 +460,15 @@ document from before it, also recorded as a shortfall. The
 ```mermaid
 flowchart TD
     Call["ChatWordText::try_from_lang(s, lang)"]
-    Term{"Terminator::is_chat_terminator(s)?"}
     MorP{"MOR_PUNCT contains s?\n(',' '‡' '„')"}
     Parse["TreeSitterParser::parse_word_fragment(s)"]
     Parsed{"ParseOutcome::Parsed\n&amp; no errors?"}
     Validate["Word::validate(ctx, errors)\nctx = ValidationContext\n(default, declared, tier)\nunder `lang`"]
     LangClean{"validate errors\nempty?"}
-    Ok["Ok(ChatWordText(s))"]
+    Ok["Ok(ChatWordText { text, content })"]
     Err["Err(Vec&lt;ParseError&gt;)\ncode + span + excerpt"]
 
-    Call --> Term
-    Term -->|"yes"| Ok
-    Term -->|"no"| MorP
+    Call --> MorP
     MorP -->|"yes"| Ok
     MorP -->|"no"| Parse
     Parse --> Parsed
@@ -478,12 +479,10 @@ flowchart TD
     LangClean -->|"no"| Err
 ```
 
-The two short-circuits (terminator, MOR_PUNCT) exist because the ASR
-pipeline emits each utterance's terminator as a regular `AsrWord` entry,
-and separator tokens (`,`, `‡`, `„`) appear as standalone `AsrWord`s
-after stage 2b boundary stripping. These are main-tier-legal but not
-words, `parse_word_fragment` correctly rejects them; the short-circuit
-lets them through.
+The separator shortcut admits `,`, `‡`, and `„` as typed separators.
+These are main-tier content but not words, so they do not go through the
+word-fragment parser. Terminators instead belong to the utterance's end
+field and are refused by word admission.
 
 The `try_from_with_parser` variant skips the language-validation branch
 and is for callers that don't know the language. The `_with_parser`

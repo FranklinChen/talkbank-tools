@@ -17,8 +17,8 @@ use pyo3::prelude::*;
 
 use crate::worker_artifacts::require_mono_prepared_audio;
 use crate::worker_execute::{
-    ExecuteFailure, ValidatedRequestV2, classify_runner_error, execute_request_v2,
-    extract_task_payload, parse_host_output, require_runner,
+    ExecuteFailure, ValidatedRequestV2, execute_request_v2, extract_task_payload,
+    parse_host_output, require_runner,
 };
 
 fn parse_opensmile_result(
@@ -72,16 +72,16 @@ fn run_opensmile(
     )?;
     let audio_array = audio.samples()?.into_pyarray(py);
     let descriptor = audio.descriptor();
-    let response = runner
-        .bind(py)
-        .call1((
+    let response = runner.call1(
+        py,
+        (
             audio_array,
             descriptor.sample_rate_hz.0,
             opensmile_request.feature_set.as_str(),
             opensmile_request.feature_level.as_str(),
             descriptor.path.as_ref(),
-        ))
-        .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+        ),
+    )?;
     Ok(TaskResultV2::OpensmileResult(parse_opensmile_result(
         &response,
     )?))
@@ -118,17 +118,17 @@ fn run_avqi(
     let sv_audio_array = sv_audio.samples()?.into_pyarray(py);
     let cs_descriptor = cs_audio.descriptor();
     let sv_descriptor = sv_audio.descriptor();
-    let response = runner
-        .bind(py)
-        .call1((
+    let response = runner.call1(
+        py,
+        (
             cs_audio_array,
             cs_descriptor.sample_rate_hz.0,
             sv_audio_array,
             sv_descriptor.sample_rate_hz.0,
             cs_descriptor.path.as_ref(),
             sv_descriptor.path.as_ref(),
-        ))
-        .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+        ),
+    )?;
     Ok(TaskResultV2::AvqiResult(parse_avqi_result(&response)?))
 }
 
@@ -184,14 +184,14 @@ fn run_speaker(
         )?,
     };
     let audio_array = audio.samples()?.into_pyarray(py);
-    let response = runner
-        .bind(py)
-        .call1((
+    let response = runner.call1(
+        py,
+        (
             audio_array,
             audio.descriptor().sample_rate_hz.0,
             expected_speakers,
-        ))
-        .map_err(|error| classify_runner_error(py, error))?;
+        ),
+    )?;
     Ok(TaskResultV2::SpeakerResult(parse_speaker_result(
         &response,
         speaker_request.backend,
@@ -266,13 +266,10 @@ fn run_speaker_embedding(
         .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
 
     let audio_array = audio.samples()?.into_pyarray(py);
-    let response = runner
-        .bind(py)
-        .call1((audio_array, audio.descriptor().sample_rate_hz.0, spans_json))
-        // The same reclassification the diarization executor uses: a gated
-        // repository or a missing credential must reach the operator as
-        // `model_access_denied`, not as an anonymous runtime failure.
-        .map_err(|error| classify_runner_error(py, error))?;
+    let response = runner.call1(
+        py,
+        (audio_array, audio.descriptor().sample_rate_hz.0, spans_json),
+    )?;
 
     let parsed: SpeakerEmbeddingResultV2 = parse_host_output(&response, "speaker embedding")?;
     require_answers_for_exactly_the_requested_spans(embedding_request, &parsed)?;

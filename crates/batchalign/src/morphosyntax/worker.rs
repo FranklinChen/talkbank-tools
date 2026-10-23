@@ -10,8 +10,10 @@ use crate::error::ServerError;
 use crate::execution::morphotag::progress::BackendProgressPort;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry_and_progress};
 use crate::runner::util::batch_progress::BatchChunkIndex;
+use crate::stanza_registry::{Admitted, Morphosyntax};
 use crate::types::worker_v2::MorphosyntaxItemResultV2;
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
+use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_morphosyntax_request_v2};
 use crate::worker::text_result_v2::parse_morphosyntax_result_v2;
@@ -24,24 +26,44 @@ struct LanguageBatchGroup {
     indices: Vec<usize>,
 }
 
+/// One effective-language group, admitted: the proof names the language the
+/// group is dispatched under.
+struct AdmittedGroup {
+    language: Admitted<Morphosyntax>,
+    indices: Vec<usize>,
+}
+
 /// Owns the exact grouped payload view whose effective languages the runtime
 /// admitted. All groups are checked before any worker can be dispatched.
 struct DispatchPlan<'a, T> {
     pool: &'a WorkerPool,
     items: &'a [T],
-    groups: Vec<LanguageBatchGroup>,
+    groups: Vec<AdmittedGroup>,
 }
 
 impl<'a, T: AsRef<MorphosyntaxBatchItem>> DispatchPlan<'a, T> {
+    /// Admit every group's effective language from the file's own proof, by
+    /// the registry that admitted the file: a refusal is a gap, never "no
+    /// registry", and the pool's registry is not read again.
     fn admit(
         pool: &'a WorkerPool,
         items: &'a [T],
-        fallback_lang: &LanguageCode3,
+        file_language: &Admitted<Morphosyntax>,
     ) -> Result<Self, ServerError> {
-        let groups = language_groups_for_items(items, fallback_lang)?;
-        for group in &groups {
-            AnalysisUnavailable::admit_effective(&group.lang, pool.stanza_registry())?;
-        }
+        let groups = language_groups_for_items(items)?
+            .into_iter()
+            .map(|group| {
+                AnalysisUnavailable::of_sibling(
+                    file_language,
+                    super::AnalysisLanguageRequirement::EffectiveUtterance,
+                    &group.lang,
+                )
+                .map(|language| AdmittedGroup {
+                    language,
+                    indices: group.indices,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             pool,
             items,
@@ -50,25 +72,24 @@ impl<'a, T: AsRef<MorphosyntaxBatchItem>> DispatchPlan<'a, T> {
     }
 }
 
+/// Group items by their own language, in first-appearance order. Every item
+/// names its language (a `LanguageCode` is never empty: the payload builder
+/// resolved the utterance's precode, else the file's first language), so
+/// there is no "the file's language" stand-in to substitute.
 fn language_groups_for_items<T: AsRef<MorphosyntaxBatchItem>>(
     items: &[T],
-    fallback_lang: &LanguageCode3,
 ) -> Result<Vec<LanguageBatchGroup>, ServerError> {
     let mut groups: Vec<LanguageBatchGroup> = Vec::new();
     let mut positions: HashMap<String, usize> = HashMap::new();
 
     for (idx, item) in items.iter().enumerate() {
         let item = item.as_ref();
-        let effective_lang = if item.lang.as_ref().is_empty() {
-            fallback_lang.clone()
-        } else {
-            LanguageCode3::try_new(item.lang.as_ref()).map_err(|error| {
-                ServerError::Validation(format!(
-                    "morphotag batch item has invalid language '{}': {error}",
-                    item.lang.as_ref()
-                ))
-            })?
-        };
+        let effective_lang = LanguageCode3::try_new(item.lang.as_ref()).map_err(|error| {
+            ServerError::Validation(format!(
+                "morphotag batch item has invalid language '{}': {error}",
+                item.lang.as_ref()
+            ))
+        })?;
 
         let key = effective_lang.as_ref().to_string();
         if let Some(group_idx) = positions.get(&key).copied() {
@@ -95,7 +116,7 @@ fn language_groups_for_items<T: AsRef<MorphosyntaxBatchItem>>(
 pub(crate) async fn infer_batch<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     pool: &WorkerPool,
     items: &[T],
-    lang: &LanguageCode3,
+    lang: &Admitted<Morphosyntax>,
     mwt: &MwtDict,
     retokenize: bool,
     progress: Option<&BackendProgressPort>,
@@ -148,7 +169,7 @@ impl<T: AsRef<MorphosyntaxBatchItem> + Sync> DispatchPlan<'_, T> {
             return infer_batch_homogeneous(
                 pool,
                 items,
-                &group.lang,
+                group.language.language(),
                 mwt,
                 retokenize,
                 progress,
@@ -171,7 +192,7 @@ impl<T: AsRef<MorphosyntaxBatchItem> + Sync> DispatchPlan<'_, T> {
             let responses = infer_batch_homogeneous(
                 pool,
                 &group_items,
-                &group.lang,
+                group.language.language(),
                 mwt,
                 retokenize,
                 progress,
@@ -403,13 +424,8 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
         cancellation,
     )
     .await?;
-    let result =
-        parse_morphosyntax_result_v2(response).map_err(|error| ServerError::OutputAdmission {
-            command: crate::api::ReleasedCommand::Morphotag,
-            details: crate::error::OutputAdmissionRefusal::unestablished(format!(
-                "invalid morphosyntax V2 result: {error}"
-            )),
-        })?;
+    let result = parse_morphosyntax_result_v2(response)
+        .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     if result.items.len() != items.len() {
         return Err(ServerError::OutputAdmission {
             command: crate::api::ReleasedCommand::Morphotag,
@@ -427,7 +443,7 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     // without a model" or "neither result nor error" case left to reject.
     let mut ud_responses = Vec::with_capacity(result.items.len());
     for (i, item_result) in result.items.into_iter().enumerate() {
-        let (raw_sentences, model, repairs) = match item_result {
+        let (raw_sentences, model, repairs, feature_repairs) = match item_result {
             MorphosyntaxItemResultV2::Failed { error } => {
                 ud_responses.push(Err(error));
                 continue;
@@ -440,11 +456,12 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
                 raw_sentences,
                 model,
                 repairs,
-            } => (raw_sentences, model, repairs),
+                feature_repairs,
+            } => (raw_sentences, model, repairs, feature_repairs),
         };
         match parse_raw_stanza_output(&raw_sentences) {
             Ok(ud) => ud_responses.push(
-                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs)
+                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs, feature_repairs)
                     .map_err(|error| format!("worker item {i}: {error}")),
             ),
             Err(error) => {
@@ -596,7 +613,7 @@ mod tests {
     #[test]
     fn language_groups_for_items_uses_per_item_language_and_preserves_indices() {
         let items = vec![batch_item("eng"), batch_item("spa"), batch_item("eng")];
-        let groups = language_groups_for_items(&items, &LanguageCode3::eng()).unwrap();
+        let groups = language_groups_for_items(&items).unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].lang, LanguageCode3::eng());
         assert_eq!(groups[0].indices, vec![0, 2]);
@@ -604,38 +621,26 @@ mod tests {
         assert_eq!(groups[1].indices, vec![1]);
     }
 
-    /// Registry double, not a model download or a timing-dependent test.
-    fn registry_supporting(langs: &[&str]) -> crate::stanza_registry::StanzaRegistry {
-        use crate::types::worker::StanzaLanguageProcessors;
-        use std::collections::BTreeMap;
-        let mut caps = BTreeMap::new();
-        for &iso3 in langs {
-            caps.insert(
-                iso3.to_string(),
-                StanzaLanguageProcessors {
-                    alpha2: iso3.chars().take(2).collect(),
-                    processors: ["tokenize", "pos", "lemma", "depparse"]
-                        .into_iter()
-                        .map(String::from)
-                        .collect(),
-                },
-            );
-        }
-        crate::stanza_registry::StanzaRegistry::from_capabilities(&caps)
+    /// The file's proof from a registry double, not a model download or a
+    /// timing-dependent test.
+    fn english_file(langs: &[&str]) -> Admitted<Morphosyntax> {
+        crate::stanza_registry::StanzaRegistry::admitting(langs)
+            .shared()
+            .admit(&LanguageCode3::eng())
+            .expect("the double admits English")
     }
 
     #[test]
     fn dispatch_plan_binds_supported_groups_to_their_exact_payloads() {
         let items = vec![batch_item("eng"), batch_item("cym"), batch_item("eng")];
-        let registry = registry_supporting(&["eng", "cym"]);
-        let pool = WorkerPool::with_test_stanza_registry(registry);
-        let plan = DispatchPlan::admit(&pool, &items, &LanguageCode3::eng()).unwrap();
+        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
+        let plan = DispatchPlan::admit(&pool, &items, &english_file(&["eng", "cym"])).unwrap();
         assert!(std::ptr::eq(plan.pool, &pool));
         assert!(std::ptr::eq(plan.items, items.as_slice()));
         assert_eq!(
             plan.groups
                 .iter()
-                .map(|g| g.lang.as_ref())
+                .map(|g| g.language.language().as_ref())
                 .collect::<Vec<_>>(),
             vec!["eng", "cym"]
         );
@@ -643,46 +648,23 @@ mod tests {
         assert_eq!(plan.groups[1].indices, vec![1]);
     }
 
+    /// The groups are admitted by the registry that admitted the file, not
+    /// by whatever the pool holds: this pool has no registry at all, which
+    /// used to refuse every group with "no registry" although the file had
+    /// been admitted.
     #[test]
     fn unsupported_effective_language_cannot_receive_a_dispatch_plan() {
         let items = vec![batch_item("eng"), batch_item("que")];
-        let registry = registry_supporting(&["eng"]);
-        let pool = WorkerPool::with_test_stanza_registry(registry);
+        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
         let Err(ServerError::AnalysisUnavailable(error)) =
-            DispatchPlan::admit(&pool, &items, &LanguageCode3::eng())
+            DispatchPlan::admit(&pool, &items, &english_file(&["eng"]))
         else {
             panic!("a mixed plan must refuse before dispatching even its supported group");
         };
         assert_eq!(error.language().as_ref(), "que");
-        assert_eq!(
-            error.reason(),
-            super::super::AnalysisUnavailableReason::ProcessorsUnavailable
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_registry_refuses_at_transport_before_any_worker() {
-        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
-        let items = vec![batch_item("eng")];
-        let error = infer_batch(
-            &pool,
-            &items,
-            &LanguageCode3::eng(),
-            &MwtDict::default(),
-            false,
-            None,
-            Cancellation::NotWired {
-                reason: "capability refusal test",
-            },
-        )
-        .await
-        .unwrap_err();
-        let ServerError::AnalysisUnavailable(error) = error else {
-            panic!("no registry must refuse instead of inventing an empty response");
+        let crate::stanza_registry::StanzaRefusal::Gap(gap) = error.reason() else {
+            panic!("a sibling's refusal is a gap");
         };
-        assert_eq!(
-            error.reason(),
-            super::super::AnalysisUnavailableReason::RegistryUnavailable
-        );
+        assert_eq!(gap.kind(), &crate::stanza_registry::GapKind::NotInCatalog);
     }
 }

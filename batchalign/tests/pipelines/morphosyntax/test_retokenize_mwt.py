@@ -177,13 +177,9 @@ class TestBatchInferRetokenize:
             mwt={},
         )
 
-        import threading
-
         response = batch_infer_morphosyntax(
             req,
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
-            nlp_lock=threading.Lock(),
-            free_threaded=False,
         )
 
         result = response.results[0].result
@@ -208,7 +204,7 @@ class TestBatchInferRetokenize:
 # load_stanza_models("eng") took the ``not has_mwt`` branch with
 # tokenize_pretokenized=True, making the English-specific MWT+postprocessor
 # branch dead code. The hardcoded list was retired on 2026-04-15 in favor
-# of a runtime read from Stanza's resources.json (``should_request_mwt``).
+# of a runtime read from Stanza's resources.json (the entry's ``has_mwt``).
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +214,6 @@ class TestWorkerPipelineRetokenize:
 
     def test_worker_pipeline_gonna_expanded(self):
         """load_stanza_models('eng') pipeline with retokenize=True expands 'gonna'."""
-        import threading
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax
         from batchalign.worker._stanza_loading import load_stanza_models
@@ -238,8 +233,6 @@ class TestWorkerPipelineRetokenize:
         response = batch_infer_morphosyntax(
             req,
             pipelines=_state.stanza_pipelines,
-            nlp_lock=threading.Lock(),
-            free_threaded=False,
         )
 
         result = response.results[0].result
@@ -251,7 +244,7 @@ class TestWorkerPipelineRetokenize:
         assert word_id == [1, 2] or word_id == (1, 2), (
             f"Worker pipeline with retokenize=True should expand 'gonna' to "
             f"Range token, got id={word_id}, text={first_word.get('text', '?')}. "
-            f"Check that should_request_mwt('en', table) is True in "
+            f"Check the English entry's has_mwt in "
             f"_stanza_loading.py: the capability table must report "
             f"has_mwt=True for English."
         )
@@ -272,7 +265,6 @@ class TestWorkerPipelineRetokenize:
 def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
     """Build host + artifact + request, execute, return first token id."""
     import json
-    import threading
 
     from batchalign.inference.morphosyntax import batch_infer_morphosyntax
     from batchalign.worker._text_v2 import (
@@ -288,14 +280,10 @@ def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
         PreparedTextRefV2,
     )
 
-    nlp_lock = threading.Lock()
-
     def _runner(req: BatchInferRequest) -> BatchInferResponse:
         return batch_infer_morphosyntax(
             req=req,
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
-            nlp_lock=nlp_lock,
-            free_threaded=False,
         )
 
     host = TextExecutionHostV2(morphosyntax_runner=_runner)

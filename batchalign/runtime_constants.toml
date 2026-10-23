@@ -36,10 +36,9 @@ loading_overhead = 1.5
 commands = ["align", "transcribe", "transcribe_s", "benchmark", "diarize", "speaker_identify"]
 
 [process_commands]
-# Non-free-threaded: CPU-bound commands needing process isolation.
-gil = ["morphotag", "coref", "utseg", "opensmile", "compare", "avqi"]
-# Free-threaded: only native-code commands need process isolation.
-free_threaded = ["opensmile", "compare", "avqi"]
+# Commands needing process isolation in every runtime: native-code commands,
+# and the Stanza commands, whose workers serve one request per process.
+commands = ["morphotag", "coref", "utseg", "opensmile", "compare", "avqi"]
 
 # Per-command base memory (MB) for process workers (non-free-threaded).
 [command_base_mb.process]
@@ -58,18 +57,19 @@ diarize = 2500
 speaker_identify = 1000
 convert = 256
 
-# Per-command base memory (MB) for thread workers (free-threaded, shared models).
+# Per-command base memory (MB) in a free-threaded runtime: thread workers
+# sharing models, and process workers for the process-isolated commands.
 [command_base_mb.threaded]
 align = 4000
 transcribe = 1500
 transcribe_s = 2500
 translate = 4000
-morphotag = 2000
-coref = 2000
-utseg = 2000
+morphotag = 8000
+coref = 4000
+utseg = 6000
 benchmark = 1500
 opensmile = 500
-compare = 2000
+compare = 8000
 avqi = 1500
 diarize = 2500
 speaker_identify = 1000

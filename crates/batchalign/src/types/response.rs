@@ -742,8 +742,6 @@ pub struct SecondaryMorphologySpan {
 pub enum SecondaryMorphologyFailureKind {
     /// The requested code cannot be dispatched.
     InvalidLanguage,
-    /// No runtime language capability registry was available.
-    RegistryUnavailable,
     /// Inference failed after its normal retry handling.
     Worker,
     /// Responses could not be paired with the requested spans.
@@ -756,6 +754,41 @@ pub enum SecondaryMorphologyFailureKind {
     Splice,
 }
 
+/// Why a secondary span failed, as a record holds it: a cause this build
+/// writes, or one only earlier builds wrote and stored records still carry.
+///
+/// Untagged over two string enums, so either reads by its own spelling. The
+/// writer produces a [`SecondaryMorphologyFailureKind`], which has no
+/// retired cause to produce.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(untagged)]
+pub enum StoredSecondaryMorphologyFailureKind {
+    /// A cause this build writes.
+    Written(SecondaryMorphologyFailureKind),
+    /// A cause only earlier builds wrote.
+    Retired(RetiredSecondaryMorphologyFailureKind),
+}
+
+impl From<SecondaryMorphologyFailureKind> for StoredSecondaryMorphologyFailureKind {
+    /// A written cause, stored as it is.
+    fn from(cause: SecondaryMorphologyFailureKind) -> Self {
+        Self::Written(cause)
+    }
+}
+
+/// A secondary-morphology cause earlier builds wrote and this one only reads.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RetiredSecondaryMorphologyFailureKind {
+    /// The runtime had no admitted Stanza registry when the file's secondary
+    /// languages were checked. Unreachable since a file's secondary
+    /// languages are admitted by the registry that admitted its primary
+    /// language; builds from 2026-10-13 wrote it.
+    RegistryUnavailable,
+}
+
 /// One secondary span's failure, distinct from an unsupported-language exclusion.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
@@ -763,7 +796,7 @@ pub struct SecondaryMorphologyFailure {
     /// Where the retained placeholders belong.
     pub span: SecondaryMorphologySpan,
     /// Typed producer boundary.
-    pub cause: SecondaryMorphologyFailureKind,
+    pub cause: StoredSecondaryMorphologyFailureKind,
     /// Bounded explanation from that boundary.
     pub detail: String,
 }
@@ -779,10 +812,34 @@ pub struct UntimedUtteranceRecord {
     /// How many of them are untimed, at least one.
     pub untimed_words: u64,
     /// Why.
-    pub cause: UntimedCauseRecord,
+    pub cause: StoredUntimedCause,
 }
 
-/// Why an utterance's words have no timing.
+/// Why an utterance's words have no timing, as a record holds it: a cause
+/// this build writes, or one only earlier builds wrote and stored records
+/// still carry.
+///
+/// Untagged over two tagged enums, so either reads by its own `kind` and the
+/// wire shape is the cause's. The writer produces an [`UntimedCauseRecord`]
+/// (`fa::completion`), which has no retired cause to produce.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(untagged)]
+pub enum StoredUntimedCause {
+    /// A cause this build writes.
+    Written(UntimedCauseRecord),
+    /// A cause only earlier builds wrote.
+    Retired(RetiredUntimedCause),
+}
+
+impl From<UntimedCauseRecord> for StoredUntimedCause {
+    /// A written cause, stored as it is.
+    fn from(cause: UntimedCauseRecord) -> Self {
+        Self::Written(cause)
+    }
+}
+
+/// Why an utterance's words have no timing: the causes this build writes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -797,16 +854,38 @@ pub enum UntimedCauseRecord {
     NotPlaced,
     /// No supplied timing or source-bound UTR search evidence; no request.
     LocalizationUnavailable,
-    /// No refusal names it, and no positive interval resulted for these
-    /// words: the aligner returned none, or they could not be sent to it.
+    /// Requests covered it and no positive interval resulted for these
+    /// words. The counts are what those requests yielded, from the run's
+    /// own group evidence.
+    Requested {
+        /// Requests that returned timing evidence (a worker's answer, the
+        /// cache, a replayed response, or reused `%wor`).
+        answered: u64,
+        /// Requests left unaligned: no worker evidence was obtained.
+        unaligned: u64,
+        /// Word ranges left unrequested: an anchored piece whose window
+        /// could not be sent.
+        unrequested: u64,
+    },
+    /// No grouping decision names it and no request covered it: the run
+    /// recorded nothing that explains its untimed words.
+    Unrecorded,
+}
+
+/// A cause earlier builds wrote and this one only reads, from records they
+/// stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RetiredUntimedCause {
+    /// Recorded whenever no refusal named the utterance, whether or not any
+    /// request covered it, so it does not say which of
+    /// [`UntimedCauseRecord::Requested`] and [`UntimedCauseRecord::Unrecorded`]
+    /// was true.
     NoUsableTiming,
-    /// The transcript marks it as not speech in the recording.
-    ///
-    /// Read, never written: only the build of 2026-10-07 that reported such
-    /// an utterance as a shortfall recorded it, and records it stored are
-    /// still read. An utterance not in the recording is now an
-    /// [`OutputExclusionRecord::NotInRecording`], which does not diagnose
-    /// the file.
+    /// The transcript marks it as not speech in the recording. Such an
+    /// utterance is now an [`OutputExclusionRecord::NotInRecording`], which
+    /// does not diagnose the file.
     NotInRecording {
         /// The postcode that marks it.
         postcode: OffRecordPostcode,
@@ -963,8 +1042,34 @@ impl std::fmt::Display for UntimedCauseRecord {
             Self::LocalizationUnavailable => f.write_str(
                 "no alignment request, no supplied timing or source-bound UTR search evidence",
             ),
+            Self::Requested {
+                answered,
+                unaligned,
+                unrequested,
+            } => write!(
+                f,
+                "no positive interval from its requests ({answered} answered, {unaligned} \
+                 unaligned, {unrequested} unrequested)"
+            ),
+            Self::Unrecorded => f.write_str("no cause recorded"),
+        }
+    }
+}
+
+impl std::fmt::Display for RetiredUntimedCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
             Self::NoUsableTiming => f.write_str("no usable timing"),
             Self::NotInRecording { postcode } => write!(f, "not in the recording: {postcode}"),
+        }
+    }
+}
+
+impl std::fmt::Display for StoredUntimedCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Written(cause) => cause.fmt(f),
+            Self::Retired(cause) => cause.fmt(f),
         }
     }
 }
@@ -1543,6 +1648,74 @@ pub(crate) fn default_cache_backend() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stored record carries a cause this build writes, or one only an
+    /// earlier build wrote; both read back by their own `kind`, with the
+    /// wire shape the cause's own. The writer's type has no retired cause.
+    /// RED FIRST: removing `registry_unavailable` from the written causes
+    /// made every stored record carrying it unreadable, and crash recovery
+    /// dropped the file's diagnostics. It reads as a retired cause.
+    #[test]
+    fn a_stored_registry_unavailable_failure_still_reads() {
+        let stored: StoredSecondaryMorphologyFailureKind =
+            serde_json::from_value(serde_json::json!("registry_unavailable"))
+                .expect("a retired cause still reads");
+        assert_eq!(
+            stored,
+            StoredSecondaryMorphologyFailureKind::Retired(
+                RetiredSecondaryMorphologyFailureKind::RegistryUnavailable
+            )
+        );
+        let written: StoredSecondaryMorphologyFailureKind =
+            serde_json::from_value(serde_json::json!("merge")).expect("a written cause reads");
+        assert_eq!(
+            written,
+            StoredSecondaryMorphologyFailureKind::Written(SecondaryMorphologyFailureKind::Merge)
+        );
+        assert!(
+            serde_json::from_value::<StoredSecondaryMorphologyFailureKind>(serde_json::json!(
+                "invented"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_stored_untimed_cause_reads_written_and_retired_kinds() {
+        let written: StoredUntimedCause =
+            serde_json::from_value(serde_json::json!({"kind": "unrecorded"})).unwrap();
+        assert_eq!(
+            written,
+            StoredUntimedCause::Written(UntimedCauseRecord::Unrecorded)
+        );
+        let retired: StoredUntimedCause =
+            serde_json::from_value(serde_json::json!({"kind": "no_usable_timing"})).unwrap();
+        assert_eq!(
+            retired,
+            StoredUntimedCause::Retired(RetiredUntimedCause::NoUsableTiming)
+        );
+        let noted: StoredUntimedCause = serde_json::from_value(
+            serde_json::json!({"kind": "not_in_recording", "postcode": "diary"}),
+        )
+        .unwrap();
+        assert_eq!(
+            noted.to_string(),
+            "not in the recording: [+ diary]",
+            "{noted:?}"
+        );
+        for cause in [written, retired, noted] {
+            let json = serde_json::to_value(&cause).unwrap();
+            assert!(json.get("kind").is_some(), "{json}");
+            assert_eq!(
+                serde_json::from_value::<StoredUntimedCause>(json).unwrap(),
+                cause
+            );
+        }
+        assert!(
+            serde_json::from_value::<StoredUntimedCause>(serde_json::json!({"kind": "unknown"}))
+                .is_err()
+        );
+    }
 
     /// Regression: the server returns relative paths like "PWA/TYO_a1.cha" as
     /// display names in file_statuses. These must deserialize successfully.

@@ -148,7 +148,7 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with('*'))
             .flat_map(|l| {
-                let after_colon = l.split_once(':').map(|x| x.1).unwrap_or("");
+                let (_, after_colon) = l.split_once(':').expect("a main tier has a colon");
                 after_colon
                     .split_whitespace()
                     .filter(|w| !w.starts_with('\u{15}') && !Terminator::is_chat_terminator(w))

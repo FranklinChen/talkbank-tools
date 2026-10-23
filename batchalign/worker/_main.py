@@ -34,12 +34,16 @@ from batchalign.worker._model_loading import (
     resolve_injected_revai_api_key,
 )
 from batchalign.worker._protocol import (
+    ErrorCorrelation,
+    _classify_dispatch_exception,
     _print_ready,
     _serve_stdio,
     _serve_stdio_concurrent,
     _serve_tcp,
     _serve_tcp_concurrent,
+    _write_json,
     claim_protocol_stdout,
+    error_envelope,
 )
 from batchalign.worker._stanza_capabilities import (
     refresh_resources_manifest_if_present,
@@ -269,14 +273,10 @@ def main() -> None:
         enable_test_echo(label, bootstrap.lang)
         if args.test_delay_ms > 0:
             _state.test_delay_ms = args.test_delay_ms
-    elif args.lazy and bootstrap.profile is not None:
-        load_worker_profile_lazy(bootstrap)
-    elif bootstrap.profile is not None:
-        load_worker_profile(bootstrap)
-    elif bootstrap.task is not None:
-        load_worker_task(bootstrap)
-    else:
+    elif bootstrap.profile is None and bootstrap.task is None:
         parser.error("--task or --profile is required (or use --test-echo)")
+    else:
+        _load_models_or_report(args, bootstrap)
 
     # After bootstrap succeeds, the worker switches to the request loop
     # expected by the Rust supervisor (stdio) or becomes a persistent daemon
@@ -309,6 +309,46 @@ def main() -> None:
                 _serve_stdio()
             case _:
                 assert_never(serving)
+
+
+def _load_models_or_report(
+    args: argparse.Namespace, bootstrap: WorkerBootstrapRuntime
+) -> None:
+    """Load the worker's models; on failure, say why on the protocol and exit.
+
+    A stdio worker that cannot load its models writes one classified
+    ``{"op": "error"}`` line in place of its ready line, then exits, so the
+    server reads a download that failed in transit as a download (retried)
+    rather than as an unexplained exit before the ready line (a system
+    failure). The Rust ready reader accepts that line
+    (``ReportedFailure::into_startup_error``). A TCP daemon has no reader on
+    its stdout, so it exits with the traceback alone, as before.
+    """
+    try:
+        if args.lazy and bootstrap.profile is not None:
+            load_worker_profile_lazy(bootstrap)
+        elif bootstrap.profile is not None:
+            load_worker_profile(bootstrap)
+        else:
+            load_worker_task(bootstrap)
+    except Exception as error:
+        if args.transport != "stdio":
+            raise
+        import traceback
+
+        kind = _classify_dispatch_exception(error)
+        sys.stderr.write(
+            f"--- worker startup exception ({kind}) ---\n" + traceback.format_exc()
+        )
+        sys.stderr.flush()
+        _write_json(
+            error_envelope(
+                str(error) or error.__class__.__name__,
+                kind,
+                ErrorCorrelation.uncorrelated(),
+            )
+        )
+        sys.exit(1)
 
 
 def _auto_assign_port(host: str) -> TcpPort:

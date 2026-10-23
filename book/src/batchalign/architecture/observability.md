@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-21 11:40 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 ## Release boundary
 
@@ -783,7 +783,7 @@ parsers is the right approach.
 | `runner/util/file_status/` | `RunnerEventSink` trait, `set_file_progress` (split: `event_sink.rs`, `file_stage.rs`, `supervision.rs`, `tracker.rs`, `tests.rs`) |
 | `runner/util/batch_progress.rs` | `ProgressReport`, `BackendProgress`, `BatchProgressLedger` and its `SourceProgress` projection |
 | `execution/morphotag/progress.rs` | `BatchProgressReporter` (owns the ledger, publishing cadence, stall republish) and `BackendProgressPort` (per-file handle) |
-| `runner/dispatch/infer_batched.rs` | Drain task, heartbeat gap, progress publishing |
+| `execution/morphotag/mod.rs` | Drain task, heartbeat gap, progress publishing |
 | `morphosyntax/batch.rs` | Language group dispatch, semaphore, timeouts |
 | `worker/handle/lifecycle.rs` | Stderr capture, ready signal |
 | `worker/error.rs` | `ProcessExited { code, stderr }` |

@@ -15,20 +15,165 @@ fn wd(text: &str, start_ms: Option<u64>, end_ms: Option<u64>) -> WordDesc {
     }
 }
 
+/// Helper: a word-level description's words.
+fn words_of(utterance: &UtteranceDesc) -> &[WordDesc] {
+    match &utterance.body {
+        UtteranceBody::Words { words, .. } => words,
+        UtteranceBody::Text { .. } => panic!("test: a word-level utterance"),
+    }
+}
+
+/// Helper: an utterance end the recognizer observed, by its CHAT text.
+fn observed(terminator: &str) -> asr_postprocess::UtteranceEnd {
+    asr_postprocess::UtteranceEnd::Observed(
+        talkbank_model::model::Terminator::try_from_chat_str(
+            talkbank_model::Location::Unlocated,
+            terminator,
+        )
+        .expect("test: a CHAT terminator"),
+    )
+}
+
+/// Helper: an English-only transcript's languages.
+fn eng() -> TranscriptLanguages {
+    TranscriptLanguages::parse(&["eng".to_string()]).expect("test: eng is a language code")
+}
+
 /// Helper: admit test bounds exactly as the ASR bridge does.
 fn described(start_ms: Option<u64>, end_ms: Option<u64>) -> DescribedTiming {
     let signed = |bound: Option<u64>| bound.map(|ms| i64::try_from(ms).expect("test bound"));
     DescribedTiming::admit_millis(signed(start_ms), signed(end_ms))
 }
 
-/// Helper: an utterance described without timing of its own.
-const NO_UTTERANCE_TIMING: DescribedTiming =
-    DescribedTiming::Untimed(asr_postprocess::UntimedCause::ProviderReportedNoTiming);
+/// A word-level utterance's end is a field of its description, so there is
+/// no "missing terminator" to refuse: a synthesized end is written as a
+/// period and reported with its position among the written utterances, and
+/// an observed one is not reported.
+#[test]
+fn a_synthesized_end_is_written_as_a_period_and_reported() {
+    let utterance = |end| UtteranceDesc {
+        speaker: "PAR".to_string(),
+        body: UtteranceBody::Words {
+            words: vec![wd("hello", None, None), wd("world", None, None)],
+            end,
+        },
+        lang: None,
+    };
+    let desc = TranscriptDescription {
+        langs: eng(),
+        participants: vec![ParticipantDesc {
+            id: "PAR".to_string(),
+            name: None,
+            role: "Participant".to_string(),
+            corpus: String::new(),
+        }],
+        media_name: None,
+        media_type: None,
+        media_status: None,
+        utterances: vec![
+            utterance(observed("?")),
+            // Reduces to nothing, so it is not a written utterance and does
+            // not count in the positions below.
+            UtteranceDesc {
+                speaker: "PAR".to_string(),
+                body: UtteranceBody::Words {
+                    words: vec![],
+                    end: asr_postprocess::UtteranceEnd::Synthesized(
+                        asr_postprocess::SynthesisCause::NoMark,
+                    ),
+                },
+                lang: None,
+            },
+            utterance(asr_postprocess::UtteranceEnd::Synthesized(
+                asr_postprocess::SynthesisCause::NoMark,
+            )),
+        ],
+        write_wor: false,
+    };
+    let built = build_chat(desc).expect("both utterances have content");
+    assert_eq!(
+        built.synthesized_ends,
+        vec![SynthesizedEnd {
+            utterance: 2,
+            speaker: "PAR".to_string(),
+        }]
+    );
+    let output = to_chat_string(&built.into_file());
+    assert!(output.contains("*PAR:\thello world ?"), "{output}");
+    assert!(output.contains("*PAR:\thello world ."), "{output}");
+}
+
+/// A word-level utterance's end is its own field: a terminator is not a
+/// word (it cannot become one, since `ChatWordText` refuses it), an observed
+/// end is written as its terminator, and a synthesized end names its cause
+/// and is written as a period.
+#[test]
+fn an_utterance_states_its_end_as_a_field() {
+    assert!(
+        asr_postprocess::ChatWordText::try_from(".").is_err(),
+        "a terminator is not a word"
+    );
+    let built = |end| {
+        let desc = TranscriptDescription {
+            langs: eng(),
+            participants: vec![ParticipantDesc {
+                id: "PAR".to_string(),
+                name: None,
+                role: "Participant".to_string(),
+                corpus: String::new(),
+            }],
+            media_name: None,
+            media_type: None,
+            media_status: None,
+            utterances: vec![UtteranceDesc {
+                speaker: "PAR".to_string(),
+                body: UtteranceBody::Words {
+                    words: vec![wd("hello", None, None)],
+                    end,
+                },
+                lang: None,
+            }],
+            write_wor: false,
+        };
+        to_chat_string(&build_chat(desc).expect("a stated end builds").into_file())
+    };
+    assert!(built(observed("?")).contains("*PAR:\thello ?"));
+    let ellipsis = asr_postprocess::UtteranceEnd::Synthesized(
+        asr_postprocess::SynthesisCause::UnwritableMark(
+            asr_postprocess::UnwritableEndMark::Ellipsis,
+        ),
+    );
+    assert!(built(ellipsis).contains("*PAR:\thello ."));
+}
+
+/// A synthesized end names its cause on the wire too, and an uncaused one
+/// is refused where it is read rather than given a cause nobody stated.
+#[test]
+fn a_serialized_synthesized_end_carries_its_cause() {
+    let ellipsis = asr_postprocess::UtteranceEnd::Synthesized(
+        asr_postprocess::SynthesisCause::UnwritableMark(
+            asr_postprocess::UnwritableEndMark::Ellipsis,
+        ),
+    );
+    let wire = serde_json::to_value(&ellipsis).expect("serializes");
+    assert_eq!(
+        wire,
+        serde_json::json!({"synthesized": {"unwritable_mark": "ellipsis"}})
+    );
+    assert_eq!(
+        serde_json::from_value::<asr_postprocess::UtteranceEnd>(wire).expect("round trip"),
+        ellipsis
+    );
+    assert!(
+        serde_json::from_value::<asr_postprocess::UtteranceEnd>(serde_json::json!("synthesized"))
+            .is_err()
+    );
+}
 
 #[test]
 fn test_build_chat_minimal() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -40,54 +185,33 @@ fn test_build_chat_minimal() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![
-                wd("hello", None, None),
-                wd("world", None, None),
-                wd(".", None, None),
-            ]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![wd("hello", None, None), wd("world", None, None)],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: false,
     };
 
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat_file);
     assert!(output.contains("@Languages:\teng"));
     assert!(output.contains("*PAR:\thello world ."));
 }
 
-/// JSON can deserialize token text without invoking ChatWordText's constructor.
-/// Assembly must refuse it rather than emit an unchecked or recovered word.
+/// A malformed token cannot reach assembly: `ChatWordText` refuses it where
+/// it is admitted, keeping the parser's evidence. The JSON route that let one
+/// skip that admission (and made assembly parse every word again) is gone.
 #[test]
-fn json_word_assembly_preserves_parser_refusal() {
+fn a_malformed_token_is_refused_where_it_is_admitted() {
     for token in ["cookies@", "be(cause", "hello world"] {
-        for kind in ["Regular", "Retrace"] {
-            let wire = serde_json::json!({
-                "langs": ["eng"],
-                "participants": [{"id": "PAR"}],
-                "write_wor": true,
-                "utterances": [{"speaker": "PAR", "words": [
-                    {"text": "hello", "start_ms": 0, "end_ms": 100},
-                    {"text": token, "kind": kind, "start_ms": 100, "end_ms": 200},
-                    {"text": "."}
-                ]}]
-            });
-            let desc: TranscriptDescription =
-                serde_json::from_value(wire.clone()).expect("wire decoding is not CHAT admission");
-            match build_chat(&desc).expect_err("malformed token must refuse the whole build") {
-                BuildChatError::Word { text, diagnostics } => {
-                    assert_eq!(text, token);
-                    assert!(
-                        !diagnostics.is_empty(),
-                        "retain parser evidence for {token:?}"
-                    );
-                }
-                other => panic!("unexpected failure for {token:?}/{kind}: {other}"),
-            }
-            assert!(build_chat_from_json(&wire.to_string()).is_err());
-        }
+        let diagnostics = asr_postprocess::ChatWordText::try_from(token)
+            .expect_err("a malformed token is no word");
+        assert!(
+            !diagnostics.is_empty(),
+            "retain parser evidence for {token:?}"
+        );
     }
 }
 
@@ -95,7 +219,7 @@ fn json_word_assembly_preserves_parser_refusal() {
 fn test_build_chat_with_timing() {
     let parser = TreeSitterParser::new().unwrap();
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -107,19 +231,19 @@ fn test_build_chat_with_timing() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![
-                wd("hello", Some(0), Some(500)),
-                wd("world", Some(500), Some(1000)),
-                wd(".", None, None),
-            ]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![
+                    wd("hello", Some(0), Some(500)),
+                    wd("world", Some(500), Some(1000)),
+                ],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: true,
     };
 
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat_file);
     assert!(output.contains("@Media:\ttest, audio"), "got: {output}");
     assert!(output.contains("%wor:"));
@@ -137,7 +261,7 @@ fn test_build_chat_with_timing() {
 #[test]
 fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -150,31 +274,35 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
         utterances: vec![
             UtteranceDesc {
                 speaker: "PAR".to_string(),
-                words: Some(vec![
-                    wd("Department", Some(24_275), Some(24_945)),
-                    wd("store", Some(24_945), Some(25_265)),
-                    wd(".", None, None),
-                ]),
-                text: None,
-                timing: NO_UTTERANCE_TIMING,
+                body: UtteranceBody::Words {
+                    words: vec![
+                        wd("Department", Some(24_275), Some(24_945)),
+                        wd("store", Some(24_945), Some(25_265)),
+                    ],
+                    end: observed("."),
+                },
                 lang: None,
             },
             UtteranceDesc {
                 speaker: "PAR".to_string(),
-                words: Some(vec![
-                    wd("almost", Some(25_265), Some(25_585)),
-                    wd("anniversary", Some(27_455), Some(28_145)),
-                    wd(".", None, None),
-                ]),
-                text: None,
-                timing: NO_UTTERANCE_TIMING,
+                body: UtteranceBody::Words {
+                    words: vec![
+                        wd("almost", Some(25_265), Some(25_585)),
+                        wd("anniversary", Some(27_455), Some(28_145)),
+                    ],
+                    end: observed("."),
+                },
                 lang: None,
             },
         ],
         write_wor: true,
     };
 
-    let output = to_chat_string(&build_chat(&desc).expect("word-timed CHAT should build"));
+    let output = to_chat_string(
+        &build_chat(desc)
+            .expect("word-timed CHAT should build")
+            .into_file(),
+    );
 
     assert!(
         output.contains("*PAR:\tDepartment store . \u{15}24275_25265\u{15}"),
@@ -187,27 +315,9 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
 }
 
 #[test]
-fn test_build_chat_from_json() {
-    let json = r#"{
-        "langs": ["eng"],
-        "participants": [{"id": "PAR"}],
-        "utterances": [
-            {"speaker": "PAR", "words": [
-                {"text": "hello"},
-                {"text": "."}
-            ]}
-        ]
-    }"#;
-
-    let chat_file = build_chat_from_json(json).unwrap();
-    let output = to_chat_string(&chat_file);
-    assert!(output.contains("*PAR:\thello ."));
-}
-
-#[test]
 fn test_build_chat_text_utterance() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -219,15 +329,16 @@ fn test_build_chat_text_utterance() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: None,
-            text: Some("hello world .".to_string()),
-            timing: described(Some(0), Some(1000)),
+            body: UtteranceBody::Text {
+                text: "hello world .".to_string(),
+                timing: described(Some(0), Some(1000)),
+            },
             lang: None,
         }],
         write_wor: false,
     };
 
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat_file);
     assert!(output.contains("*PAR:\thello world ."));
 }
@@ -235,7 +346,7 @@ fn test_build_chat_text_utterance() {
 #[test]
 fn test_build_chat_question_terminator() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -247,15 +358,16 @@ fn test_build_chat_question_terminator() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![wd("how", None, None), wd("?", None, None)]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![wd("how", None, None)],
+                end: observed("?"),
+            },
             lang: None,
         }],
         write_wor: false,
     };
 
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat_file);
     assert!(output.contains("*PAR:\thow ?"));
 }
@@ -263,7 +375,7 @@ fn test_build_chat_question_terminator() {
 #[test]
 fn test_write_wor_false_suppresses_wor_tier() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -275,19 +387,19 @@ fn test_write_wor_false_suppresses_wor_tier() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![
-                wd("hello", Some(0), Some(500)),
-                wd("world", Some(500), Some(1000)),
-                wd(".", None, None),
-            ]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![
+                    wd("hello", Some(0), Some(500)),
+                    wd("world", Some(500), Some(1000)),
+                ],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: false,
     };
 
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat_file);
     assert!(
         !output.contains("%wor:"),
@@ -305,18 +417,18 @@ fn test_transcript_from_asr_utterances() {
     let utterances = vec![
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(0),
-            words: vec![
-                asr_postprocess::AsrWord::new("hello", Some(0), Some(500)),
-                asr_postprocess::AsrWord::new(".", None, None),
-            ],
+            words: vec![asr_postprocess::AsrWord::new("hello", Some(0), Some(500))],
+            end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
         },
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(1),
-            words: vec![
-                asr_postprocess::AsrWord::new("world", Some(500), Some(1000)),
-                asr_postprocess::AsrWord::new(".", None, None),
-            ],
+            words: vec![asr_postprocess::AsrWord::new(
+                "world",
+                Some(500),
+                Some(1000),
+            )],
+            end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
         },
     ];
@@ -340,7 +452,7 @@ fn test_transcript_from_asr_utterances() {
     assert_eq!(desc.utterances[1].speaker, "INV");
 
     // Should build a valid CHAT file
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat_file);
     assert!(output.contains("*PAR:"));
     assert!(output.contains("*INV:"));
@@ -351,6 +463,7 @@ fn test_numbered_asr_names_require_no_dense_speaker_population() {
     let utterances = vec![asr_postprocess::Utterance {
         speaker: asr_postprocess::SpeakerIndex(usize::MAX),
         words: vec![asr_postprocess::AsrWord::new("hello", None, None)],
+        end: asr_postprocess::UtteranceEnd::Synthesized(asr_postprocess::SynthesisCause::NoMark),
         lang: None,
     }];
 
@@ -426,7 +539,7 @@ fn quote_mark_in_asr_token_is_silently_stripped() {
         .description
         .utterances
         .first()
-        .and_then(|u| u.words.as_deref()?.first())
+        .and_then(|u| words_of(u).first())
         .expect("first utterance has at least one word");
     assert_eq!(
         first_word.text.as_str(),
@@ -467,7 +580,7 @@ fn alphanumeric_token_under_eng_is_emitted_verbatim_for_review() {
         .description
         .utterances
         .iter()
-        .flat_map(|u| u.words.as_deref().unwrap_or(&[]))
+        .flat_map(words_of)
         .map(|w| w.text.as_str().to_owned())
         .collect();
     assert!(
@@ -499,10 +612,8 @@ fn alphanumeric_token_passes_zho_validation_gate() {
     // the right place.
     let utterances = vec![asr_postprocess::Utterance {
         speaker: asr_postprocess::SpeakerIndex(0),
-        words: vec![
-            asr_postprocess::AsrWord::new("C-3PO", Some(0), Some(500)),
-            asr_postprocess::AsrWord::new("。", None, None),
-        ],
+        words: vec![asr_postprocess::AsrWord::new("C-3PO", Some(0), Some(500))],
+        end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
         lang: None,
     }];
     let result = transcript_from_asr_utterances(
@@ -529,7 +640,7 @@ fn test_tag_marker_separator() {
 #[test]
 fn test_empty_participants_error() {
     let desc = TranscriptDescription {
-        langs: vec![],
+        langs: eng(),
         participants: vec![],
         media_name: None,
         media_type: None,
@@ -537,7 +648,7 @@ fn test_empty_participants_error() {
         utterances: vec![],
         write_wor: false,
     };
-    assert!(build_chat(&desc).is_err());
+    assert!(build_chat(desc).is_err());
 }
 
 // -- Retrace AST construction tests --
@@ -555,7 +666,7 @@ fn wd_retrace(text: &str, start_ms: Option<u64>, end_ms: Option<u64>) -> WordDes
 /// Helper: build a single-utterance CHAT file and return serialized output.
 fn build_single_utterance(words: Vec<WordDesc>) -> String {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -567,14 +678,15 @@ fn build_single_utterance(words: Vec<WordDesc>) -> String {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(words),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words,
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: false,
     };
-    let chat = build_chat(&desc).unwrap();
+    let chat = build_chat(desc).unwrap().into_file();
     to_chat_string(&chat)
 }
 
@@ -585,7 +697,6 @@ fn single_word_retrace_produces_annotated_word() {
         wd_retrace("I", None, None),
         wd("I", None, None),
         wd("went", None, None),
-        wd(".", None, None),
     ]);
     assert!(
         output.contains("I [/] I went ."),
@@ -602,7 +713,6 @@ fn multi_word_retrace_produces_annotated_group() {
         wd("I", None, None),
         wd("want", None, None),
         wd("cookie", None, None),
-        wd(".", None, None),
     ]);
     assert!(
         output.contains("<I want> [/] I want cookie ."),
@@ -616,7 +726,6 @@ fn retrace_preserves_per_word_timing() {
         wd_retrace("go", Some(0), Some(200)),
         wd("go", Some(200), Some(400)),
         wd("home", Some(400), Some(600)),
-        wd(".", None, None),
     ]);
     // The retrace word should have an inline bullet.
     assert!(
@@ -634,7 +743,6 @@ fn retrace_output_reparses_cleanly() {
         wd_retrace("I", None, None),
         wd("I", None, None),
         wd("went", None, None),
-        wd(".", None, None),
     ]);
     let (_parsed, errors) = parse_lenient(&parser, &output);
     assert!(
@@ -649,7 +757,6 @@ fn retrace_output_reparses_cleanly() {
         wd("I", None, None),
         wd("want", None, None),
         wd("cookie", None, None),
-        wd(".", None, None),
     ]);
     let (_parsed, errors) = parse_lenient(&parser, &output);
     assert!(
@@ -717,7 +824,7 @@ fn disfluency_and_retrace_end_to_end() {
     )
     .expect("test: transcript_from_asr_utterances should succeed")
     .description;
-    let chat = build_chat(&desc).unwrap();
+    let chat = build_chat(desc).unwrap().into_file();
     let serialized = to_chat_string(&chat);
 
     // Should contain filled pause marker and retrace
@@ -745,7 +852,7 @@ fn disfluency_and_retrace_end_to_end() {
 #[test]
 fn media_header_has_comma_separator() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -757,22 +864,23 @@ fn media_header_has_comma_separator() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![wd("hello", None, None), wd(".", None, None)]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![wd("hello", None, None)],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: false,
     };
-    let chat = build_chat(&desc).unwrap();
+    let chat = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat);
+    let media = output
+        .lines()
+        .find(|l| l.contains("@Media"))
+        .expect("the output declares @Media");
     assert!(
-        output.contains("@Media:\t279home-2, audio"),
-        "@Media must have 'name, type' format with comma+space, got: {}",
-        output
-            .lines()
-            .find(|l| l.contains("@Media"))
-            .unwrap_or("(no @Media)")
+        media.contains("@Media:\t279home-2, audio"),
+        "@Media must have 'name, type' format with comma+space, got: {media}"
     );
 }
 
@@ -792,18 +900,14 @@ fn asr_pipeline_sets_correct_participant_roles() {
     let utterances = vec![
         Utterance {
             speaker: SpeakerIndex(0),
-            words: vec![
-                AsrWord::new("hello", Some(0), Some(500)),
-                AsrWord::new(".", None, None),
-            ],
+            words: vec![AsrWord::new("hello", Some(0), Some(500))],
+            end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
         },
         Utterance {
             speaker: SpeakerIndex(1),
-            words: vec![
-                AsrWord::new("world", Some(600), Some(1000)),
-                AsrWord::new(".", None, None),
-            ],
+            words: vec![AsrWord::new("world", Some(600), Some(1000))],
+            end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
         },
     ];
@@ -836,7 +940,7 @@ fn asr_pipeline_sets_correct_participant_roles() {
 
     // Verify serialization: "PAR0 Participant, PAR1 Participant"
     // No doubled role words
-    let chat = build_chat(&desc).unwrap();
+    let chat = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat);
     let participants_line = output
         .lines()
@@ -860,7 +964,7 @@ fn asr_pipeline_sets_correct_participant_roles() {
 #[test]
 fn transcribe_comment_includes_do_not_use() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -872,14 +976,15 @@ fn transcribe_comment_includes_do_not_use() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![wd("hello", None, None), wd(".", None, None)]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![wd("hello", None, None)],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: false,
     };
-    let chat = build_chat(&desc).unwrap();
+    let chat = build_chat(desc).unwrap().into_file();
     let output = to_chat_string(&chat);
     // Find the "Unchecked output" comment
     if let Some(comment) = output.lines().find(|l| l.contains("Unchecked output")) {
@@ -958,7 +1063,7 @@ fn run_transcribe_pipeline(tokens: &[(&str, f64, f64)], lang: &str) -> String {
     let desc = run_transcribe_to_description(tokens, lang)
         .expect("test: transcript_from_asr_utterances should succeed")
         .description;
-    let chat = build_chat(&desc).unwrap();
+    let chat = build_chat(desc).unwrap().into_file();
     to_chat_string(&chat)
 }
 
@@ -1145,7 +1250,9 @@ fn asr_to_chat_roundtrip(
     )
     .expect("test: transcript_from_asr_utterances should succeed")
     .description;
-    let chat = build_chat(&desc).expect("build_chat should not fail on normalized input");
+    let chat = build_chat(desc)
+        .expect("build_chat should not fail on normalized input")
+        .into_file();
     let serialized = to_chat_string(&chat);
     let parser = TreeSitterParser::new().expect("grammar loads");
     let (_chat, errors) = crate::parse::parse_lenient(&parser, &serialized);
@@ -1282,7 +1389,9 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
     )
     .expect("test: transcript_from_asr_utterances should succeed")
     .description;
-    let chat = build_chat(&desc).expect("build_chat should not fail");
+    let chat = build_chat(desc)
+        .expect("build_chat should not fail")
+        .into_file();
     let serialized = to_chat_string(&chat);
     let parser = TreeSitterParser::new().expect("grammar loads");
     let (_chat, errors) = crate::parse::parse_lenient(&parser, &serialized);
@@ -1449,31 +1558,29 @@ fn english_transcribe_rules_skip_other_languages() {
     );
 }
 
-/// An invalid transcript-level language code must surface as a build
-/// error naming the offending code, never a panic and never a silently
-/// wrong @Languages header. (chatter 0.3.0 made LanguageCode
-/// construction fallible; this pins our boundary handling of it.)
+/// A transcript's languages are parsed once, where they enter: none at all,
+/// and a code that is not a CHAT language code, are refused there, so
+/// assembly never invents a default or re-parses one.
 #[test]
-fn test_build_chat_invalid_language_code_is_a_build_error() {
-    let desc = TranscriptDescription {
-        langs: vec![String::new()],
-        participants: vec![ParticipantDesc {
-            id: "PAR".to_string(),
-            name: None,
-            role: "Participant".to_string(),
-            corpus: String::new(),
-        }],
-        media_name: None,
-        media_type: None,
-        media_status: None,
-        utterances: vec![],
-        write_wor: false,
-    };
-    let err = build_chat(&desc).expect_err("empty language code must be rejected");
-    // Match the VARIANT, not the prose: that is what the typed error buys.
-    assert!(
-        matches!(err, BuildChatError::LanguageCode { .. }),
-        "error must name the language problem, got: {err}"
+fn transcript_languages_are_refused_where_they_enter() {
+    assert!(matches!(
+        TranscriptLanguages::parse(&[]),
+        Err(TranscriptBuildError::MissingPrimaryLanguage)
+    ));
+    assert!(matches!(
+        TranscriptLanguages::parse(&[String::new()]),
+        Err(TranscriptBuildError::InvalidLanguageCode { .. })
+    ));
+    let languages =
+        TranscriptLanguages::parse(&["spa".to_string(), "eng".to_string()]).expect("two codes");
+    assert_eq!(languages.primary().as_str(), "spa");
+    assert_eq!(
+        languages
+            .all()
+            .iter()
+            .map(|code| code.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["spa", "eng"]
     );
 }
 
@@ -1488,18 +1595,14 @@ fn built_chat_file_carries_typed_participant_map() {
     let utterances = vec![
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(0),
-            words: vec![
-                asr_postprocess::AsrWord::new("hello", Some(100), Some(400)),
-                asr_postprocess::AsrWord::new(".", None, None),
-            ],
+            words: vec![asr_postprocess::AsrWord::new("hello", Some(100), Some(400))],
+            end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
         },
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(1),
-            words: vec![
-                asr_postprocess::AsrWord::new("hi", Some(500), Some(800)),
-                asr_postprocess::AsrWord::new(".", None, None),
-            ],
+            words: vec![asr_postprocess::AsrWord::new("hi", Some(500), Some(800))],
+            end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
         },
     ];
@@ -1514,7 +1617,7 @@ fn built_chat_file_carries_typed_participant_map() {
     .expect("test: transcript_from_asr_utterances should succeed")
     .description;
 
-    let chat_file = build_chat(&desc).unwrap();
+    let chat_file = build_chat(desc).unwrap().into_file();
 
     assert_eq!(
         chat_file.participants.len(),
@@ -1549,7 +1652,7 @@ fn built_chat_file_carries_typed_participant_map() {
 #[test]
 fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
     let mut desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -1561,15 +1664,16 @@ fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![wd("hello", None, None), wd(".", None, None)]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![wd("hello", None, None)],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: false,
     };
 
-    let err = build_chat(&desc).expect_err("a comma-bearing media name must be rejected");
+    let err = build_chat(desc.clone()).expect_err("a comma-bearing media name must be rejected");
     assert!(
         matches!(err, BuildChatError::MediaFilename(_)),
         "the error must name the header it could not write: {err}"
@@ -1577,7 +1681,9 @@ fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
 
     // And the ordinary name still works, so the check is not simply refusing.
     desc.media_name = Some("interview_part2".to_string());
-    let chat = build_chat(&desc).expect("a representable media name still builds");
+    let chat = build_chat(desc)
+        .expect("a representable media name still builds")
+        .into_file();
     assert!(to_chat_string(&chat).contains("@Media:\tinterview_part2, audio"));
 }
 
@@ -1622,12 +1728,12 @@ fn a_reserved_marker_spelling_is_written_as_a_letter_string() {
         .description
         .utterances
         .iter()
-        .flat_map(|u| u.words.as_deref().unwrap_or(&[]))
+        .flat_map(words_of)
         .map(|w| w.text.as_str())
         .collect();
     assert_eq!(
         words,
-        ["www@k", "."],
+        ["www@k"],
         "one word, as recognized, marked as letters"
     );
     assert!(
@@ -1680,25 +1786,37 @@ fn a_clean_transcript_reports_no_language_invalid_words() {
 /// Every generated bullet comes from a positive interval. A zero-width or
 /// inverted pair keeps its word but writes no word bullet and does not widen
 /// the utterance bullet, which covers exactly the positive words (in any
-/// order). JSON keeps its flat fields and is admitted the same way.
+/// order).
 #[test]
 fn generated_bullets_come_only_from_positive_intervals() {
-    let wire = serde_json::json!({
-        "langs": ["eng"],
-        "participants": [{"id": "PAR"}],
-        "media_name": "sample.mp3",
-        "write_wor": true,
-        "utterances": [{"speaker": "PAR", "words": [
-            {"text": "zero", "start_ms": 100, "end_ms": 100},
-            {"text": "later", "start_ms": 900, "end_ms": 1200},
-            {"text": "earlier", "start_ms": 300, "end_ms": 600},
-            {"text": "backwards", "start_ms": 2000, "end_ms": 1500},
-            {"text": "untimed"},
-            {"text": "."}
-        ]}]
-    });
-    let desc: TranscriptDescription = serde_json::from_value(wire).expect("wire decoding");
-    let words = desc.utterances[0].words.as_ref().expect("words");
+    let desc = TranscriptDescription {
+        langs: eng(),
+        participants: vec![ParticipantDesc {
+            id: "PAR".to_string(),
+            name: None,
+            role: "Participant".to_string(),
+            corpus: String::new(),
+        }],
+        media_name: Some("sample.mp3".to_string()),
+        media_type: None,
+        media_status: None,
+        utterances: vec![UtteranceDesc {
+            speaker: "PAR".to_string(),
+            body: UtteranceBody::Words {
+                words: vec![
+                    wd("zero", Some(100), Some(100)),
+                    wd("later", Some(900), Some(1200)),
+                    wd("earlier", Some(300), Some(600)),
+                    wd("backwards", Some(2000), Some(1500)),
+                    wd("untimed", None, None),
+                ],
+                end: observed("."),
+            },
+            lang: None,
+        }],
+        write_wor: true,
+    };
+    let words = words_of(&desc.utterances[0]);
     assert_eq!(
         words[0].timing,
         DescribedTiming::Untimed(asr_postprocess::UntimedCause::ZeroLengthSpan)
@@ -1711,7 +1829,7 @@ fn generated_bullets_come_only_from_positive_intervals() {
         words[4].timing,
         DescribedTiming::Untimed(asr_postprocess::UntimedCause::ProviderReportedNoTiming)
     );
-    let output = to_chat_string(&build_chat(&desc).expect("build"));
+    let output = to_chat_string(&build_chat(desc).expect("build").into_file());
     assert!(
         output.contains("\u{15}300_1200\u{15}"),
         "utterance bullet is the hull of its positive words: {output}"
@@ -1732,7 +1850,7 @@ fn generated_bullets_come_only_from_positive_intervals() {
 #[test]
 fn an_utterance_with_no_positive_word_has_no_bullet() {
     let desc = TranscriptDescription {
-        langs: vec!["eng".to_string()],
+        langs: eng(),
         participants: vec![ParticipantDesc {
             id: "PAR".to_string(),
             name: None,
@@ -1744,18 +1862,15 @@ fn an_utterance_with_no_positive_word_has_no_bullet() {
         media_status: None,
         utterances: vec![UtteranceDesc {
             speaker: "PAR".to_string(),
-            words: Some(vec![
-                wd("zero", Some(500), Some(500)),
-                wd("none", None, None),
-                wd(".", None, None),
-            ]),
-            text: None,
-            timing: NO_UTTERANCE_TIMING,
+            body: UtteranceBody::Words {
+                words: vec![wd("zero", Some(500), Some(500)), wd("none", None, None)],
+                end: observed("."),
+            },
             lang: None,
         }],
         write_wor: true,
     };
-    let chat_file = build_chat(&desc).expect("build");
+    let chat_file = build_chat(desc).expect("build").into_file();
     let output = to_chat_string(&chat_file);
     assert!(!output.contains('\u{15}'), "no bullet anywhere: {output}");
     assert!(

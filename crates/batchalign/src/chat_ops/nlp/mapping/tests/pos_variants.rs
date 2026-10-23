@@ -17,7 +17,7 @@ fn a_pronoun_without_features_is_written_bare() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "I".to_string(),
         lemma: "I".to_string(),
@@ -28,7 +28,8 @@ fn a_pronoun_without_features_is_written_bare() {
         deprel: "root".to_string(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
 
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
@@ -42,7 +43,7 @@ fn test_pos_adp_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "in".into(),
         lemma: "in".into(),
@@ -53,7 +54,8 @@ fn test_pos_adp_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -66,7 +68,7 @@ fn test_pos_intj_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "wow".into(),
         lemma: "wow".into(),
@@ -77,7 +79,8 @@ fn test_pos_intj_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -90,7 +93,7 @@ fn test_pos_cconj_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "and".into(),
         lemma: "and".into(),
@@ -101,7 +104,8 @@ fn test_pos_cconj_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -114,7 +118,7 @@ fn test_pos_sconj_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "because".into(),
         lemma: "because".into(),
@@ -125,7 +129,8 @@ fn test_pos_sconj_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -137,7 +142,7 @@ fn test_pos_propn_mapping() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "London".into(),
         lemma: "London".into(),
@@ -148,7 +153,8 @@ fn test_pos_propn_mapping() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -161,7 +167,7 @@ fn test_verb_full_features() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "walks".into(),
         lemma: "walk".into(),
@@ -172,7 +178,8 @@ fn test_verb_full_features() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -185,7 +192,7 @@ fn test_verb_irregular_past() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "went".into(),
         lemma: "go".into(),
@@ -196,7 +203,8 @@ fn test_verb_irregular_past() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -209,7 +217,7 @@ fn test_pron_with_features() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "I".into(),
         lemma: "I".into(),
@@ -220,7 +228,8 @@ fn test_pron_with_features() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -232,7 +241,7 @@ fn test_pron_that_no_number() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "that".into(),
         lemma: "that".into(),
@@ -243,7 +252,8 @@ fn test_pron_that_no_number() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -256,7 +266,7 @@ fn a_det_without_definite_gets_no_def() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "the".into(),
         lemma: "the".into(),
@@ -267,7 +277,8 @@ fn a_det_without_definite_gets_no_def() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -280,7 +291,7 @@ fn test_det_with_article() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "the".into(),
         lemma: "the".into(),
@@ -291,7 +302,8 @@ fn test_det_with_article() {
         deprel: "det".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -303,7 +315,7 @@ fn test_adj_default_degree() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "big".into(),
         lemma: "big".into(),
@@ -314,7 +326,8 @@ fn test_adj_default_degree() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -327,7 +340,7 @@ fn test_adj_comparative() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "bigger".into(),
         lemma: "big".into(),
@@ -338,7 +351,8 @@ fn test_adj_comparative() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -350,7 +364,7 @@ fn an_object_noun_without_case_gets_no_acc() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "dog".into(),
         lemma: "dog".into(),
@@ -361,7 +375,8 @@ fn an_object_noun_without_case_gets_no_acc() {
         deprel: "obj".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -374,7 +389,7 @@ fn test_comma_lemma_early_return() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: ",".into(),
         lemma: ",".into(),
@@ -385,7 +400,8 @@ fn test_comma_lemma_early_return() {
         deprel: "punct".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -432,7 +448,7 @@ fn test_irr_suffix_with_3letter_code() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("eng").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "went".into(),
         lemma: "go".into(),
@@ -443,7 +459,8 @@ fn test_irr_suffix_with_3letter_code() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();
@@ -460,7 +477,7 @@ fn test_multivalue_ud_features_preserve_commas() {
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("hr").expect("valid test language code"),
     };
-    let ud = UdWord::from(UdWordAnalysis {
+    let ud = UdWord::try_from(UdWordAnalysis {
         id: UdId::Single(1),
         text: "što".into(),
         lemma: "što".into(),
@@ -471,7 +488,8 @@ fn test_multivalue_ud_features_preserve_commas() {
         deprel: "root".into(),
         deps: None,
         misc: None,
-    });
+    })
+    .expect("test analysis carries no padding feature");
     let mor = map_ud_word(&ud, &ctx).unwrap();
     let mut out = String::new();
     mor.write_chat(&mut out).unwrap();

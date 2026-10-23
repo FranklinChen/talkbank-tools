@@ -1,7 +1,7 @@
 # opensmile: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-07-29 18:27 EDT
+**Last updated:** 2026-10-25 08:12 EDT
 
 Implementation guide for the `opensmile` command. For user-facing
 documentation, see [User Guide: opensmile](../../user-guide/commands/opensmile.md).
@@ -17,7 +17,7 @@ documentation, see [User Guide: opensmile](../../user-guide/commands/opensmile.m
 | Stage recipe | `crates/batchalign/src/recipe_runner/recipes.rs` | `OPENSMILE_RECIPE` |
 | Audio prep | Shared media prep in `crates/batchalign/src/runner/` | Converts audio to mono PCM artifact |
 | Worker IPC | `batchalign/inference/opensmile.py`: `extract_features()` | Loads openSMILE, returns feature dict |
-| CSV writer | `crates/batchalign/src/commands/opensmile.rs` | Typed feature map → row-oriented CSV via `csv` crate |
+| Response admission and CSV writer | `crates/batchalign/src/runner/dispatch/media_analysis_v2.rs` | `AdmittedOpenSmileResult` → feature/value rows; typed execute failures retain their retry category |
 
 ---
 

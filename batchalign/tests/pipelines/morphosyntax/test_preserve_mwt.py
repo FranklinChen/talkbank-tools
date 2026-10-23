@@ -120,7 +120,6 @@ class TestPreserveIPCEmitsRangeTokens:
         words,
         head_lemma,
     ):
-        import threading
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax
 
@@ -130,8 +129,6 @@ class TestPreserveIPCEmitsRangeTokens:
         response = batch_infer_morphosyntax(
             req,
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
-            nlp_lock=threading.Lock(),
-            free_threaded=False,
         )
 
         first_sent = _first_sentence_raw(response)
@@ -167,7 +164,6 @@ class TestPreserveIPCEmitsRangeTokens:
         entries with Single ids n and n+1. This is what Rust's
         ``map_ud_sentence()`` consumes via ``assemble_mors()``.
         """
-        import threading
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax
 
@@ -177,8 +173,6 @@ class TestPreserveIPCEmitsRangeTokens:
         response = batch_infer_morphosyntax(
             req,
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
-            nlp_lock=threading.Lock(),
-            free_threaded=False,
         )
 
         first_sent = _first_sentence_raw(response)
@@ -246,7 +240,6 @@ class TestPreserveIPCClitcIsAUX:
         words,
         head_lemma,
     ):
-        import threading
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax
 
@@ -254,8 +247,6 @@ class TestPreserveIPCClitcIsAUX:
         response = batch_infer_morphosyntax(
             _build_req(words),
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
-            nlp_lock=threading.Lock(),
-            free_threaded=False,
         )
 
         first_sent = _first_sentence_raw(response)

@@ -177,6 +177,14 @@ macro_rules! command_end {
 enum StampField {
     Asr,
     AsrModel,
+    /// How many utterances transcribe's CHAT assembly closed with a
+    /// terminator the pipeline added, because the recognizer gave no ending
+    /// punctuation CHAT can write; absent when it added none. CHAT has no
+    /// notation for such a terminator, so this count is where the file says
+    /// so. Named for the stage it counts: a later utterance-segmentation
+    /// split writes a period at each cut it makes, which this does not
+    /// count (utseg's own evidence records its cuts).
+    AsrSynthesizedTerminators,
     /// The producing build identity ([`crate::build_hash`]). Every stamp this
     /// build writes carries it, so a defective run can be identified by build
     /// from its output; stamps written before the field existed lack it and
@@ -203,6 +211,7 @@ impl StampField {
         match self {
             Self::Asr => "asr",
             Self::AsrModel => "asr_model",
+            Self::AsrSynthesizedTerminators => "asr_synthesized_terminators",
             Self::Build => "build",
             Self::Diarize => "diarize",
             Self::Engine => "engine",
@@ -1101,9 +1110,9 @@ struct StampedMorphotagRecord {
     /// Every engine name the stamps record. A stamp with no `engine=` field
     /// names nothing.
     engines: EngineNames,
-    /// How many relation repairs the stamps record. A stamp with no
-    /// `ud_repairs=` field records none, which is what the grammar's absence
-    /// means. A stamp written by a build older than the field records none
+    /// How many UD repairs (relations and feature values) the stamps record.
+    /// A stamp with no `ud_repairs=` field records none, which is what the
+    /// grammar's absence means. A stamp written by a build older than the field records none
     /// too, and is indistinguishable from one that repaired nothing: the
     /// grammar cannot say "unknown", and inventing a spelling for it would
     /// change what every existing file means.
@@ -1193,16 +1202,19 @@ pub(crate) fn align_provenance(
 }
 
 /// Build a provenance comment for transcribe: `asr=` names the engine,
-/// `asr_model=` the selected checkpoint, when there is one, and `word_seg=`
+/// `asr_model=` the selected checkpoint, when there is one, `word_seg=`
 /// the segmenter that grouped the recognizer's characters into words, when
-/// one did. Infallible: the checkpoint was admitted as stamp-safe text with
-/// the transcribe plan, and the segmenter's name is a reported engine name.
+/// one did, and `asr_synthesized_terminators=` how many utterances CHAT
+/// assembly closed with a terminator of its own, when any. Infallible: the checkpoint was admitted
+/// as stamp-safe text with the transcribe plan, and the segmenter's name is a
+/// reported engine name.
 pub(crate) fn transcribe_provenance(
     lang: &crate::api::TranscriptLanguage,
     asr: &AsrIdentity,
     diarize: bool,
     wor: bool,
     word_segmenter: Option<&crate::api::ReportedEngineName>,
+    synthesized_terminators: Option<NonZeroUsize>,
 ) -> ProvenanceComment {
     let comment = ProvenanceComment::new(ReleasedCommand::Transcribe)
         .field(StampField::Asr, StampFieldValue::from(asr.engine().clone()))
@@ -1212,6 +1224,10 @@ pub(crate) fn transcribe_provenance(
         .field_if_some(
             StampField::WordSeg,
             word_segmenter.map(StampFieldValue::from),
+        )
+        .field_if_some(
+            StampField::AsrSynthesizedTerminators,
+            synthesized_terminators.map(StampFieldValue::from),
         );
     match asr.asr_model() {
         Some(model) => comment.field(StampField::AsrModel, StampFieldValue::from(model)),
@@ -1762,6 +1778,7 @@ mod tests {
             false,
             false,
             None,
+            None,
         )
         .format();
         assert!(
@@ -1771,6 +1788,25 @@ mod tests {
             )),
             "{comment}"
         );
+    }
+
+    /// RED FIRST: utterances closed with a terminator the pipeline added
+    /// were reported only in a log line; the file's own stamp now counts
+    /// them, and says nothing when there were none.
+    #[test]
+    fn the_transcribe_stamp_counts_synthesized_terminators() {
+        let asr =
+            AsrIdentity::of_replay(crate::transcribe::replay::LegacyProjectedAsrProducer::RevAi);
+        let english = crate::api::TranscriptLanguage::One(LanguageCode3::eng());
+        let counted =
+            transcribe_provenance(&english, &asr, false, false, None, NonZeroUsize::new(3))
+                .format();
+        assert!(
+            counted.contains("asr_synthesized_terminators=3"),
+            "{counted}"
+        );
+        let none = transcribe_provenance(&english, &asr, false, false, None, None).format();
+        assert!(!none.contains("synthesized_terminators"), "{none}");
     }
 
     #[test]
@@ -2127,6 +2163,7 @@ mod tests {
             true,
             false,
             None,
+            None,
         )
         .format();
         assert!(
@@ -2165,6 +2202,7 @@ mod tests {
             &unreported,
             true,
             false,
+            None,
             None,
         )
         .format();
