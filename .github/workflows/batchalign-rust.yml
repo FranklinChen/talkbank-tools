@@ -16,6 +16,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Install Python for PyO3 linking
+        id: python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
@@ -55,6 +61,11 @@ jobs:
         run: make batchalign-dashboard-build
 
       - name: Run imported Batchalign Rust CI gate
+        # The gate also builds the non-extension PyO3 library, which links
+        # libpython. Consume the installed interpreter rather than the runner's
+        # system Python, whose development library may be absent.
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: make batchalign-ci-rust
 
   batchalign-pyo3:
@@ -64,6 +75,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Install Python for PyO3 linking
+        id: python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -78,4 +95,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build imported standalone PyO3 crate
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: make batchalign-build-pyo3
