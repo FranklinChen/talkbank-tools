@@ -33,7 +33,9 @@
 //! Display text is an untimed source only: timing must arrive with FunASR's own
 //! unit list.
 //!
-//! Surfaces leave this module exactly as FunASR wrote them. Cantonese
+//! Tokenizer boundary markers and closed model tags are decoded before a
+//! surface can become lexical output. A decoded unit keeps its own timing;
+//! decoding never re-pairs, splits or invents timestamp entries. Cantonese
 //! normalization used to run here as well, over the joined segment; it now has
 //! one owner, `batchalign_transform::asr_postprocess::HanScriptNormalization`,
 //! which the server applies once per monologue.
@@ -55,7 +57,6 @@ use super::{
 pub(super) struct FunasrSegmentWire {
     /// Display surface: punctuated and space-free for Paraformer, carrying
     /// `<|...|>` markup for SenseVoice. A unit source only without timing.
-    #[serde(default)]
     text: String,
     /// One `[start_ms, end_ms]` entry per unit, when FunASR produced timing.
     #[serde(default)]
@@ -148,7 +149,44 @@ struct NoTiming;
 /// One FunASR unit and its timing phase ([`UnitSpan`] or [`NoTiming`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Unit<T> {
-    surface: String,
+    surface: TokenizerPiece,
+    timing: T,
+}
+
+/// Provider text has not yet been decoded into a speech surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenizerPiece(String);
+
+/// A nonempty lexical surface, with tokenizer metadata removed.
+///
+/// Private construction belongs to `TokenizerPiece::decode`. This is a
+/// recognition unit, not a claim that the provider timed each whitespace word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecodedUnitText(String);
+
+enum DecodedPiece {
+    Lexical(DecodedUnitText),
+    NonLexical,
+}
+
+impl TokenizerPiece {
+    fn decode(self) -> DecodedPiece {
+        // U+2581 is SentencePiece's escaped whitespace, not a CHAT low-pitch
+        // annotation. Decode it only at this recognizer boundary, never in
+        // user-authored CHAT. Keep this unit's span attached throughout.
+        let decoded = strip_markup(&self.0).replace('▁', " ");
+        let text = decoded.trim();
+        if is_non_lexical(text) {
+            DecodedPiece::NonLexical
+        } else {
+            DecodedPiece::Lexical(DecodedUnitText(text.to_owned()))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DecodedUnit<T> {
+    surface: DecodedUnitText,
     timing: T,
 }
 
@@ -220,7 +258,7 @@ impl AdmittedSegment {
                 .into_surfaces()
                 .into_iter()
                 .map(|surface| Unit {
-                    surface,
+                    surface: TokenizerPiece(surface),
                     timing: NoTiming,
                 })
                 .collect();
@@ -251,7 +289,10 @@ impl AdmittedSegment {
             .zip(&timestamp)
             .enumerate()
             .map(|(index, (surface, raw))| {
-                admit_timestamp(raw, segment, index).map(|timing| Unit { surface, timing })
+                admit_timestamp(raw, segment, index).map(|timing| Unit {
+                    surface: TokenizerPiece(surface),
+                    timing,
+                })
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|units| Self::Timed(Units(units)))
@@ -328,7 +369,7 @@ fn is_non_lexical(surface: &str) -> bool {
 
 /// Units with every non-lexical unit removed together with its timing.
 #[derive(Debug)]
-struct LexicalUnits<T>(Vec<Unit<T>>);
+struct LexicalUnits<T>(Vec<DecodedUnit<T>>);
 
 impl<T> Units<T> {
     /// Drop punctuation and markup units TOGETHER WITH their timing, which is
@@ -337,18 +378,9 @@ impl<T> Units<T> {
         LexicalUnits(
             self.0
                 .into_iter()
-                .filter_map(|Unit { surface, timing }| {
-                    let trimmed = surface.trim();
-                    if is_non_lexical(trimmed) {
-                        return None;
-                    }
-                    let already_trimmed = trimmed.len() == surface.len();
-                    let surface = if already_trimmed {
-                        surface
-                    } else {
-                        trimmed.to_owned()
-                    };
-                    Some(Unit { surface, timing })
+                .filter_map(|Unit { surface, timing }| match surface.decode() {
+                    DecodedPiece::Lexical(surface) => Some(DecodedUnit { surface, timing }),
+                    DecodedPiece::NonLexical => None,
                 })
                 .collect(),
         )
@@ -367,9 +399,9 @@ impl LexicalUnits<AdmittedInterval> {
     fn into_elements_and_timed_words(self) -> (Vec<HkAsrElement>, Vec<HkTimedWord>) {
         let mut elements = Vec::with_capacity(self.0.len());
         let mut timed_words = Vec::new();
-        for Unit { surface, timing } in self.0 {
+        for DecodedUnit { surface, timing } in self.0 {
             push_admitted_word(
-                surface,
+                surface.0,
                 WordTiming::from_admitted(timing),
                 &mut elements,
                 &mut timed_words,
@@ -385,9 +417,9 @@ impl LexicalUnits<NoTiming> {
     fn into_elements(self) -> Vec<HkAsrElement> {
         self.0
             .into_iter()
-            .map(|Unit { surface, .. }| {
+            .map(|DecodedUnit { surface, .. }| {
                 HkAsrElement::text(
-                    surface,
+                    surface.0,
                     WordTiming::Untimed(UntimedCause::ProviderReportedNoTiming),
                 )
             })
@@ -530,6 +562,39 @@ mod tests {
                 .map(|(start, _)| start.get()),
             Some(0.2)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tokenizer_metadata_is_decoded_without_reassigning_timing() -> Result<(), FunasrAdmissionError>
+    {
+        let projection = project_funasr_segments(vec![wire(
+            "<|en|>▁hello ▁world",
+            spans(&[(100, 200), (200, 210), (300, 400), (400, 410)]),
+            Some(&["▁hello", "▁", "<|en|>▁world", "▁!"]),
+            None,
+        )])?;
+
+        assert_eq!(values(&projection), vec!["hello", "world"]);
+        assert_eq!(projection.timed_words.len(), 2);
+        assert_eq!(projection.timed_words[0].start_ms, 100);
+        assert_eq!(projection.timed_words[0].end_ms, 200);
+        assert_eq!(projection.timed_words[1].start_ms, 300);
+        assert_eq!(projection.timed_words[1].end_ms, 400);
+        Ok(())
+    }
+
+    #[test]
+    fn untimed_recognition_decodes_tokenizer_metadata_too() -> Result<(), FunasrAdmissionError> {
+        for segment in [
+            wire("▁hello ▁world", Vec::new(), None, None),
+            wire("", Vec::new(), Some(&["▁hello", "▁world"]), None),
+            wire("", Vec::new(), None, Some("▁hello ▁world")),
+        ] {
+            let projection = project_funasr_segments(vec![segment])?;
+            assert_eq!(values(&projection), vec!["hello", "world"]);
+            assert!(projection.timed_words.is_empty());
+        }
         Ok(())
     }
 

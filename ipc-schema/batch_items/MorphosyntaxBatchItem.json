@@ -36,7 +36,7 @@
       "type": "string"
     },
     "words": {
-      "description": "Word texts for NLP processing. Each word is provenance-sealed\n`ChatCleanedText` derived from a parsed `Word` or `Separator`\nor, for non-`@s` special-form positions, the blessed\n`ChatCleanedText::stanza_placeholder()` constant.",
+      "description": "Provider request words: actual source text or the protocol's special-form\nmask. A mask never claims to be a provenance-sealed transcript word.",
       "type": "array",
       "items": {
         "type": "string"

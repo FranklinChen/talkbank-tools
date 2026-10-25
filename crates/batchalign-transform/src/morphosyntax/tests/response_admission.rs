@@ -27,7 +27,8 @@ fn items(chat: &ChatFile, language: &LanguageCode) -> Vec<CollectedUtterance> {
     collect_payloads(
         chat,
         language,
-        std::slice::from_ref(language),
+        talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(language))
+            .expect("nonempty fixture languages"),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items

@@ -688,6 +688,7 @@ mod tests {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("utt0 must retain its forward bullet");
         assert_eq!(
             b0.timing.start_ms, 731556,

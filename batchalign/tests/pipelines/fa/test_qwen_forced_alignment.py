@@ -31,18 +31,40 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
     AudioChunk,
 )
 from batchalign.inference.qwen_forced_alignment import (
+    PairedWindowAlignment,
     QwenAlignmentMismatch,
     QwenFaHost,
     QwenLanguageLabel,
     QwenSegmentationDrift,
     QwenSegmentationNotDecomposable,
+    QwenTimingInvalid,
     QwenUnitNotTimed,
     UntimedReason,
     WindowAlignedWord,
-    WindowAlignment,
     resolve_qwen_language,
 )
+from batchalign.inference.qwen_timing import (
+    AudioWindow,
+    ObservedRecordingSpan,
+    UnavailableWindowTiming,
+    WindowAlignment,
+)
 from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
+from batchalign.worker._model_errors import ModelOutputInvalidError
+
+
+def _admit(units, words, duration_s=1.0):
+    return WindowAlignment(
+        PairedWindowAlignment.of(units, words), AudioWindow(duration_s)
+    )
+
+
+def _rows(chunk):
+    result = []
+    for word in chunk.words:
+        assert isinstance(word.timing, ObservedRecordingSpan)
+        result.append((word.timing.start_s, word.timing.end_s, word.text))
+    return result
 
 
 class _RecordingAligner:
@@ -61,9 +83,9 @@ class _RecordingAligner:
 
     def align(
         self, audio: object, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment:
+    ) -> PairedWindowAlignment:
         self.calls.append((transcript, str(language)))
-        return WindowAlignment.of(
+        return PairedWindowAlignment.of(
             units=[word.text for word in self.aligned], words=self.aligned
         )
 
@@ -112,7 +134,7 @@ def test_only_the_asr_chunk_path_converts_window_time_to_file_time() -> None:
     recognizer = _ready_qwen(_RecordingAligner(aligned))
     chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE, dtype=np.float32), offset=12.0)
     asr_timings = recognizer._align_chunk(chunk, "hello")
-    assert asr_timings == [(12.10, 12.40, "hello")]
+    assert _rows(asr_timings) == [(12.10, 12.40, "hello")]
 
     host = QwenFaHost(
         aligner=_RecordingAligner(aligned), language=resolve_qwen_language("eng")
@@ -153,7 +175,7 @@ def test_a_model_that_times_more_units_than_it_segmented_is_refused() -> None:
     what `QwenAlignmentMismatch` has always been about.
     """
     with pytest.raises(QwenAlignmentMismatch):
-        WindowAlignment.of(
+        PairedWindowAlignment.of(
             units=["hello", "world"],
             words=[WindowAlignedWord(text="hello", start_s=0.0, end_s=0.4)],
         )
@@ -211,12 +233,12 @@ class _QwenLikeAligner:
 
     def align(
         self, audio: object, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment:
+    ) -> PairedWindowAlignment:
         units = self.split_words(transcript, language)
         spans = self.spans
         if spans is None:
             spans = [(index * 0.1, index * 0.1 + 0.1) for index in range(len(units))]
-        return WindowAlignment.of(
+        return PairedWindowAlignment.of(
             units=units,
             words=[
                 WindowAlignedWord(text=unit, start_s=start, end_s=end)
@@ -308,13 +330,15 @@ class _BlankUnitAligner:
 
     def align(
         self, audio: object, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment:
+    ) -> PairedWindowAlignment:
         words = [
             WindowAlignedWord(text="hello", start_s=0.10, end_s=0.40),
             WindowAlignedWord(text="   ", start_s=0.40, end_s=0.45),
             WindowAlignedWord(text="world", start_s=0.50, end_s=0.90),
         ]
-        return WindowAlignment.of(units=[word.text for word in words], words=words)
+        return PairedWindowAlignment.of(
+            units=[word.text for word in words], words=words
+        )
 
 
 def test_a_blank_unit_never_enters_the_asr_word_timings() -> None:
@@ -328,7 +352,7 @@ def test_a_blank_unit_never_enters_the_asr_word_timings() -> None:
     recognizer = _ready_qwen(_BlankUnitAligner())
     chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE, dtype=np.float32), offset=0.0)
     timings = recognizer._align_chunk(chunk, "hello world")
-    assert timings == [(0.10, 0.40, "hello"), (0.50, 0.90, "world")]
+    assert _rows(timings) == [(0.10, 0.40, "hello"), (0.50, 0.90, "world")]
 
 
 class _DriftingAligner:
@@ -345,9 +369,9 @@ class _DriftingAligner:
 
     def align(
         self, audio: object, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment:
+    ) -> PairedWindowAlignment:
         drifted = ["hell", "oworld"]
-        return WindowAlignment.of(
+        return PairedWindowAlignment.of(
             units=drifted,
             words=[
                 WindowAlignedWord(text=drifted[0], start_s=0.0, end_s=0.4),
@@ -377,7 +401,7 @@ class _WholeStringAligner:
 
     def align(
         self, audio: object, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment:
+    ) -> PairedWindowAlignment:
         raise AssertionError("the segmentation check must refuse before aligning")
 
 
@@ -387,3 +411,83 @@ def test_a_whole_string_analyser_is_refused_before_any_forward_pass() -> None:
     )
     with pytest.raises(QwenSegmentationNotDecomposable, match="helloworld"):
         host.align_words(np.zeros(SAMPLE_RATE, dtype=np.float32), ["hello", "world"])
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [(float("nan"), 1.0), (0.0, float("inf")), (-0.1, 0.5), (0.7, 0.2)],
+)
+def test_generated_invalid_spans_are_rejected_before_chat(
+    start: float, end: float
+) -> None:
+    with pytest.raises(QwenTimingInvalid) as refusal:
+        _admit(["hello"], [WindowAlignedWord("hello", start, end)])
+    assert isinstance(refusal.value, ModelOutputInvalidError)
+    assert "unit 1 'hello'" in str(refusal.value)
+    assert "generated timings" in str(refusal.value)
+    assert "CHAT input error" in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    "previous,current,boundary",
+    [
+        ((0.7, 0.8), (0.5, 0.6), "start"),
+        ((0.1, 0.8), (0.5, 0.6), "end"),
+    ],
+)
+def test_generated_backwards_sequences_identify_both_units(
+    previous: tuple[float, float], current: tuple[float, float], boundary: str
+) -> None:
+    with pytest.raises(QwenTimingInvalid) as refusal:
+        _admit(
+            ["hello", "world"],
+            [
+                WindowAlignedWord("hello", *previous),
+                WindowAlignedWord("world", *current),
+            ],
+        )
+    detail = str(refusal.value)
+    assert f"backwards {boundary}" in detail
+    assert "unit 2 'world'" in detail
+    assert "unit 1 'hello'" in detail
+
+
+def test_direct_window_alignment_construction_cannot_bypass_admission() -> None:
+    with pytest.raises(QwenTimingInvalid):
+        WindowAlignment(
+            PairedWindowAlignment.of(
+                ["hello", "world"],
+                [
+                    WindowAlignedWord("hello", 0.7, 0.8),
+                    WindowAlignedWord("world", 0.5, 0.6),
+                ],
+            ),
+            AudioWindow(1.0),
+        )
+
+
+def test_blank_and_zero_width_units_keep_their_fold_positions() -> None:
+    words = (
+        WindowAlignedWord("hello", 0.1, 0.4),
+        WindowAlignedWord("", 0.0, 0.0),
+        WindowAlignedWord("unknown", 0.0, 0.0),
+        WindowAlignedWord("world", 0.3, 0.7),
+    )
+    alignment = _admit([word.text for word in words], words)
+    assert [word.text for word in alignment.words] == [word.text for word in words]
+    assert isinstance(alignment.words[1].timing, UnavailableWindowTiming)
+    assert isinstance(alignment.words[2].timing, UnavailableWindowTiming)
+
+
+def test_asr_timing_refusal_reports_the_recording_window() -> None:
+    recognizer = _ready_qwen(
+        _RecordingAligner(
+            [WindowAlignedWord("hello", 0.7, 0.8), WindowAlignedWord("world", 0.5, 0.6)]
+        )
+    )
+    chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE), offset=180.0)
+    with pytest.raises(QwenTimingInvalid) as refusal:
+        recognizer._align_chunk(chunk, "hello world")
+    assert "recording window 180..181 s" in str(refusal.value)
+    assert "relative to that window" in str(refusal.value)
+    assert "0.5..0.6" in str(refusal.value)

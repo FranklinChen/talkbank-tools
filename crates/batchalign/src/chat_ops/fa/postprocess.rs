@@ -490,12 +490,14 @@ pub fn postprocess_utterance_timings_with_boundary_policy(
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .and_then(TranscriptBoundary::observe);
     let utterance_span_ms = utterance
         .main
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .map(|bullet| bullet.timing.end_ms.saturating_sub(bullet.timing.start_ms))
         .or_else(|| {
             let first = word_timings

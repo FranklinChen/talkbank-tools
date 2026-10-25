@@ -1,7 +1,7 @@
 # L2 and Language Switching
 
 **Status:** Current behavior reference
-**Last updated:** 2026-05-06 20:33 EDT
+**Last updated:** 2026-10-29
 
 ## Current behavior
 
@@ -42,10 +42,11 @@ fallback when a secondary Stanza model is known to be weak.
 %mor:  ... adp|auf L2|xxx L2|xxx .
 ```
 
-Validated at scale: **99.96% dispatch rate** (16,838 / 16,845 `@s`
+Historical April 2026 evaluation: **99.96% dispatch rate** (16,838 / 16,845 `@s`
 words successfully routed to a secondary-language Stanza model;
 7 fell back to `L2|xxx`) across 19 language pairs in the
-`l2-eval-runs/2026-04-15/per-pair.csv` aggregate eval.
+`l2-eval-runs/2026-04-15/per-pair.csv` aggregate eval. This historical
+dispatch measurement does not qualify the current build or model accuracy.
 Contractions expand correctly (`it's@s:eng` →
 `pron|it~aux|be`), phrasal verbs are recognized (`wake up@s` →
 `verb|wake part|up`). See
@@ -77,23 +78,34 @@ The remaining conservative fallbacks are:
 
 ## Unsupported non-primary languages
 
-`morphotag` only requires the **primary** `@Languages` code to be
-Stanza-supported; files whose primary is unsupported are skipped with
-a typed diagnostic before the pipeline runs. When the primary IS
-supported, non-primary content targeting an unsupported language is
-processed cleanly with an `L2|xxx` fallback:
+A language listed as secondary in `@Languages` does not itself require a
+model. Inline `@s:LANG` spans use a supported secondary model when one is
+available. When the admitted runtime registry explicitly lacks that model,
+only those spans retain `L2|xxx`; the primary-language words and other
+successful secondary spans keep their analysis.
 
-- `[- UNSUPPORTEDLANG]` whole-utterance precodes, the utterance is
-  grouped under `UNSUPPORTEDLANG`, the worker partitions that group
-  out of Stanza dispatch (`partition_groups_by_stanza_support`), and
-  every word receives `L2|xxx`.
-- `@s:UNSUPPORTEDLANG` per-word markers, the secondary L2 dispatch
-  span is short-circuited the same way; the host primary analysis is
-  preserved and the marker's slot stays `L2|xxx`.
+`L2|xxx` records unavailable lexical analysis. It does not assert that a model
+identified an unknown part of speech. Job diagnostics distinguish unsupported
+language exclusions from failed inference, empty responses, invalid secondary
+graphs and unresolved or ambiguous language markers. The saved transcript also
+gets an `@Comment` beginning `[batchalign morphology availability]`, naming
+unsupported languages and counts, or summarizing analysis that could not be
+completed. Contributor comments are retained. Re-running replaces this one
+application-owned availability comment rather than accumulating duplicates.
 
-The worker never crashes on an unsupported secondary, and other
-utterances or spans in the same file targeting supported languages
-continue to receive real morphology.
+For example, an unsupported inline span in `hello mundo@s:spa .` can yield
+`intj|hello L2|xxx .`, with a comment saying that Spanish L2 morphology was
+unsupported. Its dependency attachment comes from the primary utterance's
+context; it does not certify Spanish syntactic analysis.
+
+Whole-utterance `[- LANG]` precodes require a primary analysis of that entire
+utterance. If its effective language lacks required processors, capability
+admission refuses the requested file analysis with a typed diagnostic before
+inference. BA3 does not relabel the utterance or invent a whole tier of lexical
+analyses. A file's unsupported primary language is likewise refused. These
+requirements differ from an unavailable inline span embedded in an analyzable
+utterance. An absent registry is unavailable capability evidence, never proof
+that a language is unsupported.
 
 ## Validation and normalization policy
 

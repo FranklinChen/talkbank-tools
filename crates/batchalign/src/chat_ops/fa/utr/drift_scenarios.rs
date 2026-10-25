@@ -98,7 +98,13 @@ fn run_and_check_with(
 fn check_bullet_integrity(chat: &ChatFile, violations: &mut Vec<String>) {
     for (i, line) in chat.lines.iter().enumerate() {
         let Line::Utterance(utt) = line else { continue };
-        let Some(bullet) = utt.main.content.bullet.as_ref() else {
+        let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        else {
             continue;
         };
         let (s, e) = (bullet.timing.start_ms, bullet.timing.end_ms);
@@ -123,7 +129,13 @@ fn check_utterance_monotonicity(chat: &ChatFile, violations: &mut Vec<String>) {
         let Line::Utterance(utt) = line else { continue };
         let this_ordinal = utt_ordinal;
         utt_ordinal += 1;
-        let Some(bullet) = utt.main.content.bullet.as_ref() else {
+        let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        else {
             continue;
         };
         let is_overlap = utt
@@ -242,11 +254,8 @@ mod helper_self_tests {
                 _ => None,
             });
         utterances.next().unwrap().main.content.bullet = None;
-        utterances.next().unwrap().main.content.bullet = Some(Bullet::new(
-            talkbank_model::Location::Unlocated,
-            20_000,
-            21_000,
-        ));
+        utterances.next().unwrap().main.content.bullet =
+            Some(Bullet::new(talkbank_model::Location::Unlocated, 20_000, 21_000).into());
         let observation = DriftObservation::observe(&chat, &expected, result, Vec::new());
         assert_eq!(observation.violations().len(), 1);
         assert!(observation.summary().contains(
@@ -287,7 +296,7 @@ mod helper_self_tests {
             if let Line::Utterance(utt) = line {
                 if let Some((s, e)) = bullets[utt_i] {
                     utt.main.content.bullet =
-                        Some(Bullet::new(talkbank_model::Location::Unlocated, s, e));
+                        Some(Bullet::new(talkbank_model::Location::Unlocated, s, e).into());
                 }
                 utt_i += 1;
                 if utt_i == 3 {

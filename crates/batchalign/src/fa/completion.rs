@@ -62,15 +62,23 @@ enum ObligedPresence {
 }
 
 /// A bullet's two endpoints, compared exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BulletExtent {
-    start_ms: u64,
-    end_ms: u64,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BulletExtent {
+    Parsed { start_ms: u64, end_ms: u64 },
+    Rejected(String),
 }
 
 impl BulletExtent {
+    fn of_state(state: &talkbank_model::BulletState) -> Self {
+        match state {
+            talkbank_model::BulletState::Parsed(bullet) => Self::of(bullet),
+            talkbank_model::BulletState::Unparsed { unparsed } => {
+                Self::Rejected(unparsed.source().to_owned())
+            }
+        }
+    }
     fn of(bullet: &talkbank_model::model::Bullet) -> Self {
-        Self {
+        Self::Parsed {
             start_ms: bullet.timing.start_ms,
             end_ms: bullet.timing.end_ms,
         }
@@ -489,7 +497,12 @@ impl DurableFaTimingCensus {
                 .map(|utterance| UtteranceProjection {
                     speaker: utterance.main.speaker.clone(),
                     words: lexical_shape(utterance),
-                    bullet: utterance.main.content.bullet.as_ref().map(BulletExtent::of),
+                    bullet: utterance
+                        .main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .map(BulletExtent::of_state),
                     wor: utterance.wor_tier().map(|tier| {
                         tier.words()
                             .map(|word| WordProjection {
@@ -672,7 +685,12 @@ impl RequiredFaTiming {
                     // Nothing in the recording can time it: a timed word, or
                     // a bullet other than the one the input gave under a
                     // keeping policy, is a placement the pipeline invented.
-                    let bullet = utterance.main.content.bullet.as_ref().map(BulletExtent::of);
+                    let bullet = utterance
+                        .main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .map(BulletExtent::of_state);
                     if missing.len() != timings.len()
                         || collect_existing_fa_word_timings(utterance)
                             .iter()

@@ -15,6 +15,9 @@ use talkbank_model::model::dependent_tier::{
 /// Why the host anchor of a span could not be read.
 #[derive(Debug, thiserror::Error)]
 enum AnchorError {
+    /// A reported primary label cannot be projected as a CHAT relation.
+    #[error(transparent)]
+    Projection(#[from] crate::morphosyntax::MappingError),
     /// The host tiers do not hold the attachment source's relation.
     #[error("the attachment source's host relation cannot be read: {0}")]
     Unreadable(#[from] CoordinatedMutationError),
@@ -168,7 +171,8 @@ impl SpliceFallbackCategory {
             MappingError::InvalidRoot { .. } => Self::SecondaryNoRoot,
             MappingError::CircularDependency { .. } => Self::SecondaryCycle,
             MappingError::InvalidHeadReference { .. } => Self::SecondaryHeadOob,
-            MappingError::EmptyStem { .. }
+            MappingError::InvalidFeature(_)
+            | MappingError::EmptyStem { .. }
             | MappingError::InvalidDeprel { .. }
             | MappingError::Sentence(_)
             | MappingError::EmptyRangeComponents => Self::SpliceInvariantOther,
@@ -227,11 +231,6 @@ enum SplicePositionDescriptor {
 struct SpliceFallbackContext<'a> {
     line_idx: usize,
     target_lang: &'a talkbank_model::model::LanguageCode,
-    /// Word indices in the host utterance that get reset to `L2|xxx`
-    /// when the splice rolls back. For single-position splices this
-    /// is a one-element slice; for multi-position contiguous spans,
-    /// every word in the span.
-    word_indices_to_reset: &'a [MorItemIndex],
     position: SplicePositionDescriptor,
 }
 
@@ -269,11 +268,6 @@ fn validate_or_rollback_splice(
 
     *mor = mor_snapshot;
     *gra = gra_snapshot;
-    for &word_idx in ctx.word_indices_to_reset {
-        if let Some(mor_item) = mor.items_mut().get_mut(word_idx.as_usize()) {
-            mor_item.main.reset_to_l2_placeholder();
-        }
-    }
 
     match ctx.position {
         SplicePositionDescriptor::SingleWord { word_idx } => {
@@ -336,7 +330,7 @@ fn current_root_anchor_for_attachment(
                 GraHeadRef::Root => Ok(SpanRoot::UtteranceRoot),
                 GraHeadRef::Word(chunk) => Ok(SpanRoot::HostChunk {
                     chunk,
-                    relation: AttachmentRelation::new(relation.relation(source).to_chat_gra())?,
+                    relation: AttachmentRelation::new(relation.relation(source).to_chat_gra()?)?,
                 }),
             }
         }
@@ -407,7 +401,11 @@ fn splice_with_primary_root_policy(
                 block,
                 SpanRoot::HostChunk {
                     chunk: host_root,
-                    relation: AttachmentRelation::new("DEP")?,
+                    relation: AttachmentRelation::new(
+                        crate::morphosyntax::mapping_helpers::normalize_deprel("DEP", || {
+                            "primary-root attachment policy".to_owned()
+                        })?,
+                    )?,
                 },
                 redirects,
             )?;
@@ -456,7 +454,7 @@ pub fn splice_l2_into_chat(
     for span in merged {
         let line_idx = span.line_idx;
         let first_word = span.first_word;
-        let words = span.mors.len();
+        let words = span.block.items().len();
         let target_lang = span.target_lang.clone();
         let disposition = splice_span(chat_file, span);
         outcome.spans.push(SpanSpliceOutcome {
@@ -479,7 +477,7 @@ fn splice_span(
     use talkbank_model::model::DependentTier;
     use talkbank_model::model::Line;
 
-    let words = span.mors.len();
+    let words = span.block.items().len();
     let Some(Line::Utterance(utt)) = chat_file.lines.as_mut_slice().get_mut(span.line_idx) else {
         return Retained(SpliceRetentionReason::MissingUtterance);
     };
@@ -503,7 +501,10 @@ fn splice_span(
 
     let Some(gra) = gra_tier else {
         // No %gra tier: only the %mor items change.
-        for (slot, item) in mor.items_mut()[item_range].iter_mut().zip(span.mors) {
+        for (slot, item) in mor.items_mut()[item_range]
+            .iter_mut()
+            .zip(span.block.items().iter().cloned())
+        {
             *slot = item;
         }
         return Applied {
@@ -511,8 +512,6 @@ fn splice_span(
         };
     };
 
-    let mut new_gras = span.gras;
-    crate::morphosyntax::l2::merge::repair_secondary_gras(&mut new_gras, &span.attachment);
     let anchor = match current_root_anchor_for_attachment(mor, gra, &span.attachment) {
         Ok(anchor) => anchor,
         Err(error) => {
@@ -534,7 +533,7 @@ fn splice_span(
     // re-head relations across the WHOLE host %gra, not just the block.
     let mor_snapshot = mor.clone();
     let gra_snapshot = gra.clone();
-    let secondary_gras = join_relations(&new_gras);
+    let secondary_gras = span.grammar_summary;
 
     let position = match words {
         1 => SplicePositionDescriptor::SingleWord {
@@ -546,7 +545,7 @@ fn splice_span(
         },
     };
     let prepared = (|| {
-        let block = SplicedBlock::new(span.mors, new_gras)?;
+        let block = span.block;
         let redirects = host_redirects(&span.attachment, &item_range, block.root_chunk())?;
         splice_with_primary_root_policy(mor, gra, item_range.clone(), block, anchor, redirects)
     })();
@@ -564,7 +563,6 @@ fn splice_span(
         }
     };
 
-    let word_indices: Vec<MorItemIndex> = item_range.map(MorItemIndex::new).collect();
     match validate_or_rollback_splice(
         mor,
         gra,
@@ -574,7 +572,6 @@ fn splice_span(
         SpliceFallbackContext {
             line_idx: span.line_idx,
             target_lang: &span.target_lang,
-            word_indices_to_reset: &word_indices,
             position,
         },
     ) {
@@ -627,9 +624,14 @@ mod cardinality_tests {
                     PosCategory::new("noun"),
                     MorStem::new("hello"),
                 ))],
-                Vec::new(),
+                vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::root(),
+                )],
                 L2Attachment::InternalRoot,
             )
+            .expect("admitted splice fixture")
         };
         let outcome = splice_l2_into_chat(&mut chat, vec![span(999), span(line)]);
         assert_eq!(crate::serialize::to_chat_string(&chat), before);
@@ -720,8 +722,18 @@ mod cardinality_tests {
         let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 1, "DEP"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: TestAttachment::Internal,
         })];
@@ -848,7 +860,12 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("det"), MorStem::new("la"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "DET")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("DET")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
             Some(PositionResult {
@@ -856,12 +873,22 @@ mod cardinality_tests {
                     PosCategory::new("noun"),
                     MorStem::new("fecha"),
                 )),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("adv"), MorStem::new("bien"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "ADVMOD")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("ADVMOD")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
         ];
@@ -889,9 +916,24 @@ mod cardinality_tests {
         let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 1, "DEP"),
-                GrammaticalRelation::new(3, 1, "DEP"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    3,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: TestAttachment::Internal,
         })];
@@ -934,7 +976,12 @@ mod cardinality_tests {
             mor: Mor::new(MorWord::new(PosCategory::new("part"), MorStem::new("up"))),
             // The secondary's own analysis of the one-word span: its root.
             // The splice writes the corrected relation on it.
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "compound:prt"),
         })];
 
@@ -983,8 +1030,18 @@ mod cardinality_tests {
         let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 1, "DET"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("DET")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: TestAttachment::Internal,
         })];
@@ -1014,8 +1071,18 @@ mod cardinality_tests {
         let merged = vec![Some(PositionResult {
             mor: merged_mor,
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 1, "DEP"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: TestAttachment::Internal,
         })];
@@ -1054,7 +1121,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "obj"),
         })];
 
@@ -1109,7 +1181,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "case"),
         })];
 
@@ -1163,7 +1240,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "case"),
         })];
 
@@ -1215,7 +1297,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "compound"),
         })];
 
@@ -1268,7 +1355,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "obj"),
         })];
 
@@ -1322,12 +1414,22 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("uno"))),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(0, "obj"),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(1, "obl"),
             }),
         ];
@@ -1392,12 +1494,22 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("uno"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "DEP")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: utterance_root_attachment(1),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: utterance_root_attachment(1),
             }),
         ];
@@ -1570,17 +1682,32 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("pron"), MorStem::new("yo"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "NSUBJ")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("NSUBJ")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: utterance_root_attachment(2),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("aux"), MorStem::new("ser"))),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: utterance_root_attachment(2),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("det"), MorStem::new("el"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "DET")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("DET")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: utterance_root_attachment(2),
             }),
         ];
@@ -1634,7 +1761,12 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("det"), MorStem::new("el"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "DET")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("DET")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(0, "obl"),
             }),
             Some(PositionResult {
@@ -1642,7 +1774,12 @@ mod cardinality_tests {
                     PosCategory::new("noun"),
                     MorStem::new("camino"),
                 )),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(0, "obl"),
             }),
         ];
@@ -1692,7 +1829,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("extranjero"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "obj"),
         })];
 
@@ -1801,7 +1943,12 @@ mod cardinality_tests {
         // Adversarial: head=5 references a nonexistent chunk.
         let merged = vec![Some(PositionResult {
             mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
-            gras: vec![GrammaticalRelation::new(1, 5, "COMPOUND")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                5,
+                talkbank_model::GrammaticalRelationType::new("COMPOUND")
+                    .expect("valid fixture relation"),
+            )],
             attachment: utterance_root_attachment(0),
         })];
 
@@ -1843,8 +1990,18 @@ mod cardinality_tests {
             mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("foo")))
                 .with_post_clitic(MorWord::new(PosCategory::new("part"), MorStem::new("bar"))),
             gras: vec![
-                GrammaticalRelation::new(1, 2, "FLAT"),
-                GrammaticalRelation::new(2, 1, "FLAT"),
+                GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("FLAT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("FLAT")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: utterance_root_attachment(0),
         })];
@@ -1889,8 +2046,18 @@ mod cardinality_tests {
             mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("a")))
                 .with_post_clitic(MorWord::new(PosCategory::new("noun"), MorStem::new("b"))),
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 0, "ROOT"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: host_attachment(0, "obj"),
         })];
@@ -1945,7 +2112,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("foreign"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 2, "NMOD")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                2,
+                talkbank_model::GrammaticalRelationType::new("NMOD")
+                    .expect("valid fixture relation"),
+            )],
             attachment: utterance_root_attachment(0),
         })];
 
@@ -2018,12 +2190,22 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("adp"), MorStem::new("a"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "FIXED")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("FIXED")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(0, "dep"),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("b"))),
-                gras: vec![GrammaticalRelation::new(1, 1, "FLAT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("FLAT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(1, "dep"),
             }),
         ];
@@ -2069,14 +2251,24 @@ mod cardinality_tests {
             // Position 1: adversarial OOB head=99
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("a"))),
-                gras: vec![GrammaticalRelation::new(1, 99, "COMPOUND")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    99,
+                    talkbank_model::GrammaticalRelationType::new("COMPOUND")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(0, "dep"),
             }),
             // Position 2: clean: should succeed normally and not be
             // disturbed by the failure at position 1.
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("b"))),
-                gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(1, "dep"),
             }),
         ];
@@ -2106,16 +2298,9 @@ mod cardinality_tests {
     // maintained by construction). Test 4 still passes (regression pin).
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Test 1 (no_root): single-position L2 span where the L2 word IS the
-    /// host root, and secondary's per-position relation has NO `head=0,
-    /// ROOT`. Real-world shape from the warn log: host `4|0|ROOT` at the
-    /// L2 position; secondary returns `1|2|NMOD`; current splice replaces
-    /// `4|0|ROOT` with `4|5|NMOD`, killing the only root. After fix:
-    /// merge ensures the L2 position becomes `head=0, ROOT` because the
-    /// `InternalRoot` attachment promises this position owns the host's
-    /// root.
+    /// An absent secondary root cannot be invented from a host attachment plan.
     #[test]
-    fn merge_constructs_root_when_l2_span_owns_host_root() {
+    fn merge_rejects_absent_secondary_root_without_changing_host() {
         // Host: `voici yellow@s .`, `yellow` is at word_idx=1 and is the
         // host's primary root (matches the 2026-05-07 warn-line family
         // where the L2 word at word_idx=N IS at host root position).
@@ -2145,48 +2330,24 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 2, "NMOD")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                2,
+                talkbank_model::GrammaticalRelationType::new("NMOD")
+                    .expect("valid fixture relation"),
+            )],
             attachment: TestAttachment::Internal,
         })];
 
+        let before = crate::serialize::to_chat_string(&chat_file);
         let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
-            outcome.spliced, 1,
-            "InternalRoot span must splice successfully; merge must \
-             ensure the position carries head=0/ROOT regardless of \
-             secondary's relation. Got fallback={}, spliced={}.",
-            outcome.fallback, outcome.spliced
+            outcome.spliced, 0,
+            "invalid secondary evidence cannot be admitted"
         );
-        assert_eq!(outcome.fallback, 0);
-        assert_post_splice_gra_valid(
-            &mut chat_file,
-            "Test 1: InternalRoot, no head=0/ROOT in secondary",
-        );
-        // Stronger: assert the L2 position is the post-splice root.
-        let utt = match &chat_file.lines[line_idx] {
-            talkbank_model::model::Line::Utterance(u) => u,
-            _ => unreachable!(),
-        };
-        let gra = utt
-            .dependent_tiers
-            .iter()
-            .find_map(|t| match &t.tier {
-                talkbank_model::model::DependentTier::Gra(g) => Some(g),
-                _ => None,
-            })
-            .expect("post-splice gra present");
-        let roots: Vec<_> = gra
-            .relations()
-            .iter()
-            .filter(|r| r.head == 0 && r.relation.eq_ignore_ascii_case("ROOT"))
-            .collect();
-        assert_eq!(
-            roots.len(),
-            1,
-            "post-splice gra must have exactly one ROOT; got {} ({:?})",
-            roots.len(),
-            gra.relations()
-        );
+        assert_eq!(outcome.fallback, 1);
+        assert_eq!(crate::serialize::to_chat_string(&chat_file), before);
+        assert_post_splice_gra_valid(&mut chat_file, "refused secondary graph preserves host");
     }
 
     /// Test 2 (multi_root): L2 word is NOT the host root, and secondary
@@ -2222,7 +2383,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "obj"),
         })];
 
@@ -2266,14 +2432,9 @@ mod cardinality_tests {
         );
     }
 
-    /// Test 3 (head_oob): single-position L2 with secondary's head index
-    /// way out of bounds. Real-world shape: secondary returned
-    /// `1|11|NMOD` when the host has only 10 positions; current splice's
-    /// `splice_coordinated` translation produces `9|11|NMOD` and the
-    /// validator rejects it. After fix: merge clamps OOB heads to attach
-    /// at the host anchor (or treats them as external attachments).
+    /// An out-of-range secondary head cannot be clamped to a plausible host.
     #[test]
-    fn merge_clamps_secondary_head_to_anchor_when_local_index_oob() {
+    fn merge_rejects_secondary_head_outside_its_block() {
         // Host: `voici yellow@s .`, `voici` is host root; `yellow` is OBJ.
         let chat_text = "@UTF8\n\
                          @Begin\n\
@@ -2302,56 +2463,28 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 99, "NMOD")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                99,
+                talkbank_model::GrammaticalRelationType::new("NMOD")
+                    .expect("valid fixture relation"),
+            )],
             attachment: host_attachment(0, "obj"),
         })];
 
+        let before = crate::serialize::to_chat_string(&chat_file);
         let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
-            outcome.spliced, 1,
-            "OOB-head span must splice with head clamped to anchor. \
-             fallback={}, spliced={}",
-            outcome.fallback, outcome.spliced
+            outcome.spliced, 0,
+            "invalid secondary evidence cannot be admitted"
         );
-        assert_eq!(outcome.fallback, 0);
-        assert_post_splice_gra_valid(&mut chat_file, "Test 3: ExternalRoot, secondary head OOB");
+        assert_eq!(outcome.fallback, 1);
+        assert_eq!(crate::serialize::to_chat_string(&chat_file), before);
+        assert_post_splice_gra_valid(&mut chat_file, "refused secondary graph preserves host");
     }
 
-    /// Test 4 (cycle, REPAIRED): two-position L2 span where the
-    /// per-position secondary relations form a cycle within the span.
-    ///
-    /// **Originally drafted as a regression pin for "cycles are
-    /// irreducible".** After implementing the constructive merge, it
-    /// turns out cycles ARE repairable: pass 4 of `repair_secondary_gras`
-    /// detects a cycle by walking head chains and breaks it by
-    /// re-rooting one of the cycle members. The result is a valid tree
-    /// (with one position deterministically picked as the root) rather
-    /// than a rollback to L2|xxx.
-    ///
-    /// This is strictly better than rollback: morphology (POS, lemma,
-    /// features) is preserved at every position; only the structural
-    /// arc that participated in the cycle gets adjusted. The "wrong
-    /// attachment within span" cost is bounded to one edge per cycle.
-    ///
-    /// What stays the same: Test 4 still pins the cycle code path
-    /// it now pins that the cycle gets *repaired* rather than that it
-    /// rolls back. The regression class this defends against is "the
-    /// cycle-detection pass silently regresses to letting the cyclic
-    /// gras through to splice, where it fails the post-splice
-    /// validator".
-    /// Test 5 (multi_root via UtteranceRoot mismatch): the L2 plan
-    /// picked `UtteranceRoot` for an L2 word (because the primary
-    /// host parse said primary.head=0 for that position at extract
-    /// time), but the host's final gra has the root at a DIFFERENT
-    /// position. Pre-fix: splice keeps `head=0/ROOT` at the L2
-    /// position and the host's existing root, producing two
-    /// head=0/ROOT entries → `secondary_multi_root` rollback to
-    /// L2|xxx. Post-fix: post-splice repair detects the duplicate
-    /// root and demotes the L2 contribution to attach to the host
-    /// root with a generic DEP relation.
-    ///
-    /// Background: this is the 43-rollbacks-per-750-files variant
-    /// the constructive merge didn't address.
+    /// The secondary block is rooted already. An explicit primary-root policy
+    /// attaches that root to the surviving host root; no internal evidence is repaired.
     #[test]
     fn merge_demotes_duplicate_root_when_host_already_has_one() {
         let chat_text = "@UTF8\n\
@@ -2380,7 +2513,12 @@ mod cardinality_tests {
                 PosCategory::new("noun"),
                 MorStem::new("yellow"),
             )),
-            gras: vec![GrammaticalRelation::new(1, 0, "ROOT")],
+            gras: vec![GrammaticalRelation::new(
+                1,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            )],
             attachment: utterance_root_attachment(0),
         })];
 
@@ -2432,7 +2570,7 @@ mod cardinality_tests {
     }
 
     #[test]
-    fn merge_falls_back_only_on_genuine_secondary_cycle() {
+    fn merge_rejects_secondary_cycle_without_changing_host() {
         let (mut chat_file, line_idx) = build_l2_fixture("eng, fra", "x y", 2);
 
         let deferred = vec![
@@ -2445,28 +2583,35 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("x"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "DEP")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("y"))),
-                gras: vec![GrammaticalRelation::new(1, 1, "DEP")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("DEP")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
         ];
 
+        let before = crate::serialize::to_chat_string(&chat_file);
         let outcome = splice_positions(&mut chat_file, &deferred, merged);
         assert_eq!(
-            outcome.spliced, 2,
-            "cycle must be repaired into a valid tree; \
-             fallback={}, spliced={}",
-            outcome.fallback, outcome.spliced
+            outcome.spliced, 0,
+            "invalid secondary evidence cannot be admitted"
         );
-        assert_eq!(outcome.fallback, 0);
-        assert_post_splice_gra_valid(
-            &mut chat_file,
-            "Test 4: cycle in secondary, repaired via cycle-detection pass",
-        );
+        assert_eq!(outcome.fallback, 2);
+        assert_eq!(crate::serialize::to_chat_string(&chat_file), before);
+        assert_post_splice_gra_valid(&mut chat_file, "refused secondary graph preserves host");
     }
 
     /// Spans splice in transcript order whatever order the caller merged
@@ -2503,15 +2648,26 @@ mod cardinality_tests {
                             )),
                     ],
                     vec![
-                        GrammaticalRelation::new(1, 0, "ROOT"),
-                        GrammaticalRelation::new(2, 1, "OBJ"),
+                        GrammaticalRelation::new(
+                            1,
+                            0,
+                            talkbank_model::GrammaticalRelationType::new("ROOT")
+                                .expect("valid fixture relation"),
+                        ),
+                        GrammaticalRelation::new(
+                            2,
+                            1,
+                            talkbank_model::GrammaticalRelationType::new("OBJ")
+                                .expect("valid fixture relation"),
+                        ),
                     ],
                     L2Attachment::HostGovernor {
                         source_word: source.word_idx(),
                         source: source.primary().clone(),
                         relation: ExternalRelation::Primary,
                     },
-                ),
+                )
+                .expect("admitted splice fixture"),
                 MergedL2Span::for_splice_test(
                     line_idx,
                     other.word_idx(),
@@ -2519,13 +2675,19 @@ mod cardinality_tests {
                         PosCategory::new("noun"),
                         MorStem::new("dos"),
                     ))],
-                    vec![GrammaticalRelation::new(1, 0, "ROOT")],
+                    vec![GrammaticalRelation::new(
+                        1,
+                        0,
+                        talkbank_model::GrammaticalRelationType::new("ROOT")
+                            .expect("valid fixture relation"),
+                    )],
                     L2Attachment::HostGovernor {
                         source_word: other.word_idx(),
                         source: other.primary().clone(),
                         relation: ExternalRelation::Primary,
                     },
-                ),
+                )
+                .expect("admitted splice fixture"),
             ]
         };
         let uno = deferred_position(line_idx, 1, "spa", "obj", 1);
@@ -2622,7 +2784,8 @@ mod cardinality_tests {
         }
         let spans = runs
             .into_iter()
-            .map(|run| {
+            .filter_map(|run| {
+                let words = run.len();
                 let (first, first_result) = &run[0];
                 let span_attachment = attachment(&first_result.attachment);
                 let line_idx = first.line_idx();
@@ -2631,7 +2794,7 @@ mod cardinality_tests {
                     .into_iter()
                     .map(|(_, result)| (result.mor, result.gras))
                     .unzip();
-                MergedL2Span::for_splice_test(
+                match MergedL2Span::for_splice_test(
                     line_idx,
                     first_word,
                     mors,
@@ -2644,7 +2807,14 @@ mod cardinality_tests {
                         })
                         .collect(),
                     span_attachment,
-                )
+                ) {
+                    Ok(span) => Some(span),
+                    Err(error) => {
+                        assert!(!error.to_string().is_empty(), "refusal keeps a diagnostic");
+                        unmerged += words;
+                        None
+                    }
+                }
             })
             .collect();
         let outcome = splice_l2_into_chat(chat_file, spans);
@@ -2715,12 +2885,22 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("num"), MorStem::new("uno"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "NUMMOD")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("NUMMOD")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(1, "nmod"),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
-                gras: vec![GrammaticalRelation::new(2, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    2,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
         ];
@@ -2784,8 +2964,18 @@ mod cardinality_tests {
             mor: Mor::new(MorWord::new(PosCategory::new("verb"), MorStem::new("dar")))
                 .with_post_clitic(MorWord::new(PosCategory::new("pron"), MorStem::new("lo"))),
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 1, "OBJ"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("OBJ")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: host_attachment(0, "nmod"),
         })];
@@ -2812,8 +3002,18 @@ mod cardinality_tests {
             mor: Mor::new(MorWord::new(PosCategory::new("verb"), MorStem::new("dar")))
                 .with_post_clitic(MorWord::new(PosCategory::new("pron"), MorStem::new("lo"))),
             gras: vec![
-                GrammaticalRelation::new(1, 0, "ROOT"),
-                GrammaticalRelation::new(2, 1, "OBJ"),
+                GrammaticalRelation::new(
+                    1,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                ),
+                GrammaticalRelation::new(
+                    2,
+                    1,
+                    talkbank_model::GrammaticalRelationType::new("OBJ")
+                        .expect("valid fixture relation"),
+                ),
             ],
             attachment: host_attachment(0, "nmod"),
         })];
@@ -2840,12 +3040,22 @@ mod cardinality_tests {
         let merged = vec![
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("num"), MorStem::new("uno"))),
-                gras: vec![GrammaticalRelation::new(1, 2, "NUMMOD")],
+                gras: vec![GrammaticalRelation::new(
+                    1,
+                    2,
+                    talkbank_model::GrammaticalRelationType::new("NUMMOD")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: host_attachment(0, "nmod"),
             }),
             Some(PositionResult {
                 mor: Mor::new(MorWord::new(PosCategory::new("noun"), MorStem::new("dos"))),
-                gras: vec![GrammaticalRelation::new(2, 0, "ROOT")],
+                gras: vec![GrammaticalRelation::new(
+                    2,
+                    0,
+                    talkbank_model::GrammaticalRelationType::new("ROOT")
+                        .expect("valid fixture relation"),
+                )],
                 attachment: TestAttachment::Internal,
             }),
         ];

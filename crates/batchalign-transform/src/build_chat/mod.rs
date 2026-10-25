@@ -38,7 +38,7 @@ pub use schema::{
 };
 pub use utterances::tag_marker_separator;
 
-use headers::{build_header_lines, build_participant_map};
+use headers::build_header_lines;
 use utterances::build_utterance_lines;
 
 /// Why building a CHAT file from a [`TranscriptDescription`] failed.
@@ -172,12 +172,8 @@ pub fn build_chat(desc: TranscriptDescription) -> Result<BuiltChat, BuildChatErr
         Header::End,
     ));
 
-    // Programmatically assembled CHAT carries the same typed participant
-    // metadata as parsed CHAT; `ChatFile::new`'s empty map is for parser
-    // intermediates only (see `build_participant_map`).
-    let participants = build_participant_map(desc);
     Ok(BuiltChat {
-        file: ChatFile::with_participants(lines, participants),
+        file: ChatFile::new(lines),
         synthesized_ends,
     })
 }

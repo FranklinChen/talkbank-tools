@@ -44,9 +44,12 @@ impl UdDeprel {
     ///
     /// This is the single conversion boundary between UD and CHAT deprel
     /// representations. All GRA tier construction should go through this method.
-    pub fn to_chat_gra(&self) -> GrammaticalRelationType {
-        let chat = self.0.to_uppercase().replace(':', "-");
-        GrammaticalRelationType::new(chat)
+    pub fn to_chat_gra(
+        &self,
+    ) -> Result<GrammaticalRelationType, crate::morphosyntax::MappingError> {
+        crate::morphosyntax::mapping_helpers::normalize_deprel(&self.0, || {
+            "secondary dependency projection".to_owned()
+        })
     }
 }
 

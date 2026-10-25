@@ -564,7 +564,7 @@ class _WorkerState:
         """
         try:
             import stanza
-        except (ImportError, ModuleNotFoundError):
+        except ImportError, ModuleNotFoundError:
             return None
         version = getattr(stanza, "__version__", None)
         if not isinstance(version, str) or not version:

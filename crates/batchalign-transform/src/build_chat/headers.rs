@@ -1,10 +1,10 @@
 use std::path::Path;
 use talkbank_model::Location;
 
-use indexmap::IndexMap;
 use talkbank_model::model::{
-    Header, IDHeader, LanguageCodes, Line, MediaFilename, MediaHeader, MediaType, Participant,
-    ParticipantEntries, ParticipantEntry, ParticipantName, ParticipantRole, SpeakerCode,
+    Header, IDHeader, LanguageCodes, Line, MediaFilename, MediaHeader, MediaType,
+    ParticipantDetails, ParticipantEntries, ParticipantEntry, ParticipantName, ParticipantRole,
+    SpeakerCode,
 };
 
 use super::BuildChatError;
@@ -46,33 +46,15 @@ pub(super) fn build_header_lines(
     Ok(lines)
 }
 
-/// Assemble the typed participant map the built [`ChatFile`] must carry.
-///
-/// `ChatFile::new` deliberately leaves its derived participant map empty
-/// (parser-intermediate semantics), but programmatically assembled CHAT
-/// must expose the same metadata as parsed CHAT: consumers of the
-/// in-memory file consult this map rather than re-scanning header lines.
-/// Built from the SAME entry + `@ID` values the header lines carry, so
-/// map and headers cannot disagree.
-///
-/// [`ChatFile`]: talkbank_model::model::ChatFile
-pub(super) fn build_participant_map(
-    desc: &TranscriptDescription,
-) -> IndexMap<SpeakerCode, Participant> {
-    build_participant_entries(desc)
-        .into_iter()
-        .zip(build_id_headers(desc))
-        .map(|(entry, id)| (entry.speaker_code.clone(), Participant::new(entry, id)))
-        .collect()
-}
-
 fn build_participant_entries(desc: &TranscriptDescription) -> Vec<ParticipantEntry> {
     desc.participants
         .iter()
         .map(|participant| ParticipantEntry {
             speaker_code: SpeakerCode::new(participant.id.as_str()),
-            name: participant.name.as_ref().map(ParticipantName::new),
-            role: ParticipantRole::new(participant.role.as_str()),
+            details: ParticipantDetails::Complete {
+                name: participant.name.as_ref().map(ParticipantName::new),
+                role: ParticipantRole::new(participant.role.as_str()),
+            },
         })
         .collect()
 }

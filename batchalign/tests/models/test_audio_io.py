@@ -192,7 +192,7 @@ class TestTorchaudioCompatibility:
             # Try to use load - will fail on 2.9+
             _ = torchaudio.load
             return True
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             pytest.skip("torchaudio I/O not available")
             return False
 
@@ -202,7 +202,7 @@ class TestTorchaudioCompatibility:
 
         try:
             old_audio, old_rate = torchaudio.load(str(TEST_AUDIO))
-        except (ImportError, RuntimeError):
+        except ImportError, RuntimeError:
             pytest.skip("torchaudio backend (torchcodec) not available")
         new_audio, new_rate = load_audio(TEST_AUDIO)
 
@@ -222,7 +222,7 @@ class TestTorchaudioCompatibility:
             old_audio, _ = torchaudio.load(
                 str(TEST_AUDIO), frame_offset=offset, num_frames=num_frames
             )
-        except (ImportError, RuntimeError):
+        except ImportError, RuntimeError:
             pytest.skip("torchaudio backend (torchcodec) not available")
         new_audio, _ = load_audio(
             TEST_AUDIO, frame_offset=offset, num_frames=num_frames

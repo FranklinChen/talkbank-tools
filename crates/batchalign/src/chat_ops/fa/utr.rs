@@ -505,7 +505,12 @@ impl<'a> PreparedGlobalUtr<'a> {
             if !info.has_lazy_overlap
                 && !info.has_ca_overlap
                 && let Line::Utterance(utterance) = &source.lines[*line_index]
-                && let Some(bullet) = &utterance.main.content.bullet
+                && let Some(bullet) = utterance
+                    .main
+                    .content
+                    .bullet
+                    .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
             {
                 ceiling = Some(ceiling.map_or(bullet.timing.start_ms, |previous| {
                     previous.min(bullet.timing.start_ms)
@@ -594,7 +599,12 @@ impl<'a> PreparedGlobalUtr<'a> {
                 if !overlaps
                     && let Some(Line::Utterance(utt)) =
                         chat_file.lines.get(utt_line_indices[utt_idx])
-                    && let Some(bullet) = &utt.main.content.bullet
+                    && let Some(bullet) = utt
+                        .main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
                 {
                     document_floor_ms = document_floor_ms.max(bullet.timing.end_ms);
                     speaker_floors.insert(
@@ -800,7 +810,7 @@ impl<'a> PreparedGlobalUtr<'a> {
                     // Mark as a provisional UTR hint so that update_utterance_bullet
                     // (called after FA injection) overwrites this bullet with the
                     // FA word span instead of union-expanding from it.
-                    utt.main.content.bullet = Some(interval.into_hint());
+                    utt.main.content.bullet = Some(interval.into_hint().into());
                     result.injected += 1;
                 }
                 utt_idx += 1;
@@ -860,6 +870,7 @@ pub(super) fn collect_utr_utterance_info(
                         .content
                         .bullet
                         .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
                         .map(|bullet| lexical::ObservedWordTiming {
                             start_ms: bullet.timing.start_ms,
                             end_ms: bullet.timing.end_ms,
@@ -1709,6 +1720,7 @@ pub fn find_untimed_windows(
                     .content
                     .bullet
                     .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .map(|b| (b.timing.start_ms, b.timing.end_ms)),
             );
         }
@@ -1805,6 +1817,7 @@ pub fn find_untimed_windows(
 mod tests {
     use super::*;
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn parse_chat(text: &str) -> ChatFile {
         let parser = TreeSitterParser::new().unwrap();
@@ -1970,6 +1983,7 @@ mod tests {
                         .content
                         .bullet
                         .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
                         .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
                 ),
                 _ => None,
@@ -2438,6 +2452,7 @@ mod tests {
                         .content
                         .bullet
                         .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
                         .map(|b| (b.timing.start_ms, b.timing.end_ms)),
                 );
             }

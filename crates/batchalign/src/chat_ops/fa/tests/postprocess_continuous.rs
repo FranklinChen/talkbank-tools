@@ -688,6 +688,7 @@ fn test_postprocess_with_existing_wor_does_not_clamp_final_word_to_near_zero_dur
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("bullet should remain");
     assert_eq!(
         bullet.timing.end_ms, 1200,
@@ -743,6 +744,7 @@ fn rebuild_policy_keeps_fresh_measurement_before_prior_wor_boundary() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
         Some((29427, 30669))
     );
@@ -774,6 +776,7 @@ fn test_postprocess_does_not_clamp_word_timings_to_utr_hint_bullet() {
             .content
             .bullet
             .as_mut()
+            .and_then(talkbank_model::BulletState::as_parsed_mut)
             .expect("test requires pre-existing UTR bullet");
         bullet.source = BulletSource::Utr;
     }

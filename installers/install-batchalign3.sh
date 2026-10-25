@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # install-batchalign3.sh: install or update the batchalign3 CLI from the latest
 # GitHub release. Bootstraps uv if absent and installs into an isolated uv tool
-# environment using a uv-managed Python (default 3.13).
+# environment using a uv-managed Python (default 3.14).
 #
 #   curl --proto '=https' --tlsv1.2 -LsSf \
 #     https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
 #
 # Re-running upgrades an existing installation. Override the managed Python with
-# BATCHALIGN3_PYTHON (for example BATCHALIGN3_PYTHON=3.13).
+# BATCHALIGN3_PYTHON (for example BATCHALIGN3_PYTHON=3.14).
 #
 # There is no PyPI package: distribution is via GitHub releases. batchalign3's
 # own dependencies still resolve from PyPI, so the first install downloads large
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO="FranklinChen/talkbank-tools"
-PYTHON_VERSION="${BATCHALIGN3_PYTHON:-3.13}"
+PYTHON_VERSION="${BATCHALIGN3_PYTHON:-3.14}"
 
 die() { printf 'install-batchalign3: %s\n' "$1" >&2; exit 1; }
 info() { printf 'install-batchalign3: %s\n' "$1" >&2; }

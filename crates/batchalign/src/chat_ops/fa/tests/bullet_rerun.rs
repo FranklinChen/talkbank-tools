@@ -118,6 +118,7 @@ fn test_fa_bullet_overwrites_utr_hint_with_word_derived_timing() {
             .content
             .bullet
             .as_mut()
+            .and_then(talkbank_model::BulletState::as_parsed_mut)
             .expect("test requires pre-existing UTR bullet");
         bullet.source = BulletSource::Utr;
     }
@@ -189,6 +190,7 @@ fn test_fa_preserves_utr_hint_when_all_words_untimed() {
             .content
             .bullet
             .as_mut()
+            .and_then(talkbank_model::BulletState::as_parsed_mut)
             .expect("test requires pre-existing UTR bullet");
         bullet.source = BulletSource::Utr;
     }
@@ -259,6 +261,7 @@ fn test_rescued_rerun_bullet_does_not_clamp_new_fa_words() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("rescued utterance should still have a bullet");
         assert_eq!(
             bullet.source,
@@ -571,6 +574,7 @@ fn test_fa_backward_timestamp_from_wrong_audio_window_is_stripped() {
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("correctly-timed utterance 0 must keep its bullet");
     assert_eq!(b0.timing.start_ms, 731556, "utt 0 start must be 731556ms");
 }
@@ -656,6 +660,7 @@ fn test_fast_path_strips_backward_wor_timestamps_and_removes_stale_wor_tier() {
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("utt0 must keep its forward bullet");
     assert_eq!(b0.timing.start_ms, 731556, "utt0 start must be 731556ms");
 

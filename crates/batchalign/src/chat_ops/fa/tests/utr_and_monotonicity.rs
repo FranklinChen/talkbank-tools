@@ -224,7 +224,13 @@ fn test_monotonicity_clamp_does_not_create_zero_duration_bullet() {
         let talkbank_model::model::Line::Utterance(utt) = line else {
             continue;
         };
-        if let Some(bullet) = &utt.main.content.bullet {
+        if let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        {
             assert!(
                 bullet.timing.start_ms < bullet.timing.end_ms,
                 "utterance at line {i} has zero-or-negative-duration bullet \

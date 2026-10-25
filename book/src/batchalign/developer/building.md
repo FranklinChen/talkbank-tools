@@ -11,11 +11,25 @@ Development is supported on **Windows, macOS, and Linux**. The instructions belo
 - **Rust (stable)** via [rustup](https://rustup.rs/) (all platforms) -- needed for the Rust CLI and PyO3 extension.
 - **Node.js + npm** -- needed for `make build` and `make build-dashboard`, which rebuild the embedded dashboard bundled into the Rust binary.
 - **[maturin](https://www.maturin.rs/)** -- Required only if you modify the Rust `batchalign_core` extension.
-- **Python 3.13 or 3.14** for development. Installers and deployments default
-  to 3.13, while CI builds and tests both standard interpreter versions.
+- **Python 3.14** for development. Installers and deployments default
+  to 3.14, while CI builds and tests that standard interpreter.
   Free-threaded 3.14t is **not** a supported install or deployment target; see
   [Python Versioning](python-versioning.md).
 - **Platform note:** On macOS, `python` and `python3` may not exist outside a venv. Always use `uv run` to execute Python commands, which handles this automatically on all platforms.
+
+## Chatter dependency and release sequencing
+
+BA3 compiles Chatter's model, parser and generic transforms into its Rust
+binary and Python extension. `Cargo.toml` selects their published release and
+`Cargo.lock` records the exact commit. Builds do not use whichever standalone
+`chatter` command happens to be installed.
+
+A Chatter CLI/LSP/desktop release and a BA3 deployment are separate operations.
+Deploying a newer Chatter executable leaves an already-built BA3's parser and
+model unchanged. To adopt new Chatter APIs, publish the dependency, update all
+BA3 pins and the lockfile together, verify the consumer, and rebuild BA3.
+The [architecture reference](https://github.com/FranklinChen/talkbank-tools/blob/main/docs/agent-reference/architecture.md#how-the-chat-core-is-consumed)
+records the selected release and ownership boundary.
 
 ## Rust compiler policy
 

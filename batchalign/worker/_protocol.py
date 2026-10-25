@@ -422,7 +422,7 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
         try:
             with _stdout_lock:
                 _write_json(payload)
-        except (BrokenPipeError, ConnectionResetError):
+        except BrokenPipeError, ConnectionResetError:
             reader.stop()
 
     def _handle_and_respond(request: PendingProtocolRequest) -> None:
@@ -575,7 +575,7 @@ def _handle_tcp_connection_sequential(
             wfile.flush()
             if dispatch.should_shutdown:
                 return
-    except (BrokenPipeError, ConnectionResetError):
+    except BrokenPipeError, ConnectionResetError:
         logger.info("TCP connection closed by peer %s:%d", addr[0], addr[1])
     finally:
         rfile.close()
@@ -633,7 +633,7 @@ def _handle_tcp_connection_concurrent(
                 try:
                     wfile.write(error_payload + "\n")
                     wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
+                except BrokenPipeError, ConnectionResetError:
                     _stop_reading()
             if _ends_worker(kind):
                 _stop_reading()
@@ -643,7 +643,7 @@ def _handle_tcp_connection_concurrent(
             try:
                 wfile.write(json.dumps(dispatch.payload) + "\n")
                 wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except BrokenPipeError, ConnectionResetError:
                 _stop_reading()
 
     try:
@@ -679,7 +679,7 @@ def _handle_tcp_connection_concurrent(
                     break
                 continue
             pool.submit(_handle_and_respond, prepared)
-    except (BrokenPipeError, ConnectionResetError):
+    except BrokenPipeError, ConnectionResetError:
         logger.info("TCP connection closed by peer %s:%d", addr[0], addr[1])
     finally:
         pool.shutdown(wait=True)

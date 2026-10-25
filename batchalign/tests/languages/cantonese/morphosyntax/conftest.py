@@ -29,7 +29,7 @@ def pytest_collection_modifyitems(items):
     for item in items:
         try:
             item_path = Path(item.path).resolve()
-        except (OSError, AttributeError):
+        except OSError, AttributeError:
             continue
         if _HERE == item_path or _HERE in item_path.parents:
             item.add_marker(pytest.mark.cantonese_integration)

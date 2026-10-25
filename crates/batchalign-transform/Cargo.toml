@@ -33,6 +33,7 @@ whatlang = { workspace = true }
 ferrous-opencc = { workspace = true }
 
 [dev-dependencies]
+talkbank-parser-tests = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3.27"
 insta = { workspace = true }

@@ -482,8 +482,10 @@ impl LanguageGroup {
             return LanguageGroup::Unreadable;
         };
         let (file, _warnings) = batchalign_transform::parse::parse_lenient(parser, &text);
-        let mut codes: Vec<String> = file
-            .languages
+        let Ok(languages) = file.language_declaration() else {
+            return LanguageGroup::Unreadable;
+        };
+        let mut codes: Vec<String> = languages
             .iter()
             .map(|code| code.as_str().to_owned())
             .collect();

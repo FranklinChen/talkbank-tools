@@ -6,6 +6,9 @@ use super::model::{CompareStatus, UtteranceComparison};
 /// Structured serialization errors for compare-owned output artifacts.
 #[derive(Debug, thiserror::Error)]
 pub enum CompareSerializationError {
+    /// The custom label cannot name a user-defined tier.
+    #[error(transparent)]
+    TierLabel(#[from] talkbank_model::InvalidUserDefinedDependentTierLabel),
     /// `%xsrep` cannot contain an empty token payload.
     #[error(
         "compare serialization produced empty content for xsrep at utterance {utterance_index} token {token_index}"
@@ -50,12 +53,12 @@ pub struct CompareTierLabel(NonEmptyString);
 impl CompareTierLabel {
     /// `%xsrep`
     pub fn xsrep() -> Self {
-        Self(NonEmptyString::new_unchecked("xsrep"))
+        Self(talkbank_model::non_empty_literal!("xsrep"))
     }
 
     /// `%xsmor`
     pub fn xsmor() -> Self {
-        Self(NonEmptyString::new_unchecked("xsmor"))
+        Self(talkbank_model::non_empty_literal!("xsmor"))
     }
 
     pub(in crate::compare) fn as_str(&self) -> &str {
@@ -93,7 +96,7 @@ impl CompareSurfaceToken {
 }
 
 impl WriteChat for CompareSurfaceToken {
-    fn write_chat<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+    fn write_chat<W: talkbank_model::model::ChatWriter>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_str(self.0.as_ref())
     }
 }
@@ -129,7 +132,7 @@ impl ComparePosLabel {
 }
 
 impl WriteChat for ComparePosLabel {
-    fn write_chat<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+    fn write_chat<W: talkbank_model::model::ChatWriter>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_str(self.0.as_ref())
     }
 }
@@ -156,7 +159,7 @@ impl From<CompareStatus> for CompareTierMarker {
 }
 
 impl WriteChat for CompareTierMarker {
-    fn write_chat<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+    fn write_chat<W: talkbank_model::model::ChatWriter>(&self, w: &mut W) -> Result<(), W::Error> {
         match self {
             Self::Match => Ok(()),
             Self::ExtraMain => w.write_char('+'),
@@ -175,7 +178,7 @@ pub struct CompareTierItem<T> {
 }
 
 impl<T: WriteChat> WriteChat for CompareTierItem<T> {
-    fn write_chat<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+    fn write_chat<W: talkbank_model::model::ChatWriter>(&self, w: &mut W) -> Result<(), W::Error> {
         self.marker.write_chat(w)?;
         self.value.write_chat(w)
     }
@@ -212,7 +215,7 @@ impl TryFrom<&UtteranceComparison> for XsrepTierContent {
 }
 
 impl WriteChat for XsrepTierContent {
-    fn write_chat<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+    fn write_chat<W: talkbank_model::model::ChatWriter>(&self, w: &mut W) -> Result<(), W::Error> {
         for (idx, item) in self.items.iter().enumerate() {
             if idx > 0 {
                 w.write_char(' ')?;
@@ -256,7 +259,7 @@ impl TryFrom<&UtteranceComparison> for XsmorTierContent {
 }
 
 impl WriteChat for XsmorTierContent {
-    fn write_chat<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+    fn write_chat<W: talkbank_model::model::ChatWriter>(&self, w: &mut W) -> Result<(), W::Error> {
         for (idx, item) in self.items.iter().enumerate() {
             if idx > 0 {
                 w.write_char(' ')?;
@@ -286,8 +289,8 @@ impl<T: WriteChat> CompareUserDefinedTier<T> {
         };
 
         Ok(DependentTier::UserDefined(UserDefinedDependentTier {
-            label: self.label.into_inner(),
-            content: Some(content),
+            label: talkbank_model::UserDefinedDependentTierLabel::new(self.label.into_inner())?,
+            content: Some(content.into()),
             location: Location::Unlocated,
         }))
     }

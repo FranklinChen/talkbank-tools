@@ -1,30 +1,18 @@
 # Python Version Support
 
 **Status:** Current
-**Last verified:** 2026-08-30 21:00 EDT
+**Baseline adopted:** 2026-10-25
 
 ## Current policy
 
-Standard CPython **3.13 and 3.14** are supported. The package declares
-`requires-python = ">=3.13"`, uses PyO3's `abi3-py313` boundary, and CI builds
-and runs the Python suite on both versions. Installers and current deployments
-default to **3.13** because one explicit operational baseline is easier to
-reproduce than whichever compatible interpreter happens to be newest.
+Standard GIL-enabled CPython **3.14** is the baseline for all future BA3
+work: development, CI, installation and deployment. Package metadata declares
+`requires-python = ">=3.14,<3.15"`; PyO3 uses `abi3-py314`. Python 3.13 is no
+longer an installation target. A future minor version requires explicit
+qualification of the complete dependency stack before changing this policy.
 
 Free-threaded Python (`3.14t`) is **not** a supported install or deployment
-target. Do not infer free-threaded support from the standard 3.14 classifier or
-from runtime code that can detect a disabled GIL.
-
-```mermaid
-flowchart TD
-    P["Requested Python runtime"] --> V{"Version and ABI"}
-    V -->|"CPython 3.13"| S["Supported; deployment default"]
-    V -->|"CPython 3.14"| S2["Supported and CI-tested"]
-    V -->|"3.14t / free-threaded"| X["Research only; not supported"]
-    V -->|"older than 3.13"| R["Rejected by package metadata"]
-    S --> W["Install platform abi3 wheel"]
-    S2 --> W
-```
+target. Runtime detection of a disabled GIL does not establish support.
 
 ## Why free-threaded Python remains research-only
 
@@ -55,8 +43,7 @@ is not an alternate supported BA3 edition.
 
 Older reports recorded missing `onnxruntime` and other ML wheels for then-new
 interpreter ABIs. Those tables are historical evidence, not current policy.
-The current lock contains ordinary CPython 3.13 and 3.14 artifacts, and CI is
-the authority for those two supported interpreter lines. Wheel availability in
+The current baseline is ordinary CPython 3.14; CI verifies that interpreter. Wheel availability in
 a lockfile alone is not enough to promote a free-threaded ABI.
 
 ## Groundwork retained in the codebase
@@ -87,8 +74,8 @@ Promote a free-threaded interpreter only when all of these are true:
 
 Until all five gates pass:
 
-- use standard Python 3.13 or 3.14 for development;
-- use 3.13 for canonical installation and deployment; and
+- use standard Python 3.14 for development;
+- use 3.14 for canonical installation and deployment; and
 - treat free-threaded Python as a separate experiment whose result cannot
   alter supported production state.
 

@@ -82,7 +82,8 @@ pub fn read_utterances(chat_file: &ChatFile, tiers: &TierSelection) -> Vec<Trans
         }
         let timing = match utterance.main.content.bullet.as_ref() {
             None => UtteranceTiming::Untimed,
-            Some(bullet) => {
+            Some(talkbank_model::BulletState::Unparsed { .. }) => UtteranceTiming::Rejected,
+            Some(talkbank_model::BulletState::Parsed(bullet)) => {
                 let start = FileMs::new(bullet.timing.start_ms);
                 let end = FileMs::new(bullet.timing.end_ms);
                 match MediaWindow::new(start, end) {

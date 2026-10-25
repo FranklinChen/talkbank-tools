@@ -1333,7 +1333,8 @@ fn smoke_batch_items(
     let collection = crate::chat_ops::morphosyntax_ops::collect_payloads(
         &chat_file,
         lang,
-        std::slice::from_ref(lang),
+        talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(lang))
+            .map_err(|error| format!("doctor language context: {error}"))?,
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
     );
     if collection.batch_items.is_empty() {

@@ -210,6 +210,8 @@ pub enum UnscoredReason {
     },
     /// The utterance has no timing bullet, so there is no audio to embed.
     NoBullet,
+    /// The main bullet was recovered as rejected syntax, not a numeric interval.
+    UnparsedBullet,
     /// Every available enrollment vector was mathematically incomparable with
     /// this utterance, for example because one of the vectors had zero length.
     NoComparableEmbedding,
@@ -242,6 +244,7 @@ impl UnscoredReason {
         match self {
             Self::TooShortForEmbedding { .. } => "too_short_for_embedding",
             Self::NoBullet => "no_bullet",
+            Self::UnparsedBullet => "unparsed_bullet",
             Self::NoComparableEmbedding => "no_comparable_embedding",
             Self::AudioMissing { .. } => "audio_missing",
             Self::OverlapsEnrollment { .. } => "overlaps_enrollment",

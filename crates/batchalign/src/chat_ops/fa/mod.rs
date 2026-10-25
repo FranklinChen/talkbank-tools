@@ -38,6 +38,8 @@ use talkbank_model::model::{
     Bullet, ChatFile, DependentTier, Line, Utterance, UtteranceContent, Word, WordCategory,
 };
 use talkbank_model::{UtteranceIdx, WordIdx};
+#[cfg(test)]
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 // Re-export public API so that `crate::chat_ops::fa::Foo` paths remain unchanged.
 pub use self::alignment::{align_fa_response, parse_fa_response};
@@ -50,7 +52,7 @@ pub use self::grouping::{
 pub(crate) use self::grouping::{GroupUnit, GroupUnits};
 pub use self::injection::inject_timings_for_utterance;
 pub use self::main_bullets::{
-    BackwardGivenBullet, FaProjection, KeptBulletError, KeptBulletsHeld, MainBulletAuthority,
+    FaProjection, GivenBulletError, KeptBulletError, KeptBulletsHeld, MainBulletAuthority,
 };
 pub(crate) use self::orchestrate::WrittenFaDecisions;
 pub use self::orchestrate::{
@@ -1060,6 +1062,7 @@ pub fn find_reusable_utterance_indices(chat_file: &ChatFile) -> std::collections
                 .content
                 .bullet
                 .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
                 .map(|bullet| bullet.timing.start_ms),
         });
         utt_idx += 1;
@@ -1181,47 +1184,54 @@ pub fn update_utterance_bullet_with_boundary_policy(
     }
 
     if let (Some(word_start), Some(word_end)) = (first_start, last_end) {
-        let (final_start, final_end) =
-            match (existing_wor_boundaries, &utterance.main.content.bullet) {
-                // Research projection: prior boundaries are revisable output, not
-                // constraints on newly admitted evidence.
-                (ExistingWorBoundaryPolicy::RebuildFromEvidence, _) => (word_start, word_end),
-                // Provisional UTR hint: FA word span is authoritative, overwrite.
-                (_, Some(existing)) if existing.source == BulletSource::Utr => {
-                    (word_start, word_end)
-                }
-                // Authoritative hand-linked/FA bullet: reruns with an existing %wor
-                // can preserve stale starts from a previous pass. If that lead is
-                // implausibly large and there is no untimed leading filler coverage
-                // left to preserve, snap the start back to the FA word span.
-                // Otherwise keep the old leading coverage.
-                (_, Some(existing)) => {
-                    let start_lead_ms = word_start.saturating_sub(existing.timing.start_ms);
-                    let final_start = if !has_fa_wor
-                        || has_untimed_leading_filler_coverage
-                        || start_lead_ms <= MAX_AUTHORITATIVE_START_LEAD_MS
-                    {
-                        word_start.min(existing.timing.start_ms)
-                    } else {
-                        word_start
-                    };
-                    (final_start, word_end.max(existing.timing.end_ms))
-                }
-                // No pre-existing bullet: set from word span.
-                (_, None) => (word_start, word_end),
-            };
+        let (final_start, final_end) = match (
+            existing_wor_boundaries,
+            utterance
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed),
+        ) {
+            // Research projection: prior boundaries are revisable output, not
+            // constraints on newly admitted evidence.
+            (ExistingWorBoundaryPolicy::RebuildFromEvidence, _) => (word_start, word_end),
+            // Provisional UTR hint: FA word span is authoritative, overwrite.
+            (_, Some(existing)) if existing.source == BulletSource::Utr => (word_start, word_end),
+            // Authoritative hand-linked/FA bullet: reruns with an existing %wor
+            // can preserve stale starts from a previous pass. If that lead is
+            // implausibly large and there is no untimed leading filler coverage
+            // left to preserve, snap the start back to the FA word span.
+            // Otherwise keep the old leading coverage.
+            (_, Some(existing)) => {
+                let start_lead_ms = word_start.saturating_sub(existing.timing.start_ms);
+                let final_start = if !has_fa_wor
+                    || has_untimed_leading_filler_coverage
+                    || start_lead_ms <= MAX_AUTHORITATIVE_START_LEAD_MS
+                {
+                    word_start.min(existing.timing.start_ms)
+                } else {
+                    word_start
+                };
+                (final_start, word_end.max(existing.timing.end_ms))
+            }
+            // No pre-existing bullet: set from word span.
+            (_, None) => (word_start, word_end),
+        };
         // The resulting bullet is authoritative (FA-derived).
-        utterance.main.content.bullet = Some(Bullet::new(
-            talkbank_model::Location::Unlocated,
-            final_start,
-            final_end,
-        ));
+        utterance.main.content.bullet =
+            Some(Bullet::new(talkbank_model::Location::Unlocated, final_start, final_end).into());
     }
     // If no word timings: leave existing bullet unchanged, UNLESS it is
     // zero-duration (start >= end), which is an invalid timing that would
     // produce E362. A zero-duration bullet from a previous buggy run must be
     // cleared; no bullet is valid CHAT, an invalid bullet is not.
-    if let Some(ref existing) = utterance.main.content.bullet
+    if let Some(existing) = utterance
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         && existing.timing.start_ms >= existing.timing.end_ms
     {
         utterance.main.content.bullet = None;

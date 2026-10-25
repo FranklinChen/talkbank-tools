@@ -59,6 +59,7 @@ impl SecondaryReport {
         use batchalign_transform::morphosyntax::l2::L2ExtractError;
         for unplaced in extraction.unaligned() {
             let cause = match &unplaced.error {
+                L2ExtractError::LanguageUnresolved => Cause::LanguageUnresolved,
                 L2ExtractError::Alignment(_) => Cause::Alignment,
                 L2ExtractError::TokenizationDisagrees { .. } => Cause::TokenizationDisagrees,
                 L2ExtractError::SplitWord { .. } => Cause::SplitWord,
@@ -77,6 +78,58 @@ impl SecondaryReport {
                     detail: unplaced.error.to_string().chars().take(500).collect(),
                 });
         }
+    }
+
+    /// Put the same producer-owned availability facts in the saved transcript.
+    /// Replacing only this named comment preserves contributor comments.
+    pub(crate) fn annotate(&self, chat: &mut crate::chat_ops::ChatFile) {
+        use talkbank_model::{Header, Line, Location};
+        const PREFIX: &str = "[batchalign morphology availability]";
+        chat.lines.retain(|line| {
+            !matches!(line,
+            Line::Header { header, .. } if matches!(header.as_ref(),
+                Header::Comment { content } if content.to_chat_string().starts_with(PREFIX)))
+        });
+        let mut notes = Vec::new();
+        if !self.exclusions.is_empty() {
+            let languages: std::collections::BTreeSet<_> = self
+                .exclusions
+                .iter()
+                .map(|span| span.language.as_str())
+                .collect();
+            let words: u64 = self.exclusions.iter().map(|span| span.words).sum();
+            notes.push(format!(
+                "L2 morphology unsupported for {}: {words} word(s) in {} span(s)",
+                languages.into_iter().collect::<Vec<_>>().join(", "),
+                self.exclusions.len()
+            ));
+        }
+        if !self.failures.is_empty() {
+            notes.push(format!(
+                "L2 analysis incomplete for {} span(s); see job diagnostics for causes",
+                self.failures.len()
+            ));
+        }
+        if !self.unplaced.is_empty() {
+            notes.push(format!("L2 analysis could not be dispatched for {} word(s); see job diagnostics for language or alignment causes", self.unplaced.iter().map(|item| item.words).sum::<u64>()));
+        }
+        if notes.is_empty() {
+            return;
+        }
+        let text = format!(
+            "{PREFIX} {}. L2|xxx marks unavailable analysis; surrounding morphology is retained.",
+            notes.join("; ")
+        );
+        let position = crate::provenance::insert_pos_after_constant_headers(chat);
+        chat.lines.insert(
+            position,
+            Line::header(
+                Location::Unlocated,
+                Header::Comment {
+                    content: crate::chat_ops::BulletContent::from_text(text),
+                },
+            ),
+        );
     }
 
     /// Counts include every span; inline examples are bounded for job polling.

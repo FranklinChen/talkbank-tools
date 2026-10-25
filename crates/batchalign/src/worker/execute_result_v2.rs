@@ -216,6 +216,9 @@ impl ExecuteFailureRead {
                 ServerError::ProviderQuotaExhausted(self.message)
             }
             ProtocolErrorCodeV2::ModelAccessDenied => ServerError::ModelAccessDenied(self.message),
+            ProtocolErrorCodeV2::ModelOutputInvalid => {
+                ServerError::ModelOutputInvalid(self.message)
+            }
         }
     }
 

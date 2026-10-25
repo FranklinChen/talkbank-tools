@@ -162,7 +162,7 @@ def _capabilities() -> CapabilitiesResponse:
     def _module_importable(module_name: str) -> bool:
         try:
             importlib.import_module(module_name)
-        except (ImportError, ModuleNotFoundError):
+        except ImportError, ModuleNotFoundError:
             return False
         return True
 

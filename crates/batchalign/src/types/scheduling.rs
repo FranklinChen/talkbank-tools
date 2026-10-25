@@ -159,12 +159,15 @@ pub enum FailureCategory {
     /// configuration condition on the server's machine as if it were a
     /// batchalign defect or bad input.
     ModelAccessDenied,
+    /// Generated model data failed output admission. Do not retry unchanged
+    /// inference or ask the operator to repair valid input.
+    ModelOutputInvalid,
 }
 
 impl FailureCategory {
     /// Every category, so the spelling table below is the only one: parsing
     /// reads it, and a test holds serde's spelling to it.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Validation,
         Self::ParseError,
         Self::InputMissing,
@@ -183,6 +186,7 @@ impl FailureCategory {
         Self::Cancelled,
         Self::System,
         Self::ModelAccessDenied,
+        Self::ModelOutputInvalid,
     ];
 
     /// Stable wire spelling, suitable for bounded structured provenance.
@@ -206,6 +210,7 @@ impl FailureCategory {
             Self::Cancelled => "cancelled",
             Self::System => "system",
             Self::ModelAccessDenied => "model_access_denied",
+            Self::ModelOutputInvalid => "model_output_invalid",
         }
     }
 }
@@ -394,7 +399,8 @@ impl FailureCategory {
             | Self::ProviderAccountRefused
             | Self::Cancelled
             | Self::System
-            | Self::ModelAccessDenied => Retryability::Final,
+            | Self::ModelAccessDenied
+            | Self::ModelOutputInvalid => Retryability::Final,
         }
     }
 }

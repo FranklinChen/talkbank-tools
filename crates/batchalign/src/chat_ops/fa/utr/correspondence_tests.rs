@@ -177,6 +177,7 @@ fn joint_source_composition_recovers_unmarked_backchannel_inside_host() {
                 .content
                 .bullet
                 .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
                 .expect("recovered")
                 .timing;
             (timing.start_ms, timing.end_ms)
@@ -593,7 +594,15 @@ fn interleaved_search_refuses_candidate_hulls_outside_retained_same_speaker_boun
             .find(|(_, i, _)| *i == index)
             .expect("same census")
             .2;
-        assert_eq!(retained.main.content.bullet.as_ref(), Some(&original));
+        assert_eq!(
+            retained
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed),
+            original.as_parsed()
+        );
     }
     let UtrAlignmentEvidence::Global { plan } = result.alignment else {
         panic!("global plan");
@@ -1129,6 +1138,7 @@ fn an_endpoint_matched_in_every_optimum_bounds_its_hint_by_every_candidate() {
                 .content
                 .bullet
                 .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
                 .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
             _ => None,
         })

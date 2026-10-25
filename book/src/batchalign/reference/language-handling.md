@@ -1,7 +1,7 @@
 # Language Handling in CHAT: Complete Data Model
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-10-29
 
 ---
 
@@ -37,29 +37,18 @@ Declares the **primary**, **secondary**, and optionally **tertiary** languages u
 
 ### Data Model
 
-**Header enum**:
-```rust,ignore
-pub enum Header {
-    Languages { codes: LanguageCodes },
-    // ...
-}
+`Header::Languages { codes }` retains the parsed header representation.
+Consumers that need a usable declaration call `ChatFile::language_declaration()`:
 
-pub struct LanguageCodes(pub Vec<LanguageCode>);
+```rust,ignore
+let declared = chat_file.language_declaration()?;
+let primary = declared.primary();
+let secondary = declared.additional().first();
 ```
 
-**Extraction** (from ChatFile):
-```rust,ignore
-let declared_languages: Vec<LanguageCode> = chat_file
-    .headers()
-    .find_map(|h| {
-        if let Header::Languages { codes } = h {
-            Some(codes.0.clone())  // LanguageCodes tuple struct
-        } else {
-            None
-        }
-    })
-    .unwrap_or_else(|| vec![primary_lang.clone()]);
-```
+This yields `DeclaredLanguagesRef`, a nonempty admitted view. Absent, empty,
+rejected and repeated declarations are distinct errors; reading the first
+header and substituting a default would lose those distinctions.
 
 ### Example
 
@@ -174,32 +163,28 @@ pub enum WordLanguageMarker {
     /// Bare @s (shortcut to secondary language)
     Shortcut,
     /// Single explicit language @s:spa
-    Explicit(WordLanguage),
+    Explicit(LanguageCode),
     /// Multiple languages @s:eng+fra (legal in all)
-    Multiple(Vec<WordLanguage>),
+    Multiple(Vec<LanguageCode>),
     /// Ambiguous languages @s:eng&spa (unclear which)
-    Ambiguous(Vec<WordLanguage>),
+    Ambiguous(Vec<LanguageCode>),
 }
 
-pub struct WordLanguage {
-    pub code: Option<LanguageCode>,  // ISO 639-3 code
-    pub variant: Option<String>,     // Optional variant like :spa%mex
-}
 ```
 
 This is the **CHAT syntax representation** - it preserves the exact marker as written in the file.
 
 ### Data Model: Semantic Resolution Layer
 
-**LanguageResolution enum** (from `resolve_word_language()`):
+**LanguageResolution enum** (from the governing-mark resolver):
 ```rust,ignore
 pub enum LanguageResolution {
     /// Single definite language (after resolving @s shortcut)
     Single(LanguageCode),
     /// Multiple languages (code-mixing): @s:eng+fra
-    Multiple(Vec<LanguageCode>),
+    Multiple(MultipleLanguageCodes),
     /// Ambiguous between languages: @s:eng&spa
-    Ambiguous(Vec<LanguageCode>),
+    Ambiguous(MultipleLanguageCodes),
     /// No language could be resolved (error)
     Unresolved,
 }
@@ -209,15 +194,20 @@ This is the **semantic representation** - it resolves shortcuts and produces act
 
 ### Resolution Algorithm
 
-**`resolve_word_language()` function**:
+`GoverningMark::of` binds a word's own marker, enclosing span marker or
+utterance context with its source location. Its resolver returns
+`LanguageResolutionOutcome { resolution, diagnostics }`:
 
 ```rust,ignore
-pub fn resolve_word_language(
-    word: &Word,
-    tier_language: Option<&LanguageCode>,
-    declared_languages: &[LanguageCode],
-) -> (LanguageResolution, Vec<ParseError>)
+let mark = GoverningMark::of(&word, enclosing_span);
+let outcome = mark.resolve_with_declaration(
+    tier_language,
+    chat_file.language_declaration(),
+);
 ```
+
+`MultipleLanguageCodes` carries at least two members; malformed marker lists
+cannot become a successful multi-language resolution.
 
 **Resolution rules**:
 
@@ -257,7 +247,7 @@ pub fn resolve_word_language(
 ### Current Implementation (Semantic Resolution)
 
 When building morphosyntax batch payloads, Rust:
-1. Resolves each word's language using `resolve_word_language()`
+1. Resolves each word's governing language mark in the admitted declaration context
 2. Sends **semantic resolution**, not CHAT syntax
 
 **Batch payload**: one record per word, so a word's text and its role
@@ -267,7 +257,7 @@ cannot fall out of step:
 pub enum WordRole {
     Analysed,                           // the model analyses it
     SpecialForm(FormType),              // @c, @b, ...: synthesized %mor
-    CodeSwitched(LanguageResolution),   // @s or an [@s] span: L2|xxx, then
+    CodeSwitched(PendingSecondaryWord),  // @s or an [@s] span: L2|xxx, then
                                         // the secondary model
 }
 pub struct BatchWord { text: ChatCleanedText, role: WordRole }
@@ -278,30 +268,29 @@ pub struct MorphosyntaxBatchItem {
 }
 ```
 
-`BatchWord::new` sends a special form's placeholder (`xbxxx`) rather than its
-text, so the placeholder rule lives in the record. A code-switch takes
+`BatchWord::new` retains the actual source text and its role. The private
+`ProviderRequestWord` projection serializes a special-form mask (`xbxxx`)
+without claiming the mask is observed transcript text. A code-switch takes
 precedence over a form type the word also carries (`WordRole::of`).
+`PendingSecondaryWord` retains the complete resolution, including ambiguity
+or absence; the worker's primary-pass metadata does not authorize secondary
+model selection. Only a unique `Single` resolution permits that dispatch.
 
-**Example JSON payload** (the wire keeps the per-word pairs, which the worker
-does not read):
+**Example JSON payload** (the positional metadata is derived from the same
+word records):
+
 ```json
 {
   "words": ["I", "want", "biberon", "please"],
   "terminator": ".",
-  "special_forms": [
-    [null, null],                              // "I": analysed
-    [null, null],                              // "want"
-    [null, "spa"],                             // "biberon@s": resolved to Spanish
-    [null, null]                               // "please"
-  ],
-  "lang": "eng"                                // Utterance language
+  "special_forms": [[null, null], [null, null], [null, "spa"], [null, null]],
+  "lang": "eng"
 }
 ```
 
-**What Python receives** (semantics, not syntax):
-- `"spa"` - resolved language code, not `Shortcut` enum variant
-- `{"Multiple": ["eng", "fra"]}` - multiple languages, not `+` syntax
-- `{"Ambiguous": ["eng", "spa"]}` - ambiguous, not `&` syntax
+Python receives provider inputs and primary-pass metadata. Full language
+resolution and the decision to dispatch a secondary model remain in Rust;
+`Multiple` and `Ambiguous` are not sent as fabricated single-language analyses.
 
 ### Why Semantic Resolution?
 
@@ -346,7 +335,7 @@ for lang_code, items in by_lang.items():
 
 1. The primary morphosyntax pass still emits `L2|xxx` as the safe intermediate
    placeholder for language-marked words.
-2. `talkbank-transform` then extracts deferred `@s` positions, plans
+2. `batchalign-transform` then extracts deferred `@s` positions, plans
    contiguous spans plus host-side attachment, and asks `batchalign` only for
    the secondary Stanza worker dispatch.
 3. Successful secondary results are merged back into `%mor`/`%gra`; only
@@ -359,28 +348,23 @@ for lang_code, items in by_lang.items():
 - splice/lowering needs a safe placeholder before secondary dispatch completes
 
 **What's still limited**:
-- `@s:eng+spa` / `@s:eng&spa` dispatch to the first language named
+- `@s:eng+spa` / `@s:eng&spa` remain unavailable analysis; neither chooses one model arbitrarily
 - unsupported secondary languages remain `L2|xxx` (see "Unsupported
   non-primary languages" below for the handling contract)
 
 **Unsupported non-primary languages**:
 
-`morphotag` only requires the **primary** `@Languages` code to be
-Stanza-supported; files whose primary is unsupported are skipped with a
-typed diagnostic before the pipeline runs. When the primary IS
-supported, unsupported non-primary content is processed cleanly with an
-`L2|xxx` fallback rather than crashing the worker:
+Inline unsupported secondary spans retain `L2|xxx` locally while successful
+surrounding analysis is kept. Explicitly missing registry capability produces
+an exclusion; inference, extraction, merge and splice failures retain their
+own diagnostic causes. Job diagnostics and a saved availability comment report
+the affected languages and counts.
 
-- `[- UNSUPPORTEDLANG]` whole-utterance precodes, the utterance is
-  grouped under `UNSUPPORTEDLANG`, the worker partitions that group out
-  of the dispatch list (`partition_groups_by_stanza_support`), and
-  every word receives `L2|xxx`.
-- `@s:UNSUPPORTEDLANG` per-word markers, the secondary L2 dispatch
-  span is short-circuited the same way; the host primary analysis is
-  preserved and the marker's slot stays `L2|xxx`.
-
-Other utterances and spans in the same file that target supported
-languages continue to receive real morphology.
+Primary-header and effective whole-utterance `[- LANG]` work require admitted
+model capability. If required processors are unavailable, file analysis is
+refused before inference; the inline placeholder policy does not manufacture
+an entire utterance's morphology. See [L2 handling](l2-handling.md#unsupported-non-primary-languages)
+for the complete availability policy.
 
 **Validation / repair policy around that behavior**:
 - explicit `@s:LANG` still resolves and dispatches even when `LANG` is absent
@@ -399,7 +383,7 @@ languages continue to receive real morphology.
 
 Current boundary:
 - per-word routing for resolvable `@s` words is implemented
-- conservative fallback remains for the unresolved / unsupported cases
+- local unavailable analysis is retained and reported for unresolved, ambiguous and unsupported inline spans
 
 ---
 
@@ -446,9 +430,12 @@ Current boundary:
 
 ### No @Languages Header
 
-If `@Languages` is missing:
-- Inferred from `@ID` headers (first 3-letter language code)
-- Falls back to primary language passed to processing function
+Morphotag requires one usable `@Languages` declaration; it does not infer
+that declaration from `@ID` or silently choose English. The shared payload
+helper permits an explicitly configured language only for a genuinely absent
+header and records `ConfiguredWhenAbsent`; empty, rejected and repeated
+headers remain errors. This helper policy does not override morphotag's
+per-file header requirement.
 
 ---
 
@@ -466,15 +453,15 @@ If `@Languages` is missing:
 
 ### Validation Context
 
-```text
-let (resolved, errors) = resolve_word_language(
-    &word,
-    tier_language,
-    &declared_languages,
-);
+```rust,ignore
+let outcome = GoverningMark::of(&word, enclosing_span)
+    .resolve_with_declaration(tier_language, chat_file.language_declaration());
+let resolved = outcome.resolution;
+let diagnostics = outcome.diagnostics;
 ```
 
-Errors are collected during resolution and reported via the validation system.
+Resolution and its diagnostics travel together. A consumer inspects the
+resolution variant before selecting any language-specific operation.
 
 ---
 
@@ -512,19 +499,19 @@ Errors are collected during resolution and reported via the validation system.
 ### Rust (talkbank-model)
 
 - **Language syntax markers**: `../chatter/crates/talkbank-model/src/model/content/word/language.rs`: `WordLanguageMarker` enum (Shortcut, Explicit, Multiple, Ambiguous)
-- **Resolution logic**: `../chatter/crates/talkbank-model/src/validation/word/language/resolve.rs`: `resolve_word_language()` function
+- **Resolution logic**: `../chatter/crates/talkbank-model/src/validation/word/language/`: `GoverningMark::resolve_with_declaration` and `LanguageResolutionOutcome`
 - **Header language list**: `../chatter/crates/talkbank-model/src/model/header/header_enum/header.rs`: `Header::Languages { codes }`
 - **Tier language directive**: `../chatter/crates/talkbank-model/src/model/content/main_tier.rs`: `MainTierContent.language_code` field
 
-### Rust (talkbank-transform - payload & injection)
+### Rust (batchalign-transform - payload & injection)
 
 - **Batch payload definition**: `crates/batchalign-transform/src/morphosyntax/payload.rs`: `MorphosyntaxBatchItem` (words as `BatchWord` records, terminator, lang) and its wire shape
-- **L2|xxx placeholder for unresolved words**: `crates/batchalign-transform/src/morphosyntax/injection.rs`: replaces pos with `PosCategory::new("L2")` when word has language marker but isn't routed
+- **L2|xxx placeholder for unresolved words**: `crates/batchalign-transform/src/morphosyntax/payload.rs`: `PendingSecondaryWord::staged_mor` projects explicit unavailable secondary analysis
 - **L2 splice logic**: `crates/batchalign-transform/src/morphosyntax/l2/splice.rs`: replaces L2|xxx with real morphology after secondary dispatch
 
 ### Rust (batchalign - orchestration)
 
-- **Batch collection & language grouping**: `crates/batchalign/src/morphosyntax/mod.rs:72::run_morphosyntax_impl` is the orchestration entry; per-utterance language grouping for the secondary L2 path lives at `crates/batchalign/src/morphosyntax/batch.rs:31::dispatch_secondary_l2` (file is 208 lines total)
+- **Batch collection & language grouping**: `crates/batchalign/src/morphosyntax/mod.rs`: `run_morphosyntax_impl` is the orchestration entry; `crates/batchalign/src/morphosyntax/batch.rs`: `dispatch_secondary_l2` owns secondary-language dispatch
 
 ### Python (stateless inference only)
 
@@ -538,9 +525,11 @@ Errors are collected during resolution and reported via the validation system.
 The remaining low-priority work is no longer "per-word routing exists or not";
 it is policy/refinement work on top of the implemented L2 dispatch path:
 
-1. warning/reporting surfaces for unresolved `@s:eng+spa` / `@s:eng&spa`
-2. policy-sensitive normalization around all-`@s` utterances and headers
-3. broader secondary-language quality work for weak or unsupported models
+1. policy-sensitive normalization around all-`@s` utterances and headers
+2. broader secondary-language quality work for weak or unsupported models
+
+Job/header availability reporting is implemented; it is distinct from these
+quality and transcript-normalization questions.
 
 ---
 

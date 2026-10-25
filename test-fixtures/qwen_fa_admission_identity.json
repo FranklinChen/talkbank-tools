@@ -1,0 +1,4 @@
+{
+  "legacy": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
+  "current": "Qwen/Qwen3-ForcedAligner-0.6B-hf@bounded-unit-evidence-v1"
+}

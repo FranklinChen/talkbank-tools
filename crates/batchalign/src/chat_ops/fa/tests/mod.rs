@@ -35,6 +35,7 @@ pub(super) use super::*;
 use talkbank_model::UtteranceIdx;
 use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 mod anchored_split;
 mod bullet_rerun;
@@ -161,6 +162,7 @@ pub(super) fn get_utterance_bullet(
                     .content
                     .bullet
                     .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .map(|b| (b.timing.start_ms, b.timing.end_ms));
             }
             utt_idx += 1;
@@ -298,6 +300,7 @@ pub(crate) fn assert_given_bullets_held(
                     .content
                     .bullet
                     .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .map(|b| (b.timing.start_ms, b.timing.end_ms))
             })
             .collect()

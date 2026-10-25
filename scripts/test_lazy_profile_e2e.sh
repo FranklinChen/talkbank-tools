@@ -13,7 +13,7 @@
 #   bash scripts/test_lazy_profile_e2e.sh release    # release binary
 #
 # Requirements:
-#   - Python 3.13 with batchalign installed (uv sync)
+#   - Python 3.14 with batchalign installed (uv sync)
 #   - Stanza models downloaded (auto-downloads on first run)
 #   - At least 4 GB free RAM
 

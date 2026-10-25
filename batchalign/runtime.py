@@ -124,7 +124,7 @@ def system_ram_mb() -> int | None:
     """
     try:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1024 * 1024)
-    except (ValueError, OSError, AttributeError):
+    except ValueError, OSError, AttributeError:
         return None
 
 
@@ -146,7 +146,7 @@ def available_memory_mb() -> int | None:
                     if line.startswith("MemAvailable:"):
                         # Value is in kB
                         return int(line.split()[1]) // 1024
-        except (OSError, ValueError, IndexError):
+        except OSError, ValueError, IndexError:
             pass
         return None
 
@@ -156,7 +156,7 @@ def available_memory_mb() -> int | None:
 
             avail = psutil.virtual_memory().available
             return int(avail * 0.70) // (1024 * 1024)
-        except (ImportError, OSError, AttributeError):
+        except ImportError, OSError, AttributeError:
             return None
 
     return None

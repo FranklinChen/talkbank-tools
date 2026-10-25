@@ -422,13 +422,19 @@ impl TranslationText {
 /// `replace_or_add_tier` to inject it (replacing any existing `%xtra`).
 /// Infallible: the content is an admitted [`TranslationText`].
 pub fn inject_translation(utterance: &mut Utterance, translation: &TranslationText) {
-    // A compile-time literal, non-empty where it is written, so there is no
-    // runtime failure to report and no error path for a caller to mishandle.
-    let label = NonEmptyString::new_unchecked("xtra");
+    // The application-owned label is admitted once; translated content already
+    // carries its own nonempty proof. Neither depends on model label spelling.
+    #[allow(clippy::expect_used)]
+    static LABEL: std::sync::LazyLock<talkbank_model::UserDefinedDependentTierLabel> =
+        std::sync::LazyLock::new(|| {
+            talkbank_model::UserDefinedDependentTierLabel::new("xtra")
+                .expect("application-owned xtra label is valid")
+        });
+    let label = LABEL.clone();
 
     let new_tier = DependentTier::UserDefined(UserDefinedDependentTier {
         label,
-        content: Some(translation.0.clone()),
+        content: Some(translation.0.clone().into()),
         location: Location::Unlocated,
     });
 
@@ -613,6 +619,7 @@ mod tests {
     use super::*;
     use talkbank_model::model::WriteChat;
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn parse_chat(text: &str) -> ChatFile {
         let parser = TreeSitterParser::new().unwrap();

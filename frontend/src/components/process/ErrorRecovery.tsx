@@ -126,6 +126,16 @@ const RECOVERY: Record<FailureCategory, ErrorInfo> = {
       "If using Rev.AI, verify your API key is still valid",
     ],
   },
+  model_output_invalid: {
+    title: "Generated model output needs investigation",
+    explanation:
+      "The engine ran, but its generated result failed output checks. This is not an input-format or credential problem. The identical inference is not retried automatically.",
+    suggestions: [
+      "Read the file's diagnostic for the model, affected unit and audio window",
+      "Keep the diagnostic and audio sample together when reporting the problem",
+      "Use another engine if available; test one file before repeating the batch",
+    ],
+  },
   provider_terminal: {
     title: "Service rejected the request",
     explanation: "The cloud ASR service returned a permanent error for this file.",

@@ -46,6 +46,7 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
         .content
         .bullet
         .as_mut()
+        .and_then(talkbank_model::BulletState::as_parsed_mut)
         .unwrap()
         .timing
         .end_ms = 3_035_820;
@@ -54,6 +55,7 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .unwrap()
         .timing
         .start_ms;
@@ -98,6 +100,7 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .unwrap()
             .timing
             .end_ms,
@@ -133,6 +136,7 @@ fn group_window_budget_preserves_the_extent_of_overlapping_utterances() {
         .content
         .bullet
         .as_mut()
+        .and_then(talkbank_model::BulletState::as_parsed_mut)
         .unwrap()
         .timing
         .end_ms = 10_000;
@@ -141,6 +145,7 @@ fn group_window_budget_preserves_the_extent_of_overlapping_utterances() {
         .content
         .bullet
         .as_mut()
+        .and_then(talkbank_model::BulletState::as_parsed_mut)
         .unwrap()
         .timing
         .end_ms = 6_000;
@@ -522,6 +527,7 @@ fn rebuild_policy_reconstructs_reused_utterance_bullet_from_wor_hull() {
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("reused word evidence should produce a bullet");
     assert_eq!((bullet.timing.start_ms, bullet.timing.end_ms), (100, 1000));
 }

@@ -53,6 +53,7 @@ use batchalign_transform::morphosyntax::{
 use talkbank_model::ParseValidateOptions;
 use talkbank_model::model::LanguageCode;
 use talkbank_parser::TreeSitterParser;
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 /// Shared error type for these boundary tests: any failure (parser init,
 /// parse, or a missing-fixture assertion) is propagated out of the test
@@ -131,8 +132,14 @@ fn bug_009_level_pitch_separator_no_space_must_not_leak_into_stanza_payload() ->
     let chat_file = parse_one_utterance("Yes→")?;
 
     let primary = LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let collected = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll);
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let collected = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    );
 
     // The utterance has alignable content (`Yes`), so it must produce
     // exactly one batch item.
@@ -191,8 +198,14 @@ fn bug_009_level_pitch_separator_in_long_utterance_with_bullet_must_not_leak() -
     let chat_file =
         parse_one_utterance("I think you could use new clothes→ \u{0015}0_2633\u{0015}")?;
     let primary = LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let collected = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll);
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let collected = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    );
 
     assert_eq!(
         collected.batch_items.len(),
@@ -647,8 +660,14 @@ fn a_code_switch_span_reaches_the_stanza_payload_as_its_own_language() -> TestRe
     let chat_file = parse_strict_file(&parser, chat)?;
 
     let primary = LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let collected = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll);
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let collected = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    );
     assert_eq!(collected.batch_items.len(), 1, "one utterance, one item");
 
     let batch_item = collected.batch_items[0].item();
@@ -658,7 +677,7 @@ fn a_code_switch_span_reaches_the_stanza_payload_as_its_own_language() -> TestRe
         .words()
         .iter()
         .map(|w| match w.role() {
-            batchalign_transform::morphosyntax::WordRole::CodeSwitched(r) => Some(r),
+            batchalign_transform::morphosyntax::WordRole::CodeSwitched(r) => Some(r.resolution()),
             batchalign_transform::morphosyntax::WordRole::Analysed
             | batchalign_transform::morphosyntax::WordRole::SpecialForm(_) => None,
         })
@@ -695,9 +714,15 @@ fn injection_rejects_response_cardinality_without_mutating_chat() -> TestResult 
     for count in [0, 2] {
         let mut chat = parse_one_utterance("hello .")?;
         let before = to_chat_string(&chat);
-        let languages = declared_languages(&chat, &language);
-        let items = collect_payloads(&chat, &language, &languages, MultilingualPolicy::ProcessAll)
-            .batch_items;
+        let languages =
+            declared_languages(&chat, &language).expect("admitted fixture language context");
+        let items = collect_payloads(
+            &chat,
+            &language,
+            languages.as_ref(),
+            MultilingualPolicy::ProcessAll,
+        )
+        .batch_items;
         assert_eq!(items.len(), 1);
         let responses = (0..count)
             .map(|_| UdResponse {
@@ -733,9 +758,15 @@ fn injection_rejects_stale_position_without_panicking() -> TestResult {
     let parser = TreeSitterParser::new()?;
     let language = LanguageCode::new("eng")?;
     let mut chat = parse_one_utterance("hello .")?;
-    let languages = declared_languages(&chat, &language);
-    let items =
-        collect_payloads(&chat, &language, &languages, MultilingualPolicy::ProcessAll).batch_items;
+    let languages =
+        declared_languages(&chat, &language).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat,
+        &language,
+        languages.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
     // The file changes after collection: its one utterance is gone, so the
     // collected position names a header or the end.
     chat.lines

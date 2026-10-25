@@ -209,7 +209,7 @@ fn preferred_venv_pythons(root: &Path) -> Vec<PathBuf> {
     } else {
         let bin = root.join(".venv").join("bin");
         vec![
-            bin.join("python3.12"),
+            bin.join("python3.14"),
             bin.join("python3"),
             bin.join("python"),
         ]
@@ -220,7 +220,7 @@ fn preferred_path_pythons() -> &'static [&'static str] {
     if cfg!(windows) {
         &["python"]
     } else {
-        &["python3.12", "python3"]
+        &["python3.14", "python3"]
     }
 }
 

@@ -38,6 +38,7 @@
 )]
 
 use std::path::PathBuf;
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 use batchalign_transform::extract;
 use talkbank_model::alignment::helpers::PositionalDomain;

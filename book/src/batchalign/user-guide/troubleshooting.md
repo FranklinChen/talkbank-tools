@@ -19,6 +19,20 @@ batchalign3 logs --export
 
 CLI-managed runs write structured logs under `~/.batchalign3/logs/`.
 
+## Generated model output was rejected
+
+`model_output_invalid` means inference ran but its generated result could not
+be admitted for further processing. For example, a Qwen alignment diagnostic
+names the affected words, their original timestamps and the recording window
+when spoken intervals go backwards. A FunASR diagnostic can identify a segment
+whose recognized units and timestamps disagree.
+
+Keep that diagnostic with the input audio, command and model identity when
+reporting the problem. The identical request is not automatically retried.
+Test one affected file with an alternative engine before repeating a batch.
+Do not edit CHAT pitch marks or reorder timestamps to hide an error generated
+from audio-only input.
+
 ## Worker Python resolution order
 
 When debugging which Python the CLI selects, the full resolution order is:

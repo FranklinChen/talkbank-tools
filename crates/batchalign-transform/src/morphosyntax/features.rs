@@ -32,7 +32,7 @@ use super::{
     lang_fr, lang2,
 };
 use smallvec::SmallVec;
-use talkbank_model::model::dependent_tier::mor::MorFeature;
+use talkbank_model::model::dependent_tier::mor::{MorFeature, MorFeatureShapeError};
 
 /// How the renderer classifies feature values: each distinction named once,
 /// so no call site compares a value with a string literal.
@@ -253,6 +253,8 @@ pub(super) struct RenderedFeatures {
     suffixes: SmallVec<[MorFeature; 4]>,
 }
 
+pub(super) type FeatureRendering = Result<RenderedFeatures, MorFeatureShapeError>;
+
 impl RenderedFeatures {
     pub(super) fn into_suffixes(self) -> SmallVec<[MorFeature; 4]> {
         self.suffixes
@@ -261,7 +263,7 @@ impl RenderedFeatures {
 
 /// Write suffixes in order. A suffix whose text is empty is skipped, as it
 /// always was (an empty feature value, an `Agreement` of two empty slots).
-fn render(suffixes: Suffixes<'_>) -> RenderedFeatures {
+fn render(suffixes: Suffixes<'_>) -> FeatureRendering {
     let mut rendered = RenderedFeatures::default();
     let mut text = String::new();
     for suffix in suffixes {
@@ -279,10 +281,10 @@ fn render(suffixes: Suffixes<'_>) -> RenderedFeatures {
             }
         }
         if !text.is_empty() {
-            rendered.suffixes.push(MorFeature::flat(&text));
+            rendered.suffixes.push(MorFeature::flat(&text)?);
         }
     }
-    rendered
+    Ok(rendered)
 }
 
 /// Whether the person/number agreement in a UD feature bundle is spelled out on
@@ -350,7 +352,7 @@ pub(super) fn verb_features(
     written: MorPos,
     ud: &UdWord,
     ctx: &MappingContext,
-) -> RenderedFeatures {
+) -> FeatureRendering {
     // `ろ` is written bare.
     if ud.text == "\u{308D}"
         || !matches!(
@@ -358,7 +360,7 @@ pub(super) fn verb_features(
             MorPos::Upos(UniversalPos::Verb | UniversalPos::Aux)
         )
     {
-        return RenderedFeatures::default();
+        return Ok(RenderedFeatures::default());
     }
     let mut suffixes = Suffixes::new();
     for name in [
@@ -408,7 +410,7 @@ pub(super) fn pron_features(
     feats: &UdFeats<'_>,
     ud: &UdWord,
     ctx: &MappingContext,
-) -> RenderedFeatures {
+) -> FeatureRendering {
     let mut suffixes = Suffixes::new();
     if let Some(kind) = feats.get(FeatName::PronType) {
         suffixes.push(Suffix::Feature(kind));
@@ -441,7 +443,7 @@ pub(super) fn pron_features(
     render(suffixes)
 }
 
-pub(super) fn det_features(feats: &UdFeats<'_>) -> RenderedFeatures {
+pub(super) fn det_features(feats: &UdFeats<'_>) -> FeatureRendering {
     let mut suffixes = Suffixes::new();
     match feats.get(FeatName::Gender) {
         // Common gender (`Com`, `Com,Neut`) is not written.
@@ -469,7 +471,7 @@ pub(super) fn det_features(feats: &UdFeats<'_>) -> RenderedFeatures {
     render(suffixes)
 }
 
-pub(super) fn adj_features(feats: &UdFeats<'_>) -> RenderedFeatures {
+pub(super) fn adj_features(feats: &UdFeats<'_>) -> FeatureRendering {
     let mut suffixes = Suffixes::new();
     // The positive degree is not written; nor is an absent degree.
     match feats.get(FeatName::Degree) {
@@ -493,7 +495,7 @@ pub(super) fn noun_features(
     feats: &UdFeats<'_>,
     ud: &UdWord,
     ctx: &MappingContext,
-) -> RenderedFeatures {
+) -> FeatureRendering {
     let mut suffixes = Suffixes::new();
     match feats.get(FeatName::Gender) {
         Some(gender) if gender.gender() == GenderClass::Common => {}

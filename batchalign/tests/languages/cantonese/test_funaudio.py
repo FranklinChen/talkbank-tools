@@ -12,7 +12,7 @@ from batchalign.inference.languages.cantonese._funaudio_common import (
     FunAsrSegment,
     FunAudioRecognizer,
 )
-from batchalign_core import BatchalignError
+from batchalign.worker._model_errors import ModelOutputInvalidError
 
 _S = FunAsrSegment
 
@@ -28,14 +28,17 @@ class TestFunAsrSegmentFromRaw:
         assert seg.text == "hello"
         assert seg.timestamp == [[0, 100]]
 
-    def test_missing_text_defaults_empty(self) -> None:
-        seg = _S.from_raw({})
-        assert seg.text == ""
-        assert seg.timestamp == []
+    def test_missing_text_is_not_fabricated_as_silence(self) -> None:
+        with pytest.raises(ModelOutputInvalidError, match="text field"):
+            _S.from_raw({})
 
-    def test_non_list_timestamp_defaults_empty(self) -> None:
-        seg = _S.from_raw({"text": "hi", "timestamp": "bad"})
-        assert seg.timestamp == []
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("timestamp", "bad"), ("words", ["hi", 1]), ("raw_text", 42)],
+    )
+    def test_malformed_fields_are_not_discarded(self, field, value) -> None:
+        with pytest.raises(ModelOutputInvalidError, match=field):
+            _S.from_raw({"text": "hi", field: value})
 
     def test_missing_timestamp_defaults_empty(self) -> None:
         seg = _S.from_raw({"text": "hi"})
@@ -130,8 +133,25 @@ class TestTranscribe:
                 words=["hello", "world", "bye"],
             )
         ]
-        with pytest.raises(BatchalignError, match="3 units but 1 timestamps"):
+        with pytest.raises(ModelOutputInvalidError, match="3 units but 1 timestamps"):
             rec.transcribe("dummy.wav")
+
+    def test_tokenizer_markers_are_decoded_without_shifting_word_times(self) -> None:
+        rec = self._make_recognizer("eng")
+        rec._run_model = lambda _path: [  # type: ignore[method-assign]
+            _S(
+                text="hello world",
+                words=["▁hello", "▁", "<|en|>▁world"],
+                timestamp=[[100, 200], [200, 300], [300, 400]],
+            )
+        ]
+        payload, timed_words = rec.transcribe("dummy.wav")
+        elements = payload["monologues"][0]["elements"]
+        assert [(el["value"], el["ts"]) for el in elements] == [
+            ("hello", 0.1),
+            ("world", 0.3),
+        ]
+        assert [word["start_ms"] for word in timed_words] == [100, 300]
 
     def test_paraformer_raw_text_times_characters_not_clauses(self) -> None:
         # Paraformer timing is per character; each keeps its own span.
@@ -195,6 +215,12 @@ class TestTranscribe:
 
 
 class TestProtocolSafety:
+    def test_native_boundary_refuses_missing_text_too(self) -> None:
+        import batchalign_core
+
+        with pytest.raises(ModelOutputInvalidError, match="text"):
+            batchalign_core.funaudio_segments_to_asr([{}])
+
     def test_get_model_reports_missing_dependency(self, monkeypatch) -> None:
         original_import = builtins.__import__
 
@@ -319,15 +345,17 @@ class TestProtocolSafety:
         ]
         assert segments == [_S(text="好。", timestamp=[[0, 100]], raw_text="好")]
 
-    def test_run_model_ignores_non_collection_output(self) -> None:
+    @pytest.mark.parametrize("output", ["not-a-segment-list", [{"text": "hi"}, None]])
+    def test_run_model_refuses_malformed_output(self, output) -> None:
         class FakeModel:
             def generate(self, **_kwargs):
-                return "not-a-segment-list"
+                return output
 
         rec = FunAudioRecognizer(lang="yue")
         rec._model = FakeModel()
 
-        assert rec._run_model("dummy.wav") == []
+        with pytest.raises(ModelOutputInvalidError, match="expected a dict"):
+            rec._run_model("dummy.wav")
 
 
 class TestFunaudioDownloadEvents:

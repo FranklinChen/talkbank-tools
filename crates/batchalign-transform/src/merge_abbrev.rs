@@ -16,7 +16,7 @@ use talkbank_parser::TreeSitterParser;
 static ABBREV: LazyLock<HashSet<String>> = LazyLock::new(|| {
     let data: Vec<String> = serde_json::from_str(include_str!("../data/abbrev.json"))
         .expect("embedded abbrev.json is valid");
-    data.into_iter().map(|s| s.to_uppercase()).collect()
+    data.into_iter().map(|text| text.to_uppercase()).collect()
 });
 
 /// Merge consecutive single-letter words matching known abbreviations.
@@ -64,7 +64,7 @@ fn merge_in_content_items(items: &mut Vec<UtteranceContent>) {
 
     while i < items.len() {
         let run_start = i;
-        let mut letters: Vec<String> = Vec::new();
+        let mut letters: Vec<char> = Vec::new();
 
         while i < items.len() {
             if let Some(letter) = single_letter_word(&items[i]) {
@@ -92,13 +92,15 @@ fn merge_in_content_items(items: &mut Vec<UtteranceContent>) {
             for len in (2..=max_len).rev() {
                 let candidate: String = letters[j..j + len]
                     .iter()
-                    .map(|s| s.to_uppercase())
+                    .flat_map(|letter| letter.to_uppercase())
                     .collect();
                 if ABBREV.contains(&candidate) {
-                    let merged_text: String = letters[j..j + len].concat();
-                    result.push(UtteranceContent::Word(Box::new(Word::simple(
+                    let tail: String = letters[j + 1..j + len].iter().collect();
+                    let merged_text =
+                        talkbank_model::NonEmptyString::from_head_and_tail(letters[j], &tail);
+                    result.push(UtteranceContent::Word(Box::new(Word::new(
                         talkbank_model::Location::Unlocated,
-                        merged_text,
+                        merged_text.into(),
                     ))));
                     j += len;
                     matched = true;
@@ -116,13 +118,13 @@ fn merge_in_content_items(items: &mut Vec<UtteranceContent>) {
     *items = result;
 }
 
-fn single_letter_word(item: &UtteranceContent) -> Option<String> {
+fn single_letter_word(item: &UtteranceContent) -> Option<char> {
     match item {
         UtteranceContent::Word(w) => {
             let text = w.cleaned_text();
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
-                (Some(c), None) if c.is_alphabetic() => Some(c.to_string()),
+                (Some(c), None) if c.is_alphabetic() => Some(c),
                 _ => None,
             }
         }
@@ -135,6 +137,7 @@ mod tests {
     use super::{merge_abbreviations, merge_abbreviations_in_chat_text};
     use talkbank_model::model::{Terminator, WriteChat};
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn merge_and_serialize(chat: &str) -> String {
         let parser = TreeSitterParser::new().unwrap();

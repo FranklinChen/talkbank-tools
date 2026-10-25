@@ -54,6 +54,7 @@ fn local_overlap_hint_remains_provisional_through_final_word_injection() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("recovered hint")
             .source,
         BulletSource::Utr
@@ -117,6 +118,7 @@ fn local_overlap_hint_remains_provisional_through_final_word_injection() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("final main bullet")
             .timing
             .end_ms,
@@ -198,7 +200,7 @@ fn onset_end_boundary_controls_preserve_fallback_and_review_evidence() {
     ];
     for control in controls {
         let mut chat = parse_chat(&proof_chat("hello ."));
-        get_test_utterance(&mut chat, 0).main.content.bullet = control.bullet;
+        get_test_utterance(&mut chat, 0).main.content.bullet = control.bullet.map(Into::into);
         let groups = vec![FaGroup::test_fixture(
             TimeSpan::new(0, 8500),
             vec![FaWord {

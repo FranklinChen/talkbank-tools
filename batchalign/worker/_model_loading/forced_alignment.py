@@ -5,7 +5,6 @@ from __future__ import annotations
 import typing
 
 from batchalign.inference._domain_types import parse_choice
-from batchalign.inference.qwen_forced_alignment import QWEN_FORCED_ALIGNER_MODEL_ID
 from batchalign.worker._types import FaEngine, WorkerBootstrapRuntime, _state
 
 
@@ -38,7 +37,7 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         # at bootstrap, so an unsupported language fails before the download
         # rather than after it.
         _state.qwen_fa_host = load_qwen_fa(lang, device_policy=bootstrap.device_policy)
-        _state.fa_model_name = QWEN_FORCED_ALIGNER_MODEL_ID
+        _state.fa_model_name = _state.qwen_fa_host.cache_identity.wire_name
     elif backend is FaEngine.WHISPER:
         from batchalign.inference.fa import WHISPER_FA_ENGINE_ID, load_whisper_fa
 

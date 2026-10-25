@@ -2034,9 +2034,11 @@ mod tests {
         let mut file = parse(VALID);
         for line in &mut file.lines {
             if let Line::Utterance(utt) = line {
-                utt.main.content.content = TierContentItems::new(vec![UtteranceContent::Word(
-                    Box::new(Word::simple(Location::Unlocated, "F B I")),
-                )]);
+                utt.main.content.content =
+                    TierContentItems::new(vec![UtteranceContent::Word(Box::new(Word::new(
+                        talkbank_model::Location::Unlocated,
+                        talkbank_model::WordText::new("F B I").expect("nonempty fixture word"),
+                    )))]);
             }
         }
 
@@ -2081,8 +2083,14 @@ mod tests {
         for line in &mut file.lines {
             if let Line::Utterance(utt) = line {
                 utt.main.content.content = TierContentItems::new(vec![
-                    UtteranceContent::Word(Box::new(Word::simple(Location::Unlocated, "hello"))),
-                    UtteranceContent::Word(Box::new(Word::simple(Location::Unlocated, "b2"))),
+                    UtteranceContent::Word(Box::new(Word::new(
+                        talkbank_model::Location::Unlocated,
+                        talkbank_model::WordText::new("hello").expect("nonempty fixture word"),
+                    ))),
+                    UtteranceContent::Word(Box::new(Word::new(
+                        talkbank_model::Location::Unlocated,
+                        talkbank_model::WordText::new("b2").expect("nonempty fixture word"),
+                    ))),
                 ]);
             }
         }
@@ -2205,9 +2213,9 @@ mod tests {
                     ["F", "B", "I", "b2"]
                         .into_iter()
                         .map(|word| {
-                            UtteranceContent::Word(Box::new(Word::simple(
+                            UtteranceContent::Word(Box::new(Word::new(
                                 Location::Unlocated,
-                                word,
+                                talkbank_model::WordText::new(word).expect("nonempty fixture word"),
                             )))
                         })
                         .collect(),

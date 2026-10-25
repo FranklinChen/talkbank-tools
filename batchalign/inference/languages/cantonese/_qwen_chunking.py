@@ -73,11 +73,6 @@ from typing import assert_never
 
 import numpy as np
 
-# Seconds measured from the start of the CHUNK the model was handed.
-type WindowSeconds = float
-# Seconds measured from the start of the recording. What %wor needs.
-type FileSeconds = float
-
 # Qwen3-ASR's audio front end expects 16 kHz.
 SAMPLE_RATE = 16000
 
@@ -153,19 +148,11 @@ class AudioChunk:
     """
 
     samples: np.ndarray
-    offset: FileSeconds
+    offset: float
 
     @property
     def seconds(self) -> float:
         return len(self.samples) / float(SAMPLE_RATE)
-
-    def to_file(self, t: WindowSeconds) -> FileSeconds:
-        """Convert a model-reported time into a recording-relative one.
-
-        The only sanctioned route between the two spaces. Everything the
-        aligner returns is window-relative and must come through here.
-        """
-        return t + self.offset
 
 
 @dataclass(frozen=True)
@@ -296,7 +283,7 @@ class RunawayOutput:
     to the artifact, unqueryable afterwards, and tested by nothing.
     """
 
-    offset: FileSeconds
+    offset: float
     audio_seconds: float
     chars: int
     limit: float
@@ -406,7 +393,7 @@ def split_audio_into_chunks(
 
     chunks: list[AudioChunk] = []
     start = 0
-    offset_sec: FileSeconds = 0.0
+    offset_sec: float = 0.0
 
     while (total_len - start) > max_len:
         cut = start + max_len

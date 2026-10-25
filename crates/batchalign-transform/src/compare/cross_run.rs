@@ -737,8 +737,7 @@ pub fn serialize_cross_run_csv(
 /// runs declare English alone, so neither run's labels normalize its words
 /// differently from the other's.
 fn run_normalization(left: &ChatFile, right: &ChatFile) -> WerNormalization {
-    WerNormalization::for_declared_languages(&left.languages)
-        .shared(WerNormalization::for_declared_languages(&right.languages))
+    WerNormalization::for_document(left).shared(WerNormalization::for_document(right))
 }
 
 fn speaker_words(

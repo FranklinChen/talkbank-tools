@@ -142,7 +142,7 @@ fn start_daemon_on_ephemeral_port(
 #[test]
 fn serve_start_with_ephemeral_port_publishes_the_bound_port() {
     let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
 
@@ -362,7 +362,7 @@ fn models_python_module_importable() {
     // The `models` command forwards to `python -m batchalign.models.training.run`.
     // Verify the Python module can at least be found (import check).
     let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
 
@@ -639,7 +639,7 @@ async fn cli_align_real_server_live_fa_succeeds() {
     use batchalign::worker::InferTask;
 
     let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
 
@@ -741,7 +741,7 @@ async fn cli_align_real_server_live_fa_succeeds() {
 #[test]
 fn cli_transcribe_explicit_server_never_falls_back_to_local_daemon() {
     let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
 
@@ -887,7 +887,7 @@ fn cli_align_explicit_remote_server_is_contacted_not_refused() {
 #[test]
 fn cli_align_explicit_loopback_uses_shared_paths_mode() {
     let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
 
@@ -965,7 +965,7 @@ fn cli_align_explicit_loopback_uses_shared_paths_mode() {
 #[test]
 fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
     let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
     MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
@@ -1019,7 +1019,7 @@ fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
 #[test]
 fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
     let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.12 with batchalign not available");
+        eprintln!("SKIP: Python 3.14 with batchalign not available");
         return;
     };
     MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");

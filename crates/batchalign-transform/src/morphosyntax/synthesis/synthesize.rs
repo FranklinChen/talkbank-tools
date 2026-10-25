@@ -18,8 +18,11 @@ use super::table::scat_synthesis;
 /// Without `clean_lemma`, surfaces like `ie-@u` produced lemmas
 /// ending in `-` (e.g., `uni|ie-`) which the `%mor` parser rejected
 /// with E316. See `contract_s2_*` tests below.
-pub fn synthesize_special_form_mor(form_type: &FormType, surface: &str) -> Mor {
-    let rule = scat_synthesis(form_type);
+pub fn synthesize_special_form_mor(
+    form_type: &FormType,
+    surface: &str,
+) -> Result<Mor, crate::morphosyntax::MappingError> {
+    let rule = scat_synthesis(form_type)?;
     // `clean_lemma(lemma, text)` falls back to `text` when `lemma`
     // is unrecoverable; for synthesis the caller's `surface` is both
     // the lemma source and the fallback, so we pass it twice.
@@ -28,7 +31,7 @@ pub fn synthesize_special_form_mor(form_type: &FormType, surface: &str) -> Mor {
     for feature in rule.features {
         word = word.with_feature(feature);
     }
-    Mor::new(word)
+    Ok(Mor::new(word))
 }
 
 #[cfg(test)]
@@ -38,6 +41,7 @@ mod tests {
     fn render(form_type: FormType, surface: &str) -> String {
         let mut buf = String::new();
         synthesize_special_form_mor(&form_type, surface)
+            .expect("admitted synthesis fixture")
             .write_chat(&mut buf)
             .unwrap();
         buf

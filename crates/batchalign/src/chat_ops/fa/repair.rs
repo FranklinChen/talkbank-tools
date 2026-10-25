@@ -264,7 +264,12 @@ pub(super) fn repair_bullets_under(
     };
     for &(line_idx, new_start_ms) in &gap_fills {
         if let Some(utt) = get_utterance_mut(working, line_idx)
-            && let Some(ref mut bullet) = utt.main.content.bullet
+            && let Some(bullet) = utt
+                .main
+                .content
+                .bullet
+                .as_mut()
+                .and_then(talkbank_model::BulletState::as_parsed_mut)
         {
             bullet.timing.start_ms = new_start_ms;
         }
@@ -458,10 +463,22 @@ fn resolve_boundary_average_pair(
     }
     let (earlier_line_idx, earlier_speaker) = (earlier.line_idx, earlier.speaker.as_str());
     let (later_line_idx, later_speaker) = (later.line_idx, later.speaker.as_str());
-    let earlier_bullet = get_utterance_mut(chat_file, earlier_line_idx)
-        .and_then(|utt| utt.main.content.bullet.clone())?;
-    let later_bullet = get_utterance_mut(chat_file, later_line_idx)
-        .and_then(|utt| utt.main.content.bullet.clone())?;
+    let earlier_bullet = get_utterance_mut(chat_file, earlier_line_idx).and_then(|utt| {
+        utt.main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+            .cloned()
+    })?;
+    let later_bullet = get_utterance_mut(chat_file, later_line_idx).and_then(|utt| {
+        utt.main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+            .cloned()
+    })?;
 
     if later_bullet.timing.start_ms >= earlier_bullet.timing.end_ms {
         return None;
@@ -517,7 +534,12 @@ fn resolve_boundary_average_pair(
 
     // Apply immediately, before the next pair in this sweep is read.
     if let Some(utt) = get_utterance_mut(chat_file, earlier_line_idx)
-        && let Some(ref mut bullet) = utt.main.content.bullet
+        && let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_mut()
+            .and_then(talkbank_model::BulletState::as_parsed_mut)
     {
         bullet.timing.end_ms = earlier_new_end_ms;
     }
@@ -531,7 +553,12 @@ fn resolve_boundary_average_pair(
         EndOverlapResolution::CoverageOnly { .. }
         | EndOverlapResolution::BoundaryFromWords { .. } => {
             if let Some(utt) = get_utterance_mut(chat_file, later_line_idx)
-                && let Some(ref mut bullet) = utt.main.content.bullet
+                && let Some(bullet) = utt
+                    .main
+                    .content
+                    .bullet
+                    .as_mut()
+                    .and_then(talkbank_model::BulletState::as_parsed_mut)
             {
                 bullet.timing.start_ms = later_new_start_ms;
             }
@@ -578,7 +605,13 @@ fn collect_bullet_entries(
 ) -> Result<Vec<BulletEntry>, KeptBulletError> {
     let mut entries = Vec::new();
     for (line_idx, utterance_idx, utt) in super::utterances_indexed(chat_file) {
-        let Some(ref bullet) = utt.main.content.bullet else {
+        let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        else {
             continue;
         };
         entries.push(BulletEntry {

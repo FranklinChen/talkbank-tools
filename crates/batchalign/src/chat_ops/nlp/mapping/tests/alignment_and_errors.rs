@@ -96,7 +96,7 @@ fn test_mwt_gra_per_component_alignment() {
     assert_eq!(gras[1].index, 2);
     assert_eq!(gras[2].index, 3);
     assert_eq!(gras[3].index, 4);
-    assert_eq!(gras[3].relation, "PUNCT".to_string().into());
+    assert_eq!(gras[3].relation.as_str(), "PUNCT");
 }
 
 #[test]

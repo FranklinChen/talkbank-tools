@@ -60,7 +60,7 @@ fn time_words(file: &mut talkbank_model::ChatFile, only_last: bool) -> usize {
                 }
             },
         );
-        utterance.main.content.bullet = Some(Bullet::new(Location::Unlocated, 0, 20_000));
+        utterance.main.content.bullet = Some(Bullet::new(Location::Unlocated, 0, 20_000).into());
         crate::chat_ops::fa::add_wor_tier(utterance);
         return words;
     }
@@ -304,7 +304,7 @@ fn real_injection_retains_exact_word_intervals_through_written_chat() {
     let mut cursor = 0;
     let _injected = inject_timings_for_utterance(utterance, &timings, &mut cursor);
     assert_eq!(cursor, 3, "compound filler consumes two model units");
-    utterance.main.content.bullet = Some(Bullet::new(Location::Unlocated, 100, 380));
+    utterance.main.content.bullet = Some(Bullet::new(Location::Unlocated, 100, 380).into());
     crate::chat_ops::fa::add_wor_tier(utterance);
     let expected = written_words(&file);
     let output = admission
@@ -590,7 +590,7 @@ fn a_diary_notes_given_bullet_is_kept_only_where_the_policy_keeps_given_bullets(
     let (mut file, admission) = attempt_with_diary(given, MainBulletPolicy::KeepGiven);
     time_words(&mut file, false);
     diary_utterance(&mut file).main.content.bullet =
-        Some(Bullet::new(Location::Unlocated, 20_000, 21_000));
+        Some(Bullet::new(Location::Unlocated, 20_000, 21_000).into());
     assert!(
         admission.finish(result(file)).is_ok(),
         "keep: the given bullet, restored, is the input's own"
@@ -608,7 +608,7 @@ fn a_diary_notes_given_bullet_is_kept_only_where_the_policy_keeps_given_bullets(
     ] {
         let (mut file, admission) = attempt_with_diary(given, policy);
         time_words(&mut file, false);
-        diary_utterance(&mut file).main.content.bullet = Some(bullet);
+        diary_utterance(&mut file).main.content.bullet = Some(bullet.into());
         let Err(error) = admission.finish(result(file)) else {
             panic!("{policy:?}: a bullet the policy does not keep is invented timing");
         };
@@ -644,7 +644,7 @@ fn a_kept_diary_bullet_that_conflicts_with_aligned_timing_is_named() {
     // The spoken utterance aligned across the note's given extent.
     time_words(&mut file, false);
     diary_utterance(&mut file).main.content.bullet =
-        Some(Bullet::new(Location::Unlocated, 1_000, 2_000));
+        Some(Bullet::new(Location::Unlocated, 1_000, 2_000).into());
     let Err(error) = admission.finish(result(file)) else {
         panic!("an overlapping same-speaker bullet cannot be written");
     };

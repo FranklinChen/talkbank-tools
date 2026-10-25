@@ -75,6 +75,11 @@
           "const": "runtime_failure"
         },
         {
+          "description": "Inference ran, but its generated result cannot become valid evidence.\nDistinct from malformed input and transient runtime failures.",
+          "type": "string",
+          "const": "model_output_invalid"
+        },
+        {
           "description": "The provider refused execution because its quota/resource pack is\nexhausted. Requires account intervention, not input repair or retry.",
           "type": "string",
           "const": "provider_quota_exhausted"

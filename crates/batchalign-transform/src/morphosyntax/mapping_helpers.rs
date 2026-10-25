@@ -18,23 +18,12 @@ pub fn normalize_deprel(
     } else {
         Cow::Borrowed(raw)
     };
-    let bytes = relation.as_bytes();
-    if bytes.is_empty()
-        || !bytes[0].is_ascii_uppercase()
-        || !bytes
-            .iter()
-            .all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(MappingError::InvalidDeprel {
-            details: format!(
-                "{}: deprel {:?} transforms to {:?}, not a valid CHAT %gra relation (must match [A-Z][A-Z0-9-]*)",
-                context_for_error(),
-                raw,
-                relation.as_ref()
-            ),
-        });
-    }
-    Ok(GrammaticalRelationType::new(relation.as_ref()))
+    GrammaticalRelationType::new(relation.as_ref()).map_err(|error| MappingError::InvalidDeprel {
+        details: format!(
+            "{}: deprel {raw:?} transforms to {relation:?}: {error}",
+            context_for_error()
+        ),
+    })
 }
 
 /// Build chunk provenance for a regular UD word that produced one chunk.

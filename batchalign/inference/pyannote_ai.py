@@ -107,7 +107,7 @@ def resolve_pyannote_ai_api_key(
     parser = configparser.ConfigParser()
     try:
         loaded = parser.read(path)
-    except (configparser.Error, OSError):
+    except configparser.Error, OSError:
         return None
     if not loaded or not parser.has_section("diarize"):
         return None

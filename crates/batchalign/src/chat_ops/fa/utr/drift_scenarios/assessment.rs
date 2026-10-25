@@ -60,7 +60,13 @@ impl DriftObservation {
             .enumerate()
             .map(|(ordinal, (utterance, exp))| {
                 assert_eq!(exp.utt_index, ordinal, "fixture/scorer order mismatch");
-                let Some(bullet) = utterance.main.content.bullet.as_ref() else {
+                let Some(bullet) = utterance
+                    .main
+                    .content
+                    .bullet
+                    .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
+                else {
                     return WindowObservation::Unrecovered {
                         surviving_asr_words: exp.surviving_asr_words,
                     };

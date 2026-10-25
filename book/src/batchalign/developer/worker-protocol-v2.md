@@ -326,6 +326,7 @@ ProtocolErrorCode =
   attachment_unreadable
   model_unavailable
   runtime_failure
+  model_output_invalid
   provider_quota_exhausted
   model_access_denied
   unsupported_language
@@ -344,8 +345,15 @@ Current classification on the live `execute_v2` path is intentionally split:
   artifact was absent or unreadable
 - `model_unavailable` means the selected backend is not loaded in this worker
 - `runtime_failure` means the model host accepted the request but then crashed
-  or returned malformed result data (for example non-finite metrics, reversed
-  timing ranges, wrong per-item result shapes, or host/result count drift)
+  or reported an unclassified failure; some result adapters also use this for
+  malformed results that do not yet have a typed output-admission exception
+- `model_output_invalid` means a model ran but its generated data was rejected
+  by a named output-admission boundary. Qwen alignment rejects non-finite,
+  negative, reversed, out-of-window or backwards spoken intervals; recording
+  assembly rejects overlapping/backwards chunk placement. Zero-width reports
+  remain explicitly unavailable instead of supplying word endpoints. FunASR rejects malformed
+  segments and unit/timestamp disagreement. This is a final file failure,
+  with the original diagnostic preserved, rather than an invalid client request
 - `provider_quota_exhausted`, `model_access_denied` and `unsupported_language`
   are raised by the model host as typed Python exceptions and keep their own
   codes, so the server can tell an account condition, a credential condition
@@ -363,6 +371,7 @@ by its class, most specific first:
 | --- | --- |
 | `ModelAccessDeniedError` | `model_access_denied` |
 | `ProviderQuotaExhaustedError` | `provider_quota_exhausted` |
+| `ModelOutputInvalidError` (including Qwen admission exceptions) | `model_output_invalid` |
 | a download that failed in transit (`is_model_download_failure`) | `model_download_failed` |
 | `torch.OutOfMemoryError` (`is_device_out_of_memory`) | `device_out_of_memory` |
 | `UnsupportedLanguageError` | `unsupported_language` |

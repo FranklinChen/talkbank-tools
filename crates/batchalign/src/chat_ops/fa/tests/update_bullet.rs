@@ -16,7 +16,14 @@ fn test_update_utterance_bullet_preserves_start_with_leading_fillers() {
     let utt = get_test_utterance(&mut chat, 0);
 
     // Verify pre-existing bullet
-    let original_bullet = utt.main.content.bullet.clone().unwrap();
+    let original_bullet = utt
+        .main
+        .content
+        .bullet
+        .clone()
+        .unwrap()
+        .into_parsed()
+        .expect("numeric fixture timing");
     assert_eq!(original_bullet.timing.start_ms, 37397);
     assert_eq!(original_bullet.timing.end_ms, 42983);
 
@@ -38,7 +45,13 @@ fn test_update_utterance_bullet_preserves_start_with_leading_fillers() {
     );
     update_utterance_bullet(utt);
 
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(
         bullet.timing.start_ms, 37397,
         "Bullet start must be preserved from original (covers leading filler), got {}",
@@ -58,7 +71,14 @@ fn test_update_utterance_bullet_preserves_end_with_trailing_gesture() {
     let utt = get_test_utterance(&mut chat, 0);
 
     // Verify pre-existing bullet
-    let original_bullet = utt.main.content.bullet.clone().unwrap();
+    let original_bullet = utt
+        .main
+        .content
+        .bullet
+        .clone()
+        .unwrap()
+        .into_parsed()
+        .expect("numeric fixture timing");
     assert_eq!(original_bullet.timing.start_ms, 50556);
     assert_eq!(original_bullet.timing.end_ms, 56221);
 
@@ -81,7 +101,13 @@ fn test_update_utterance_bullet_preserves_end_with_trailing_gesture() {
     );
     update_utterance_bullet(utt);
 
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(
         bullet.timing.start_ms, 50556,
         "Bullet start must be preserved from original, got {}",
@@ -113,7 +139,13 @@ fn test_update_utterance_bullet_sets_new_bullet_when_none_existed() {
     let utt = get_test_utterance(&mut chat, 0);
     update_utterance_bullet(utt);
 
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(bullet.timing.start_ms, 100);
     assert_eq!(bullet.timing.end_ms, 1000);
 }
@@ -160,7 +192,13 @@ fn test_apply_fa_results_preserves_pretimed_bullet() {
     );
 
     let utt = get_test_utterance(&mut chat, 0);
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(
         bullet.timing.start_ms, 37397,
         "Pipeline must preserve original bullet start (covers leading filler), got {}",
@@ -193,7 +231,13 @@ fn test_update_utterance_bullet_expands_when_words_exceed_original() {
     // Skip postprocess (it would clamp to utterance boundary), test update only
     update_utterance_bullet(utt);
 
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(
         bullet.timing.start_ms, 37000,
         "Bullet should expand to earlier word start, got {}",
@@ -233,7 +277,13 @@ fn test_update_utterance_bullet_discards_large_stale_start_on_rerun_without_lead
     let utt = get_test_utterance(&mut chat, 0);
     update_utterance_bullet(utt);
 
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(
         bullet.timing.start_ms, 9443,
         "Large stale start with no untimed leading content must be replaced by first word start, got {}",
@@ -279,7 +329,13 @@ fn test_update_utterance_bullet_discards_large_stale_start_when_leading_filler_i
     let utt = get_test_utterance(&mut chat, 0);
     update_utterance_bullet(utt);
 
-    let bullet = utt.main.content.bullet.as_ref().unwrap();
+    let bullet = utt
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+        .unwrap();
     assert_eq!(
         bullet.timing.start_ms, 8473,
         "Large stale start must snap to the timed leading filler, got {}",

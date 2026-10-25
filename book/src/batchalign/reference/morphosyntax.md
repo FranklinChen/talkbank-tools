@@ -980,6 +980,36 @@ explicit secondary-word policy, not successful analysis of those words.
 Whole-utterance `[- LANG]` precodes instead select required primary analysis;
 see [Language capability admission](#language-capability-admission).
 
+#### Availability and reporting policy
+
+The compatibility migration must preserve that local scope: unavailable
+secondary analysis belongs to the affected word or span. It must not discard
+valid host-utterance morphology, other supported spans, or the transcript.
+Internally, deferred, analysed and unavailable secondary results are distinct
+states; an unknown output marker does not constitute observed morphology.
+
+Job diagnostics identify the affected languages, words/spans and producer
+causes. An explicitly unsupported secondary model is an exclusion; failed
+inference, extraction, merge or splice is an analysis shortfall. A saved
+`@Comment` beginning `[batchalign morphology availability]` names unsupported
+languages and counts, or summarizes incomplete/undispatched analysis. This
+application-owned comment is replaced on rerun, while contributor comments
+are retained. The limitation therefore survives separation from run logs.
+
+Only `LanguageResolution::Single` authorizes secondary dispatch. Multiple,
+ambiguous and unresolved markers retain local unavailable analysis and a
+`LanguageUnresolved` extraction report; choosing the first candidate would
+invent a model-selection decision the source did not make.
+
+The existing serialized fallback remains `L2|xxx`; it denotes unavailable
+secondary morphology, not an inferred lemma. Preserving that local fallback
+does not require choosing a new output policy. Alternatives such as
+`L2|<source-form>` or `L2|unknown` would change the established representation
+and require separate review. Retained primary-context dependency structure must
+not be presented as a successful secondary-language analysis. Do not invent a
+relation to make a partial graph appear complete. Any contract change needs
+matching model, writer, diagnostic and replay tests.
+
 ### Key Files
 
 | File | Purpose |

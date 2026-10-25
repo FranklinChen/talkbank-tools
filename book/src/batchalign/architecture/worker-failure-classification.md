@@ -447,6 +447,7 @@ row there:
 | `provider_account_refused` | withheld | The fallback is sent from the same refused account. |
 | `model_access_denied` | withheld | The fallback asks this machine for the same refused model. |
 | `worker_bootstrap` | withheld | The engine's worker cannot start (a model that will not load, a runtime or model identity mismatch), and the fallback goes to that same worker key. A download that failed in transit is not this category: it is `provider_transient`. |
+| `model_output_invalid` | permitted | The first request generated inadmissible data. A different request over narrower windows may succeed; the identical failed inference remains non-retryable. |
 | every other category | permitted | The failure was this request's: a terminal provider failure (a 4xx other than an account refusal, a failed job, an undecodable response), a local model failing on this input, a download that failed in transit, a crash, a timeout, memory pressure, a protocol fault. |
 
 A withheld fallback is still recorded: the failed pass appears in the

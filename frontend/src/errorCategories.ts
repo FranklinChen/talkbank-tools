@@ -62,6 +62,8 @@ const CATEGORY_GROUP: Record<FailureCategory, ErrorGroupKind> = {
   // Hugging Face model, a missing token): neither bad input nor a defect.
   model_access_denied: "model_access",
   local_runtime: "engine",
+  // A model ran but produced inadmissible evidence, not malformed user input.
+  model_output_invalid: "engine",
   provider_transient: "engine",
   provider_terminal: "engine",
   // The provider account's quota is used up: no retry helps until restored.

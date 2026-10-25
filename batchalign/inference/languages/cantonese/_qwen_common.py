@@ -40,9 +40,20 @@ from batchalign.inference.qwen_forced_alignment import (
     QWEN_FORCED_ALIGNER_MODEL_ID,
     ForcedAligner,
     QwenForcedAligner,
-    SpokenWindowWords,
+    QwenTimingInvalid,
 )
 from batchalign.inference.qwen_punctuation import PunctuatedAlignment
+from batchalign.inference.qwen_timing import (
+    AudioWindow,
+    CompletedRecording,
+    ObservedRecordingSpan,
+    RecordingChunkSpeech,
+    RecordingPrefix,
+    RecordingStart,
+    SpokenWindowWords,
+    UnavailableWindowTiming,
+    WindowAlignment,
+)
 from batchalign.worker._types_v2 import QwenRecognitionV2, RecognitionPunctuationV2
 
 from ._asr_types import (
@@ -97,20 +108,6 @@ def _check_native_checkpoint(model_id: str) -> None:
         )
 
 
-@dataclass
-class QwenAsrSegment:
-    """One chunk of transcript with its word-level timestamps.
-
-    ``text`` is the chunk's full string. ``word_timestamps`` is a list of
-    ``(start_s, end_s, word_text)`` tuples in RECORDING-relative seconds,
-    already converted out of the aligner's window-relative space. It is empty
-    when the aligner returned nothing for the chunk.
-    """
-
-    text: str
-    word_timestamps: list[tuple[float, float, str]] = field(default_factory=list)
-
-
 @dataclass(frozen=True)
 class QwenTranscription:
     """Everything one recording produced, including what it did NOT produce.
@@ -122,8 +119,12 @@ class QwenTranscription:
     in a log line.
     """
 
-    segments: list[QwenAsrSegment]
-    refused: list[RunawayOutput]
+    recording: CompletedRecording
+    refused: tuple[RunawayOutput, ...]
+
+    @property
+    def segments(self) -> tuple[RecordingChunkSpeech, ...]:
+        return self.recording.chunks
 
     @property
     def refused_seconds(self) -> float:
@@ -359,9 +360,7 @@ class ReadyQwenRecognizer:
             case (False, False):
                 return Completed(text=text)
 
-    def _align_chunk(
-        self, chunk: AudioChunk, text: str
-    ) -> list[tuple[float, float, str]]:
+    def _align_chunk(self, chunk: AudioChunk, text: str) -> RecordingChunkSpeech:
         """Word timings for one chunk, converted into recording-relative time.
 
         The aligner call itself is shared with the standalone ``qwen3_fa``
@@ -377,23 +376,25 @@ class ReadyQwenRecognizer:
         answers. The FA fold must keep every unit in position, which is why the
         filter cannot live in `align`.
         """
-        alignment = self.models.aligner.align(
-            chunk.samples, text, self.config.profile.alignment_language
-        )
-        spoken = SpokenWindowWords.of_units(alignment.words)
+        try:
+            paired = self.models.aligner.align(
+                chunk.samples, text, self.config.profile.alignment_language
+            )
+            alignment = WindowAlignment(paired, AudioWindow(chunk.seconds))
+        except QwenTimingInvalid as error:
+            raise error.in_recording_window(chunk.offset, chunk.seconds) from error
+        spoken = SpokenWindowWords(alignment)
         # The validated transition carries text and time together. The caller
         # never zips a separate spelling list onto timestamp evidence.
+        speech: SpokenWindowWords | PunctuatedAlignment
         match self.config.profile.punctuation:
             case RecognitionPunctuationV2.RESTORE:
-                words = PunctuatedAlignment(text, spoken).words
+                speech = PunctuatedAlignment(text, spoken)
             case RecognitionPunctuationV2.DISCARD:
-                words = spoken.words
+                speech = spoken
             case unreachable:
                 assert_never(unreachable)
-        return [
-            (chunk.to_file(word.start_s), chunk.to_file(word.end_s), word.text)
-            for word in words
-        ]
+        return RecordingChunkSpeech(text, chunk.offset, speech)
 
     def _run_model(
         self, source_path: str, decode_budget_seconds: float | None = None
@@ -431,7 +432,7 @@ class ReadyQwenRecognizer:
             else DecodeBudget.for_total_seconds(sum(chunk.seconds for chunk in chunks))
         )
 
-        segments: list[QwenAsrSegment] = []
+        recording: RecordingStart | RecordingPrefix = RecordingStart()
         refused: list[RunawayOutput] = []
         for chunk in chunks:
             chunk_budget = ChunkDecodeBudget.for_chunk(chunk, remaining_budget)
@@ -458,13 +459,8 @@ class ReadyQwenRecognizer:
             if not text.strip():
                 continue
 
-            segments.append(
-                QwenAsrSegment(
-                    text=text,
-                    word_timestamps=self._align_chunk(chunk, text),
-                )
-            )
-        return QwenTranscription(segments=segments, refused=refused)
+            recording = recording.append(self._align_chunk(chunk, text))
+        return QwenTranscription(CompletedRecording(recording), tuple(refused))
 
     def transcribe(
         self, source_path: str, decode_budget_seconds: float | None = None
@@ -502,41 +498,38 @@ class ReadyQwenRecognizer:
         elements: list[AsrElement] = []
         timed_words: list[TimedWord] = []
         for seg in segments:
-            if seg.word_timestamps:
-                for start_s, end_s, word in seg.word_timestamps:
-                    # Pre-filter empty/whitespace tokens so downstream
-                    # never sees them: saves allocation and matches
-                    # the FunASR + Tencent shape.
-                    if not word.strip():
-                        continue
-                    elements.append(
-                        AsrElement(
-                            type="text",
-                            ts=start_s,
-                            end_ts=end_s,
-                            value=word,
-                        )
-                    )
-                    timed_words.append(
-                        TimedWord(
-                            word=word,
-                            start_ms=int(start_s * 1000),
-                            end_ms=int(end_s * 1000),
-                        )
-                    )
+            if seg.words:
+                for word in seg.words:
+                    match word.timing:
+                        case ObservedRecordingSpan() as span:
+                            elements.append(
+                                AsrElement(
+                                    type="text",
+                                    ts=span.start_s,
+                                    end_ts=span.end_s,
+                                    value=word.text,
+                                )
+                            )
+                            timed_words.append(
+                                TimedWord(
+                                    word=word.text,
+                                    start_ms=int(span.start_s * 1000),
+                                    end_ms=int(span.end_s * 1000),
+                                )
+                            )
+                        case UnavailableWindowTiming():
+                            elements.append(
+                                AsrElement(
+                                    type="text", ts=None, end_ts=None, value=word.text
+                                )
+                            )
+                        case unreachable:
+                            assert_never(unreachable)
             elif seg.text.strip():
-                # Fall back to the whole-segment text when the model
-                # didn't return per-word timestamps. CJK output is
-                # tokenized per-character downstream; we leave that
-                # to BA3's standard Cantonese tokenizer rather than
-                # splitting here (avoid double-tokenization).
+                # The model produced no word units. Preserve its recognized
+                # text as explicitly untimed rather than inventing endpoints.
                 elements.append(
-                    AsrElement(
-                        type="text",
-                        ts=None,
-                        end_ts=None,
-                        value=seg.text,
-                    )
+                    AsrElement(type="text", ts=None, end_ts=None, value=seg.text)
                 )
 
         # Qwen3-ASR emits no speaker diarization (see this class's docstring),

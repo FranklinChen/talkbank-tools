@@ -711,6 +711,8 @@ pub struct SecondaryMorphologyUnplacedUtterance {
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecondaryExtractionFailure {
+    /// The language marker has no dispatchable resolution in this document.
+    LanguageUnresolved,
     /// Primary analysis does not align with the words.
     Alignment,
     /// Text and analysis tokenization disagree.

@@ -5,6 +5,28 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Checked CHAT recovery and secondary morphology
+
+- Consume Chatter v0.32.1 through current header declarations and checked
+  lexical, feature, dependency and speaker-token constructors. Recovered
+  bullets retain rejected source evidence and cannot become numeric timing.
+- Unsupported inline secondary morphology preserves `L2|xxx` locally and
+  successful surrounding analysis. Saved availability comments name languages
+  and counts; job diagnostics retain exclusion versus failure causes. Ambiguous
+  or unresolved language markers cannot select an arbitrary model.
+- Secondary dependency graphs must be rooted, bounded and acyclic before
+  splicing. Invalid graph evidence is refused instead of inventing roots or
+  clamping unknown heads. The public kept-bullet refusal is now the
+  `GivenBulletError` enum, distinguishing backward timing from unparsed syntax.
+
+### Changed
+
+- **Breaking:** BA3 now requires standard CPython 3.14 for development and
+  installation. Build, CI, installer and worker discovery defaults use 3.14;
+  Python 3.13 and free-threaded interpreters are not supported targets.
+- Dashboard failure/restart tests use rejected CHAT independently of model
+  language coverage; waits reject every unexpected terminal job state.
+
 ### Small corrections
 
 - Unclassified local model runtime failures now retry within the existing

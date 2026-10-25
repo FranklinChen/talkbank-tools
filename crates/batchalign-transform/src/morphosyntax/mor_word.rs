@@ -1,8 +1,8 @@
 //! Single-word UD-to-CHAT MOR mapping.
 
 use super::features::{
-    RenderedFeatures, UdFeats, adj_features, det_features, noun_features, pron_features,
-    verb_features,
+    FeatureRendering, RenderedFeatures, UdFeats, adj_features, det_features, noun_features,
+    pron_features, verb_features,
 };
 use super::{
     MappingContext, MappingError, UdPunctable, UdWord, UniversalPos, japanese_verbform, lang2,
@@ -61,7 +61,7 @@ pub(super) fn map_ud_mor_word(ud: &UdWord, ctx: &MappingContext) -> Result<MorWo
         }
     }
 
-    let suffixes = compute_features(&ud.upos, &feats, written, ud, ctx).into_suffixes();
+    let suffixes = compute_features(&ud.upos, &feats, written, ud, ctx)?.into_suffixes();
     let sanitized_lemma = sanitize_mor_text(&cleaned_lemma);
     if sanitized_lemma.is_empty() {
         return Err(MappingError::EmptyStem {
@@ -187,7 +187,7 @@ fn compute_features(
     written: MorPos,
     ud: &UdWord,
     ctx: &MappingContext,
-) -> RenderedFeatures {
+) -> FeatureRendering {
     // Every UPOS named, so a new one fails to compile here instead of falling
     // through to "no features".
     match original_upos {
@@ -212,7 +212,7 @@ fn compute_features(
             | UniversalPos::Sym
             | UniversalPos::X,
         )
-        | UdPunctable::Punct(_) => RenderedFeatures::default(),
+        | UdPunctable::Punct(_) => Ok(RenderedFeatures::default()),
     }
 }
 

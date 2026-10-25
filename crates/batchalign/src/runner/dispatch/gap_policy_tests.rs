@@ -16,6 +16,7 @@ use clap::Parser;
 use talkbank_model::UtteranceIdx;
 use talkbank_model::model::WriteChat;
 use talkbank_parser::TreeSitterParser;
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 fn submitted(flags: &[&str]) -> CommandOptions {
     let mut argv = vec!["batchalign3", "align", "input.cha"];

@@ -341,9 +341,9 @@ mod tests {
             "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello mundo@s:spa .\n@End\n",
         );
         let lang = crate::chat_ops::LanguageCode::new("eng").unwrap();
-        let langs = declared_languages(&chat, &lang);
-        let items =
-            collect_payloads(&chat, &lang, &langs, MultilingualPolicy::ProcessAll).batch_items;
+        let langs = declared_languages(&chat, &lang).expect("admitted fixture language context");
+        let items = collect_payloads(&chat, &lang, langs.as_ref(), MultilingualPolicy::ProcessAll)
+            .batch_items;
         let response = serde_json::from_str(
             r#"{"sentences":[{"words":[
             {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"},

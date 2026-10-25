@@ -65,6 +65,7 @@ async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_
     .unwrap();
     let output = parsed
         .collect(&options)
+        .expect("admitted fixture language context")
         .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
             response, "9.9.9", "eng",
         )])
@@ -127,6 +128,7 @@ async fn an_unsupported_secondary_language_is_excluded() {
     .unwrap();
     let output = parsed
         .collect(&options)
+        .expect("admitted fixture language context")
         .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
             response, "9.9.9", "eng",
         )])
@@ -142,6 +144,18 @@ async fn an_unsupported_secondary_language_is_excluded() {
         proof.as_str().contains("intj|hello L2|xxx ."),
         "{}",
         proof.as_str()
+    );
+    assert!(
+        proof
+            .as_str()
+            .contains("L2 morphology unsupported for spa: 1 word(s) in 1 span(s)")
+    );
+    assert_eq!(
+        proof
+            .as_str()
+            .matches("[batchalign morphology availability]")
+            .count(),
+        1
     );
     let (shortfalls, exclusions) = report.into_records();
     let produced = ProducedOutput::Admitted(proof);
@@ -793,6 +807,7 @@ async fn noalign_files_get_morphotagged_with_provenance() {
     .expect("worker response fixture");
     let output = parsed
         .collect(&options)
+        .expect("admitted fixture language context")
         .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
             response, "test", "eng",
         )])
@@ -856,7 +871,9 @@ async fn morphotag_provenance_names_the_worker_reported_model() {
     else {
         panic!("expected analysis");
     };
-    let collected = parsed.collect(&options);
+    let collected = parsed
+        .collect(&options)
+        .expect("admitted fixture language context");
     let responses: Vec<crate::chat_ops::nlp::UdResponse> = vec![
         serde_json::from_str(
             r#"{"sentences":[{"words":[
@@ -923,7 +940,11 @@ fn worker_response_count_failure_cannot_admit_inference_or_blame_valid_chat() {
                 )
             })
             .collect();
-        let error = match parsed.collect(&options).with_responses(responses) {
+        let error = match parsed
+            .collect(&options)
+            .expect("admitted fixture language context")
+            .with_responses(responses)
+        {
             Ok(_) => panic!("unpaired responses must not mint Analysis<Inferred>"),
             Err(error) => error,
         };
@@ -990,6 +1011,7 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
             let response = serde_json::from_str(wire).expect("worker wire fixture");
             let inferred = parsed
                 .collect(&options)
+                .expect("admitted fixture language context")
                 .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
                     response, "test", "eng",
                 )])
@@ -1067,14 +1089,19 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
     else {
         panic!("expected analysis");
     };
-    let collected = parsed.collect(&options);
+    let collected = parsed
+        .collect(&options)
+        .expect("admitted fixture language context");
     let ParsedFile::Analyze(reparsed) =
         ParsedFile::parse(chat, params.policy.ca_policy, &test_registry())
             .expect("parse again for missing-response boundary")
     else {
         panic!("expected analysis");
     };
-    let missing_response = reparsed.collect(&options).with_responses(Vec::new());
+    let missing_response = reparsed
+        .collect(&options)
+        .expect("admitted fixture language context")
+        .with_responses(Vec::new());
     assert!(
         missing_response.is_err(),
         "missing worker output cannot admit injection"
@@ -1136,7 +1163,9 @@ async fn pos_hint_evidence_survives_retokenization() {
     else {
         panic!("expected analysis");
     };
-    let collected = parsed.collect(&options);
+    let collected = parsed
+        .collect(&options)
+        .expect("admitted fixture language context");
     let responses = vec![
         serde_json::from_str(
             r#"{"sentences":[{"words":[
@@ -1221,7 +1250,9 @@ async fn morphosyntax_pos_hints_follow_admitted_mor_positions() {
                 else {
                     panic!("expected analysis");
                 };
-                let collected = parsed.collect(&options);
+                let collected = parsed
+                    .collect(&options)
+                    .expect("admitted fixture language context");
                 let response = serde_json::from_str(model).expect("model double");
                 let applied = collected
                     .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
@@ -1285,9 +1316,9 @@ fn transcript_diagnosed_in_its_second_utterance()
         ["we", "took", "b2"]
             .into_iter()
             .map(|word| {
-                UtteranceContent::Word(Box::new(Word::simple(
+                UtteranceContent::Word(Box::new(Word::new(
                     talkbank_model::Location::Unlocated,
-                    word,
+                    talkbank_model::WordText::new(word).expect("nonempty fixture word"),
                 )))
             })
             .collect(),
@@ -1345,6 +1376,7 @@ async fn a_diagnosed_transcript_is_tagged_outside_its_faulty_utterance() {
     };
     let produced = parsed
         .collect(&options)
+        .expect("admitted fixture language context")
         .with_responses(vec![
             one_word_analysis("hello"),
             one_word_analysis("goodbye"),
@@ -1395,9 +1427,11 @@ fn an_analysis_that_adds_a_finding_outside_the_held_out_utterances_is_refused() 
         .into_iter()
         .find(|line| matches!(line, Line::Utterance(_)))
     {
-        first.main.content.content = TierContentItems::new(vec![UtteranceContent::Word(Box::new(
-            Word::simple(talkbank_model::Location::Unlocated, "c3"),
-        ))]);
+        first.main.content.content =
+            TierContentItems::new(vec![UtteranceContent::Word(Box::new(Word::new(
+                talkbank_model::Location::Unlocated,
+                talkbank_model::WordText::new("c3").expect("nonempty fixture word"),
+            )))]);
     }
     let Err(failure) = crate::pipeline::post_validate::PostValidated::produced_outside(
         file,

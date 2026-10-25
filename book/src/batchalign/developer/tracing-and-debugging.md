@@ -184,11 +184,11 @@ returns `Option<Word>` instead of always succeeding. On parse
 failure, the original word is preserved (no invalid content enters
 the AST).
 
-**C. Temporary scaffolding**: a temporary word is used only as input
-to `resolve_word_language()`
-(`../chatter/crates/talkbank-model/src/validation/word/language/resolve.rs:137`)
-and never injected into the AST. This is a documented acceptable use
-of `new_unchecked`.
+**C. Source-bound language resolution**: `GoverningMark` retains the
+word's own, enclosing-span or utterance language context and source location.
+`resolve_with_declaration` consumes the admitted header context or its explicit
+unavailability and returns resolution plus diagnostics. No temporary unchecked
+word is required to obtain a language decision.
 
 ### Injection-time alignment check (`crates/batchalign-transform/src/morphosyntax/injection.rs`)
 

@@ -33,7 +33,7 @@ fn finalize_as_is(
 /// derivation would, after the bind (so it is revisable).
 fn derive_bullet(chat: &mut talkbank_model::model::ChatFile, utt_idx: usize, start: u64, end: u64) {
     get_test_utterance(chat, utt_idx).main.content.bullet =
-        Some(Bullet::new(talkbank_model::Location::Unlocated, start, end));
+        Some(Bullet::new(talkbank_model::Location::Unlocated, start, end).into());
 }
 
 // ---------------------------------------------------------------------------

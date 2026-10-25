@@ -89,6 +89,7 @@ fn held_check_fails_when_a_kept_bullet_is_changed() {
         .content
         .bullet
         .as_mut()
+        .and_then(talkbank_model::BulletState::as_parsed_mut)
         .expect("fixture is bulleted")
         .timing
         .end_ms = 2500;
@@ -276,7 +277,7 @@ fn held_check_fails_when_a_kept_absence_gains_a_bullet() {
     assert_eq!((held.kept(), held.kept_absent()), (1, 1));
 
     get_test_utterance(&mut chat, 1).main.content.bullet =
-        Some(Bullet::new(Location::Unlocated, 2500, 3000));
+        Some(Bullet::new(Location::Unlocated, 2500, 3000).into());
     assert!(matches!(
         authority.verify_held(&chat),
         Err(KeptBulletError::GainedBullet {
@@ -325,7 +326,7 @@ fn utr_bullets_written_after_the_bind_still_derive() {
             ),
             EndOverlapPolicy::ClampAllAdjacent,
             |chat, projection| {
-                get_test_utterance(chat, 1).main.content.bullet = Some(utr_bullet.clone());
+                get_test_utterance(chat, 1).main.content.bullet = Some(utr_bullet.clone().into());
                 align_one_group(
                     chat,
                     projection,
@@ -363,6 +364,7 @@ fn a_kept_bullet_widened_before_grouping_is_restored() {
                 .content
                 .bullet
                 .as_mut()
+                .and_then(talkbank_model::BulletState::as_parsed_mut)
                 .expect("fixture is bulleted");
             bullet.timing.end_ms = 6000;
             bullet.source = BulletSource::Utr;
@@ -496,4 +498,38 @@ fn ca_transcript_keeps_bullets_and_clamps_existing_wor_in_place() {
         wor_timings(&kept.chat, 0),
         vec![Some((1000, 1500)), Some((1500, 3000))]
     );
+}
+
+#[test]
+fn recovered_bullet_cannot_enter_or_satisfy_kept_timing() {
+    let rejected = parse_chat(&two_speaker_transcript(
+        "*CHI:\thello . \u{15}184467440737095516160_2000\u{15}\n",
+    ));
+    let original = parse_chat(&two_speaker_transcript(
+        "*CHI:\thello . \u{15}1000_2000\u{15}\n",
+    ));
+    for policy in [MainBulletPolicy::KeepGiven, MainBulletPolicy::KeepExact] {
+        assert!(matches!(
+            MainBulletAuthority::bind(policy, &rejected),
+            Err(super::super::main_bullets::GivenBulletError::Unparsed { .. })
+        ));
+        let bound = MainBulletAuthority::bind(policy, &original).expect("admitted numeric timing");
+        assert!(matches!(
+            bound.verify_held(&rejected),
+            Err(KeptBulletError::UnparsedWorking { .. })
+        ));
+    }
+}
+
+#[test]
+fn recovered_bullet_is_not_a_kept_absence() {
+    let original = parse_chat(&two_speaker_transcript("*CHI:\thello .\n"));
+    let rejected = parse_chat(&two_speaker_transcript(
+        "*CHI:\thello . \u{15}184467440737095516160_2000\u{15}\n",
+    ));
+    let bound = MainBulletAuthority::bind(MainBulletPolicy::KeepExact, &original).unwrap();
+    assert!(matches!(
+        bound.verify_held(&rejected),
+        Err(KeptBulletError::UnparsedWorking { .. })
+    ));
 }

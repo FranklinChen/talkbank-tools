@@ -366,14 +366,14 @@ pub fn inject_coref(
         return Ok(());
     }
 
-    let label = NonEmptyString::new("xcoref")
+    let label = talkbank_model::UserDefinedDependentTierLabel::new("xcoref")
         .map_err(|_| "Failed to create NonEmptyString for 'xcoref'".to_string())?;
     let content = NonEmptyString::new(annotation_text)
         .map_err(|_| "Failed to create NonEmptyString for coref content".to_string())?;
 
     let new_tier = DependentTier::UserDefined(UserDefinedDependentTier {
         label,
-        content: Some(content),
+        content: Some(content.into()),
         location: Location::Unlocated,
     });
 
@@ -548,6 +548,7 @@ mod tests {
     use super::*;
     use talkbank_model::model::WriteChat;
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn parse_chat(text: &str) -> ChatFile {
         let parser = TreeSitterParser::new().unwrap();

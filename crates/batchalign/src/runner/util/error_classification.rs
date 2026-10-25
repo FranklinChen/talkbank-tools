@@ -243,6 +243,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
             AsrProviderDisposition::AccountRefused => FailureCategory::ProviderAccountRefused,
         },
         ServerError::ProviderQuotaExhausted(_) => FailureCategory::ProviderQuotaExhausted,
+        ServerError::ModelOutputInvalid(_) => FailureCategory::ModelOutputInvalid,
         // A worker running models other than the pinned ones recurs for every
         // request it serves, exactly as a runtime-code identity mismatch does
         // (`WorkerError::RuntimeIdentityMismatch`), and is classified with it:
@@ -314,6 +315,14 @@ pub(crate) fn user_facing_error(
             let detail = truncate_tail(raw_error, 1000);
             format!("{command_label} failed for {filename}: {detail}")
         }
+        FailureCategory::ModelOutputInvalid => {
+            let detail = truncate_tail(raw_error, 1600);
+            format!(
+                "{command_label} could not use the model-generated result for {filename}. \
+                 This is an output-quality failure, not an input-format error. \
+                 Keep this diagnostic with the audio and engine/model identity for investigation.\n{detail}"
+            )
+        }
         FailureCategory::ProviderQuotaExhausted => {
             let detail = truncate_tail(raw_error, 1000);
             format!(
@@ -371,6 +380,21 @@ pub(crate) fn user_facing_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_model_output_is_final_and_keeps_the_failing_boundary() {
+        let detail = "Qwen companion alignment: unit 2 starts at 0.5 s after unit 1 at 0.7 s";
+        let category = classify_server_error(&ServerError::ModelOutputInvalid(detail.into()));
+        assert_eq!(category, FailureCategory::ModelOutputInvalid);
+        assert_eq!(
+            category.retryability(),
+            crate::types::scheduling::Retryability::Final
+        );
+        let message = user_facing_error(category, "Transcription", "sample.wav", detail);
+        assert!(message.contains("output-quality failure"));
+        assert!(message.contains("not an input-format error"));
+        assert!(message.contains(detail));
+    }
 
     #[test]
     fn terminal_provider_message_keeps_local_failure_without_authentication_guess() {

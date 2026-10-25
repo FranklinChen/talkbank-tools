@@ -15,8 +15,8 @@ use crate::morphosyntax::{
 };
 use std::collections::HashMap;
 use std::ops::Range;
-use talkbank_model::model::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
+use talkbank_model::model::{GrammaticalRelation, GrammaticalRelationType};
 
 /// How a sentence's top-level tokens become `%mor` items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +208,7 @@ fn build_gra_and_validate(items: &SentenceItems) -> Result<Vec<GrammaticalRelati
             let (head, relation) = match chunk_prov.head() {
                 ChunkHead::Root => {
                     root_chunk = Some(chunk);
-                    (0, "ROOT".into())
+                    (0, GrammaticalRelationType::root())
                 }
                 ChunkHead::FromUd(head) => (
                     *chunk_of
@@ -249,7 +249,9 @@ fn build_gra_and_validate(items: &SentenceItems) -> Result<Vec<GrammaticalRelati
     gras.push(GrammaticalRelation {
         index: total_chunks + 1,
         head: root_chunk,
-        relation: "PUNCT".into(),
+        relation: crate::morphosyntax::mapping_helpers::normalize_deprel("PUNCT", || {
+            "mapped sentence terminator".to_owned()
+        })?,
     });
 
     validate_generated_gra(&gras)?;

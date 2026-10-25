@@ -196,6 +196,7 @@ fn fallback_after(category: FailureCategory) -> RecoveryNeed {
         // malformed exchange, a crash, a timeout, memory pressure (narrower
         // windows need less), a transient fault.
         FailureCategory::ProviderTerminal
+        | FailureCategory::ModelOutputInvalid
         | FailureCategory::Validation
         | FailureCategory::ParseError
         | FailureCategory::InputMissing

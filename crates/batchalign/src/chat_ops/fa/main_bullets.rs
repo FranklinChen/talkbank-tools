@@ -18,7 +18,7 @@
 //!
 //! ```text
 //! input bullet --classify--> GivenMainBullet::{Extent, Empty, Backward}
-//!     Backward: bind refuses the file (BackwardGivenBullet)
+//!     Backward: bind refuses the file (GivenBulletError)
 //!     Extent | Empty: KeptBullet, read-only for the run
 //! utterance not in the recording ([+ diary]), with or without a bullet:
 //!     Given::OffRecord, no bullet during the run (input admission removed
@@ -253,17 +253,35 @@ pub(super) enum BulletMutability {
     Revisable,
 }
 
-/// The input carried a bullet whose end precedes its start.
+/// A source bullet cannot enter the kept numeric-timing state.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "--main-bullets keep: utterance {utterance_ordinal} (line {line_idx}) has a backward bullet \
-     {start_ms}_{end_ms}; a backward bullet cannot be kept"
-)]
-pub struct BackwardGivenBullet {
-    utterance_ordinal: usize,
-    line_idx: usize,
-    start_ms: u64,
-    end_ms: u64,
+pub enum GivenBulletError {
+    /// Parsed numeric timing runs backwards.
+    #[error(
+        "--main-bullets keep: utterance {utterance_ordinal} (line {line_idx}) has a backward bullet {start_ms}_{end_ms}; a backward bullet cannot be kept"
+    )]
+    Backward {
+        /// Utterance ordinal.
+        utterance_ordinal: usize,
+        /// Model line index.
+        line_idx: usize,
+        /// Observed start.
+        start_ms: u64,
+        /// Observed end.
+        end_ms: u64,
+    },
+    /// Recovered syntax is source evidence, never a numeric interval.
+    #[error(
+        "--main-bullets keep: utterance {utterance_ordinal} (line {line_idx}) has an unparsed bullet {source_text:?}; fix its syntax before keeping timing"
+    )]
+    Unparsed {
+        /// Utterance ordinal.
+        utterance_ordinal: usize,
+        /// Model line index.
+        line_idx: usize,
+        /// Rejected spelling.
+        source_text: String,
+    },
 }
 
 /// A kept bullet could not be attributed or did not hold.
@@ -272,6 +290,16 @@ pub struct BackwardGivenBullet {
 /// rather than writing a transcript whose kept bullets moved.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeptBulletError {
+    /// A numeric kept-bullet invariant cannot be checked against rejected syntax.
+    #[error(
+        "utterance {utterance_idx} acquired an unparsed bullet {source_text:?} during alignment"
+    )]
+    UnparsedWorking {
+        /// Utterance ordinal.
+        utterance_idx: usize,
+        /// Rejected spelling.
+        source_text: String,
+    },
     /// The working document has more utterances than the input did.
     #[error(
         "--main-bullets keep: utterance {utterance_idx} is not in the input, which has \
@@ -338,6 +366,24 @@ pub enum KeptBulletError {
     },
 }
 
+/// Admit observed syntax before numeric kept-bullet consumers. Rejected
+/// evidence cannot satisfy either a kept interval or a kept absence.
+fn live_bullet(
+    utterance_idx: UtteranceIdx,
+    state: Option<&talkbank_model::BulletState>,
+) -> Result<Option<&Bullet>, KeptBulletError> {
+    match state {
+        None => Ok(None),
+        Some(talkbank_model::BulletState::Parsed(bullet)) => Ok(Some(bullet)),
+        Some(talkbank_model::BulletState::Unparsed { unparsed }) => {
+            Err(KeptBulletError::UnparsedWorking {
+                utterance_idx: utterance_idx.raw(),
+                source_text: unparsed.source().to_owned(),
+            })
+        }
+    }
+}
+
 impl KeptBulletError {
     fn off_record(utterance_idx: UtteranceIdx, live: &Bullet) -> Self {
         Self::OffRecordBullet {
@@ -375,7 +421,7 @@ impl MainBulletAuthority {
     /// default reads nothing and cannot fail; `keep` and `exact` classify
     /// every input bullet and refuse a backward one, and differ only in what
     /// an utterance WITHOUT a bullet becomes.
-    pub fn bind(policy: MainBulletPolicy, input: &ChatFile) -> Result<Self, BackwardGivenBullet> {
+    pub fn bind(policy: MainBulletPolicy, input: &ChatFile) -> Result<Self, GivenBulletError> {
         let absence = match policy {
             MainBulletPolicy::DeriveFromWords => return Ok(Self::DeriveFromWords),
             MainBulletPolicy::KeepGiven => AbsencePolicy::Derive,
@@ -383,11 +429,21 @@ impl MainBulletAuthority {
         };
         let by_utterance = utterances_indexed(input)
             .map(|(line_idx, utterance_idx, utterance)| {
+                if let Some(talkbank_model::BulletState::Unparsed { unparsed }) =
+                    &utterance.main.content.bullet
+                {
+                    return Err(GivenBulletError::Unparsed {
+                        utterance_ordinal: utterance_idx.raw(),
+                        line_idx,
+                        source_text: unparsed.source().to_owned(),
+                    });
+                }
                 let kept = match utterance
                     .main
                     .content
                     .bullet
                     .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .map(GivenMainBullet::classify)
                 {
                     None => None,
@@ -398,7 +454,7 @@ impl MainBulletAuthority {
                         Some(KeptBullet(Kept::Empty { at_ms }))
                     }
                     Some(GivenMainBullet::Backward { start_ms, end_ms }) => {
-                        return Err(BackwardGivenBullet {
+                        return Err(GivenBulletError::Backward {
                             utterance_ordinal: utterance_idx.raw(),
                             line_idx,
                             start_ms,
@@ -496,7 +552,7 @@ impl MainBulletAuthority {
                     }
                     GivenSlot::Kept(kept) => kept,
                 };
-                utterance.main.content.bullet = Some(kept.to_bullet());
+                utterance.main.content.bullet = Some(kept.to_bullet().into());
                 let clamped = clamp_words_within(utterance, kept.span());
                 if clamped.cut_main_tier() {
                     cuts.push(utterance_idx);
@@ -544,9 +600,10 @@ impl MainBulletAuthority {
             return Ok(());
         };
         for (_, utterance_idx, utterance) in utterances_indexed_mut(chat_file) {
+            live_bullet(utterance_idx, utterance.main.content.bullet.as_ref())?;
             match given.slot(utterance_idx)? {
                 GivenSlot::OffRecord(Some(kept)) => {
-                    utterance.main.content.bullet = Some(kept.to_bullet());
+                    utterance.main.content.bullet = Some(kept.to_bullet().into());
                 }
                 GivenSlot::OffRecord(None)
                 | GivenSlot::Unbulleted
@@ -605,31 +662,27 @@ impl MainBulletAuthority {
         let mut kept_absent = 0usize;
         for (_, utterance_idx, utterance) in utterances_indexed(chat_file) {
             working_utterances += 1;
+            let live = live_bullet(utterance_idx, utterance.main.content.bullet.as_ref())?;
             match given.slot(utterance_idx)? {
                 GivenSlot::Unbulleted => {}
-                GivenSlot::KeptAbsent => match utterance.main.content.bullet.as_ref() {
+                GivenSlot::KeptAbsent => match live {
                     None => kept_absent += 1,
                     Some(live) => return Err(KeptBulletError::gained(utterance_idx, live)),
                 },
-                GivenSlot::Kept(kept) => {
-                    let live = utterance.main.content.bullet.as_ref();
-                    match kept.is_live(live) {
-                        true => kept_count += 1,
-                        false => return Err(KeptBulletError::drifted(utterance_idx, kept, live)),
+                GivenSlot::Kept(kept) => match kept.is_live(live) {
+                    true => kept_count += 1,
+                    false => return Err(KeptBulletError::drifted(utterance_idx, kept, live)),
+                },
+                GivenSlot::OffRecord(given) => match (given, live) {
+                    (None, None) => {}
+                    (Some(kept), live) if kept.is_live(live) => kept_count += 1,
+                    (Some(kept), live) => {
+                        return Err(KeptBulletError::drifted(utterance_idx, kept, live));
                     }
-                }
-                GivenSlot::OffRecord(given) => {
-                    match (given, utterance.main.content.bullet.as_ref()) {
-                        (None, None) => {}
-                        (Some(kept), live) if kept.is_live(live) => kept_count += 1,
-                        (Some(kept), live) => {
-                            return Err(KeptBulletError::drifted(utterance_idx, kept, live));
-                        }
-                        (None, Some(live)) => {
-                            return Err(KeptBulletError::off_record(utterance_idx, live));
-                        }
+                    (None, Some(live)) => {
+                        return Err(KeptBulletError::off_record(utterance_idx, live));
                     }
-                }
+                },
             }
         }
         match working_utterances == given.by_utterance.len() {

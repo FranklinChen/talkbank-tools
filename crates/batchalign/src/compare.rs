@@ -342,16 +342,15 @@ fn apply_media_header_from_main(
     main_file: &crate::chat_ops::ChatFile,
     gold_file: &mut crate::chat_ops::ChatFile,
 ) {
-    let Some(media) = main_file.media.clone() else {
+    let Some(media) = main_file.media_header().cloned() else {
         return;
     };
 
-    gold_file.media = Some(media.clone());
     for line in &mut gold_file.lines {
         if let Line::Header { header, .. } = line
             && matches!(header.as_ref(), Header::Media(_))
         {
-            **header = Header::Media((*media).clone());
+            **header = Header::Media(media.clone());
             return;
         }
     }
@@ -365,7 +364,7 @@ fn apply_media_header_from_main(
         insert_at,
         Line::header(
             talkbank_model::Location::Unlocated,
-            Header::Media((*media).clone()),
+            Header::Media(media.clone()),
         ),
     );
 }

@@ -46,8 +46,15 @@ pub fn check_utterance_bullet_monotonicity_preserved(parsed: &ChatFile) -> Resul
     let mut prev_start: Option<u64> = None;
     let mut prev_index: usize = 0;
     for (i, utt) in parsed.utterances().enumerate() {
-        let Some(bullet) = utt.main.content.bullet.as_ref() else {
-            continue;
+        let bullet = match utt.main.content.bullet.as_ref() {
+            None => continue,
+            Some(talkbank_model::BulletState::Parsed(bullet)) => bullet,
+            Some(talkbank_model::BulletState::Unparsed { unparsed }) => {
+                return Err(format!(
+                    "utterance #{i} has an unparsed bullet: {}",
+                    unparsed.source()
+                ));
+            }
         };
         let is_overlap_continuation = utt
             .main

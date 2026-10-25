@@ -57,7 +57,9 @@ fn file_has_english(chat_file: &crate::chat_ops::ChatFile) -> Result<bool, Serve
             "coref: failed to construct the 'eng' fallback language code: {e}"
         ))
     })?;
-    let langs = declared_languages(chat_file, &fallback);
+    let langs = declared_languages(chat_file, &fallback).map_err(|error| {
+        ServerError::Validation(format!("unusable @Languages declaration: {error}"))
+    })?;
     Ok(langs.iter().any(|l| l.as_str() == "eng"))
 }
 

@@ -120,12 +120,40 @@ return character-sized units and omit punctuation. The ASR adapter handles
 that difference through this sequence:
 
 ```text
-WindowAlignment (window-relative units)
+PairedWindowAlignment (model units and reported times, arity checked)
+  -> WindowAlignment + AudioWindow (bounded observed spans or unavailable timing)
   -> SpokenWindowWords (spoken units for ASR)
   -> PunctuatedAlignment (profile RESTORE only; validated lexical correspondence)
-  -> AudioChunk.to_file (add this chunk's offset once)
-  -> recording-relative ASR word tuples
+  -> RecordingChunkSpeech (place the bounded speech at its recording offset)
+  -> RecordingStart / RecordingPrefix (admit the next disjoint window)
+  -> CompletedRecording (publish immutable recording chunks)
 ```
+
+`PairedWindowAlignment` snapshots both sequences and admits their arity.
+Both ASR and standalone FA must then construct `WindowAlignment` with the
+actual audio duration. Every interval must be finite, nonnegative, forward
+and contained in that audio; nonblank positive-duration units must have
+nondecreasing starts and ends. Ordinary overlap is permitted when both
+boundaries advance. `ObservedWindowSpan` and `UnavailableWindowTiming` are
+distinct states. Zero-width units retain their fold positions as unavailable
+evidence and cannot supply observed word endpoints. The FA fold leaves a word
+untimed if any constituent is unavailable, or if its interval disappears when
+rounded to milliseconds. No neighboring interval supplies the missing times.
+
+Recording placement adds the offset once. An immutable recording prefix accepts
+only a subsequent disjoint window; containment plus ordered windows prevents
+cross-chunk time reversal. Publication consumes that prefix, so the ASR result
+cannot publish a bare, unchecked list of chunk timestamps. Unavailable words
+retain their text with absent timestamps on the ASR wire.
+
+An inadmissible interval raises `QwenTimingInvalid`, a
+`ModelOutputInvalidError`, before conversion or CHAT construction. It reports
+the offending unit and original times, the preceding unit for backwards
+timing, and whether the start or end moved backwards. `_align_chunk` adds
+the recording window while preserving the relative coordinate labels.
+The worker reports `model_output_invalid`; the identical request is not
+automatically retried. Do not sort or clamp these times to manufacture an
+apparently valid alignment.
 
 `PunctuatedAlignment(text, spoken)` compares the complete lexical sequence of
 the recognition text with the concatenated alignment units. Letters, numbers,
@@ -134,9 +162,9 @@ This preserves tone marks as evidence: dropping a combining mark is a mismatch,
 not punctuation normalization. Changed, missing or additional lexical text
 raises `ValueError`, as does a nonlexical aligned unit. There is no fuzzy match.
 
-On success, the constructor returns one owned tuple of `WindowAlignedWord`
+On success, the constructor returns one owned tuple of `AlignedWindowWord`
 values. It appends supported sentence/clause punctuation to the preceding unit
-and preserves each unit's start and end exactly. Quotes and arbitrary symbols
+and preserves the same immutable timing evidence. Quotes and arbitrary symbols
 are not restored. Do not return a separate spelling list and zip it onto times:
 that permits changed text and timing evidence to diverge after validation.
 
@@ -145,6 +173,20 @@ chunk offset is available. The shared forced aligner must continue returning
 window-relative times; adding an offset there would affect standalone FA too.
 Likewise, the ASR-specific spoken-unit filtering does not belong in the shared
 aligner, whose standalone fold needs every unit's position.
+
+## Replay compatibility
+
+The ready standalone FA host reports a `QwenFaCacheIdentity`: model ID plus
+`QwenFaAdmissionRevision.BOUNDED_UNIT_EVIDENCE_V1`. The wire name ends in
+`@bounded-unit-evidence-v1`. Both raw and derived FA cache envelopes are admitted
+against this name. Earlier model-only namespaces cannot authorize replay under
+the new timing rules; the cached rows no longer contain the unit evidence
+needed to prove those rules retroactively. Existing cache bytes are retained.
+This changes replay compatibility without renaming the selected model.
+
+The shared identity fixture is consumed by the Python loader test and the
+Rust raw/derived replay test, including acceptance of current evidence. A
+revision is an admission compatibility statement, not a model-quality score.
 
 These types establish correspondence and coordinate ownership, not acoustic
 accuracy. A lexically consistent alignment can still contain zero-duration or

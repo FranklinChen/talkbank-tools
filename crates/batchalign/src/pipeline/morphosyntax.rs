@@ -111,7 +111,7 @@ async fn analyze_in_scope<D: AnalysisScope>(
     let collected = observe_stage(
         "morphotag",
         StageId::CollectPayloads,
-        Box::pin(async { Ok(parsed.collect(options)) }),
+        Box::pin(async { parsed.collect(options) }),
     )
     .await?;
     let inferred = observe_stage(

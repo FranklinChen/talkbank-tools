@@ -1,7 +1,7 @@
 # L2 Morphotag: Current Status
 
 **Status:** Current
-**Last updated:** 2026-10-12 22:31 EDT
+**Last updated:** 2026-10-29
 
 L2 dispatch is on by default (`--no-l2-morphotag` opts out). It routes
 `@s` (code-switched) words to the Stanza model of their own language and
@@ -27,7 +27,6 @@ the repository's `CHANGELOG.md`.
 
 ```text
 crates/batchalign-transform/src/morphosyntax/l2/
-├── alignment.rs: UdAlignment, the one CHAT-word to UD-word alignment
 ├── extract.rs: deferred @s positions and the primary's structure for them
 ├── plan.rs: contiguous spans (owning their positions) and L2Attachment
 ├── merge.rs: MergedL2Span, ModelAssignedPos, the external relation
@@ -35,6 +34,8 @@ crates/batchalign-transform/src/morphosyntax/l2/
 ├── splice.rs: splice merged spans into the ChatFile, validate, roll back
 └── pipeline_tests.rs: end-to-end tests on recorded worker analyses
 ```
+
+Shared `UdAlignment` lives in `crates/batchalign-transform/src/morphosyntax/alignment.rs`.
 
 **Dispatch** (`crates/batchalign/src/morphosyntax/batch.rs`,
 `dispatch_secondary_l2`): plan spans from the deferred positions, send
@@ -47,15 +48,24 @@ call it.
 
 ### Fallback and reporting
 
-Every `@s` word keeps the `L2|xxx` the primary pass wrote unless its span
-splices, and every way to keep it is reported:
+The [availability and reporting policy](morphosyntax.md#availability-and-reporting-policy)
+keeps unavailable inline secondary analysis local to the affected word/span
+when L2 dispatch is enabled.
+`PendingSecondaryWord` projects `L2|xxx` until an admitted secondary span is
+actually installed. Successful host morphology and other supported spans remain.
 
-| Where | Cause | Report |
-|-------|-------|--------|
-| extract | primary analysis does not align to the utterance's words | `L2Extraction::unaligned`, logged by `into_reported_positions` |
-| dispatch | no Stanza model for the target, or dispatch failed | `L2 morphotag:` log lines with the word count |
-| merge | secondary analysis does not align, map, or has no root | `L2MergeError`, logged with line and word count |
-| splice | the spliced `%gra` breaks an invariant | categorised warning, span rolled back |
+| Boundary | Cause | Report |
+|----------|-------|--------|
+| extract | unresolved/ambiguous language or unplaceable primary analysis | `L2Extraction::unaligned`, durable job shortfall |
+| dispatch | runtime explicitly lacks target processors | unsupported-language exclusion |
+| dispatch | inference failure, response mismatch or empty response | producer-specific secondary-analysis shortfall |
+| merge | unalignable analysis or an invalid rooted dependency block | `L2MergeError`, original host analysis retained |
+| splice | insertion refusal or invalid resulting grammar | addressed retention cause, exact host snapshot retained |
+
+Job records retain counts and bounded examples. A saved availability `@Comment`
+names unsupported languages and counts or summarizes incomplete analysis. A
+primary/effective whole-utterance language capability refusal, including an
+unavailable registry, is a separate file-level policy; it cannot borrow the inline marker rule.
 
 ### Tests
 
@@ -86,15 +96,18 @@ splices, and every way to keep it is reported:
 ### Interaction with the English grammatical-invariant rewrite
 
 A Rust rewrite rule (see [Stanza Limitations, Defect 1](stanza-limitations.md))
-runs on the **primary** English UD analysis inside injection. L2
-extraction reads the primary responses before injection takes them, so the
-rewrite cannot change what extraction aligns.
+acts on primary English UD analysis. L2 extraction uses the same admitted
+analysis and item placement that injection mapped, so its source positions
+remain bound to the written host morphology.
 
 ## What is not done
 
-- Host words whose primary head is a span word attach to the span's first
-  chunk (chatter's splice), not to the secondary root; see Limitations in
-  [L2 Morphotag](l2-morphotag.md#limitations).
+- Whole-utterance host syntax is still the primary model's analysis. Dependents
+  of the attachment-source word follow the secondary block's admitted root;
+  other replaced words follow their counterpart chunks. Valid graph structure
+  does not establish linguistic correctness.
+- Model coverage and secondary analyses still require language-specific quality
+  evaluation; see [L2 Morphotag](l2-morphotag.md#limitations).
 
 ## Documentation
 

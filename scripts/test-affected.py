@@ -73,7 +73,7 @@ def _git_diff_names(base: str | None) -> list[str]:
         committed = subprocess.run(
             args, capture_output=True, text=True, check=False, timeout=10
         ).stdout.splitlines()
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+    except FileNotFoundError, OSError, subprocess.TimeoutExpired:
         return []  # Fail-open caller will print everything.
 
     try:
@@ -98,7 +98,7 @@ def _git_diff_names(base: str | None) -> list[str]:
             check=False,
             timeout=10,
         ).stdout.splitlines()
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+    except FileNotFoundError, OSError, subprocess.TimeoutExpired:
         uncommitted = []
         untracked = []
 

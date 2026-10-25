@@ -178,10 +178,10 @@ pub enum LanguageBucket {
     /// One definite language.
     Language(LanguageCode),
     /// A word marked as mixing languages, such as `@s:eng+spa`, with its codes.
-    Mixed(Vec<LanguageCode>),
+    Mixed(talkbank_model::MultipleLanguageCodes),
     /// A word marked as ambiguous between languages, such as `@s:eng&spa`,
     /// with its codes.
-    Ambiguous(Vec<LanguageCode>),
+    Ambiguous(talkbank_model::MultipleLanguageCodes),
     /// No language could be resolved: an utterance with no precode in a file
     /// with no `@Languages`, or a word mark the resolver could not resolve.
     Unresolved,
@@ -202,8 +202,8 @@ impl LanguageBucket {
     pub fn csv_key(&self) -> String {
         match self {
             Self::Language(code) => code.as_str().to_string(),
-            Self::Mixed(codes) => join_codes(codes, "+"),
-            Self::Ambiguous(codes) => join_codes(codes, "&"),
+            Self::Mixed(codes) => join_codes(codes.as_slice(), "+"),
+            Self::Ambiguous(codes) => join_codes(codes.as_slice(), "&"),
             Self::Unresolved => "unresolved".to_string(),
         }
     }
@@ -238,9 +238,10 @@ impl Ord for LanguageBucket {
             (Self::Language(left), Self::Language(right)) => left.as_str().cmp(right.as_str()),
             (Self::Mixed(left), Self::Mixed(right))
             | (Self::Ambiguous(left), Self::Ambiguous(right)) => left
+                .as_slice()
                 .iter()
                 .map(LanguageCode::as_str)
-                .cmp(right.iter().map(LanguageCode::as_str)),
+                .cmp(right.as_slice().iter().map(LanguageCode::as_str)),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -372,8 +373,19 @@ impl<S: Side> LanguagedUtterance<S> {
 pub(in crate::compare) fn languaged_utterances<S: Side>(
     chat_file: &ChatFile,
 ) -> PerUtterance<S, LanguagedUtterance<S>> {
-    let declared: &[LanguageCode] = &chat_file.languages;
-    let primary = declared.first();
+    let declared = chat_file.language_declaration();
+    let primary = match declared {
+        Ok(codes) => Some(codes.primary()),
+        Err(
+            error @ (talkbank_model::LanguageDeclarationError::Absent
+            | talkbank_model::LanguageDeclarationError::Empty
+            | talkbank_model::LanguageDeclarationError::Rejected
+            | talkbank_model::LanguageDeclarationError::Repeated),
+        ) => {
+            tracing::warn!(%error, "comparison language attribution has no admitted declaration");
+            None
+        }
+    };
 
     let values = chat_file
         .utterances()
@@ -439,10 +451,22 @@ fn resolve_word_language<S: Side>(
     word: &ExtractedWord,
     utterance_language: &LanguageBucket,
     tier_language: Option<&LanguageCode>,
-    declared: &[LanguageCode],
+    declared: Result<
+        talkbank_model::DeclaredLanguagesRef<'_>,
+        talkbank_model::LanguageDeclarationError,
+    >,
 ) -> WordLanguage<S> {
-    let bucket =
-        LanguageBucket::of_resolution(word.resolve_language(tier_language, declared).resolution);
+    let bucket = match declared {
+        Ok(codes) => {
+            LanguageBucket::of_resolution(word.resolve_language(tier_language, codes).resolution)
+        }
+        Err(
+            talkbank_model::LanguageDeclarationError::Absent
+            | talkbank_model::LanguageDeclarationError::Empty
+            | talkbank_model::LanguageDeclarationError::Rejected
+            | talkbank_model::LanguageDeclarationError::Repeated,
+        ) => LanguageBucket::Unresolved,
+    };
     let role = match (
         word.language_kind(),
         LanguageAgreement::of(&bucket, utterance_language),

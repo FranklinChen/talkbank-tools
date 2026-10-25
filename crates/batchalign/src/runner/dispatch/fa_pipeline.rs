@@ -683,8 +683,23 @@ async fn process_one_fa_file(
     // The whole header, not `first()`: a secondary language reaches words
     // through `[- deu]` precodes and `word@s:deu` markers, and those words
     // travel to the aligner in the same groups as the primary language's.
+    let header_languages = match model.document().language_declaration() {
+        Ok(languages) => Some(languages),
+        Err(talkbank_model::LanguageDeclarationError::Absent) => None,
+        Err(
+            error @ (talkbank_model::LanguageDeclarationError::Empty
+            | talkbank_model::LanguageDeclarationError::Rejected
+            | talkbank_model::LanguageDeclarationError::Repeated),
+        ) => {
+            lifecycle.fail(&format!("align: unusable @Languages declaration: {error}; fix the header before aligning"), FailureCategory::Validation).await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
     let declared_languages = match DeclaredLanguages::from_header(
-        model.document().languages.iter().map(|code| code.as_str()),
+        header_languages
+            .into_iter()
+            .flat_map(|languages| languages.iter())
+            .map(|code| code.as_str()),
         lang_fallback,
     ) {
         Ok(declared) => declared,

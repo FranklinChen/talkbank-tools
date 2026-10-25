@@ -86,11 +86,7 @@ impl<'source> MappedDiarizeSource<'source> {
         let document = transcript.document();
         let mut declared_mapping = BTreeMap::new();
         for (track, participant) in mapping.entries() {
-            if !document
-                .participants
-                .values()
-                .any(|declared| &declared.code == participant)
-            {
+            if document.get_participant(participant.as_str()).is_none() {
                 return Err(DiarizeChatRefusal::UndeclaredParticipant {
                     track,
                     participant: participant.clone(),
@@ -158,10 +154,10 @@ impl<'source> MappedDiarizeSource<'source> {
                 segment.interval.end_millis(),
             )
             .map_err(|_| DiarizeChatRefusal::ProducerInterval)?;
-            turns.push(DiarizationTurn {
-                track: participant.clone(),
-                span,
-            });
+            turns.push(
+                DiarizationTurn::new(participant.clone(), span)
+                    .map_err(|_| DiarizeChatRefusal::ProducerCoordinate)?,
+            );
         }
         let timeline = DiarizationTimeline::new(turns);
         let mut replacements = Vec::with_capacity(self.utterances.len());
@@ -324,7 +320,14 @@ mod tests {
             .document()
             .utterances()
             .map(|child| {
-                let timing = &child.main.content.bullet.as_ref().unwrap().timing;
+                let timing = &child
+                    .main
+                    .content
+                    .bullet
+                    .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
+                    .unwrap()
+                    .timing;
                 (child.main.speaker.as_str(), timing.start_ms, timing.end_ms)
             })
             .collect();

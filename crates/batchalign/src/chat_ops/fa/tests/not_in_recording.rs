@@ -24,6 +24,7 @@ fn bullets(chat: &talkbank_model::model::ChatFile) -> Vec<Option<(u64, u64)>> {
                     .content
                     .bullet
                     .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
             ),
             _ => None,
@@ -133,21 +134,25 @@ fn a_kept_diary_bullet_is_restored_after_ordering_and_orders_nothing() {
         if let MainBulletPolicy::KeepExact = policy {
             // `exact` keeps an unbulleted utterance unbulleted: give the
             // spoken one a bullet of its own so both policies time it.
-            get_test_utterance(&mut chat, 2).main.content.bullet =
-                Some(talkbank_model::model::Bullet::new(
+            get_test_utterance(&mut chat, 2).main.content.bullet = Some(
+                talkbank_model::model::Bullet::new(
                     talkbank_model::Location::Unlocated,
                     3_400,
                     4_600,
-                ));
+                )
+                .into(),
+            );
         }
         let keep = if let MainBulletPolicy::KeepExact = policy {
             let mut given = input.clone();
-            get_test_utterance(&mut given, 2).main.content.bullet =
-                Some(talkbank_model::model::Bullet::new(
+            get_test_utterance(&mut given, 2).main.content.bullet = Some(
+                talkbank_model::model::Bullet::new(
                     talkbank_model::Location::Unlocated,
                     3_400,
                     4_600,
-                ));
+                )
+                .into(),
+            );
             bound_projection(&given, EndOverlapPolicy::ClampAllAdjacent, policy)
         } else {
             keep

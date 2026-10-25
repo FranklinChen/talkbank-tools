@@ -15,7 +15,7 @@
 
 use smallvec::SmallVec;
 use talkbank_model::model::FormType;
-use talkbank_model::model::dependent_tier::mor::MorFeature;
+use talkbank_model::model::dependent_tier::mor::{MorFeature, MorFeatureShapeError};
 
 /// One row of the table: scat code (POS prefix as a flat string, interned
 /// at use-site by [`super::synthesize`]) plus zero or more flat features.
@@ -32,16 +32,16 @@ impl SynthesisRule {
         }
     }
 
-    fn with_feature(mut self, value: impl AsRef<str>) -> Self {
-        self.features.push(MorFeature::flat(value));
-        self
+    fn with_feature(mut self, value: impl AsRef<str>) -> Result<Self, MorFeatureShapeError> {
+        self.features.push(MorFeature::flat(value)?);
+        Ok(self)
     }
 }
 
 /// Map a `FormType` to its synthesis rule. Exhaustive match, adding a
 /// `FormType` variant without updating this is a compile error.
-pub(crate) fn scat_synthesis(form_type: &FormType) -> SynthesisRule {
-    match form_type {
+pub(crate) fn scat_synthesis(form_type: &FormType) -> Result<SynthesisRule, MorFeatureShapeError> {
+    Ok(match form_type {
         FormType::B => SynthesisRule::bare("bab"),
         FormType::C => SynthesisRule::bare("chi"),
         FormType::D => SynthesisRule::bare("dia"),
@@ -65,7 +65,7 @@ pub(crate) fn scat_synthesis(form_type: &FormType) -> SynthesisRule {
         // CHAT-MOR convention; conservative defaults, easy to revise.
         FormType::FP => SynthesisRule::bare("co"),
         FormType::G => SynthesisRule::bare("unk"),
-        FormType::LS => SynthesisRule::bare("n:let").with_feature("Plur"),
+        FormType::LS => SynthesisRule::bare("n:let").with_feature("Plur")?,
 
         // A marker naming no declared form. This is INVALID CHAT, not an
         // extension point: chatter rejects it with E203 ("Undeclared form
@@ -80,8 +80,8 @@ pub(crate) fn scat_synthesis(form_type: &FormType) -> SynthesisRule {
         // for a form CHAT does not define would fabricate a value, and
         // dropping the code would destroy the evidence of what was wrong. The
         // real fix belongs upstream, in whatever produced the invalid marker.
-        FormType::Undeclared(code) => SynthesisRule::bare("unk").with_feature(code),
+        FormType::Undeclared(code) => SynthesisRule::bare("unk").with_feature(code)?,
 
-        FormType::UserDefined(code) => SynthesisRule::bare("unk").with_feature(code),
-    }
+        FormType::UserDefined(code) => SynthesisRule::bare("unk").with_feature(code)?,
+    })
 }

@@ -329,7 +329,10 @@ mod tests {
     fn a_different_source_word_cannot_acquire_the_expansion() {
         with_context(|_word, mut ctx| {
             let refusal = AdmittedExpansion::admit(
-                &Word::simple(talkbank_model::Location::Unlocated, "dog"),
+                &Word::new(
+                    talkbank_model::Location::Unlocated,
+                    talkbank_model::non_empty_literal!("dog").into(),
+                ),
                 &mut ctx,
             )
             .err()

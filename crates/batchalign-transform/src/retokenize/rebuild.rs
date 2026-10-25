@@ -193,7 +193,8 @@ pub(super) fn rebuild_content(
             // if that rule ever changes, every word after a retrace lands on
             // the wrong `%mor` entry. Listing the variants is what makes the
             // compiler notice a new one instead of silently assuming it too.
-            UtteranceContent::Event(_)
+            UtteranceContent::OrphanAnnotation(_)
+            | UtteranceContent::Event(_)
             | UtteranceContent::AnnotatedEvent(_)
             | UtteranceContent::Pause(_)
             | UtteranceContent::Retrace(_)
@@ -364,7 +365,8 @@ fn rebuild_bracketed_content(
                 new_items.push(item);
             }
             // The bracketed twin of the passthrough above; same claim, same reason.
-            BracketedItem::Event(_)
+            BracketedItem::OrphanAnnotation(_)
+            | BracketedItem::Event(_)
             | BracketedItem::AnnotatedEvent(_)
             | BracketedItem::Pause(_)
             | BracketedItem::Action(_)

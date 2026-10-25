@@ -1282,7 +1282,7 @@ mod tests {
             let MediaTimingState::Timed(linked) = state else {
                 panic!("{case:?}: a timed document takes the timed transition");
             };
-            let media = linked.as_chat_file().media.as_ref().expect("linked media");
+            let media = linked.as_chat_file().media_header().expect("linked media");
             assert_eq!(media.status, None, "{case:?}: the result is linked");
         }
     }

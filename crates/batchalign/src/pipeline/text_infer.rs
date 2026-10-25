@@ -989,9 +989,10 @@ mod tests {
                         ["we", "took", "b2", "there"]
                             .into_iter()
                             .map(|word| {
-                                UtteranceContent::Word(Box::new(Word::simple(
+                                UtteranceContent::Word(Box::new(Word::new(
                                     talkbank_model::Location::Unlocated,
-                                    word,
+                                    talkbank_model::WordText::new(word)
+                                        .expect("nonempty fixture word"),
                                 )))
                             })
                             .collect(),
@@ -1071,9 +1072,10 @@ mod tests {
                                 ["the", "c3", "ball"]
                                     .into_iter()
                                     .map(|word| {
-                                        UtteranceContent::Word(Box::new(Word::simple(
+                                        UtteranceContent::Word(Box::new(Word::new(
                                             talkbank_model::Location::Unlocated,
-                                            word,
+                                            talkbank_model::WordText::new(word)
+                                                .expect("nonempty fixture word"),
                                         )))
                                     })
                                     .collect(),

@@ -16,12 +16,17 @@ from batchalign.inference.languages.cantonese._qwen_common import (
 )
 from batchalign.inference.qwen_asr_profile import QwenAsrProfile
 from batchalign.inference.qwen_forced_alignment import (
-    SpokenWindowWords,
+    PairedWindowAlignment,
     WindowAlignedWord,
-    WindowAlignment,
     resolve_qwen_language,
 )
 from batchalign.inference.qwen_punctuation import PunctuatedAlignment
+from batchalign.inference.qwen_timing import (
+    AudioWindow,
+    ObservedRecordingSpan,
+    SpokenWindowWords,
+    WindowAlignment,
+)
 from batchalign.tests._qwen_recognition import (
     SEGMENTATION_MODEL_POLICY,
     TAIWANESE_POLICY,
@@ -31,8 +36,13 @@ from batchalign.worker._types_v2 import RecognitionPunctuationV2
 
 
 def _spoken(words):
-    return SpokenWindowWords.of_units(
+    reported = [
         WindowAlignedWord(word, float(i), float(i + 1)) for i, word in enumerate(words)
+    ]
+    return SpokenWindowWords(
+        WindowAlignment(
+            PairedWindowAlignment.of(words, reported), AudioWindow(float(len(words)))
+        )
     )
 
 
@@ -81,7 +91,7 @@ def test_recognizer_retains_punctuation_and_exact_file_relative_times():
     class Aligner:
         def align(self, audio, text, language):
             assert language == "Chinese"
-            return WindowAlignment.of(
+            return PairedWindowAlignment.of(
                 ["你", "好"],
                 [WindowAlignedWord("你", 0.1, 0.4), WindowAlignedWord("好", 0.5, 0.9)],
             )
@@ -97,7 +107,11 @@ def test_recognizer_retains_punctuation_and_exact_file_relative_times():
     )
     chunk = AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0)
     words = recognizer._align_chunk(chunk, "你好。")
-    assert words == [(30.1, 30.4, "你"), (30.5, 30.9, "好。")]
+    assert [
+        (word.timing.start_s, word.timing.end_s, word.text)
+        for word in words.words
+        if isinstance(word.timing, ObservedRecordingSpan)
+    ] == [(30.1, 30.4, "你"), (30.5, 30.9, "好。")]
 
 
 def test_a_discarding_profile_keeps_only_the_aligned_units():
@@ -107,7 +121,7 @@ def test_a_discarding_profile_keeps_only_the_aligned_units():
     class Aligner:
         def align(self, audio, text, language):
             assert language == "Cantonese"
-            return WindowAlignment.of(
+            return PairedWindowAlignment.of(
                 ["你", "好"],
                 [WindowAlignedWord("你", 0.1, 0.4), WindowAlignedWord("好", 0.5, 0.9)],
             )
@@ -123,7 +137,11 @@ def test_a_discarding_profile_keeps_only_the_aligned_units():
     )
     chunk = AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0)
     words = recognizer._align_chunk(chunk, "你好。")
-    assert words == [(30.1, 30.4, "你"), (30.5, 30.9, "好")]
+    assert [
+        (word.timing.start_s, word.timing.end_s, word.text)
+        for word in words.words
+        if isinstance(word.timing, ObservedRecordingSpan)
+    ] == [(30.1, 30.4, "你"), (30.5, 30.9, "好")]
 
 
 def test_config_load_transitions_to_a_ready_recognizer(monkeypatch):
@@ -181,7 +199,8 @@ def test_punctuation_does_not_erase_combining_tone_marks():
         PunctuatedAlignment("a\u0301.", _spoken(["a"]))
     aligned = _spoken(["a\u0301"])
     result = PunctuatedAlignment("a\u0301.", aligned)
-    assert result.words == (WindowAlignedWord("a\u0301.", 0.0, 1.0),)
+    assert result.words[0].text == "a\u0301."
+    assert result.words[0].timing is aligned.words[0].timing
 
 
 @pytest.mark.parametrize("context", ["", "臺灣台語與國語混合對話"])

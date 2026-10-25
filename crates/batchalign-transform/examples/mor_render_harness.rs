@@ -153,10 +153,9 @@ fn read_cleared(parser: &TreeSitterParser, path: &Path) -> Result<ChatFile, Erro
 }
 
 fn primary_language(chat: &ChatFile, path: &Path) -> Result<LanguageCode, Error> {
-    chat.languages
-        .first()
-        .cloned()
-        .ok_or_else(|| format!("{}: no @Languages", path.display()).into())
+    chat.language_declaration()
+        .map(|languages| languages.primary().clone())
+        .map_err(|error| format!("{}: unusable @Languages: {error}", path.display()).into())
 }
 
 fn collect(root: &Path, out: &Path, files: &[String]) -> Result<(), Error> {
@@ -167,8 +166,13 @@ fn collect(root: &Path, out: &Path, files: &[String]) -> Result<(), Error> {
         let path = root.join(file);
         let chat = read_cleared(&parser, &path)?;
         let primary = primary_language(&chat, &path)?;
-        let langs = declared_languages(&chat, &primary);
-        let payloads = collect_payloads(&chat, &primary, &langs, MultilingualPolicy::ProcessAll);
+        let langs = declared_languages(&chat, &primary)?;
+        let payloads = collect_payloads(
+            &chat,
+            &primary,
+            langs.as_ref(),
+            MultilingualPolicy::ProcessAll,
+        );
         for utterance in payloads.batch_items {
             let key = ItemKey {
                 file: file.clone(),
@@ -200,8 +204,13 @@ fn render_file(
     let path = root.join(file);
     let mut chat = read_cleared(parser, &path)?;
     let primary = primary_language(&chat, &path)?;
-    let langs = declared_languages(&chat, &primary);
-    let payloads = collect_payloads(&chat, &primary, &langs, MultilingualPolicy::ProcessAll);
+    let langs = declared_languages(&chat, &primary)?;
+    let payloads = collect_payloads(
+        &chat,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    );
 
     let mut responses: Vec<UdResponse> = Vec::with_capacity(payloads.batch_items.len());
     for utterance in &payloads.batch_items {

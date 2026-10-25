@@ -34,7 +34,7 @@ irm https://github.com/FranklinChen/talkbank-tools/releases/latest/download/inst
 
 The installer bootstraps [`uv`](https://docs.astral.sh/uv/) if it is not already
 present, installs `batchalign3` into an isolated environment with a uv-managed
-Python (3.13 by default; override with `BATCHALIGN3_PYTHON`), and re-running it
+Python (3.14 by default; override with `BATCHALIGN3_PYTHON`), and re-running it
 upgrades to the latest release. The first install downloads large ML
 dependencies (PyTorch, Stanza, Whisper, and others).
 
@@ -62,7 +62,7 @@ Full command reference:
 | Requirement | Details |
 |---|---|
 | Operating systems | macOS (Apple Silicon + Intel), Linux (x86_64 + aarch64), Windows (x86_64) |
-| Python | 3.13 or 3.14 (the installer uses a uv-managed Python, 3.13 by default) |
+| Python | 3.14 (the installer uses a uv-managed Python, 3.14 by default) |
 | Disk | Several GB for ML models, downloaded on first use |
 | RAM | 8 GB minimum, 16 GB recommended |
 | FFmpeg | Needed only for some media formats |

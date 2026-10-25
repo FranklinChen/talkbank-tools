@@ -58,6 +58,8 @@ pub(crate) enum ExecuteFailure {
     DeviceOutOfMemory(String),
     /// The task ran and failed.
     Runtime(String),
+    /// The model ran but generated data that fails output admission.
+    ModelOutputInvalid(String),
 }
 
 impl ExecuteFailure {
@@ -86,6 +88,7 @@ impl ExecuteFailure {
             }
             Self::DeviceOutOfMemory(message) => (ProtocolErrorCodeV2::DeviceOutOfMemory, message),
             Self::Runtime(message) => (ProtocolErrorCodeV2::RuntimeFailure, message),
+            Self::ModelOutputInvalid(message) => (ProtocolErrorCodeV2::ModelOutputInvalid, message),
         }
     }
 }
@@ -108,6 +111,7 @@ pyo3::import_exception!(
 pyo3::import_exception!(batchalign.worker._language_errors, UnsupportedLanguageError);
 
 pyo3::import_exception!(batchalign.worker._model_errors, ModelNotLoadedError);
+pyo3::import_exception!(batchalign.worker._model_errors, ModelOutputInvalidError);
 
 // pydantic's validation failure: what a runner adapter raises when the batch
 // or request it parses has the wrong shape.
@@ -162,6 +166,7 @@ impl TransientQuestion {
 /// | --- | --- |
 /// | `ModelAccessDeniedError` | `ModelAccessDenied` |
 /// | `ProviderQuotaExhaustedError` | `ProviderQuotaExhausted` |
+/// | `ModelOutputInvalidError` | `ModelOutputInvalid` |
 /// | a download that failed in transit (see `_transient_failures`) | `ModelDownloadFailed` |
 /// | `torch.OutOfMemoryError` (see `_transient_failures`) | `DeviceOutOfMemory` |
 /// | `UnsupportedLanguageError` | `UnsupportedLanguage` |
@@ -189,6 +194,9 @@ fn classify_runner_error(py: Python<'_>, error: PyErr) -> ExecuteFailure {
     }
     if error.is_instance_of::<ProviderQuotaExhaustedError>(py) {
         return ExecuteFailure::ProviderQuotaExhausted(message);
+    }
+    if error.is_instance_of::<ModelOutputInvalidError>(py) {
+        return ExecuteFailure::ModelOutputInvalid(message);
     }
     for question in [
         TransientQuestion::ModelDownload,

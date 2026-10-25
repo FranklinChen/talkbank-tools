@@ -1,7 +1,7 @@
 # L2 Morphotag: Per-Word Code-Switching Analysis
 
 **Status:** Current
-**Last updated:** 2026-10-12 22:31 EDT
+**Last updated:** 2026-10-29
 
 L2 dispatch is on by default; `--no-l2-morphotag` opts out and leaves every
 `@s` word as `L2|xxx`. This page is the design reference for implementers;
@@ -341,10 +341,10 @@ NOUN, so it stands. Inside the span `los` keeps the secondary's `det`:
 
 ```chat
 %mor: pron|we-Prs-Nom-P1 verb|talk-Fin-Ind-Past-P1 adp|about det|el-Masc-Def-Art-Plur noun|niño-Masc-Plur .
-%gra: 1|2|NSUBJ 2|0|ROOT 3|4|CASE 4|5|DET 5|2|OBL 6|2|PUNCT
+%gra: 1|2|NSUBJ 2|0|ROOT 3|5|CASE 4|5|DET 5|2|OBL 6|2|PUNCT
 ```
 
-(`3|4|CASE`: see Limitations.)
+`about` follows the attachment source to the secondary root (`3|5|CASE`).
 
 ### Phrasal verbs
 
@@ -369,9 +369,10 @@ NOUN `time`, so `out` keeps its ADP.
 
 `splice_l2_into_chat` consumes merged spans through chatter's
 `MorTier::splice_range_coordinated`, including one-word spans. The span's
-relations are repaired together (`repair_secondary_gras`), then admitted
-as a `SplicedBlock`: one ordered relation per chunk, bounded heads, exactly
-one root and no cycle. `SplicedBlock::root_chunk()` supplies the admitted
+relations enter a checked `SplicedBlock`: one ordered relation per chunk,
+bounded heads, exactly one root and no cycle. A missing root, cycle or
+out-of-range head refuses the secondary graph before it can be spliced; BA3
+does not invent a root or clamp a missing dependency to a plausible host. `SplicedBlock::root_chunk()` supplies the admitted
 root in block-relative numbering; the consumer does not rediscover it.
 
 The caller supplies the root attachment as a `SpanRoot`. A host governor
@@ -401,9 +402,9 @@ not `DEP` fallback attachments or utterance-root replacements.
 | Variant | Dispatch target |
 |---------|-----------------|
 | `Single(lang)` | `lang` |
-| `Multiple(langs)` | the first language named |
-| `Ambiguous(langs)` | the first language named |
-| `Unresolved` | none: the word stays `L2|xxx` |
+| `Multiple(langs)` | none: retain `L2|xxx` and report unresolved dispatch |
+| `Ambiguous(langs)` | none: retain `L2|xxx` and report unresolved dispatch |
+| `Unresolved` | none: retain `L2|xxx` and report unresolved dispatch |
 
 ### Validation and normalization policy
 
@@ -424,14 +425,11 @@ Per-word L2 dispatch and transcript repair are intentionally separate concerns:
 
 ### Unsupported non-primary language handling
 
-`morphotag` requires only the **primary** `@Languages` code to be
-Stanza-supported. Non-primary content targeting an unsupported language,
-whether via `[- UNSUPPORTEDLANG]` precode or `@s:UNSUPPORTEDLANG`
-per-word marker, is partitioned out of Stanza dispatch by
-`partition_groups_by_stanza_support` in
-`crates/batchalign/src/morphosyntax/worker.rs` and emitted as `L2|xxx`
-rather than crashing the worker. Supported-language utterances and
-spans in the same file continue to receive real morphology.
+Unsupported inline `@s:LANG` spans retain their local `L2|xxx` slots,
+with job exclusions and an availability header comment. Failures retain their
+own shortfall causes. Primary and effective whole-utterance language work
+requires capability admission before inference; it does not borrow this inline
+placeholder policy. See [L2 handling](l2-handling.md#unsupported-non-primary-languages).
 
 ## Design Alternatives Considered
 
@@ -512,14 +510,11 @@ before merging; count mismatches leave those spans untouched:
 
 ## Limitations
 
-1. **Host words that point into a span attach to its first chunk.**
-   Chatter's splice redirects a host relation whose head is a replaced
-   word to the first chunk of the replacing block. Where the source's
-   host dependents should go to the secondary root, the result differs:
-   in `we talked about los@s niños@s .` `about` attaches to `los`
-   (`3|4|CASE`), and in
-   `ich glaube it's@s working@s und don't@s stop@s .` `und` attaches to
-   `do` (`6|7|CC`) and `stop` to `it` (`9|3|CONJ`).
+1. **Host context is not reanalysed by the secondary model.**
+   Dependents of the primary attachment source follow the secondary block's
+   admitted root through `HostRedirects::PerItem`; other replaced words follow
+   their counterpart chunks. The primary model still supplies host syntax,
+   which can be linguistically wrong even when the coordinated graph is valid.
 2. **A single isolated word has only the secondary's analysis of it
    alone.** The secondary model sees just the span and the terminator;
    for an ambiguous isolated word its category is the model's best

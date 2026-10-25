@@ -518,6 +518,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
                         .content
                         .bullet
                         .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
                         .map(|b| (b.timing.start_ms, b.timing.end_ms)),
                 )
             } else {
@@ -574,7 +575,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
                 if let Some(recovered) = bullet_iter.peek()
                     && utt_idx == recovered.utterance_index.index()
                 {
-                    utt.main.content.bullet = Some(recovered.interval.into_hint());
+                    utt.main.content.bullet = Some(recovered.interval.into_hint().into());
                     bullet_iter.next();
                 }
                 utt_idx += 1;
@@ -985,6 +986,7 @@ mod proof_only_tests;
 mod tests {
     use super::*;
     use crate::chat_ops::fa::coordinates::Ms;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     pub(super) fn expected_interval(start_ms: u64, end_ms: u64) -> PositiveUtrInterval {
         PositiveUtrInterval::admit(start_ms, end_ms).expect("positive expected interval")

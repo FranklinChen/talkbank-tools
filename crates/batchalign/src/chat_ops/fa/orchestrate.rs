@@ -1626,7 +1626,13 @@ fn enforce_start_order(
 
     let mut entries = Vec::new();
     for (line_idx, utterance_idx, utterance) in super::utterances_indexed(chat_file) {
-        let Some(bullet) = utterance.main.content.bullet.as_ref() else {
+        let Some(bullet) = utterance
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        else {
             continue;
         };
         entries.push(StartOrderEntry {
@@ -1890,7 +1896,13 @@ pub(super) fn file_order_successor_start_ms(
         .iter()
         .skip(after_line_idx + 1)
         .find_map(|line| match line {
-            Line::Utterance(utt) => utt.main.content.bullet.as_ref().map(|b| b.timing.start_ms),
+            Line::Utterance(utt) => utt
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
+                .map(|b| b.timing.start_ms),
             _ => None,
         })
 }
@@ -1926,7 +1938,13 @@ fn resolve_end_overlap_pair(
     let Line::Utterance(next_utt_ref) = &chat_file.lines.as_slice()[next_idx] else {
         return Ok(());
     };
-    let Some(next_bullet) = next_utt_ref.main.content.bullet.as_ref() else {
+    let Some(next_bullet) = next_utt_ref
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+    else {
         return Ok(());
     };
     let next_start = next_bullet.timing.start_ms;
@@ -1939,7 +1957,13 @@ fn resolve_end_overlap_pair(
     let Line::Utterance(prev_utt_ref) = &chat_file.lines.as_slice()[prev_idx] else {
         return Ok(());
     };
-    let Some(prev_bullet) = prev_utt_ref.main.content.bullet.as_ref() else {
+    let Some(prev_bullet) = prev_utt_ref
+        .main
+        .content
+        .bullet
+        .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
+    else {
         return Ok(());
     };
     if prev_bullet.timing.end_ms <= next_start {
@@ -2134,7 +2158,12 @@ fn resolve_revisable_prev(
                 clamped_to_ms,
             });
             if let Line::Utterance(prev_utt) = &mut chat_file.lines.as_mut_slice()[prev_idx]
-                && let Some(bullet) = prev_utt.main.content.bullet.as_mut()
+                && let Some(bullet) = prev_utt
+                    .main
+                    .content
+                    .bullet
+                    .as_mut()
+                    .and_then(talkbank_model::BulletState::as_parsed_mut)
             {
                 bullet.timing.end_ms = clamped_to_ms;
             }
@@ -2158,12 +2187,22 @@ fn resolve_revisable_prev(
                 next_hull_start_ms,
             });
             if let Line::Utterance(prev_utt) = &mut chat_file.lines.as_mut_slice()[prev_idx]
-                && let Some(bullet) = prev_utt.main.content.bullet.as_mut()
+                && let Some(bullet) = prev_utt
+                    .main
+                    .content
+                    .bullet
+                    .as_mut()
+                    .and_then(talkbank_model::BulletState::as_parsed_mut)
             {
                 bullet.timing.end_ms = prev_hull_end_ms;
             }
             if let Line::Utterance(next_utt) = &mut chat_file.lines.as_mut_slice()[next_idx]
-                && let Some(bullet) = next_utt.main.content.bullet.as_mut()
+                && let Some(bullet) = next_utt
+                    .main
+                    .content
+                    .bullet
+                    .as_mut()
+                    .and_then(talkbank_model::BulletState::as_parsed_mut)
             {
                 bullet.timing.start_ms = next_hull_start_ms;
             }
@@ -2171,7 +2210,13 @@ fn resolve_revisable_prev(
         EndOverlapResolution::InterleavedWords => {
             let mut words_clamped = ClampedWordCounts::default();
             if let Line::Utterance(prev_utt) = &mut chat_file.lines.as_mut_slice()[prev_idx] {
-                if let Some(bullet) = prev_utt.main.content.bullet.as_mut() {
+                if let Some(bullet) = prev_utt
+                    .main
+                    .content
+                    .bullet
+                    .as_mut()
+                    .and_then(talkbank_model::BulletState::as_parsed_mut)
+                {
                     bullet.timing.end_ms = next_start;
                 }
                 words_clamped = clamp_words_past_bound(prev_utt, next_start);
@@ -2261,6 +2306,7 @@ fn yield_next_to_kept_end(
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .map(|bullet| bullet.timing.end_ms)
     else {
         return;
@@ -2288,7 +2334,13 @@ fn yield_next_to_kept_end(
             )
         }
         KeptEndYield::StartToKeptEnd | KeptEndYield::LeadingWordsClamped => {
-            if let Some(bullet) = next_utt.main.content.bullet.as_mut() {
+            if let Some(bullet) = next_utt
+                .main
+                .content
+                .bullet
+                .as_mut()
+                .and_then(talkbank_model::BulletState::as_parsed_mut)
+            {
                 bullet.timing.start_ms = kept_end;
             }
             let words = match yielded {

@@ -149,7 +149,7 @@ jobs:
           shared-key: batchalign-release-${{ matrix.target }}
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       # The batchalign crate's default features include `embed-dashboard`,
       # which `include_dir!`s frontend/dist at compile time and panics if it
@@ -258,7 +258,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       - uses: actions/download-artifact@v8
         with:
           name: wheel-${{ matrix.target }}

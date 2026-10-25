@@ -1,9 +1,8 @@
-"""The worker's typed report that a request names a model it has not loaded.
+"""Lightweight exception identities for model availability and output admission.
 
 Its own module, holding nothing else, so the Rust worker boundary
 (``pyo3::import_exception!`` in ``batchalign-pyo3/src/worker_execute.rs``)
-can recognise the class by identity, as the protocol code
-``model_unavailable``, without importing the model libraries that raise it.
+can recognise each class without importing the model libraries that raise it.
 """
 
 from __future__ import annotations
@@ -19,4 +18,13 @@ class ModelNotLoadedError(RuntimeError):
     """
 
 
-__all__ = ["ModelNotLoadedError"]
+class ModelOutputInvalidError(ValueError):
+    """Inference returned data that cannot become admitted pipeline evidence.
+
+    The request was valid and the model ran. Retrying the identical request or
+    editing input CHAT is not a repair for its malformed result. The worker
+    protocol keeps this distinct from invalid requests and transient failures.
+    """
+
+
+__all__ = ["ModelNotLoadedError", "ModelOutputInvalidError"]

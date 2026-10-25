@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 /// A validated lowercase SHA-256 digest.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(transparent)]
 pub struct Sha256Digest(String);
 
@@ -47,7 +48,8 @@ impl<'de> Deserialize<'de> for Sha256Digest {
 }
 
 /// Runtime identity proven by the current ready-handshake schema.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct WorkerRuntimeIdentity {
     schema_version: u8,
     python_version: String,

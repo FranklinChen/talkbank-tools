@@ -556,7 +556,13 @@ impl LocalizedUtterance {
         anchors: &AnchorIndex,
         recording: &Recording,
     ) -> Option<Self> {
-        let span = match &source.main.content.bullet {
+        let span = match source
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        {
             Some(bullet) => TimeSpan::new(bullet.timing.start_ms, bullet.timing.end_ms),
             None => anchors.search_window(
                 utterance,

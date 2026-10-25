@@ -78,7 +78,7 @@ def test_a_bounded_deadline_chunk_with_no_text_still_lands_in_refused(
 
     result = recognizer._run_model("fake.wav")
 
-    assert result.segments == []
+    assert result.segments == ()
     assert len(result.refused) == 1
     assert result.refused[0].reason is RunawayReason.DEADLINE
 
@@ -97,5 +97,5 @@ def test_a_completed_outcome_with_no_text_is_ordinary_silence_not_a_refusal(
 
     result = recognizer._run_model("fake.wav")
 
-    assert result.segments == []
-    assert result.refused == []
+    assert result.segments == ()
+    assert result.refused == ()

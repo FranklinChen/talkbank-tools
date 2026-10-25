@@ -1591,7 +1591,7 @@ fn transcript_languages_are_refused_where_they_enter() {
 /// consult `chat_file.participants` instead of re-parsing header lines
 /// would otherwise see an empty roster on ASR-built files.
 #[test]
-fn built_chat_file_carries_typed_participant_map() {
+fn built_chat_file_exposes_participants_from_headers() {
     let utterances = vec![
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(0),
@@ -1620,21 +1620,21 @@ fn built_chat_file_carries_typed_participant_map() {
     let chat_file = build_chat(desc).unwrap().into_file();
 
     assert_eq!(
-        chat_file.participants.len(),
+        chat_file.all_participants().len(),
         2,
         "built ChatFile must populate its typed participant map"
     );
     let par = chat_file
-        .participants
-        .values()
-        .find(|p| p.code.as_str() == "PAR")
+        .all_participants()
+        .into_iter()
+        .find(|p| p.code().as_str() == "PAR")
         .expect("PAR participant present");
-    assert_eq!(par.role.as_str(), "Participant");
+    assert_eq!(par.role().expect("declared role").as_str(), "Participant");
     assert!(
         chat_file
-            .participants
-            .values()
-            .any(|p| p.code.as_str() == "INV"),
+            .all_participants()
+            .into_iter()
+            .any(|p| p.code().as_str() == "INV"),
         "INV participant present"
     );
 }

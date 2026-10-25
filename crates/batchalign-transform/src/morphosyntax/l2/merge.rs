@@ -14,8 +14,10 @@
 
 use talkbank_model::alignment::MorItemIndex;
 use talkbank_model::model::LanguageCode;
+#[cfg(test)]
 use talkbank_model::model::dependent_tier::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::{Mor, PosCategory};
+use talkbank_model::model::dependent_tier::{SplicedBlock, SplicedBlockError};
 
 use super::deprel::{deprel_to_pos_constraint, infer_deprel_from_pos};
 use super::plan::{AsPlanned, ExternalRelation, L2Attachment, L2SpanPlan};
@@ -146,6 +148,9 @@ pub enum L2MergeError {
     /// The secondary analysis has no root word.
     #[error("secondary analysis has no root word")]
     NoSecondaryRoot,
+    /// The mapped secondary analysis is not an admitted rooted block.
+    #[error("secondary block refused: {0}")]
+    Block(#[from] SplicedBlockError),
 }
 
 /// Deprel-base comparison against the UD phrasal-verb particle
@@ -168,16 +173,12 @@ pub struct MergedL2Span {
     /// The language the span was analysed in (for reports).
     pub(super) target_lang: LanguageCode,
     /// The host word the span starts at; the span covers
-    /// `first_word .. first_word + mors.len()`.
+    /// `first_word .. first_word + block.items().len()`.
     pub(super) first_word: MorItemIndex,
-    /// One `%mor` item per span word, in order: the secondary's items as
-    /// `map_ud_sentence` mapped them (`it's` is `pron|it~aux|be`), with only
-    /// a phrasal particle's category rewritten to PART.
-    pub(super) mors: Vec<Mor>,
-    /// The secondary's relations for the chunks of `mors`, unchanged: heads
-    /// are 1-based within the span, `0` for the secondary root. Inside the
-    /// span these are authoritative.
-    pub(super) gras: Vec<GrammaticalRelation>,
+    /// Morphology and its admitted, immutable block-relative graph.
+    pub(super) block: SplicedBlock,
+    /// Mapped grammar retained for diagnostics, never reparsed as evidence.
+    pub(super) grammar_summary: String,
     /// How the secondary root attaches to the host, with the span's one
     /// external relation (the primary's, or its correction).
     pub(super) attachment: L2Attachment<ExternalRelation>,
@@ -186,12 +187,12 @@ pub struct MergedL2Span {
 impl MergedL2Span {
     /// The span's `%mor` items.
     pub fn mors(&self) -> &[Mor] {
-        &self.mors
+        self.block.items()
     }
 
-    /// The span's secondary relations (span-relative heads).
-    pub fn gras(&self) -> &[GrammaticalRelation] {
-        &self.gras
+    /// The mapped grammar's diagnostic spelling, not mutable graph data.
+    pub fn grammar_summary(&self) -> &str {
+        &self.grammar_summary
     }
 
     /// How the span root attaches to the host.
@@ -204,8 +205,7 @@ impl MergedL2Span {
         self.first_word
     }
 
-    /// A span built directly, for splice tests that feed shapes no
-    /// secondary analysis produces.
+    /// Admit fixture graph evidence through the same block boundary as production.
     #[cfg(test)]
     pub(super) fn for_splice_test(
         line_idx: usize,
@@ -213,118 +213,19 @@ impl MergedL2Span {
         mors: Vec<Mor>,
         gras: Vec<GrammaticalRelation>,
         attachment: L2Attachment<ExternalRelation>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SplicedBlockError> {
+        Ok(Self {
             line_idx,
             target_lang: LanguageCode::new("spa").expect("valid language code"),
             first_word,
-            mors,
-            gras,
+            grammar_summary: gras
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+            block: SplicedBlock::new(mors, gras)?,
             attachment,
-        }
-    }
-}
-
-/// Whether the entry at `start` reaches a `head=0` row by following
-/// head pointers within `chunk_count + 1` hops. Returns false on
-/// cycles and self-loops: the conditions
-/// [`repair_secondary_gras`]'s pass 4 needs to detect.
-fn entry_reaches_root_via_heads(
-    gras: &[GrammaticalRelation],
-    start: usize,
-    chunk_count: usize,
-) -> bool {
-    let mut current = start;
-    for _ in 0..=chunk_count {
-        let head = gras[current].head;
-        if head == 0 {
-            return true;
-        }
-        let next = head - 1; // 1-indexed → 0-indexed
-        if next == current {
-            return false; // self-loop
-        }
-        current = next;
-    }
-    false
-}
-
-/// Repair a span-aggregated secondary gras slice so the merged
-/// result can be admitted as a `SplicedBlock`. Admission, not repair,
-/// supplies the proof of a one-rooted tree and its block-relative root.
-///
-/// Runs at the splice, once per span, over the span's whole relation list:
-/// heads are span-relative, so one word's relation may point at another
-/// word of the span.
-///
-/// Four passes, each reading and updating the one root found so far:
-/// 1. Clamp OOB (`head > chunk_count` becomes `head=0`).
-///    Catches `secondary_head_oob`.
-/// 2. The first `head=0` row is the root (labelled `ROOT`); every later
-///    one attaches to it as `DEP`. Catches `secondary_multi_root`.
-/// 3. With no root and an [`L2Attachment::InternalRoot`] attachment, the
-///    first row becomes the root. No-op for an external attachment;
-///    subsequent block admission refuses any remaining rootless block. Catches
-///    `secondary_no_root`.
-/// 4. A row that does not reach the root (a cycle) attaches to the root,
-///    or becomes it when there is none yet. Catches `secondary_cycle`.
-pub(super) fn repair_secondary_gras<R>(
-    gras: &mut [GrammaticalRelation],
-    attachment: &L2Attachment<R>,
-) {
-    let chunk_count = gras.len();
-
-    // Pass 1.
-    for rel in gras.iter_mut() {
-        if rel.head > chunk_count {
-            rel.head = 0;
-        }
-    }
-
-    // Pass 2.
-    let mut root: Option<usize> = None;
-    for (i, relation) in gras.iter_mut().enumerate() {
-        if relation.head != 0 {
-            continue;
-        }
-        match root {
-            None => {
-                relation.relation = "ROOT".into();
-                root = Some(i);
-            }
-            Some(first) => {
-                relation.head = first + 1; // 1-indexed
-                relation.relation = "DEP".into();
-            }
-        }
-    }
-
-    // Pass 3.
-    if root.is_none()
-        && chunk_count > 0
-        && let L2Attachment::InternalRoot = attachment
-    {
-        gras[0].head = 0;
-        gras[0].relation = "ROOT".into();
-        root = Some(0);
-    }
-
-    // Pass 4.
-    for i in 0..chunk_count {
-        if gras[i].head == 0 || entry_reaches_root_via_heads(gras, i, chunk_count) {
-            continue;
-        }
-        match root {
-            Some(root) => {
-                gras[i].head = root + 1;
-                gras[i].relation = "DEP".into();
-            }
-            None => {
-                gras[i].head = 0;
-                gras[i].relation = "ROOT".into();
-                root = Some(i);
-            }
-        }
+        })
     }
 }
 
@@ -378,8 +279,12 @@ pub fn merge_planned_secondary_span(
         line_idx: span.line_idx,
         target_lang: span.target_lang,
         first_word: span.first_word,
-        mors,
-        gras,
+        grammar_summary: gras
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" "),
+        block: SplicedBlock::new(mors, gras)?,
         attachment,
     })
 }
@@ -491,8 +396,7 @@ mod tests {
 
         let pos: Vec<&str> = merged.mors().iter().map(|m| m.main.pos.as_str()).collect();
         assert_eq!(pos, ["verb", "part"]);
-        let gras: Vec<String> = merged.gras().iter().map(ToString::to_string).collect();
-        assert_eq!(gras, ["1|0|ROOT", "2|1|COMPOUND-PRT"]);
+        assert_eq!(merged.grammar_summary(), "1|0|ROOT 2|1|COMPOUND-PRT");
         assert!(matches!(
             merged.attachment(),
             L2Attachment::HostGovernor { source_word, source, relation: ExternalRelation::Primary }
@@ -596,24 +500,5 @@ mod tests {
             (pos.pos(), pos.source()),
             (UniversalPos::Adp, PosSource::SecondaryTag)
         );
-    }
-
-    /// Repair leaves at most one root: with two separate cycles and no root,
-    /// the first cycle's promoted root is the root the second attaches to.
-    #[test]
-    fn repair_leaves_at_most_one_root() {
-        let mut gras = vec![
-            GrammaticalRelation::new(1, 2, "DEP"),
-            GrammaticalRelation::new(2, 1, "DEP"),
-            GrammaticalRelation::new(3, 4, "DEP"),
-            GrammaticalRelation::new(4, 3, "DEP"),
-        ];
-        let attachment: L2Attachment = L2Attachment::UtteranceRoot {
-            source_word: MorItemIndex::new(0),
-        };
-        repair_secondary_gras(&mut gras, &attachment);
-        let roots = gras.iter().filter(|rel| rel.head == 0).count();
-        assert_eq!(roots, 1, "{gras:?}");
-        assert_eq!(gras[0].head, 0);
     }
 }

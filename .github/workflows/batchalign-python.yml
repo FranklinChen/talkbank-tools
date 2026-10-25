@@ -57,7 +57,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -72,8 +72,8 @@ jobs:
           name: dashboard-dist
           path: frontend/dist/
       - name: Build development-profile ABI3 wheel
-        # One cp313-abi3 wheel is valid on every supported Python. The test
-        # matrix below installs this exact artifact under 3.13 and 3.14.
+        # One cp314-abi3 wheel is valid on every supported Python. The test
+        # matrix below installs this exact artifact under standard CPython 3.14.
         env:
           BATCHALIGN_PRESTAGED_BIN: "1"
         run: make batchalign-build-ci-wheel
@@ -88,12 +88,12 @@ jobs:
     needs: build-wheel
     runs-on: ubuntu-latest
     strategy:
-      # Test every officially supported Python (3.13/3.14) on every push
+      # Test every officially supported Python (3.14) on every push
       # and dispatch; see build-wheel for the rationale. fail-fast off so one
       # version's failure still reports the others.
       fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: ["3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0
@@ -123,7 +123,7 @@ jobs:
       # working directory is empty on purpose.
       - uses: astral-sh/setup-uv@v10.3.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
           enable-cache: false
           ignore-empty-workdir: true
       - uses: actions/download-artifact@v8
@@ -151,7 +151,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       - uses: actions/download-artifact@v8
         with:
           name: wheel
@@ -251,7 +251,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       # This job consumes artifacts; it does not compile Rust.
       - uses: actions/download-artifact@v8
         with:
@@ -307,7 +307,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -398,7 +398,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14"
       # This job consumes artifacts; it does not compile Rust.
       - uses: actions/download-artifact@v8
         with:

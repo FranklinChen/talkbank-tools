@@ -146,6 +146,7 @@ class ProtocolErrorCodeV2(str, Enum):
     ATTACHMENT_UNREADABLE = "attachment_unreadable"
     MODEL_UNAVAILABLE = "model_unavailable"
     RUNTIME_FAILURE = "runtime_failure"
+    MODEL_OUTPUT_INVALID = "model_output_invalid"
     # Raised from a structured provider quota refusal, never message matching.
     PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     # A pinned Hugging Face Hub artifact refused this machine's request: a

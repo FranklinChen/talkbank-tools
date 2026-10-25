@@ -56,6 +56,8 @@ pub struct TranscriptUtterance {
 pub enum UtteranceTiming {
     /// The main tier carries no timing bullet.
     Untimed,
+    /// A recovered bullet has no numeric timing to score.
+    Rejected,
     /// The bullet exists but cannot describe a non-empty audio window.
     Invalid {
         /// Start written in the bullet.
@@ -70,7 +72,7 @@ pub enum UtteranceTiming {
 impl UtteranceTiming {
     fn start(self) -> Option<FileMs> {
         match self {
-            Self::Untimed => None,
+            Self::Untimed | Self::Rejected => None,
             Self::Invalid { start, .. } => Some(start),
             Self::Window(window) => Some(window.start()),
         }
@@ -78,7 +80,7 @@ impl UtteranceTiming {
 
     fn end(self) -> Option<FileMs> {
         match self {
-            Self::Untimed => None,
+            Self::Untimed | Self::Rejected => None,
             Self::Invalid { end, .. } => Some(end),
             Self::Window(window) => Some(window.end()),
         }
@@ -271,6 +273,10 @@ pub async fn identify_speakers(
     let mut refusals: BTreeMap<usize, UnscoredReason> = BTreeMap::new();
     for utterance in utterances {
         let window = match utterance.timing {
+            UtteranceTiming::Rejected => {
+                refusals.insert(utterance.utterance_index, UnscoredReason::UnparsedBullet);
+                continue;
+            }
             UtteranceTiming::Untimed => {
                 refusals.insert(utterance.utterance_index, UnscoredReason::NoBullet);
                 continue;

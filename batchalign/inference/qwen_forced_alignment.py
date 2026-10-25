@@ -26,9 +26,21 @@ import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Final, NamedTuple, NewType, Protocol
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    NamedTuple,
+    NewType,
+    Protocol,
+    assert_never,
+)
 
 from batchalign.inference._domain_types import LanguageCode
+from batchalign.worker._model_errors import ModelOutputInvalidError
+
+if TYPE_CHECKING:
+    from batchalign.inference.qwen_timing import QwenFaCacheIdentity, WindowAlignment
 
 L = logging.getLogger("batchalign.qwen.fa")
 
@@ -110,7 +122,9 @@ def resolve_qwen_language(lang: LanguageCode) -> QwenLanguageLabel:
 class WindowAlignedWord:
     """One aligned word, in the time of the AUDIO WINDOW it was aligned against.
 
-    The type name carries the coordinate space on purpose. The aligner is
+    These are model reports, not admitted evidence. `qwen_timing.WindowAlignment`
+    admits their timing against the actual audio before either consumer can
+    use them. The type name carries the coordinate space on purpose. The aligner is
     handed a window (an ASR chunk, or an FA group's audio) and answers relative
     to the start of that window, never relative to the recording. Converting to
     recording time needs the window's own offset, which only the caller holds,
@@ -148,44 +162,118 @@ class WindowAlignedWord:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SpokenWindowWords:
-    """The aligner units that carry TEXT, for a caller that reads them as words.
+class SpanDefect(Enum):
+    NON_FINITE = "non-finite"
+    NEGATIVE = "negative"
+    REVERSED = "end before start"
 
-    A separate type from a `list[WindowAlignedWord]` because dropping a unit is
-    exactly what the FA fold must never do and exactly what the ASR path must
-    do. The fold attributes units to CHAT words BY POSITION, so a filtered list
-    handed to it would move every later span onto the wrong word; the ASR path
-    holds no positional contract at all and simply reports the words it was
-    given timings for.
 
-    Naming the filtered form is the guard the ASR path used to spell inline,
-    restored as a transition instead of an `if` in a loop: `of_units` is the
-    only way to get one, and nothing that takes a `WindowAlignment` takes one
-    of these.
-    """
-
-    words: tuple[WindowAlignedWord, ...]
-
-    @classmethod
-    def of_units(cls, units: Iterable[WindowAlignedWord]) -> SpokenWindowWords:
-        """Keep the units with text; a whitespace-only unit is not a word."""
-        return cls(words=tuple(unit for unit in units if unit.text.strip()))
+class TimingBoundary(Enum):
+    START = "start"
+    END = "end"
 
 
 @dataclass(frozen=True, slots=True)
-class WindowAlignment:
-    """What the aligner segmented AND what it timed, from the SAME call.
+class IndexedWindowUnit:
+    index: int
+    word: WindowAlignedWord
 
-    The two halves used to come from different calls: `WordSegmentation` asked
-    `split_words`, and `align` let `prepare_forced_aligner_inputs` recompute
-    the segmentation internally and threw its answer away. Nothing related the
-    two beyond their length, so a segmentation that differed at the same COUNT
-    folded silently onto the wrong words.
 
-    Holding both together is the cure: possession of a `WindowAlignment` is the
-    proof that these times belong to these units, and `WordSegmentation.fold`
-    can check the units it proved against the units the times are actually for.
+@dataclass(frozen=True, slots=True)
+class InvalidUnitSpan:
+    unit: IndexedWindowUnit
+    defect: SpanDefect
+
+
+@dataclass(frozen=True, slots=True)
+class BackwardsUnitSpan:
+    previous: IndexedWindowUnit
+    current: IndexedWindowUnit
+    boundary: TimingBoundary
+
+
+@dataclass(frozen=True, slots=True)
+class OutsideAudioWindow:
+    unit: IndexedWindowUnit
+    duration_s: float
+
+
+type TimingProblem = InvalidUnitSpan | BackwardsUnitSpan | OutsideAudioWindow
+
+
+@dataclass(frozen=True, slots=True)
+class RelativeAudioWindow:
+    """The shared aligner knows only window-relative coordinates."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingAudioWindow:
+    start_s: float
+    duration_s: float
+
+
+type TimingLocation = RelativeAudioWindow | RecordingAudioWindow
+
+_RELATIVE_AUDIO_WINDOW = RelativeAudioWindow()
+
+
+class QwenTimingInvalid(ModelOutputInvalidError):
+    """A rejected model result, with its original values and coordinate space."""
+
+    def __init__(
+        self,
+        problem: TimingProblem,
+        location: TimingLocation = _RELATIVE_AUDIO_WINDOW,
+    ) -> None:
+        self.problem = problem
+        self.location = location
+        match problem:
+            case InvalidUnitSpan(unit=unit, defect=defect):
+                detail = f"unit {unit.index + 1} {unit.word.text!r} has {defect.value} timing {unit.word.start_s!r}..{unit.word.end_s!r} s"
+            case BackwardsUnitSpan(
+                previous=previous, current=current, boundary=boundary
+            ):
+                detail = (
+                    f"unit {current.index + 1} {current.word.text!r} has a backwards {boundary.value}: "
+                    f"{current.word.start_s!r}..{current.word.end_s!r} s after "
+                    f"unit {previous.index + 1} {previous.word.text!r} "
+                    f"{previous.word.start_s!r}..{previous.word.end_s!r} s"
+                )
+            case OutsideAudioWindow(unit=unit, duration_s=duration):
+                detail = (
+                    f"unit {unit.index + 1} {unit.word.text!r} reports "
+                    f"{unit.word.start_s!r}..{unit.word.end_s!r} s outside its "
+                    f"0..{duration:g} s audio window"
+                )
+            case unreachable:
+                assert_never(unreachable)
+        match location:
+            case RelativeAudioWindow():
+                where = "window-relative coordinates"
+            case RecordingAudioWindow(start_s=start, duration_s=duration):
+                where = f"recording window {start:g}..{start + duration:g} s (reported times are relative to that window)"
+            case unreachable:
+                assert_never(unreachable)
+        super().__init__(
+            f"Qwen forced-aligner model output rejected in {where}: {detail}. "
+            "These are generated timings, not a CHAT input error; retain this diagnostic "
+            "with the audio sample for investigation before rerunning the batch."
+        )
+
+    def in_recording_window(
+        self, start_s: float, duration_s: float
+    ) -> QwenTimingInvalid:
+        return QwenTimingInvalid(
+            self.problem, RecordingAudioWindow(start_s, duration_s)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PairedWindowAlignment:
+    """Paired model reports from the same call; timing is not yet admitted.
+
+    Construction snapshots the sequences and checks arity. WindowAlignment in
+    qwen_timing owns the next edge: bounded intervals and explicit absence.
     """
 
     units: tuple[str, ...]
@@ -193,18 +281,23 @@ class WindowAlignment:
     words: tuple[WindowAlignedWord, ...]
     """One timed span per unit, in the same order."""
 
+    def __post_init__(self) -> None:
+        # Snapshot even a direct caller's lists: a frozen wrapper around a
+        # mutable list would let the result change after admission.
+        object.__setattr__(self, "units", tuple(self.units))
+        object.__setattr__(self, "words", tuple(self.words))
+        if len(self.units) != len(self.words):
+            raise QwenAlignmentMismatch(
+                requested=list(self.units), produced=[word.text for word in self.words]
+            )
+
     @classmethod
     def of(
         cls, units: Iterable[str], words: Iterable[WindowAlignedWord]
-    ) -> WindowAlignment:
-        """The only constructor, and where the model-boundary arity is checked."""
+    ) -> PairedWindowAlignment:
+        """Snapshot model output and pass through the constructor's admission."""
         unit_tuple = tuple(str(unit) for unit in units)
         word_tuple = tuple(words)
-        if len(unit_tuple) != len(word_tuple):
-            raise QwenAlignmentMismatch(
-                requested=list(unit_tuple),
-                produced=[word.text for word in word_tuple],
-            )
         return cls(units=unit_tuple, words=word_tuple)
 
 
@@ -221,10 +314,10 @@ class ForcedAligner(Protocol):
 
     def align(
         self, audio: Any, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment: ...
+    ) -> PairedWindowAlignment: ...
 
 
-class QwenUnitNotTimed(ValueError):
+class QwenUnitNotTimed(ModelOutputInvalidError):
     """A decoded aligner unit arrived without one of its times.
 
     Named rather than left as the raw `KeyError` the dict access would raise,
@@ -242,7 +335,7 @@ class QwenUnitNotTimed(ValueError):
         self.unit = unit
 
 
-class QwenSegmentationDrift(ValueError):
+class QwenSegmentationDrift(ModelOutputInvalidError):
     """The aligner segmented one way when asked and another way when aligning.
 
     NOT an arity disagreement, which is what `QwenAlignmentMismatch` covers:
@@ -263,7 +356,7 @@ class QwenSegmentationDrift(ValueError):
         self.aligned = aligned
 
 
-class QwenSegmentationNotDecomposable(ValueError):
+class QwenSegmentationNotDecomposable(ModelOutputInvalidError):
     """The aligner's tokenizer does not segment word by word.
 
     The fold below rests on ONE property of the aligner's tokenizer: segmenting
@@ -297,7 +390,7 @@ class QwenSegmentationNotDecomposable(ValueError):
         self.per_word = per_word
 
 
-class QwenAlignmentMismatch(ValueError):
+class QwenAlignmentMismatch(ModelOutputInvalidError):
     """The model timed a different number of units than it segmented.
 
     NOT a disagreement about words: that is what the fold below exists to
@@ -306,7 +399,7 @@ class QwenAlignmentMismatch(ValueError):
     attributed to the wrong CHAT word. There is no correct silent handling, so
     it is refused with both lists in the message.
 
-    A MODEL-BOUNDARY check, and it now lives on `WindowAlignment.of`, the one
+    A MODEL-BOUNDARY check, and it now lives on `PairedWindowAlignment.of`, the one
     constructor that sees both the aligner's units and its timings. It is
     unreachable through the shipped `QwenForcedAligner`, whose
     `decode_forced_alignment` builds one entry per unit of `word_lists`; it is
@@ -329,15 +422,10 @@ class QwenAlignmentMismatch(ValueError):
 
 
 class UntimedReason(Enum):
-    """Why one CHAT word came back without a timing.
+    """Explicit absence of word timing; no missing endpoint becomes zero."""
 
-    Exactly one variant, and that is a claim about the fold rather than an
-    oversight: every word the aligner's tokenizer keeps at least one character
-    of owns at least one unit, and every unit is timed, so the only way to
-    reach the end of the fold with no span is to have contributed nothing to
-    segment. A second variant would need a second way, and there is not one.
-    """
-
+    ALIGNMENT_UNIT_UNAVAILABLE = "alignment_unit_unavailable"
+    BELOW_MILLISECOND_RESOLUTION = "below_millisecond_resolution"
     NO_ALIGNABLE_CHARACTERS = "no_alignable_characters"
     """The aligner's tokenizer kept none of this word's characters.
 
@@ -353,6 +441,10 @@ class TimedChatWord:
     word: str
     start_ms: int
     end_ms: int
+
+    def __post_init__(self) -> None:
+        if self.start_ms < 0 or self.end_ms <= self.start_ms:
+            raise ValueError("a timed CHAT word needs a positive forward interval")
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,7 +547,12 @@ class WordSegmentation:
         not a comparison of two lengths. A count cannot see a same-length
         boundary shift, and a boundary shift is what silently moves spans.
         """
-        aligned = list(alignment.words)
+        from batchalign.inference.qwen_timing import (
+            ObservedWindowSpan,
+            UnavailableWindowTiming,
+        )
+
+        aligned = alignment.words
         if list(alignment.units) != list(self.units):
             raise QwenSegmentationDrift(
                 proved=list(self.units),
@@ -474,13 +571,28 @@ class WordSegmentation:
                 continue
             constituents = aligned[cursor : cursor + count]
             cursor += count
-            folded.append(
-                TimedChatWord(
-                    word=word,
-                    start_ms=int(round(constituents[0].start_s * 1000)),
-                    end_ms=int(round(constituents[-1].end_s * 1000)),
+            observed: list[ObservedWindowSpan] = []
+            for constituent in constituents:
+                match constituent.timing:
+                    case ObservedWindowSpan() as span:
+                        observed.append(span)
+                    case UnavailableWindowTiming():
+                        break
+                    case unreachable:
+                        assert_never(unreachable)
+            if len(observed) != len(constituents):
+                folded.append(
+                    UntimedChatWord(word, UntimedReason.ALIGNMENT_UNIT_UNAVAILABLE)
                 )
-            )
+                continue
+            start_ms = int(round(observed[0].start_s * 1000))
+            end_ms = int(round(observed[-1].end_s * 1000))
+            if start_ms == end_ms:
+                folded.append(
+                    UntimedChatWord(word, UntimedReason.BELOW_MILLISECOND_RESOLUTION)
+                )
+            else:
+                folded.append(TimedChatWord(word, start_ms, end_ms))
         return QwenWordFold(words=tuple(folded))
 
 
@@ -585,7 +697,7 @@ class QwenForcedAligner:
 
     def align(
         self, audio: Any, transcript: str, language: QwenLanguageLabel
-    ) -> WindowAlignment:
+    ) -> PairedWindowAlignment:
         """Align one transcript against one audio WINDOW.
 
         Times are window-relative; see `WindowAlignedWord`. One unit out per
@@ -595,7 +707,7 @@ class QwenForcedAligner:
         path's blank-unit filter is NOT here but in `SpokenWindowWords`, which
         only the caller that ignores position uses.
 
-        The returned `WindowAlignment` carries the segmentation
+        The returned `PairedWindowAlignment` carries the segmentation
         `prepare_forced_aligner_inputs` actually used. Returning it rather than
         discarding it is the point: the fold's unit counts came from a separate
         `split_words` call, and until this returned `word_lists` nothing could
@@ -618,7 +730,7 @@ class QwenForcedAligner:
 
         # One transcript in, so one word list out; `prepare_forced_aligner_inputs`
         # refuses a transcript/audio count mismatch itself.
-        return WindowAlignment.of(
+        return PairedWindowAlignment.of(
             units=word_lists[0],
             words=[WindowAlignedWord.from_decoded(unit) for unit in aligned],
         )
@@ -636,6 +748,18 @@ class QwenFaHost:
 
     aligner: ForcedAligner
     language: QwenLanguageLabel
+
+    @property
+    def cache_identity(self) -> QwenFaCacheIdentity:
+        from batchalign.inference.qwen_timing import (
+            QwenFaAdmissionRevision,
+            QwenFaCacheIdentity,
+        )
+
+        return QwenFaCacheIdentity(
+            QWEN_FORCED_ALIGNER_MODEL_ID,
+            QwenFaAdmissionRevision.BOUNDED_UNIT_EVIDENCE_V1,
+        )
 
     def segment(self, words: list[str]) -> WordSegmentation:
         """The aligner's OWN segmentation of these words, with no forward pass.
@@ -661,7 +785,13 @@ class QwenFaHost:
         words are different spaces, so the fold is the only route between them.
         """
         segmentation = self.segment(words)
-        alignment = self.aligner.align(audio, segmentation.transcript, self.language)
+        from batchalign.inference.languages.cantonese._qwen_chunking import SAMPLE_RATE
+        from batchalign.inference.qwen_timing import AudioWindow, WindowAlignment
+
+        paired = self.aligner.align(audio, segmentation.transcript, self.language)
+        alignment = WindowAlignment(
+            paired, AudioWindow.from_samples(audio, SAMPLE_RATE)
+        )
         return segmentation.fold(alignment)
 
 
@@ -703,6 +833,7 @@ __all__ = [
     "FoldedChatWord",
     "ForcedAligner",
     "IndexedWordTimingRow",
+    "PairedWindowAlignment",
     "QwenAlignmentMismatch",
     "QwenFaHost",
     "QwenForcedAligner",
@@ -711,12 +842,10 @@ __all__ = [
     "QwenSegmentationNotDecomposable",
     "QwenUnitNotTimed",
     "QwenWordFold",
-    "SpokenWindowWords",
     "TimedChatWord",
     "UntimedChatWord",
     "UntimedReason",
     "WindowAlignedWord",
-    "WindowAlignment",
     "WordSegmentation",
     "load_qwen_fa",
     "resolve_qwen_language",

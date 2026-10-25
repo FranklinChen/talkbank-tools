@@ -96,11 +96,23 @@ impl WerNormalization {
     /// other language keeps names. A transcript declaring nothing is normalized
     /// as English, which is how every such comparison was normalized before
     /// this choice existed, so their numbers do not move.
-    pub fn for_declared_languages(languages: &[talkbank_model::model::LanguageCode]) -> Self {
-        match languages {
-            [] => Self::English,
-            [only] if only.as_str() == "eng" => Self::English,
-            [_] | [_, _, ..] => Self::KeepNames,
+    pub fn for_document(file: &talkbank_model::ChatFile) -> Self {
+        use talkbank_model::LanguageDeclarationError;
+        match file.language_declaration() {
+            Ok(codes) => match codes.additional() {
+                [] if codes.primary().as_str() == "eng" => Self::English,
+                [] | [_, ..] => Self::KeepNames,
+            },
+            // Historical normalization policy, not a claim that English was declared.
+            Err(LanguageDeclarationError::Absent) => Self::English,
+            Err(
+                error @ (LanguageDeclarationError::Empty
+                | LanguageDeclarationError::Rejected
+                | LanguageDeclarationError::Repeated),
+            ) => {
+                tracing::warn!(%error, "comparison keeps names because language metadata is unusable");
+                Self::KeepNames
+            }
         }
     }
 
@@ -342,23 +354,34 @@ mod tests {
     /// English only when both would.
     #[test]
     fn normalization_follows_declared_languages() {
-        let code = |c: &str| talkbank_model::model::LanguageCode::new(c).expect("code");
-        assert_eq!(
-            WerNormalization::for_declared_languages(&[]),
-            WerNormalization::English
-        );
-        assert_eq!(
-            WerNormalization::for_declared_languages(&[code("eng")]),
-            WerNormalization::English
-        );
-        assert_eq!(
-            WerNormalization::for_declared_languages(&[code("spa")]),
-            WerNormalization::KeepNames
-        );
-        assert_eq!(
-            WerNormalization::for_declared_languages(&[code("eng"), code("spa")]),
-            WerNormalization::KeepNames
-        );
+        let document = |codes: &[&str]| {
+            let mut lines = Vec::new();
+            if !codes.is_empty() {
+                lines.push(talkbank_model::Line::header(
+                    talkbank_model::Location::Unlocated,
+                    talkbank_model::Header::Languages {
+                        codes: talkbank_model::LanguageCodes::new(
+                            codes
+                                .iter()
+                                .map(|code| {
+                                    talkbank_model::LanguageCode::new(code)
+                                        .expect("fixture language code")
+                                })
+                                .collect(),
+                        ),
+                    },
+                ));
+            }
+            talkbank_model::ChatFile::new(lines)
+        };
+        for (codes, expected) in [
+            (vec![], WerNormalization::English),
+            (vec!["eng"], WerNormalization::English),
+            (vec!["spa"], WerNormalization::KeepNames),
+            (vec!["eng", "spa"], WerNormalization::KeepNames),
+        ] {
+            assert_eq!(WerNormalization::for_document(&document(&codes)), expected);
+        }
         assert_eq!(
             WerNormalization::English.shared(WerNormalization::KeepNames),
             WerNormalization::KeepNames

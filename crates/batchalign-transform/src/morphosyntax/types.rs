@@ -47,6 +47,10 @@ pub fn lang2(code: &str) -> &str {
 /// Structured error type for UD-to-CHAT mapping failures.
 #[derive(Debug, thiserror::Error)]
 pub enum MappingError {
+    /// A rendered feature cannot be represented by a single flat MOR feature.
+    #[error("invalid rendered MOR feature: {0}")]
+    InvalidFeature(#[from] talkbank_model::model::dependent_tier::mor::MorFeatureShapeError),
+
     /// A word produced an empty MOR stem after lemma cleaning and sanitization.
     #[error("Empty MOR stem: word={word:?}, lemma={lemma:?}, upos={upos:?}")]
     EmptyStem {

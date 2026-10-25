@@ -265,6 +265,7 @@ mod tests {
     use super::*;
     use talkbank_model::model::{ChatFile, Line, WriteChat};
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     const HELLO_CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
 @ID:\teng|test|CHI||female|||Target_Child|||\n*CHI:\thello .\n@End\n";
@@ -295,8 +296,8 @@ mod tests {
 
         // Add %xtra
         let xtra1 = DependentTier::UserDefined(UserDefinedDependentTier {
-            label: NonEmptyString::new("xtra").unwrap(),
-            content: Some(NonEmptyString::new("first").unwrap()),
+            label: talkbank_model::UserDefinedDependentTierLabel::new("xtra").unwrap(),
+            content: Some(NonEmptyString::new("first").unwrap().into()),
             location: Location::Unlocated,
         });
         replace_or_add_tier(&mut tiers, xtra1);
@@ -304,8 +305,8 @@ mod tests {
 
         // Replace %xtra with new content
         let xtra2 = DependentTier::UserDefined(UserDefinedDependentTier {
-            label: NonEmptyString::new("xtra").unwrap(),
-            content: Some(NonEmptyString::new("second").unwrap()),
+            label: talkbank_model::UserDefinedDependentTierLabel::new("xtra").unwrap(),
+            content: Some(NonEmptyString::new("second").unwrap().into()),
             location: Location::Unlocated,
         });
         replace_or_add_tier(&mut tiers, xtra2);
@@ -320,8 +321,8 @@ mod tests {
 
         // Add %xcod (different label), should NOT replace %xtra
         let xcod = DependentTier::UserDefined(UserDefinedDependentTier {
-            label: NonEmptyString::new("xcod").unwrap(),
-            content: Some(NonEmptyString::new("code").unwrap()),
+            label: talkbank_model::UserDefinedDependentTierLabel::new("xcod").unwrap(),
+            content: Some(NonEmptyString::new("code").unwrap().into()),
             location: Location::Unlocated,
         });
         replace_or_add_tier(&mut tiers, xcod);
@@ -337,9 +338,9 @@ mod tests {
         )];
         let replacement = DependentTier::Wor(WorTier::from_words(
             Location::Unlocated,
-            vec![talkbank_model::model::Word::simple(
+            vec![talkbank_model::model::Word::new(
                 Location::Unlocated,
-                "hello",
+                talkbank_model::WordText::new("hello").expect("nonempty fixture word"),
             )],
         ));
 
@@ -448,7 +449,11 @@ mod tests {
         // Upstream produced gras for items only, forgot to append the
         // terminator's PUNCT relation. Mor count_chunks() == 2 (1 item +
         // sidecar terminator), gras.len() == 1. Inject must reject.
-        let item_only_gras = vec![GrammaticalRelation::new(1, 0, "ROOT")];
+        let item_only_gras = vec![GrammaticalRelation::new(
+            1,
+            0,
+            talkbank_model::GrammaticalRelationType::new("ROOT").expect("valid fixture relation"),
+        )];
 
         let result = inject_morphosyntax(
             utt,

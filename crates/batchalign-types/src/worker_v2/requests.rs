@@ -432,6 +432,9 @@ pub enum ProtocolErrorCodeV2 {
     ModelUnavailable,
     /// Runtime failed while executing the task.
     RuntimeFailure,
+    /// Inference ran, but its generated result cannot become valid evidence.
+    /// Distinct from malformed input and transient runtime failures.
+    ModelOutputInvalid,
     /// The provider refused execution because its quota/resource pack is
     /// exhausted. Requires account intervention, not input repair or retry.
     ProviderQuotaExhausted,
@@ -476,6 +479,7 @@ impl ProtocolErrorCodeV2 {
             Self::AttachmentUnreadable => "attachment_unreadable",
             Self::ModelUnavailable => "model_unavailable",
             Self::RuntimeFailure => "runtime_failure",
+            Self::ModelOutputInvalid => "model_output_invalid",
             Self::ProviderQuotaExhausted => "provider_quota_exhausted",
             Self::ModelAccessDenied => "model_access_denied",
             Self::UnsupportedLanguage => "unsupported_language",
@@ -502,6 +506,7 @@ mod protocol_error_code_tests {
             ProtocolErrorCodeV2::AttachmentUnreadable,
             ProtocolErrorCodeV2::ModelUnavailable,
             ProtocolErrorCodeV2::RuntimeFailure,
+            ProtocolErrorCodeV2::ModelOutputInvalid,
             ProtocolErrorCodeV2::ProviderQuotaExhausted,
             ProtocolErrorCodeV2::ModelAccessDenied,
             ProtocolErrorCodeV2::UnsupportedLanguage,

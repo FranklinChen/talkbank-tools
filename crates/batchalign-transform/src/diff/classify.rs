@@ -53,18 +53,27 @@ fn timing_differs(
     before_bullet != after_bullet
 }
 
-/// Extract the bullet timing (start_ms, end_ms) for an utterance, if present.
-fn bullet_at(chat_file: &ChatFile, utt_idx: UtteranceIdx) -> Option<(u64, u64)> {
+#[derive(Debug, PartialEq, Eq)]
+enum BulletEvidence<'a> {
+    Timing { start_ms: u64, end_ms: u64 },
+    Rejected(&'a str),
+}
+
+/// Compare observed timing separately from retained rejected source.
+fn bullet_at(chat_file: &ChatFile, utt_idx: UtteranceIdx) -> Option<BulletEvidence<'_>> {
     let mut idx = 0usize;
     for line in &chat_file.lines {
         if let Line::Utterance(utt) = line {
             if idx == utt_idx.raw() {
-                return utt
-                    .main
-                    .content
-                    .bullet
-                    .as_ref()
-                    .map(|b| (b.timing.start_ms, b.timing.end_ms));
+                return utt.main.content.bullet.as_ref().map(|bullet| match bullet {
+                    talkbank_model::BulletState::Parsed(bullet) => BulletEvidence::Timing {
+                        start_ms: bullet.timing.start_ms,
+                        end_ms: bullet.timing.end_ms,
+                    },
+                    talkbank_model::BulletState::Unparsed { unparsed } => {
+                        BulletEvidence::Rejected(unparsed.source())
+                    }
+                });
             }
             idx += 1;
         }

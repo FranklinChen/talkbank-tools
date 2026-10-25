@@ -8,7 +8,7 @@ version = "0.8.5"
 description = "Transcription, alignment, and language-sample analysis for TalkBank CHAT transcripts"
 readme = "batchalign/README.md"
 license = "BSD-3-Clause"
-requires-python = ">=3.13"
+requires-python = ">=3.14,<3.15"
 # Primary author first, matching the Cargo manifests and the commit history.
 # The addresses are deliberate: publishing one is what an `authors` field is
 # for, and it is the ecosystem norm (71% of 282 surveyed installed packages
@@ -28,7 +28,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing :: Linguistic",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
 ]
@@ -74,7 +73,7 @@ dependencies = [
     "alibabacloud-nls-python-sdk>=1.0.0",
     # 1.4.13 and 1.4.14 require NumPy<2, downgrading the shared ML stack to
     # NumPy 1.26 (supports Python <=3.12). Revisit when upstream restores
-    # compatibility with this package's Python >=3.13 environment.
+    # compatibility with this package's Python >=3.14 environment.
     "funasr<1.4.13",
     # Qwen3-ASR: Alibaba's open-weight Cantonese-capable ASR. Local
     # model (~3.4 GB fp16) downloaded from HuggingFace on first use.
@@ -114,7 +113,7 @@ Issues = "https://github.com/FranklinChen/talkbank-tools/issues"
 manifest-path = "crates/batchalign-pyo3/Cargo.toml"
 python-source = "."
 python-packages = ["batchalign"]
-features = ["pyo3/extension-module", "pyo3/abi3-py313"]
+features = ["pyo3/extension-module", "pyo3/abi3-py314"]
 # Use the debug profile for the explicit `make batchalign-develop` rebuild.
 # Bare `uv run` does not reliably notice Rust source edits. Distribution wheels
 # are built explicitly via `maturin build --release` in the GitHub Release
@@ -179,7 +178,7 @@ override-dependencies = ["torchcodec ; sys_platform == 'batchalign-never'"]
 # from `uv.lock`. Before this section existed, `uv run ruff` resolved to
 # whatever copy happened to be on the machine and applied an inherited rule
 # set, which is a measurement nobody can reproduce.
-target-version = "py313"
+target-version = "py314"
 # Generated, vendored, or not-ours. `.venv` and `target` are build output;
 # `frontend` is TypeScript with an incidental script or two.
 extend-exclude = ["frontend", "book", ".venv", "target"]

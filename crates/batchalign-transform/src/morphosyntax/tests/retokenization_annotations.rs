@@ -39,7 +39,8 @@ fn inject_language_case(
     let payloads = collect_payloads(
         &chat,
         &language,
-        std::slice::from_ref(&language),
+        talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(&language))
+            .expect("nonempty fixture languages"),
         MultilingualPolicy::ProcessAll,
     );
     let result = inject_results(

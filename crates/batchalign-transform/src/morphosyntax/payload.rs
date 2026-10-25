@@ -22,11 +22,43 @@ use talkbank_model::GoverningMarkKind;
 use super::outcome::{MorOutcome, MorOutcomeKind, classify_not_applicable};
 use super::types::MultilingualPolicy;
 
-// The Stanza placeholder constant moved to
-// `talkbank_model::ChatCleanedText::stanza_placeholder()` as the only
-// blessed exception to provenance sealing. See its doc comment for
-// details and the post-Stanza synthesis recognition logic in
-// `morphosyntax/synthesis/`.
+/// A provider request distinguishes observed text from a special-form mask.
+/// A mask is protocol input, never provenance-sealed transcript text.
+enum ProviderRequestWord<'a> {
+    Source(&'a talkbank_model::ChatCleanedText),
+    SpecialFormMask,
+}
+
+/// A source-marked secondary word still awaiting secondary-language analysis.
+/// It can project the documented local unknown marker, never observed analysis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingSecondaryWord {
+    resolution: talkbank_model::validation::LanguageResolution,
+}
+
+impl PendingSecondaryWord {
+    /// The source resolver's result, including genuine ambiguity or absence.
+    pub fn resolution(&self) -> &talkbank_model::validation::LanguageResolution {
+        &self.resolution
+    }
+
+    /// Staging projection of explicit missing secondary evidence. This is the
+    /// existing CHAT convention, not an analysis returned by the primary model.
+    pub(super) fn staged_mor(&self) -> talkbank_model::model::dependent_tier::mor::MorWord {
+        use talkbank_model::model::dependent_tier::mor::{MorStem, MorWord, PosCategory};
+        MorWord::new(PosCategory::new("L2"), MorStem::new("xxx"))
+    }
+}
+
+impl serde::Serialize for ProviderRequestWord<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = match self {
+            Self::Source(text) => text.as_str(),
+            Self::SpecialFormMask => "xbxxx",
+        };
+        serializer.serialize_str(text)
+    }
+}
 
 /// What one word of a batch item is to the morphosyntax pipeline.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,7 +72,7 @@ pub enum WordRole {
     /// `L2|xxx` from the primary pass, then the secondary model when its
     /// language resolved. Takes precedence over a form type the word also
     /// carries.
-    CodeSwitched(talkbank_model::validation::LanguageResolution),
+    CodeSwitched(PendingSecondaryWord),
 }
 
 impl WordRole {
@@ -51,16 +83,15 @@ impl WordRole {
         language: Option<talkbank_model::validation::LanguageResolution>,
     ) -> Self {
         match (language, form_type) {
-            (Some(language), _) => Self::CodeSwitched(language),
+            (Some(resolution), _) => Self::CodeSwitched(PendingSecondaryWord { resolution }),
             (None, Some(form_type)) => Self::SpecialForm(form_type),
             (None, None) => Self::Analysed,
         }
     }
 }
 
-/// One word of a batch item: the text the model receives, and the word's
-/// role. [`BatchWord::new`] is the only constructor, and it sends a special
-/// form's placeholder rather than its text, so the two cannot disagree.
+/// One source word with its role. Provider requests are derived from the role;
+/// masking cannot replace the retained source text.
 #[derive(Debug, Clone)]
 pub struct BatchWord {
     text: talkbank_model::ChatCleanedText,
@@ -68,16 +99,9 @@ pub struct BatchWord {
 }
 
 impl BatchWord {
-    /// A word with its role. A special form is sent as
-    /// `ChatCleanedText::stanza_placeholder()`: the model sees the
-    /// placeholder, not the non-word, so the surrounding parse stays clean,
-    /// and injection replaces the placeholder's analysis with the form
-    /// type's `%mor`.
+    /// Retain actual source text. Special forms become a separate protocol
+    /// mask only when the worker request is serialized.
     pub fn new(text: talkbank_model::ChatCleanedText, role: WordRole) -> Self {
-        let text = match role {
-            WordRole::SpecialForm(_) => talkbank_model::ChatCleanedText::stanza_placeholder(),
-            WordRole::Analysed | WordRole::CodeSwitched(_) => text,
-        };
         Self { text, role }
     }
 
@@ -86,7 +110,7 @@ impl BatchWord {
         Self::new(text, WordRole::Analysed)
     }
 
-    /// The text the model receives.
+    /// The actual source word, independently of provider masking.
     pub fn text(&self) -> &talkbank_model::ChatCleanedText {
         &self.text
     }
@@ -94,6 +118,15 @@ impl BatchWord {
     /// The word's role.
     pub fn role(&self) -> &WordRole {
         &self.role
+    }
+
+    fn request_word(&self) -> ProviderRequestWord<'_> {
+        match self.role {
+            WordRole::SpecialForm(_) => ProviderRequestWord::SpecialFormMask,
+            WordRole::Analysed | WordRole::CodeSwitched(_) => {
+                ProviderRequestWord::Source(&self.text)
+            }
+        }
     }
 }
 
@@ -137,12 +170,10 @@ impl MorphosyntaxBatchItem {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 #[schemars(rename = "MorphosyntaxBatchItem")]
 struct MorphosyntaxBatchItemWire<'a> {
-    /// Word texts for NLP processing. Each word is provenance-sealed
-    /// `ChatCleanedText` derived from a parsed `Word` or `Separator`
-    /// or, for non-`@s` special-form positions, the blessed
-    /// `ChatCleanedText::stanza_placeholder()` constant.
+    /// Provider request words: actual source text or the protocol's special-form
+    /// mask. A mask never claims to be a provenance-sealed transcript word.
     #[schemars(with = "Vec<String>")]
-    words: Vec<&'a talkbank_model::ChatCleanedText>,
+    words: Vec<ProviderRequestWord<'a>>,
     /// Utterance terminator. Typed; serializes to its CHAT surface form
     /// (`.`, `?`, `!`, etc.) over the IPC boundary so the Stanza worker
     /// continues to receive a plain string.
@@ -160,7 +191,7 @@ struct MorphosyntaxBatchItemWire<'a> {
 impl<'a> MorphosyntaxBatchItemWire<'a> {
     fn of(item: &'a MorphosyntaxBatchItem) -> Self {
         Self {
-            words: item.words.iter().map(BatchWord::text).collect(),
+            words: item.words.iter().map(BatchWord::request_word).collect(),
             terminator: &item.terminator,
             special_forms: item
                 .words
@@ -187,7 +218,11 @@ fn wire_role(role: &WordRole) -> (Option<String>, Option<String>) {
         }
         WordRole::CodeSwitched(resolution) => (
             None,
-            resolution.languages().first().map(|lc| lc.to_string()),
+            resolution
+                .resolution()
+                .languages()
+                .first()
+                .map(|lc| lc.to_string()),
         ),
     }
 }
@@ -343,21 +378,12 @@ impl<'source> MorphologyInput<'source> {
     /// Prepare one analyzable utterance, irrespective of its existing tiers.
     pub fn from_utterance(
         utterance: &'source talkbank_model::model::Utterance,
-        primary_lang: &talkbank_model::model::LanguageCode,
-        declared_languages: &[talkbank_model::model::LanguageCode],
+        declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
     ) -> Option<Self> {
-        let lang = utterance
-            .main
-            .content
-            .language_code
-            .as_ref()
-            .map(|precode| precode.code.clone())
-            .unwrap_or_else(|| {
-                declared_languages
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| primary_lang.clone())
-            });
+        let lang = match &utterance.main.content.language_code {
+            Some(precode) => precode.code.clone(),
+            None => declared_languages.primary().clone(),
+        };
         let mut words = Vec::new();
         extract::collect_utterance_content(
             &utterance.main.content.content,
@@ -430,7 +456,7 @@ impl<'source> MorphologyInput<'source> {
 pub fn collect_payloads(
     chat_file: &talkbank_model::model::ChatFile,
     primary_lang: &talkbank_model::model::LanguageCode,
-    declared_languages: &[talkbank_model::model::LanguageCode],
+    declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
     multilingual_policy: MultilingualPolicy,
 ) -> PayloadCollection {
     let total_utts = chat_file
@@ -465,9 +491,7 @@ pub fn collect_payloads(
         });
 
         if !skip && !has_mor {
-            if let Some(input) =
-                MorphologyInput::from_utterance(utt, primary_lang, declared_languages)
-            {
+            if let Some(input) = MorphologyInput::from_utterance(utt, declared_languages) {
                 batch_items.push(CollectedUtterance {
                     line: LineIdx::new(line_idx),
                     utt_ordinal: utt_idx,
@@ -495,16 +519,60 @@ pub fn collect_payloads(
     }
 }
 
-/// Extract declared languages from the `@Languages` header, with fallback to
-/// `primary_lang` if none were declared.
+/// Why the morphology input language set is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputLanguageOrigin {
+    /// An admitted source header supplies the complete ordered declaration.
+    SourceHeader,
+    /// No header exists; the command's explicitly selected language applies.
+    ConfiguredWhenAbsent,
+}
+
+/// Admitted language context with source declaration and command policy distinct.
+/// Missing headers may use the configured language; malformed/repeated/empty
+/// headers reject rather than silently selecting a different language.
+pub struct MorphologyLanguages {
+    codes: talkbank_model::DeclaredLanguages,
+    origin: InputLanguageOrigin,
+}
+
+impl MorphologyLanguages {
+    /// Borrow the nonempty ordered context without repeating admission.
+    pub fn as_ref(&self) -> talkbank_model::DeclaredLanguagesRef<'_> {
+        self.codes.as_ref()
+    }
+
+    /// Preserve whether this is source metadata or explicit command policy.
+    pub fn origin(&self) -> InputLanguageOrigin {
+        self.origin
+    }
+
+    /// Inspect the ordered codes without losing nonempty evidence.
+    pub fn iter(&self) -> impl Iterator<Item = &talkbank_model::LanguageCode> + Clone {
+        self.codes.iter()
+    }
+}
+
+/// Admit source languages or the configured language when the header is absent.
 pub fn declared_languages(
     chat_file: &talkbank_model::model::ChatFile,
     primary_lang: &talkbank_model::model::LanguageCode,
-) -> Vec<talkbank_model::model::LanguageCode> {
-    if chat_file.languages.is_empty() {
-        vec![primary_lang.clone()]
-    } else {
-        chat_file.languages.to_vec()
+) -> Result<MorphologyLanguages, talkbank_model::LanguageDeclarationError> {
+    use talkbank_model::LanguageDeclarationError;
+    match chat_file.language_declaration() {
+        Ok(codes) => Ok(MorphologyLanguages {
+            codes: codes.to_owned(),
+            origin: InputLanguageOrigin::SourceHeader,
+        }),
+        Err(LanguageDeclarationError::Absent) => Ok(MorphologyLanguages {
+            codes: talkbank_model::DeclaredLanguages::new(vec![primary_lang.clone()])?,
+            origin: InputLanguageOrigin::ConfiguredWhenAbsent,
+        }),
+        Err(
+            error @ (LanguageDeclarationError::Empty
+            | LanguageDeclarationError::Rejected
+            | LanguageDeclarationError::Repeated),
+        ) => Err(error),
     }
 }
 

@@ -1584,6 +1584,83 @@ mod tests {
     }
 
     #[test]
+    fn qwen_admission_revision_refuses_both_old_cache_layers_and_accepts_current_evidence() {
+        use crate::api::NonNegativeSeconds;
+        use crate::types::engines::FaEngineName;
+        use crate::types::worker_v2::{
+            ExecuteResponseV2, IndexedWordTimingResultV2, TaskResultV2, WorkerRequestIdV2,
+        };
+
+        #[derive(serde::Deserialize)]
+        struct IdentityFixture {
+            legacy: String,
+            current: String,
+        }
+        let identity: IdentityFixture = serde_json::from_str(include_str!(
+            "../../../../test-fixtures/qwen_fa_admission_identity.json"
+        ))
+        .expect("shared producer/consumer identity fixture");
+        let legacy = FaCacheNamespace::for_test(&identity.legacy);
+        let current = FaCacheNamespace::for_test(&identity.current);
+        let key = CacheKey::from_content("qwen-admission-cache-boundary");
+        let response = ExecuteResponseV2::success(
+            WorkerRequestIdV2::from("qwen-admission-cache-boundary"),
+            TaskResultV2::IndexedWordTimingResult(IndexedWordTimingResultV2 {
+                indexed_timings: vec![None],
+            }),
+            NonNegativeSeconds::ZERO,
+        );
+        enum ExpectedReplay {
+            RefusedLegacyAdmission,
+            AdmittedCurrentEvidence,
+        }
+        for (namespace, expected) in [
+            (&legacy, ExpectedReplay::RefusedLegacyAdmission),
+            (&current, ExpectedReplay::AdmittedCurrentEvidence),
+        ] {
+            let raw = raw_evidence::FaRawEvidence::admit_requested(
+                &response,
+                FaEngineName::Qwen3,
+                namespace,
+                raw_evidence::ExpectedFaWords::new(1),
+                &key,
+                raw_evidence::FaEvidenceRoute::Direct,
+            )
+            .expect("fixture response admitted under producing revision")
+            .into_replayable()
+            .expect("direct evidence is replayable");
+            let raw_value = serde_json::to_value(&raw).expect("serialize raw evidence");
+            let derived = AdmittedCachedFaTimings::encode_from_raw(vec![None], &raw)
+                .expect("serialize derived evidence");
+            let replay = raw_evidence::ReplayableFaRawEvidence::decode(
+                raw_value,
+                FaEngineName::Qwen3,
+                &current,
+                raw_evidence::ExpectedFaWords::new(1),
+                &key,
+            );
+            let timings =
+                AdmittedCachedFaTimings::decode(derived, FaEngineName::Qwen3, &current, 1, &key);
+            match expected {
+                ExpectedReplay::RefusedLegacyAdmission => {
+                    assert!(matches!(
+                        replay,
+                        Err(raw_evidence::FaRawEvidenceError::EngineVersionDrift { .. })
+                    ));
+                    assert!(matches!(
+                        timings,
+                        Err(FaDerivedEvidenceError::EngineVersionDrift { .. })
+                    ));
+                }
+                ExpectedReplay::AdmittedCurrentEvidence => {
+                    assert!(replay.is_ok(), "current evidence must remain reusable");
+                    assert_eq!(timings.expect("current timings").into_timings(), vec![None]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_evidence_is_replayed_before_a_derived_timing_hit() {
         use crate::api::NonNegativeSeconds;
         use crate::chat_ops::fa::{FaGroup, FaWord, TimeSpan};

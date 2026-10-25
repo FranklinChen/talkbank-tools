@@ -93,7 +93,8 @@ impl UtteranceEvidence {
                 }
             }
             ContentItem::Pause(_) => placer.pending_break = true,
-            ContentItem::Event(_)
+            ContentItem::OrphanAnnotation(_)
+            | ContentItem::Event(_)
             | ContentItem::Action(_)
             | ContentItem::OverlapPoint(_)
             | ContentItem::OtherSpokenEvent(_)
@@ -229,6 +230,7 @@ mod tests {
     use talkbank_model::alignment::helpers::PositionalDomain;
     use talkbank_model::model::Line;
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn evidence_for(main_tier: &str) -> (Vec<String>, UtteranceEvidence) {
         let chat = format!(

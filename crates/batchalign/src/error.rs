@@ -1098,6 +1098,10 @@ pub enum ServerError {
     #[error("provider quota exhausted: {0}")]
     ProviderQuotaExhausted(String),
 
+    /// Model inference returned inadmissible generated evidence, not bad input.
+    #[error("model output rejected: {0}")]
+    ModelOutputInvalid(String),
+
     /// A worker-protocol V2 retry loop
     /// ([`crate::infer_retry::dispatch_execute_v2_with_retry_and_progress`])
     /// observed job cancellation before returning a definite outcome.
@@ -1352,6 +1356,7 @@ impl ServerError {
             // The server's own machine lacks Hub access/credentials; the
             // caller's request was fine.
             Self::ModelAccessDenied(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ModelOutputInvalid(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::AsrProvider { .. } | Self::ProviderQuotaExhausted(_) => StatusCode::BAD_GATEWAY,
             Self::AsrModelIdentity(_) => StatusCode::INTERNAL_SERVER_ERROR,
             // Internal cancellation signal from a background retry loop;

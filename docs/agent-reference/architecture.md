@@ -1,6 +1,6 @@
 # Architecture reference
 
-**Last modified:** 2026-10-14 16:21 EDT
+**Last modified:** 2026-10-29
 
 Read the sections relevant to your task. [AGENTS.md](../../AGENTS.md)
 is the canonical policy entry point and resolves workflow conflicts here.
@@ -27,7 +27,8 @@ chatter on 2026-06-18.
 
 `[workspace.dependencies]` in `Cargo.toml` pins `talkbank-model`,
 `talkbank-parser`, `talkbank-parser-tests` and `talkbank-transform` to one
-exact Chatter Git revision. The manifest and lockfile own the current identity;
+published Chatter release tag, resolved to an exact commit in `Cargo.lock`.
+The current selection is v0.32.1. The manifest and lockfile own the identity;
 application version strings do not identify the compiled dependency.
 Adopt a newer reviewed Chatter commit by updating all pins and the lockfile
 together, then verify the consuming targets. **Do NOT re-introduce copies of those
@@ -39,6 +40,13 @@ uncommitted dependency tree or a committed local path patch. Local qualification
 of an unpublished checkpoint is not clean-machine installation evidence.
 Publish Chatter before claiming that a dependent candidate is publicly
 reproducible; a published dependency builds without a sibling checkout.
+
+The parser, model and transforms are linked into the BA3 binary and its
+extension. Installing or deploying the standalone Chatter CLI does not change
+those compiled libraries. A later Chatter release can ship independently;
+BA3 adopts it only through a reviewed pin/lock update, compatibility checks,
+rebuild and deployment. BA3 fixes that already work on the selected published
+release do not wait for an unpublished Chatter candidate.
 
 ## Crates in this workspace
 

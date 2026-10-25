@@ -146,7 +146,7 @@ echo "[OK] Downloaded: $(basename "$DOWNLOADED_WHEEL")"
 
 echo ""
 echo "=== Test 4: Install from downloaded wheel ==="
-uv tool install --python 3.12 "$DOWNLOADED_WHEEL"
+uv tool install --python 3.14 "$DOWNLOADED_WHEEL"
 echo "[OK] uv tool install succeeded"
 
 # ── Verify CLI works ────────────────────────────────────────────────────────
@@ -161,7 +161,7 @@ batchalign3 version 2>&1 || true
 
 echo ""
 echo "=== Test 6: Upgrade from downloaded wheel ==="
-uv tool install --force --python 3.12 "$DOWNLOADED_WHEEL"
+uv tool install --force --python 3.14 "$DOWNLOADED_WHEEL"
 echo "[OK] Upgrade (--force) succeeded"
 
 batchalign3 --help >/dev/null

@@ -129,7 +129,7 @@ def _resolve_commit_sha() -> str | None:
             timeout=2,
             check=False,
         )
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         return None
     if result.returncode != 0:
         return None
@@ -309,7 +309,7 @@ def pytest_collection_modifyitems(
     if num_workers is not None and not isinstance(num_workers, int):
         try:
             num_workers = int(num_workers)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             import os
 
             num_workers = os.cpu_count() or 1

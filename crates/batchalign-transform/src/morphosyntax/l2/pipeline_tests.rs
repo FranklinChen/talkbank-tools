@@ -22,6 +22,7 @@
 
 use talkbank_model::WriteChat;
 use talkbank_model::model::{LanguageCode, Line};
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 use super::{merge_planned_secondary_span, plan_dispatch_spans, splice_l2_into_chat};
 use crate::morphosyntax::{
@@ -126,7 +127,12 @@ fn run_l2_in(
     let parser = talkbank_parser::TreeSitterParser::new().expect("parser");
     let mut chat = parser.parse_chat_file(&chat_text).expect_built();
 
-    let payloads = collect_payloads(&chat, &primary_lang, &codes, MultilingualPolicy::ProcessAll);
+    let payloads = collect_payloads(
+        &chat,
+        &primary_lang,
+        talkbank_model::DeclaredLanguagesRef::new(&codes).expect("nonempty fixture languages"),
+        MultilingualPolicy::ProcessAll,
+    );
     let responses = vec![UdResponse {
         sentences: vec![ud_sentence(primary)],
     }];

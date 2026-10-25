@@ -100,6 +100,7 @@ fn untimed_word_with_inherited_bullet_gets_no_wor_tier() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .map(|b| (b.timing.start_ms, b.timing.end_ms)),
         Some((29500, 30980)),
         "the inherited bullet must survive unchanged: nothing to derive a new one from"

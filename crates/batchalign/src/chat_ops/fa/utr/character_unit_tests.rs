@@ -47,6 +47,7 @@ fn bullet(document: &talkbank_model::model::ChatFile) -> Option<(u64, u64)> {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
         _ => None,
     })

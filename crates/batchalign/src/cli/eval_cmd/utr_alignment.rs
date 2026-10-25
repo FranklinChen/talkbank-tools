@@ -92,21 +92,17 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
     // Retained tokens were dumped after script normalization, which is not
     // idempotent, so they are replayed as they are, matched in the units the
     // transcript's primary language selects, as production matched them.
-    let language = match chat
-        .document()
-        .languages
-        .first()
-        .map(|code| crate::api::LanguageCode3::try_from(code.as_str()))
-    {
-        Some(Ok(language)) => language,
-        Some(Err(_)) | None => {
-            return Err(CliError::InvalidArgument(
-                "UTR replay needs the transcript's primary @Languages code to choose its \
-                 lexical units"
-                    .into(),
-            ));
-        }
-    };
+    let languages = chat.document().language_declaration().map_err(|error| {
+        CliError::InvalidArgument(format!(
+            "UTR replay needs a usable @Languages declaration: {error}"
+        ))
+    })?;
+    let language =
+        crate::api::LanguageCode3::try_from(languages.primary().as_str()).map_err(|error| {
+            CliError::InvalidArgument(format!(
+                "UTR replay cannot use the primary language: {error}"
+            ))
+        })?;
     let tokens = PreparedUtrTokens::retained(
         serde_json::from_slice::<Vec<AsrTimingToken>>(&token_bytes)?,
         &language,

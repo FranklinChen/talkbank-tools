@@ -640,7 +640,7 @@ def _cleanup_runner_daemons(case_root: Path, label: str) -> None:
             continue
         try:
             payload = json.loads(info_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             continue
         pid = payload.get("pid")
         if isinstance(pid, int):

@@ -243,38 +243,29 @@ reproducibility of older analyses), pass `--no-l2-morphotag`:
 batchalign3 morphotag bilingual.cha --no-l2-morphotag
 ```
 
-**Validation.** L2 dispatch has been validated at scale: across 19
+**Historical evaluation (April 2026).** The retained evaluation covers 19
 language pairs and ~17K `@s` words, well above 99% dispatch to a
 secondary-language Stanza model on most pairs, with 100% dispatch on
 the majority of evaluated language pairs. The remaining cases fall
-back to `L2|xxx`.
+back to `L2|xxx`. Those results do not qualify the current build or establish
+recognition or morphology accuracy.
 
 ### Unsupported non-primary languages
 
-`morphotag` only requires the **primary** `@Languages` code to be
-Stanza-supported. Files whose primary is not Stanza-supported are
-skipped with a typed diagnostic and never enter the pipeline.
+An unsupported inline `@s:LANG` span retains `L2|xxx` while the surrounding
+utterance keeps its successful morphology. A saved availability `@Comment`
+names unsupported languages and counts. Job diagnostics distinguish unsupported
+language exclusions from failed or incomplete analysis and identify affected
+spans. Ambiguous or unresolved markers do not choose one model arbitrarily.
 
-When the primary IS supported, **non-primary content in any language
-that Stanza does not support is processed cleanly with an `L2|xxx`
-fallback**:
+Whole-utterance `[- LANG]` precodes and the file's primary language require
+model capability for their requested analysis. If that required capability is
+unavailable, file analysis is refused before inference with a typed diagnostic.
+The inline placeholder rule does not supply a whole-utterance analysis.
 
-- `[- UNSUPPORTEDLANG]` whole-utterance precodes, the entire utterance
-  is grouped under `UNSUPPORTEDLANG`, the worker partition routes that
-  group to the fallback bucket (no Stanza dispatch), and every word in
-  the utterance receives `L2|xxx` in `%mor` with no `%gra` relation
-  emitted for those positions.
-- `@s:UNSUPPORTEDLANG` per-word markers, the secondary L2 dispatch
-  path for that span is short-circuited the same way; the host primary
-  analysis is preserved and the `@s` token's slot stays as `L2|xxx`.
-
-Both fallbacks are *graceful*: the worker never crashes on an
-unsupported secondary, and other utterances in the same file (or other
-spans in the same utterance) that target supported languages continue
-to receive real morphology. The mechanism is a partition step in
-`infer_batch` (`partition_groups_by_stanza_support`) that splits each
-batch's language groups into "dispatchable" and "fallback" before
-calling Stanza.
+`L2|xxx` means lexical analysis was unavailable. Its contextual dependency links
+come from the primary model and do not certify secondary-language syntax.
+See [L2 and language switching](../../reference/l2-handling.md) for the full policy.
 
 **Example.** German-English code-switching:
 

@@ -10,13 +10,14 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from batchalign.inference._domain_types import LanguageCode
+from batchalign.worker._model_errors import ModelOutputInvalidError
 
 from ._asr_types import AsrGenerationPayload, AsrMonologue, TimedWord
 
 L = logging.getLogger("batchalign.hk.funaudio")
 
 
-@dataclass
+@dataclass(frozen=True)
 class FunAsrSegment:
     """Parsed output from one FunASR result.
 
@@ -39,17 +40,30 @@ class FunAsrSegment:
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> FunAsrSegment:
         """Parse a raw FunASR segment dict into a typed object."""
-        text = str(raw.get("text", ""))
+        text = raw.get("text")
+        if not isinstance(text, str):
+            raise ModelOutputInvalidError("FunASR segment has no string text field")
         timestamps = raw.get("timestamp")
-        if not isinstance(timestamps, list):
+        if timestamps is None:
             timestamps = []
+        elif not isinstance(timestamps, list):
+            raise ModelOutputInvalidError("FunASR timestamp must be a list or absent")
         words = raw.get("words")
         raw_text = raw.get("raw_text")
+        if words is not None and (
+            not isinstance(words, list)
+            or any(not isinstance(word, str) for word in words)
+        ):
+            raise ModelOutputInvalidError(
+                "FunASR words must be a list of strings or absent"
+            )
+        if raw_text is not None and not isinstance(raw_text, str):
+            raise ModelOutputInvalidError("FunASR raw_text must be a string or absent")
         return cls(
             text=text,
             timestamp=timestamps,
-            words=[str(word) for word in words] if isinstance(words, list) else None,
-            raw_text=raw_text if isinstance(raw_text, str) else None,
+            words=words,
+            raw_text=raw_text,
         )
 
 
@@ -232,11 +246,26 @@ class FunAudioRecognizer:
         if isinstance(output, dict):
             raw_list = [output]
         elif isinstance(output, list):
-            raw_list = [item for item in output if isinstance(item, dict)]
+            raw_list = output
         else:
-            raw_list = []
+            raise ModelOutputInvalidError(
+                f"FunASR returned {type(output).__name__}; expected a dict or list of dicts"
+            )
 
-        return [FunAsrSegment.from_raw(raw) for raw in raw_list]
+        segments = []
+        for index, raw in enumerate(raw_list):
+            if not isinstance(raw, dict):
+                raise ModelOutputInvalidError(
+                    f"FunASR model {self.model_name}, segment {index + 1}: "
+                    f"expected a dict, got {type(raw).__name__}"
+                )
+            try:
+                segments.append(FunAsrSegment.from_raw(raw))
+            except ModelOutputInvalidError as error:
+                raise ModelOutputInvalidError(
+                    f"FunASR model {self.model_name}, segment {index + 1}: {error}"
+                ) from error
+        return segments
 
     def transcribe(
         self, source_path: str

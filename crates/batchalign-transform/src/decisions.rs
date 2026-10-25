@@ -734,6 +734,7 @@ mod tests {
     use super::*;
     use talkbank_model::WriteChat;
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn parse_chat(text: &str) -> ChatFile {
         let parser = TreeSitterParser::new().expect("parser init");

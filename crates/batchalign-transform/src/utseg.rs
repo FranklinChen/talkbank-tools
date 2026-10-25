@@ -520,7 +520,8 @@ fn as_retrace(item: &UtteranceContent) -> Option<&Retrace> {
     match item {
         UtteranceContent::Retrace(retrace) => Some(retrace),
         UtteranceContent::AnnotatedRetrace(annotated) => Some(&annotated.inner),
-        UtteranceContent::Word(_)
+        UtteranceContent::OrphanAnnotation(_)
+        | UtteranceContent::Word(_)
         | UtteranceContent::AnnotatedWord(_)
         | UtteranceContent::ReplacedWord(_)
         | UtteranceContent::Event(_)
@@ -554,6 +555,7 @@ mod tests {
     use super::*;
     use talkbank_model::model::{DependentTier, Terminator, UtteranceContent, WorTier, WriteChat};
     use talkbank_parser::TreeSitterParser;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
 
     fn parse_chat(text: &str) -> ChatFile {
         let parser = TreeSitterParser::new().unwrap();
@@ -974,8 +976,20 @@ mod tests {
             .bullet
             .as_ref()
             .expect("a sole child holds the parent's whole content, and its span");
-        assert_eq!(kept.timing.start_ms, 1000);
-        assert_eq!(kept.timing.end_ms, 5000);
+        assert_eq!(
+            kept.as_parsed()
+                .expect("fixture has parsed timing")
+                .timing
+                .start_ms,
+            1000
+        );
+        assert_eq!(
+            kept.as_parsed()
+                .expect("fixture has parsed timing")
+                .timing
+                .end_ms,
+            5000
+        );
     }
 
     /// %wor partitioning: when a parent has %wor with timing for every
@@ -1087,16 +1101,44 @@ mod tests {
             .bullet
             .as_ref()
             .expect("complete child %wor timing must produce a main bullet");
-        assert_eq!(first.timing.start_ms, 24_275);
-        assert_eq!(first.timing.end_ms, 25_265);
+        assert_eq!(
+            first
+                .as_parsed()
+                .expect("fixture has parsed timing")
+                .timing
+                .start_ms,
+            24_275
+        );
+        assert_eq!(
+            first
+                .as_parsed()
+                .expect("fixture has parsed timing")
+                .timing
+                .end_ms,
+            25_265
+        );
         let second = result[1]
             .main
             .content
             .bullet
             .as_ref()
             .expect("complete child %wor timing must produce a main bullet");
-        assert_eq!(second.timing.start_ms, 25_265);
-        assert_eq!(second.timing.end_ms, 28_145);
+        assert_eq!(
+            second
+                .as_parsed()
+                .expect("fixture has parsed timing")
+                .timing
+                .start_ms,
+            25_265
+        );
+        assert_eq!(
+            second
+                .as_parsed()
+                .expect("fixture has parsed timing")
+                .timing
+                .end_ms,
+            28_145
+        );
     }
 
     /// A single missing `%wor` timing keeps the split out of the complete

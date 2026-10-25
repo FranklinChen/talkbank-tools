@@ -2,10 +2,10 @@
 //!
 //! Resolution order:
 //! 1. `BATCHALIGN_PYTHON` (explicit override)
-//! 2. `VIRTUAL_ENV` interpreter (preferring Python 3.13 names where available)
+//! 2. `VIRTUAL_ENV` interpreter (preferring Python 3.14 names where available)
 //! 3. Sibling python in the same directory as the binary (pip-installed case)
 //! 4. Walk up from the binary looking for a `.venv` that has batchalign
-//! 5. `python3.13` on Unix-like systems, or `python` on Windows
+//! 5. `python3.14` on Unix-like systems, or `python` on Windows
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ const WORKER_ENTRY: &str = "import sys; sys.argv = ['batchalign-worker'] + sys.a
 /// `batchalign` from that checkout's working tree, uncommitted edits included,
 /// instead of the package installed beside the interpreter, while the build
 /// identity reported the installed build (observed 2026-10-01). `-P` (Python
-/// 3.11+; we require 3.13) removes that entry and nothing else, so an editable
+/// 3.11+; we require 3.14) removes that entry and nothing else, so an editable
 /// development install, which reaches its source through a `.pth` file, still
 /// works.
 pub(crate) fn isolated_python(python: impl AsRef<OsStr>) -> std::process::Command {
@@ -100,17 +100,11 @@ impl PythonRuntime {
 }
 
 fn venv_python_candidates(venv_dir: &Path) -> Vec<PathBuf> {
-    if cfg!(windows) {
-        vec![venv_dir.join("Scripts").join("python.exe")]
-    } else {
-        let bin = venv_dir.join("bin");
-        vec![
-            bin.join("python3.13"),
-            bin.join("python3.12"),
-            bin.join("python3"),
-            bin.join("python"),
-        ]
-    }
+    let bin = venv_dir.join(if cfg!(windows) { "Scripts" } else { "bin" });
+    sibling_python_names()
+        .iter()
+        .map(|name| bin.join(name))
+        .collect()
 }
 
 /// Check whether a Python executable can import `batchalign.worker`.
@@ -131,7 +125,7 @@ fn sibling_python_names() -> &'static [&'static str] {
     if cfg!(windows) {
         &["python.exe"]
     } else {
-        &["python3.13", "python3.12", "python3", "python"]
+        &["python3.14", "python3", "python"]
     }
 }
 
@@ -139,7 +133,7 @@ fn default_python_command() -> &'static str {
     if cfg!(windows) {
         "python"
     } else {
-        "python3.13"
+        "python3.14"
     }
 }
 
@@ -147,7 +141,7 @@ fn default_python_command() -> &'static str {
 ///
 /// When the binary is installed into a venv via `pip install` (e.g.
 /// `.venv/bin/batchalign3`), the venv's Python sits right next to it at
-/// `.venv/bin/python3.13` (or another preferred sibling name). This handles
+/// `.venv/bin/python3.14` (or another preferred sibling name). This handles
 /// the common case where `VIRTUAL_ENV`
 /// is not set (venv not activated).
 fn discover_sibling_python(current_exe: Option<&Path>) -> Option<String> {
@@ -243,7 +237,7 @@ mod tests {
         let py = if cfg!(windows) {
             sub.join("python.exe")
         } else {
-            sub.join("python3.12")
+            sub.join("python3.14")
         };
         std::fs::write(&py, b"").expect("touch");
 
@@ -257,7 +251,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(got, "python");
         } else {
-            assert_eq!(got, "python3.13");
+            assert_eq!(got, "python3.14");
         }
     }
 }

@@ -1580,13 +1580,16 @@ unbulleted), have changed it, and `BulletSource` cannot tell the difference. So
 `MainBulletAuthority::bind` runs at the single parse in the align dispatch,
 before UTR, and the result travels with the model in `FaInputDocument`. Each
 input bullet is classified as a `GivenMainBullet`: `Extent` and `Empty` are
-kept (`KeptBullet`); `Backward` refuses the file with `BackwardGivenBullet`.
+kept (`KeptBullet`); `Backward` refuses the file with `GivenBulletError::Backward`.
+Recovered, unparsed source is refused as `GivenBulletError::Unparsed`; it
+cannot enter kept numeric timing. Later verification likewise refuses unparsed
+working bullets, including where the input required a kept absence.
 `FaProjection::new` pairs the authority with the `FaProjectionPolicy` (which
 does not itself carry the main-bullet choice).
 
 ```mermaid
 flowchart TD
-    parse["align dispatch: single parse"] --> bind["MainBulletAuthority::bind<br/>(classify each input bullet;<br/>Backward refuses the file)"]
+    parse["align dispatch: single parse"] --> bind["MainBulletAuthority::bind<br/>(classify each input bullet;<br/>Backward or unparsed refuses the file)"]
     bind --> utr["UTR pre-pass, rescue, filler expansion<br/>(may widen bullets for grouping)"]
     utr --> apply["apply_fa_results_with_projection_policy<br/>kept: skip the bullet update"]
     apply --> impose["then_finalize: impose<br/>restore kept bullets, clamp words on<br/>main tier and %wor -> ImposedBullets"]

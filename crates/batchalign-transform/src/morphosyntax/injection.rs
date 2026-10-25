@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use talkbank_model::alignment::MorItemIndex;
 use talkbank_model::model::dependent_tier::GrammaticalRelation;
-use talkbank_model::model::dependent_tier::mor::{Mor, MorWord};
+use talkbank_model::model::dependent_tier::mor::Mor;
 use talkbank_model::model::{GrammaticalRelationType, LanguageCode, Line};
 
 use super::alignment::{UdAlignment, UdAlignmentError, UdTokens};
@@ -199,38 +199,39 @@ const PUNCT_RELATION_LABEL: &str = "PUNCT";
 fn synthesize_all_special_forms(
     item: &super::payload::MorphosyntaxBatchItem,
     words: &[crate::extract::ExtractedWord],
-) -> Option<Vec<Mor>> {
-    let mors: Vec<Mor> = item
-        .words()
-        .iter()
-        .zip(words.iter())
-        .map(|(batch_word, word)| match batch_word.role() {
-            WordRole::CodeSwitched(_) => Some(Mor::new(MorWord::l2_placeholder())),
+) -> Result<Option<Vec<Mor>>, MappingError> {
+    let mut mors = Vec::new();
+    for (batch_word, word) in item.words().iter().zip(words) {
+        let mor = match batch_word.role() {
+            WordRole::CodeSwitched(pending) => Mor::new(pending.staged_mor()),
             WordRole::SpecialForm(form_type) => {
-                Some(synthesize_special_form_mor(form_type, word.text.as_str()))
+                synthesize_special_form_mor(form_type, word.text.as_str())?
             }
-            WordRole::Analysed => None,
-        })
-        .collect::<Option<_>>()?;
-    (!mors.is_empty()).then_some(mors)
+            WordRole::Analysed => return Ok(None),
+        };
+        mors.push(mor);
+    }
+    Ok((!mors.is_empty()).then_some(mors))
 }
 
 /// The star-shaped `%gra` of a synthesized utterance: the first chunk is the
 /// root, every other chunk depends on it, and the terminator on chunk 1.
-fn star_gras(mors: &[Mor]) -> Vec<GrammaticalRelation> {
+fn star_gras(mors: &[Mor]) -> Result<Vec<GrammaticalRelation>, MappingError> {
+    let dependent = super::mapping_helpers::normalize_deprel(DEP_RELATION_LABEL, || {
+        "synthetic special-form structure".to_owned()
+    })?;
+    let punctuation = super::mapping_helpers::normalize_deprel(PUNCT_RELATION_LABEL, || {
+        "synthetic special-form terminator".to_owned()
+    })?;
     let chunk_count: usize = mors.iter().map(Mor::count_chunks).sum();
     let mut gras: Vec<GrammaticalRelation> = (1..=chunk_count)
         .map(|chunk| match chunk {
-            1 => GrammaticalRelation::new(chunk, 0, ROOT_RELATION_LABEL),
-            _ => GrammaticalRelation::new(chunk, 1, DEP_RELATION_LABEL),
+            1 => GrammaticalRelation::new(chunk, 0, GrammaticalRelationType::root()),
+            _ => GrammaticalRelation::new(chunk, 1, dependent.clone()),
         })
         .collect();
-    gras.push(GrammaticalRelation::new(
-        chunk_count + 1,
-        1,
-        PUNCT_RELATION_LABEL,
-    ));
-    gras
+    gras.push(GrammaticalRelation::new(chunk_count + 1, 1, punctuation));
+    Ok(gras)
 }
 
 /// Relabel the items of special-form and code-switched words, in place.
@@ -247,7 +248,7 @@ fn relabel_special_forms<'w>(
     mors: &mut [Mor],
     gras: &mut [GrammaticalRelation],
     words: impl Iterator<Item = (&'w BatchWord, &'w crate::extract::ExtractedWord, Vec<usize>)>,
-) {
+) -> Result<(), MappingError> {
     // The chunk each item starts at, before any item is replaced.
     let first_chunks: Vec<usize> = mors
         .iter()
@@ -265,20 +266,23 @@ fn relabel_special_forms<'w>(
             };
             match batch_word.role() {
                 WordRole::Analysed => {}
-                WordRole::CodeSwitched(_) => mor.main.reset_to_l2_placeholder(),
+                WordRole::CodeSwitched(pending) => mor.main = pending.staged_mor(),
                 WordRole::SpecialForm(form_type) => {
-                    *mor = synthesize_special_form_mor(form_type, word.text.as_str());
+                    *mor = synthesize_special_form_mor(form_type, word.text.as_str())?;
                     if let Some(gra) = gras.get_mut(first_chunk) {
                         let label = match gra.head {
                             0 => ROOT_RELATION_LABEL,
                             _ => DEP_RELATION_LABEL,
                         };
-                        gra.relation = GrammaticalRelationType::new(label);
+                        gra.relation = super::mapping_helpers::normalize_deprel(label, || {
+                            "special-form attachment".to_owned()
+                        })?;
                     }
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Inject UD NLP results back into utterances.
@@ -376,6 +380,16 @@ struct UtteranceInjection<'a, 'u> {
 }
 
 impl UtteranceInjection<'_, '_> {
+    fn mapping_failure(&self, error: MappingError) -> Box<DecisionRecord> {
+        Box::new(DecisionRecord::new_and_trace(
+            self.line_idx,
+            self.utt.main.speaker.as_str().to_string(),
+            DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
+            format!("ud_to_chat_error={error}"),
+            true,
+        ))
+    }
+
     /// Inject one response: rewrite the analysis by the grammatical
     /// invariants once, walk it once, map the walk, place the special forms
     /// through the alignment, inject, and defer the `@s` words from the same
@@ -413,8 +427,10 @@ impl UtteranceInjection<'_, '_> {
 
         // Utterances whose every word is a special form or a code-switch
         // do not need the model's analysis (see `synthesize_all_special_forms`).
-        if let Some(mors) = synthesize_all_special_forms(self.item, self.words) {
-            let gras = star_gras(&mors);
+        if let Some(mors) = synthesize_all_special_forms(self.item, self.words)
+            .map_err(|error| self.mapping_failure(error))?
+        {
+            let gras = star_gras(&mors).map_err(|error| self.mapping_failure(error))?;
             let item_count = mors.len();
             return match crate::inject::inject_morphosyntax(
                 self.utt,
@@ -529,7 +545,8 @@ impl UtteranceInjection<'_, '_> {
                     .zip(self.words)
                     .enumerate()
                     .map(|(word, (batch_word, extracted))| (batch_word, extracted, vec![word])),
-            );
+            )
+            .map_err(|error| self.mapping_failure(error))?;
         }
         match crate::inject::inject_morphosyntax(self.utt, mors, self.item.terminator.clone(), gras)
         {
@@ -565,6 +582,7 @@ impl UtteranceInjection<'_, '_> {
 
         let (mors, gras, token_items) = mapped.into_indexed();
         let expanded = SurfaceItems::pair(surface, mors, gras, self.words)
+            .map_err(ExpansionFailure::Geometry)
             .and_then(|paired| paired.expand(mwt));
         let Expanded {
             tokens,
@@ -575,7 +593,8 @@ impl UtteranceInjection<'_, '_> {
         } = match expanded {
             Ok(expanded) => expanded,
             // The utterance is left as it was, and the failure reported.
-            Err(refused) => {
+            Err(ExpansionFailure::Relation(error)) => return Err(self.mapping_failure(error)),
+            Err(ExpansionFailure::Geometry(refused)) => {
                 let tokens = refused.stanza_tokens_after_mapping.clone();
                 return self.misalignment(
                     refused,
@@ -623,7 +642,8 @@ impl UtteranceInjection<'_, '_> {
                     )
                 },
             ),
-        );
+        )
+        .map_err(|error| self.mapping_failure(error))?;
 
         // Collect retokenization trace info before modifying the AST.
         self.result.retokenization_traces.push(RetokenizationInfo {
@@ -828,6 +848,21 @@ struct SurfaceItems {
 /// A refused retokenization: the diagnostic the utterance is reported with.
 type Refused = crate::inject::MisalignmentDiagnostic;
 
+/// A geometry refusal never conceals a relation-admission failure.
+#[derive(Debug, thiserror::Error)]
+enum ExpansionFailure {
+    #[error("retokenization geometry is inconsistent")]
+    Geometry(Refused),
+    #[error(transparent)]
+    Relation(#[from] MappingError),
+}
+
+impl From<Refused> for ExpansionFailure {
+    fn from(diagnostic: Refused) -> Self {
+        Self::Geometry(diagnostic)
+    }
+}
+
 impl SurfaceItems {
     /// Pair each item with its token, or refuse.
     fn pair(
@@ -860,7 +895,11 @@ impl SurfaceItems {
     /// first (`FIXED`). Every chunk index and head is renumbered, the
     /// terminator's relation included, so the relations stay one per chunk
     /// and form the tree the analysis did.
-    fn expand(self, mwt: &MwtDict) -> Result<Expanded, Refused> {
+    fn expand(self, mwt: &MwtDict) -> Result<Expanded, ExpansionFailure> {
+        let piece_relation =
+            super::mapping_helpers::normalize_deprel(LEXICON_PIECE_RELATION_LABEL, || {
+                "MWT lexicon piece attachment".to_owned()
+            })?;
         let Self {
             tokens,
             mors,
@@ -896,7 +935,8 @@ impl SurfaceItems {
                 ),
                 actual: talkbank_model::alignment::helpers::MorItemCount::new(gras.len()),
                 suspected_class: crate::inject::MisalignmentClass::MorGraCountMismatch,
-            });
+            }
+            .into());
         }
 
         // Per item: its first chunk before (1-based) and its first piece's
@@ -956,7 +996,7 @@ impl SurfaceItems {
                 out.gras.push(GrammaticalRelation::new(
                     renumber(relation.index),
                     renumber(relation.head),
-                    relation.relation.as_str(),
+                    relation.relation,
                 ));
             }
             for (piece_at, piece) in item_pieces.into_iter().enumerate() {
@@ -965,7 +1005,7 @@ impl SurfaceItems {
                         out.gras.push(GrammaticalRelation::new(
                             new_first[item] + piece_at * count + offset,
                             new_first[item] + offset,
-                            LEXICON_PIECE_RELATION_LABEL,
+                            piece_relation.clone(),
                         ));
                     }
                 }
@@ -978,7 +1018,7 @@ impl SurfaceItems {
             out.gras.push(GrammaticalRelation::new(
                 renumber(relation.index),
                 renumber(relation.head),
-                relation.relation.as_str(),
+                relation.relation,
             ));
         }
         Ok(out)

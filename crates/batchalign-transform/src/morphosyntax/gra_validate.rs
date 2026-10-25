@@ -116,13 +116,48 @@ mod tests {
     #[test]
     fn self_loop_with_non_root_deprel_is_a_cycle() {
         let gras = vec![
-            GrammaticalRelation::new(1, 5, "NSUBJ"),
-            GrammaticalRelation::new(2, 5, "PUNCT"),
-            GrammaticalRelation::new(3, 4, "CASE"),
-            GrammaticalRelation::new(4, 5, "NSUBJ"),
-            GrammaticalRelation::new(5, 5, "DISCOURSE"),
-            GrammaticalRelation::new(6, 5, "DISCOURSE"),
-            GrammaticalRelation::new(7, 5, "PUNCT"),
+            GrammaticalRelation::new(
+                1,
+                5,
+                talkbank_model::GrammaticalRelationType::new("NSUBJ")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                2,
+                5,
+                talkbank_model::GrammaticalRelationType::new("PUNCT")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                3,
+                4,
+                talkbank_model::GrammaticalRelationType::new("CASE")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                4,
+                5,
+                talkbank_model::GrammaticalRelationType::new("NSUBJ")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                5,
+                5,
+                talkbank_model::GrammaticalRelationType::new("DISCOURSE")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                6,
+                5,
+                talkbank_model::GrammaticalRelationType::new("DISCOURSE")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                7,
+                5,
+                talkbank_model::GrammaticalRelationType::new("PUNCT")
+                    .expect("valid fixture relation"),
+            ),
         ];
         let err = validate_generated_gra(&gras)
             .expect_err("self-loop with non-ROOT deprel must fail validation");
@@ -141,9 +176,24 @@ mod tests {
     #[test]
     fn self_loop_with_root_deprel_is_accepted_as_structural_root() {
         let gras = vec![
-            GrammaticalRelation::new(1, 2, "DET"),
-            GrammaticalRelation::new(2, 2, "ROOT"),
-            GrammaticalRelation::new(3, 2, "PUNCT"),
+            GrammaticalRelation::new(
+                1,
+                2,
+                talkbank_model::GrammaticalRelationType::new("DET")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                2,
+                2,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                3,
+                2,
+                talkbank_model::GrammaticalRelationType::new("PUNCT")
+                    .expect("valid fixture relation"),
+            ),
         ];
         validate_generated_gra(&gras)
             .expect("self-headed ROOT must be accepted as structural root");
@@ -153,9 +203,24 @@ mod tests {
     #[test]
     fn canonical_head_zero_root_validates() {
         let gras = vec![
-            GrammaticalRelation::new(1, 2, "DET"),
-            GrammaticalRelation::new(2, 0, "ROOT"),
-            GrammaticalRelation::new(3, 2, "PUNCT"),
+            GrammaticalRelation::new(
+                1,
+                2,
+                talkbank_model::GrammaticalRelationType::new("DET")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                2,
+                0,
+                talkbank_model::GrammaticalRelationType::new("ROOT")
+                    .expect("valid fixture relation"),
+            ),
+            GrammaticalRelation::new(
+                3,
+                2,
+                talkbank_model::GrammaticalRelationType::new("PUNCT")
+                    .expect("valid fixture relation"),
+            ),
         ];
         validate_generated_gra(&gras).expect("canonical head=0/ROOT must validate");
     }

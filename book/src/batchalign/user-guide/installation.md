@@ -5,7 +5,7 @@
 
 `batchalign3` is distributed via **GitHub releases** (there is no PyPI package).
 The installer bootstraps [`uv`](https://docs.astral.sh/uv/) if needed, installs
-`batchalign3` into an isolated environment using a uv-managed Python (3.13 by
+`batchalign3` into an isolated environment using a uv-managed Python (3.14 by
 default), and re-running it upgrades to the latest release.
 
 ```bash
@@ -27,14 +27,14 @@ batchalign3 --help
 
 Pre-built wheels are published for all five platforms (macOS Apple Silicon +
 Intel, Linux x86_64 + aarch64, Windows x86_64). One abi3 wheel per platform
-covers Python 3.13 and newer. `batchalign3`'s own dependencies still resolve
+targets standard Python 3.14. `batchalign3`'s own dependencies still resolve
 from PyPI, so the first install downloads large ML dependencies.
 
 ## System requirements
 
 | Requirement | Details |
 |------------|---------|
-| Python | 3.13 or 3.14 (a uv-managed 3.13 is used by default) |
+| Python | 3.14 (a uv-managed 3.14 is used by default) |
 | Disk space | Several GB for ML models (downloaded on first use) |
 | RAM | 8 GB minimum, 16 GB recommended |
 | FFmpeg | Only needed for some media formats |
@@ -42,12 +42,12 @@ from PyPI, so the first install downloads large ML dependencies.
 
 ## Choosing the Python version
 
-The installer uses a uv-managed Python 3.13 by default. To install against a
-different supported version, set `BATCHALIGN3_PYTHON` before running it:
+The installer uses a uv-managed Python 3.14 by default. To install against a
+specific standard CPython 3.14 interpreter, set `BATCHALIGN3_PYTHON` before running it:
 
 ```bash
-BATCHALIGN3_PYTHON=3.13 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/FranklinChen/talkbank-tools/releases/latest/download/install-batchalign3.sh | BATCHALIGN3_PYTHON=3.14 sh
 ```
 
 ## Double-click helpers
@@ -81,7 +81,7 @@ for your platform from the
 and install it with `uv`:
 
 ```bash
-uv tool install --python 3.13 ./batchalign3-0.4.1-cp313-abi3-macosx_11_0_arm64.whl
+uv tool install --python 3.14 ./batchalign3-0.4.1-cp314-abi3-macosx_11_0_arm64.whl
 ```
 
 ## First run
@@ -97,8 +97,8 @@ user path is the `batchalign3` CLI above.
 
 ## Worker Python resolution
 
-The CLI finds a Python 3.13 runtime automatically, via `BATCHALIGN_PYTHON`, the
-active virtualenv, a sibling/project `.venv`, or `python3.13` on PATH. Override
+The CLI finds a Python 3.14 runtime automatically, via `BATCHALIGN_PYTHON`, the
+active virtualenv, a sibling/project `.venv`, or `python3.14` on PATH. Override
 explicitly:
 
 ```bash

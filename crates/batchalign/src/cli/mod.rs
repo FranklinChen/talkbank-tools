@@ -181,7 +181,6 @@ pub(crate) mod self_exe;
 pub mod serve_cmd;
 pub mod setup_cmd;
 pub mod tui;
-#[cfg(feature = "binary-entry")]
 pub mod worker_cmd;
 
 /// Run the embedded CLI entry path from an explicit `argv` vector.

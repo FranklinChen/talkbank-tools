@@ -22,7 +22,7 @@ Windows, and Linux.
 
 Install the `batchalign3` CLI from the latest GitHub release. The installer
 bootstraps [`uv`](https://docs.astral.sh/uv/) if needed, installs into an
-isolated environment with a uv-managed Python (3.12 by default), and re-running
+isolated environment with a uv-managed Python (3.14 by default), and re-running
 it upgrades to the latest release. There is no PyPI package.
 
 **macOS / Linux:**
@@ -43,7 +43,7 @@ Windows `.bat` double-click wrappers that run the same installer.
 
 ### System requirements
 
-- **Python:** 3.12, 3.13, or 3.14 (a uv-managed 3.12 is used by default)
+- **Python:** 3.14 (a uv-managed 3.14 is used by default)
 - **Disk:** several GB for ML models (downloaded on first use)
 - **RAM:** 8 GB minimum, 16 GB recommended
 - **FFmpeg:** only needed for some media formats

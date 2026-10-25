@@ -371,12 +371,17 @@ impl<D: AnalysisScope> Analysis<Admitted, D> {
     /// Collect the payload of every utterance the scope analyzes. An
     /// utterance outside it is never sent to a worker, so it gets no
     /// analysis to inject.
-    pub(super) fn collect(self, options: &RunOptions<'_>) -> Analysis<Collected, D> {
-        let languages = declared_languages(&self.chat, &self.language.model);
+    pub(super) fn collect(
+        self,
+        options: &RunOptions<'_>,
+    ) -> Result<Analysis<Collected, D>, ServerError> {
+        let languages = declared_languages(&self.chat, &self.language.model).map_err(|error| {
+            ServerError::Validation(format!("unusable @Languages declaration: {error}"))
+        })?;
         let collected = collect_payloads(
             &self.chat,
             &self.language.model,
-            &languages,
+            languages.as_ref(),
             options.multilingual,
         );
         let hints = if options.hints.should_apply() {
@@ -390,12 +395,12 @@ impl<D: AnalysisScope> Analysis<Admitted, D> {
             .filter(|item| self.scope.analyzes(item.utt_ordinal()))
             .collect();
         // Per-file reporting of collected.not_applicable remains a separate concern.
-        Analysis {
+        Ok(Analysis {
             chat: self.chat,
             language: self.language,
             scope: self.scope,
             state: Collected { items, hints },
-        }
+        })
     }
 }
 
@@ -542,6 +547,7 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
             options.tokenization == TokenizationMode::StanzaRetokenize,
         );
         crate::provenance::inject_provenance(&mut self.chat, &provenance);
+        self.state.applied.annotate_secondary(&mut self.chat);
         remove_empty_morphosyntax_placeholders(&mut self.chat);
 
         let output = self.scope.judge(self.chat)?;

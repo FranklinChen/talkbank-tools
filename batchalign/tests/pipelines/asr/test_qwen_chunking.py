@@ -26,7 +26,6 @@ import pytest
 from batchalign.inference.languages.cantonese._qwen_chunking import (
     MIN_ASR_INPUT_SECONDS,
     SAMPLE_RATE,
-    AudioChunk,
     split_audio_into_chunks,
 )
 
@@ -65,12 +64,6 @@ def test_offsets_are_the_true_start_time_of_each_chunk() -> None:
         assert chunk.offset == pytest.approx(expected, abs=1e-9)
         expected += chunk.seconds
     assert expected == pytest.approx(len(wav) / SR, abs=1e-9)
-
-
-def test_to_file_shifts_a_window_time_by_the_chunk_offset() -> None:
-    chunk = AudioChunk(samples=_noise(5.0), offset=180.0)
-    assert chunk.to_file(0.0) == 180.0
-    assert chunk.to_file(2.5) == 182.5
 
 
 def test_the_effective_cap_exceeds_the_named_one_by_the_search_window() -> None:

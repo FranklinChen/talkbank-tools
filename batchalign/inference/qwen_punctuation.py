@@ -5,9 +5,10 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass, replace
 
-from batchalign.inference.qwen_forced_alignment import (
+from batchalign.inference.qwen_timing import (
+    AlignedWindowWord,
+    AudioWindow,
     SpokenWindowWords,
-    WindowAlignedWord,
 )
 
 
@@ -24,7 +25,8 @@ class PunctuatedAlignment:
     timestamps to changed words. Text is provider output, never CHAT.
     """
 
-    words: tuple[WindowAlignedWord, ...]
+    words: tuple[AlignedWindowWord, ...]
+    window: AudioWindow
 
     def __init__(self, text: str, aligned: SpokenWindowWords) -> None:
         source = [(i, c) for i, c in enumerate(text) if _lexical(c)]
@@ -34,7 +36,7 @@ class PunctuatedAlignment:
             raise ValueError(
                 "Qwen alignment changed recognized words; cannot transfer punctuation"
             )
-        result: list[WindowAlignedWord] = []
+        result: list[AlignedWindowWord] = []
         offset = 0
         for word in aligned.words:
             count = sum(_lexical(c) for c in word.text)
@@ -49,3 +51,4 @@ class PunctuatedAlignment:
             )
             result.append(replace(word, text=word.text + punctuation))
         object.__setattr__(self, "words", tuple(result))
+        object.__setattr__(self, "window", aligned.window)

@@ -89,6 +89,7 @@ pub fn expand_bullets_for_edge_fillers(chat_file: &mut ChatFile) {
                     .content
                     .bullet
                     .as_ref()
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .map(|b| (b.timing.start_ms, b.timing.end_ms));
                 Some(UtteranceFillerSummary {
                     bullet: boundary,
@@ -107,7 +108,13 @@ pub fn expand_bullets_for_edge_fillers(chat_file: &mut ChatFile) {
             _ => continue,
         };
 
-        let bullet = match &mut utt.main.content.bullet {
+        let bullet = match utt
+            .main
+            .content
+            .bullet
+            .as_mut()
+            .and_then(talkbank_model::BulletState::as_parsed_mut)
+        {
             Some(b) => b,
             None => {
                 utt_idx += 1;

@@ -53,7 +53,11 @@ impl RecordingPresence {
             .content
             .postcodes
             .iter()
-            .find_map(|postcode| OffRecordPostcode::of_postcode_text(&postcode.text))
+            .find_map(|postcode| {
+                postcode
+                    .text()
+                    .and_then(OffRecordPostcode::of_postcode_text)
+            })
             .map_or(Self::InRecording, Self::NotInRecording)
     }
 }

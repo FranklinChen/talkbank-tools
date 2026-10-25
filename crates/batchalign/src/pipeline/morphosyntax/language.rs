@@ -16,14 +16,12 @@ use crate::{api::LanguageCode3, chat_ops::ChatFile, error::ServerError};
 /// shortcut was a known correctness hazard, see the 2026-05-03 incident.
 /// We deliberately diverge.
 pub(crate) fn resolve_per_file_lang(chat_file: &ChatFile) -> Result<LanguageCode3, ServerError> {
-    let raw = chat_file.languages.first().ok_or_else(|| {
-        ServerError::Validation(
-            "morphotag: file has no `@Languages:` header. Add the header (e.g. \
-             `@Languages: eng`) and re-run; per-file language is required for \
-             honest %mor/%gra provenance."
-                .to_string(),
-        )
+    let languages = chat_file.language_declaration().map_err(|error| {
+        ServerError::Validation(format!(
+            "morphotag: unusable `@Languages:` declaration ({error}). Supply one valid header before analysis."
+        ))
     })?;
+    let raw = languages.primary();
     LanguageCode3::try_from(raw.as_str()).map_err(|err| {
         ServerError::Validation(format!(
             "morphotag: file's `@Languages:` declares '{raw}', which is not a \

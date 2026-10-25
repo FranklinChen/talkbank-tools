@@ -130,7 +130,8 @@ impl FaWorkerFailure {
             | ProtocolErrorCodeV2::ModelAccessDenied
             | ProtocolErrorCodeV2::UnsupportedLanguage
             | ProtocolErrorCodeV2::ModelDownloadFailed
-            | ProtocolErrorCodeV2::DeviceOutOfMemory => FaFailureClass::FileFailure,
+            | ProtocolErrorCodeV2::DeviceOutOfMemory
+            | ProtocolErrorCodeV2::ModelOutputInvalid => FaFailureClass::FileFailure,
         };
         Self { class, failure }
     }
@@ -262,6 +263,34 @@ mod tests {
 
     fn adapter_engine() -> EngineId {
         EngineId::new("test-fa")
+    }
+
+    #[test]
+    fn invalid_generated_timing_stays_final_through_the_fa_boundary() {
+        use crate::runner::util::classify_server_error;
+        use crate::types::scheduling::{FailureCategory, NextAttempt, RetryPolicy, StopReason};
+        use crate::worker::execute_result_v2::ModelLocality;
+
+        let response = ExecuteResponseV2::failure(
+            WorkerRequestIdV2::from("req-invalid-timing"),
+            ProtocolErrorCodeV2::ModelOutputInvalid,
+            "Qwen unit 2 starts before unit 1; not: targets length is too long for CTC".into(),
+            NonNegativeSeconds::ZERO,
+        );
+        let Err(FaPayloadRefusal::Failed(failure)) = read_fa_payload(&response) else {
+            panic!("the failed response must preserve its typed failure");
+        };
+        assert_eq!(failure.class(), FaFailureClass::FileFailure);
+        let category = classify_server_error(
+            &failure
+                .into_report()
+                .into_server_error(ModelLocality::Local),
+        );
+        assert_eq!(category, FailureCategory::ModelOutputInvalid);
+        assert_eq!(
+            RetryPolicy::default().after_failure(1, category),
+            NextAttempt::Stop(StopReason::Final)
+        );
     }
 
     /// The production path: the one read, then alignment of its payload.

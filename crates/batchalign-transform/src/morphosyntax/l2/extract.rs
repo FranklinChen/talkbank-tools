@@ -190,6 +190,11 @@ pub struct UnalignedL2Utterance {
 /// Why an utterance's `@s` words could not be deferred.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum L2ExtractError {
+    /// A marked word names no dispatchable language in its header context.
+    #[error(
+        "secondary language could not be uniquely resolved; retain L2|xxx and correct the language marker or @Languages declaration"
+    )]
+    LanguageUnresolved,
     /// The primary UD sentence does not align to the utterance's words.
     #[error("primary analysis does not align: {0}")]
     Alignment(#[from] UdAlignmentError),
@@ -255,7 +260,7 @@ impl L2Extraction {
                 at_s_words = unaligned.at_s_words,
                 error = %unaligned.error,
                 "L2 extract: @s words fall back to L2|xxx because the primary \
-                 analysis cannot be aligned to the utterance's words"
+                 analysis or language cannot be placed for the utterance's words"
             );
         }
         self.positions
@@ -273,6 +278,20 @@ impl L2Extraction {
         alignment: Result<&UdAlignment<'_, MorItemIndex>, &UdAlignmentError>,
         placement: &ItemPlacement<'_>,
     ) {
+        let unresolved = item
+            .words()
+            .iter()
+            .filter(|word| {
+                matches!(word.role(), WordRole::CodeSwitched(_)) && dispatch_target(word).is_none()
+            })
+            .count();
+        if unresolved > 0 {
+            self.unaligned.push(UnalignedL2Utterance {
+                line_idx,
+                at_s_words: unresolved,
+                error: L2ExtractError::LanguageUnresolved,
+            });
+        }
         let at_s_words = item
             .words()
             .iter()
@@ -402,23 +421,25 @@ impl ItemPlacement<'_> {
     }
 }
 
-/// The language a batch word is dispatched to: the first language its
-/// code-switch resolved to; none for any other role, or an unresolved one
+/// The unique language a marked word authorizes; none for other roles,
+/// unresolved, multiple or ambiguous language evidence
 /// (which keeps `L2|xxx`).
 fn dispatch_target(word: &BatchWord) -> Option<LanguageCode> {
     match word.role() {
-        WordRole::CodeSwitched(resolution) => resolve_dispatch_lang(resolution),
+        WordRole::CodeSwitched(resolution) => resolve_dispatch_lang(resolution.resolution()),
         WordRole::Analysed | WordRole::SpecialForm(_) => None,
     }
 }
 
-/// Resolve the dispatch target language from a `LanguageResolution`.
-///
-/// Uses `LanguageResolution::languages()` which returns the first language
-/// for Single, all languages for Multiple/Ambiguous (we take the first),
-/// and empty for Unresolved.
+/// Only a unique language authorizes a model call. A compound or ambiguous
+/// marker carries language evidence without choosing one model arbitrarily.
 fn resolve_dispatch_lang(resolution: &LanguageResolution) -> Option<LanguageCode> {
-    resolution.languages().first().cloned()
+    match resolution {
+        LanguageResolution::Single(language) => Some(language.clone()),
+        LanguageResolution::Multiple(_)
+        | LanguageResolution::Ambiguous(_)
+        | LanguageResolution::Unresolved => None,
+    }
 }
 
 /// A word's UPOS, or `None` for a raw punctuation tag.
@@ -450,7 +471,8 @@ mod tests {
         let payloads = collect_payloads(
             &chat,
             &eng,
-            &[eng.clone(), spa],
+            talkbank_model::DeclaredLanguagesRef::new(&[eng.clone(), spa])
+                .expect("nonempty fixture language context"),
             MultilingualPolicy::ProcessAll,
         );
         let parser = talkbank_parser::TreeSitterParser::new().expect("parser");
@@ -578,18 +600,18 @@ mod tests {
         );
     }
 
-    /// The dispatch target is the first language a resolution names; an
-    /// unresolved word has none and keeps `L2|xxx`.
+    /// Only a unique resolution authorizes secondary inference.
     #[test]
-    fn dispatch_target_is_the_first_resolved_language() {
+    fn dispatch_requires_one_resolved_language() {
         let eng = LanguageCode::new("eng").expect("valid language code");
         let spa = LanguageCode::new("spa").expect("valid language code");
         assert_eq!(
-            resolve_dispatch_lang(&LanguageResolution::Multiple(vec![
-                eng.clone(),
-                spa.clone()
-            ])),
-            Some(eng)
+            resolve_dispatch_lang(&LanguageResolution::Multiple(
+                vec![eng.clone(), spa.clone()]
+                    .try_into()
+                    .expect("multiple fixture languages")
+            )),
+            None
         );
         assert_eq!(
             resolve_dispatch_lang(&LanguageResolution::Single(spa.clone())),

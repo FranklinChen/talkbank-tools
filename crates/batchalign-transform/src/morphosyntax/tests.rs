@@ -9,6 +9,7 @@ use talkbank_model::alignment::helpers::{MorAlignableWordCount, MorItemCount};
 use talkbank_model::model::ChatFile;
 use talkbank_model::model::{LanguageCode, SpeakerCode, Utterance};
 use talkbank_parser::TreeSitterParser;
+use talkbank_parser_tests::test_error::ParseProductTestExt;
 
 use crate::inject::{MisalignmentClass, MisalignmentDiagnostic};
 use crate::parse::parse_lenient;
@@ -341,9 +342,15 @@ fn ca_arrow_terminator_must_normalize_to_period_in_morphotag_payload() {
     let (chat_file, _) = parse_lenient(&parser, chat);
 
     let primary = LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(
         items.len(),
@@ -380,9 +387,15 @@ fn collect_payloads_resolves_at_s_against_file_languages_not_batch_default() {
     let (chat_file, _) = parse_lenient(&parser, chat);
 
     let primary = LanguageCode::new("eng").expect("valid test language code"); // simulated batch default
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let item = items[0].item();
@@ -401,7 +414,12 @@ fn collect_payloads_resolves_at_s_against_file_languages_not_batch_default() {
     let WordRole::CodeSwitched(resolved) = dona.role() else {
         panic!("dona@s must produce a language resolution");
     };
-    let resolved_langs: Vec<&str> = resolved.languages().iter().map(|c| c.as_str()).collect();
+    let resolved_langs: Vec<&str> = resolved
+        .resolution()
+        .languages()
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
     assert_eq!(
         resolved_langs,
         vec!["spa"],
@@ -433,7 +451,8 @@ fn a_batch_word_carries_its_role_and_the_text_it_implies() {
     let payloads = payload::collect_payloads(
         &chat,
         &eng,
-        &[eng.clone(), spa],
+        talkbank_model::DeclaredLanguagesRef::new(&[eng.clone(), spa])
+            .expect("nonempty fixture language context"),
         types::MultilingualPolicy::ProcessAll,
     );
     let item = payloads.batch_items[0].item();
@@ -449,12 +468,11 @@ fn a_batch_word_carries_its_role_and_the_text_it_implies() {
             (word.text().as_str(), role)
         })
         .collect();
-    let placeholder = talkbank_model::ChatCleanedText::stanza_placeholder();
     assert_eq!(
         roles,
         [
             ("the", "analysed"),
-            (placeholder.as_str(), "special form"),
+            ("gumma", "special form"),
             ("and", "analysed"),
             ("camino", "code-switched"),
             ("go", "analysed"),
@@ -462,6 +480,10 @@ fn a_batch_word_carries_its_role_and_the_text_it_implies() {
     );
     // On the wire, each word's role is a (form type, language) pair.
     let wire = serde_json::to_value(item).expect("the item serializes");
+    assert_eq!(
+        wire["words"],
+        serde_json::json!(["the", "xbxxx", "and", "camino", "go"])
+    );
     assert_eq!(
         wire["special_forms"],
         serde_json::json!([
@@ -491,7 +513,7 @@ fn inject_one(
     let payloads = payload::collect_payloads(
         &chat,
         &codes[0],
-        &codes,
+        talkbank_model::DeclaredLanguagesRef::new(&codes).expect("nonempty fixture languages"),
         types::MultilingualPolicy::ProcessAll,
     );
     let parser = TreeSitterParser::new().expect("parser");
@@ -572,7 +594,8 @@ fn morphosyntax_placeholder_spelling_does_not_choose_a_word_role() {
             let collection = payload::collect_payloads(
                 &chat,
                 &eng,
-                std::slice::from_ref(&eng),
+                talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(&eng))
+                    .expect("nonempty fixture languages"),
                 types::MultilingualPolicy::ProcessAll,
             );
             assert_eq!(collection.batch_items.len(), 1, "{main}");
@@ -635,4 +658,49 @@ fn at_s_positions_read_the_analysis_the_mapping_reads() {
         position.primary().head(),
         l2::HeadTarget::Word(talkbank_model::alignment::MorItemIndex::new(1))
     );
+}
+
+#[test]
+fn language_context_distinguishes_configured_absence_from_rejected_or_repeated_headers() {
+    use payload::{InputLanguageOrigin, declared_languages};
+    let primary = LanguageCode::new("eng").expect("fixture code");
+    let absent = ChatFile::new(Vec::new());
+    let context =
+        declared_languages(&absent, &primary).expect("explicit configured fallback for absence");
+    assert_eq!(context.origin(), InputLanguageOrigin::ConfiguredWhenAbsent);
+    assert_eq!(context.as_ref().primary(), &primary);
+    let source = one_utterance("hello .");
+    let declared = parse_chat(&source);
+    assert_eq!(
+        declared_languages(&declared, &primary).unwrap().origin(),
+        InputLanguageOrigin::SourceHeader
+    );
+    for headers in [
+        "@Languages:\teng\n@Languages:\tspa",
+        "@Languages:\t",
+        "@Languages:\t???",
+    ] {
+        let rejected = parse_chat(&source.replace("@Languages:\teng", headers));
+        assert!(
+            declared_languages(&rejected, &primary).is_err(),
+            "{headers:?} must not become the configured language"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_inline_language_keeps_surrounding_analysis_and_reports_its_absence() {
+    let (mor, _, injection) = inject_one(
+        "eng, spa, fra",
+        "hello mundo@s:spa&fra .",
+        "1 hello hello INTJ _ 0 root\n2 mundo mundo NOUN _ 1 obj\n3 . . PUNCT _ 1 punct",
+    );
+    assert_eq!(mor, "%mor:\tintj|hello L2|xxx .");
+    let (_, extraction) = injection.into_parts();
+    assert_eq!(extraction.unaligned().len(), 1);
+    assert_eq!(extraction.unaligned()[0].at_s_words, 1);
+    assert!(matches!(
+        extraction.unaligned()[0].error,
+        l2::L2ExtractError::LanguageUnresolved
+    ));
 }

@@ -570,13 +570,13 @@ mod tests {
             for line in &mut file.lines {
                 if let Line::Utterance(utt) = line {
                     utt.main.content.content = TierContentItems::new(vec![
-                        UtteranceContent::Word(Box::new(Word::simple(
+                        UtteranceContent::Word(Box::new(Word::new(
                             talkbank_model::Location::Unlocated,
-                            "hello",
+                            talkbank_model::WordText::new("hello").expect("nonempty fixture word"),
                         ))),
-                        UtteranceContent::Word(Box::new(Word::simple(
+                        UtteranceContent::Word(Box::new(Word::new(
                             talkbank_model::Location::Unlocated,
-                            "b2",
+                            talkbank_model::WordText::new("b2").expect("nonempty fixture word"),
                         ))),
                     ]);
                 }

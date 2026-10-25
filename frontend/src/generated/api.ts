@@ -472,7 +472,7 @@ export interface components {
          *     error strings.
          * @enum {string}
          */
-        FailureCategory: "validation" | "parse_error" | "input_missing" | "evidence_unavailable" | "analysis_unavailable" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "local_runtime" | "provider_transient" | "provider_terminal" | "provider_quota_exhausted" | "provider_account_refused" | "memory_pressure" | "cancelled" | "system" | "model_access_denied";
+        FailureCategory: "validation" | "parse_error" | "input_missing" | "evidence_unavailable" | "analysis_unavailable" | "worker_crash" | "worker_timeout" | "worker_protocol" | "worker_bootstrap" | "local_runtime" | "provider_transient" | "provider_terminal" | "provider_quota_exhausted" | "provider_account_refused" | "memory_pressure" | "cancelled" | "system" | "model_access_denied" | "model_output_invalid";
         /**
          * @description What a file written with diagnostics reports.
          *
@@ -1615,7 +1615,7 @@ export interface components {
          * @description Why secondary positions could not be established from primary injection.
          * @enum {string}
          */
-        SecondaryExtractionFailure: "alignment" | "tokenization_disagrees" | "split_word" | "unmapped_word";
+        SecondaryExtractionFailure: "language_unresolved" | "alignment" | "tokenization_disagrees" | "split_word" | "unmapped_word";
         /** @description One secondary span's failure, distinct from an unsupported-language exclusion. */
         SecondaryMorphologyFailure: {
             /** @description Typed producer boundary. */

@@ -235,6 +235,7 @@ fn test_monotonicity_clamps_overlapping_end_times() {
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("utt0 should keep timing");
     assert_eq!(
         b0.timing.end_ms, 4000,
@@ -248,6 +249,7 @@ fn test_monotonicity_clamps_overlapping_end_times() {
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("utt1 should keep timing");
     assert_eq!(
         b1.timing.end_ms, 7000,
@@ -261,6 +263,7 @@ fn test_monotonicity_clamps_overlapping_end_times() {
         .content
         .bullet
         .as_ref()
+        .and_then(talkbank_model::BulletState::as_parsed)
         .expect("utt2 should keep timing");
     assert_eq!(b2.timing.end_ms, 12000, "last utt end should be unchanged");
 
@@ -345,6 +348,7 @@ fn cross_speaker_overlap_policy_preserves_only_cross_speaker_end_overlap() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("cross-speaker timing retained")
             .timing
             .end_ms,
@@ -356,6 +360,7 @@ fn cross_speaker_overlap_policy_preserves_only_cross_speaker_end_overlap() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("same-speaker timing retained")
             .timing
             .end_ms,
@@ -393,6 +398,7 @@ fn fa_applied_carries_end_overlap_policy_into_finalization() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("cross-speaker timing retained")
             .timing
             .end_ms,
@@ -423,6 +429,7 @@ fn no_injection_projection_carries_end_overlap_policy_into_ordering() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("cross-speaker timing retained")
             .timing
             .end_ms,
@@ -455,6 +462,7 @@ fn fa_finalization_runs_optional_repair_before_monotonicity() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("earlier timing retained")
             .timing
             .end_ms,
@@ -466,6 +474,7 @@ fn fa_finalization_runs_optional_repair_before_monotonicity() {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .expect("later timing retained")
             .timing
             .start_ms,

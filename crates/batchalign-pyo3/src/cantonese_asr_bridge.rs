@@ -62,6 +62,8 @@ use serde::{Deserialize, Serialize};
 mod funasr_projection;
 mod provider_admission;
 
+pyo3::import_exception!(batchalign.worker._model_errors, ModelOutputInvalidError);
+
 /// Speaker attribution as this projection can express it.
 ///
 /// Serialized in the SAME tagged shape as the worker wire's
@@ -517,12 +519,12 @@ pub(crate) fn funaudio_segments_to_asr(
         let segments = match value {
             serde_json::Value::Array(_) => serde_json::from_value::<Vec<FunasrSegmentWire>>(value)
                 .map_err(|error| {
-                    BatchalignBoundaryError::internal(error.to_string()).into_py_err()
+                    ModelOutputInvalidError::new_err(format!("FunASR output: {error}"))
                 })?,
             serde_json::Value::Object(_) => {
                 vec![
                     serde_json::from_value::<FunasrSegmentWire>(value).map_err(|error| {
-                        BatchalignBoundaryError::internal(error.to_string()).into_py_err()
+                        ModelOutputInvalidError::new_err(format!("FunASR output: {error}"))
                     })?,
                 ]
             }
@@ -534,7 +536,7 @@ pub(crate) fn funaudio_segments_to_asr(
         };
 
         let projection = project_funasr_segments(segments)
-            .map_err(|error| BatchalignBoundaryError::internal(error).into_py_err())?;
+            .map_err(|error| ModelOutputInvalidError::new_err(error.to_string()))?;
         serde_json::to_string(&projection)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
     })

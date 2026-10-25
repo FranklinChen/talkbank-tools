@@ -500,10 +500,7 @@ pub(in crate::compare) fn conform_file_words(chat_file: &ChatFile) -> (Vec<Strin
         tokens,
         word_of_token,
         ..
-    } = ConformedSide::of(
-        &document,
-        WerNormalization::for_declared_languages(&chat_file.languages),
-    );
+    } = ConformedSide::of(&document, WerNormalization::for_document(chat_file));
     (tokens, word_of_token)
 }
 
@@ -522,7 +519,7 @@ pub fn compare(
 ) -> ComparisonBundle {
     let main_document = ComparedDocument::<Main>::of(main_file);
     let gold_document = ComparedDocument::<Gold>::of(gold_file);
-    let normalization = WerNormalization::for_declared_languages(&gold_file.languages);
+    let normalization = WerNormalization::for_document(gold_file);
     let main = ConformedSide::of(&main_document, normalization);
     let gold = ConformedSide::of(&gold_document, normalization);
     WholeFileAlignment::of(&main, &gold, gold_coverage).render()

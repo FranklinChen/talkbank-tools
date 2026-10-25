@@ -183,18 +183,20 @@ pub(crate) async fn process_morphosyntax_incremental(
     // Only complete source-admitted pairs can satisfy reuse. Copying one tier,
     // or copying nothing from an unchanged utterance, leaves analysis owed.
     let preserved_count =
-        preserve_complete_prior_morphology(&before, &mut after_file, &deltas, &primary_lang);
+        preserve_complete_prior_morphology(&before, &mut after_file, &deltas, &primary_lang)?;
     info!(preserved_count, "Preserved %mor/%gra from before file");
 
     // Admission already removed all after-file morphology. Only complete pairs
     // were installed above. The canonical collector therefore selects exactly
     // the remaining work, including unchanged utterances with missing analysis.
     // No second text-diff filter may drop those obligations.
-    let langs = declared_languages(&after_file, &primary_lang);
+    let langs = declared_languages(&after_file, &primary_lang).map_err(|error| {
+        ServerError::Validation(format!("unusable @Languages declaration: {error}"))
+    })?;
     let filtered_payloads = collect_payloads(
         &after_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         params.multilingual_policy,
     )
     .batch_items;
@@ -331,6 +333,7 @@ pub(crate) async fn process_morphosyntax_incremental(
         &applied,
         retokenize,
     );
+    applied.secondary_mut().annotate(&mut after_file);
     gate_incremental_output(after_file).map(|document| {
         MorphosyntaxOutput::new(document, applied.into_secondary()).with_provenance(provenance)
     })
@@ -348,10 +351,12 @@ impl<'source> ReusablePriorMorphology<'source> {
     fn from_admitted(
         prior: &'source batchalign_transform::AdmittedSourceChat<'_>,
         primary_lang: &LanguageCode,
-    ) -> Vec<Option<Self>> {
+    ) -> Result<Vec<Option<Self>>, ServerError> {
         use talkbank_model::model::{DependentTier, Line};
-        let languages = declared_languages(prior.document(), primary_lang);
-        prior
+        let languages = declared_languages(prior.document(), primary_lang).map_err(|error| {
+            ServerError::Validation(format!("unusable @Languages declaration: {error}"))
+        })?;
+        Ok(prior
             .document()
             .lines
             .iter()
@@ -376,24 +381,21 @@ impl<'source> ReusablePriorMorphology<'source> {
                 Some(mor.zip(gra).and_then(|(mor, gra)| {
                     batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
                         utterance,
-                        primary_lang,
-                        &languages,
+                        languages.as_ref(),
                     )
                     .map(|input| Self { mor, gra, input })
                 }))
             })
-            .collect()
+            .collect())
     }
 
     fn bind_to<'destination>(
         &self,
         destination: &'destination mut talkbank_model::model::Utterance,
-        primary_lang: &LanguageCode,
-        languages: &[LanguageCode],
+        languages: talkbank_model::DeclaredLanguagesRef<'_>,
     ) -> Option<CompatiblePriorMorphology<'source, 'destination>> {
         let input = batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
             destination,
-            primary_lang,
             languages,
         )?;
         if !self.input.equivalent_to(&input) {
@@ -437,11 +439,13 @@ fn preserve_complete_prior_morphology(
     after: &mut crate::chat_ops::ChatFile,
     deltas: &[batchalign_transform::diff::UtteranceDelta],
     primary_lang: &LanguageCode,
-) -> usize {
+) -> Result<usize, ServerError> {
     use batchalign_transform::diff::UtteranceDelta;
     use talkbank_model::model::Line;
-    let analyses = ReusablePriorMorphology::from_admitted(prior, primary_lang);
-    let languages = declared_languages(after, primary_lang);
+    let analyses = ReusablePriorMorphology::from_admitted(prior, primary_lang)?;
+    let languages = declared_languages(after, primary_lang).map_err(|error| {
+        ServerError::Validation(format!("unusable @Languages declaration: {error}"))
+    })?;
     let mut destinations: Vec<_> = after
         .lines
         .as_mut_slice()
@@ -476,7 +480,7 @@ fn preserve_complete_prior_morphology(
         if let (Some(Some(analysis)), Some(destination)) = (
             analyses.get(before_idx.raw()),
             destinations.get_mut(after_idx.raw()),
-        ) && let Some(compatible) = analysis.bind_to(destination, primary_lang, &languages)
+        ) && let Some(compatible) = analysis.bind_to(destination, languages.as_ref())
         {
             compatible.install();
             preserved += 1;
@@ -485,7 +489,7 @@ fn preserve_complete_prior_morphology(
     if preserved > 0 {
         crate::provenance::inherit_morphotag_provenance(prior, after);
     }
-    preserved
+    Ok(preserved)
 }
 
 /// Run the post-validation gate for the incremental morphotag path.
@@ -534,12 +538,14 @@ mod tests {
         let input = after.into_incremental();
         let mut chat = input.chat;
         let preserved =
-            preserve_complete_prior_morphology(&before, &mut chat, &deltas, &input.language);
-        let languages = declared_languages(&chat, &input.language);
+            preserve_complete_prior_morphology(&before, &mut chat, &deltas, &input.language)
+                .expect("fixture language declarations admitted");
+        let languages =
+            declared_languages(&chat, &input.language).expect("admitted fixture language context");
         let outstanding = collect_payloads(
             &chat,
             &input.language,
-            &languages,
+            languages.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
         .batch_items
@@ -696,8 +702,9 @@ mod tests {
         let chat = include_str!("../../../../test-fixtures/eng_hello_male.cha");
         let (chat_file, _) = parse_lenient(&parser, chat);
         let primary = LanguageCode::new("eng").expect("valid test language code");
-        let langs = declared_languages(&chat_file, &primary);
-        assert!(!langs.is_empty());
+        let langs =
+            declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+        assert_eq!(langs.as_ref().primary().as_str(), "eng");
     }
 
     #[test]
@@ -707,20 +714,25 @@ mod tests {
         let chat = include_str!("../../../../test-fixtures/eng_spa_bilingual_code_switch.cha");
         let (chat_file, _) = parse_lenient(&parser, chat);
         let primary = LanguageCode::new("eng").expect("valid test language code");
-        let langs = declared_languages(&chat_file, &primary);
+        let langs =
+            declared_languages(&chat_file, &primary).expect("admitted fixture language context");
 
         // With SkipNonPrimary, the Spanish utterance should be skipped
         let items_skip = collect_payloads(
             &chat_file,
             &primary,
-            &langs,
+            langs.as_ref(),
             MultilingualPolicy::SkipNonPrimary,
         )
         .batch_items;
         // With ProcessAll, all utterances should be included
-        let items_all =
-            collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll)
-                .batch_items;
+        let items_all = collect_payloads(
+            &chat_file,
+            &primary,
+            langs.as_ref(),
+            MultilingualPolicy::ProcessAll,
+        )
+        .batch_items;
 
         // SkipNonPrimary should produce fewer items than ProcessAll
         assert!(
@@ -738,10 +750,16 @@ mod tests {
         let chat = include_str!("../../../../test-fixtures/eng_spa_bilingual_code_switch.cha");
         let (chat_file, _) = parse_lenient(&parser, chat);
         let primary = LanguageCode::new("eng").expect("valid test language code");
-        let langs = declared_languages(&chat_file, &primary);
+        let langs =
+            declared_languages(&chat_file, &primary).expect("admitted fixture language context");
 
-        let items = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll)
-            .batch_items;
+        let items = collect_payloads(
+            &chat_file,
+            &primary,
+            langs.as_ref(),
+            MultilingualPolicy::ProcessAll,
+        )
+        .batch_items;
         // Both utterances should be included
         assert_eq!(items.len(), 2, "ProcessAll should include all utterances");
     }
@@ -755,9 +773,15 @@ mod tests {
 
         // Legacy detection and payload collection do not certify valid input.
         let primary = LanguageCode::new("eng").expect("valid test language code");
-        let langs = declared_languages(&chat_file, &primary);
-        let items = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll)
-            .batch_items;
+        let langs =
+            declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+        let items = collect_payloads(
+            &chat_file,
+            &primary,
+            langs.as_ref(),
+            MultilingualPolicy::ProcessAll,
+        )
+        .batch_items;
         assert!(!items.is_empty());
         assert!(
             ParsedFile::parse(

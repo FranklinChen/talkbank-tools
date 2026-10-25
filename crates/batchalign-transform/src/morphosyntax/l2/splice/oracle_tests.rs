@@ -246,12 +246,19 @@ fn production(case: &Case) -> Written {
         .host_parents
         .iter()
         .enumerate()
-        .map(|(at, &parent)| GrammaticalRelation::new(at + 1, parent, label(parent)))
+        .map(|(at, &parent)| {
+            GrammaticalRelation::new(
+                at + 1,
+                parent,
+                talkbank_model::GrammaticalRelationType::new(label(parent))
+                    .expect("valid fixture relation"),
+            )
+        })
         .collect();
     relations.push(GrammaticalRelation::new(
         host_chunks + 1,
         host_root,
-        "PUNCT",
+        talkbank_model::GrammaticalRelationType::new("PUNCT").expect("valid fixture relation"),
     ));
     let mut mor = MorTier::new_mor(
         Location::Unlocated,
@@ -284,7 +291,14 @@ fn production(case: &Case) -> Written {
         .block_parents
         .iter()
         .enumerate()
-        .map(|(at, &parent)| GrammaticalRelation::new(at + 1, parent, label(parent)))
+        .map(|(at, &parent)| {
+            GrammaticalRelation::new(
+                at + 1,
+                parent,
+                talkbank_model::GrammaticalRelationType::new(label(parent))
+                    .expect("valid fixture relation"),
+            )
+        })
         .collect();
 
     let anchor = current_root_anchor_for_attachment(&mor, &gra, &attachment)

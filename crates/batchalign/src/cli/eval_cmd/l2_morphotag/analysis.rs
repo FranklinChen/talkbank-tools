@@ -24,7 +24,7 @@ use talkbank_model::alignment::helpers::{
     MorAlignableWordCount, MorItemCount, WordItem, counts_for_tier, walk_words,
 };
 use talkbank_model::model::{
-    ChatFile, GrammaticalRelationType, LanguageCode, Line, MorFeature, PosCategory,
+    ChatFile, GrammaticalRelationType, Line, MorFeature, PosCategory,
     content::word::WordLanguageMarker,
 };
 
@@ -57,6 +57,9 @@ pub enum AnalysisError {
     /// Parser initialization failure.
     #[error("failed to initialize CHAT parser: {0}")]
     ParserInit(String),
+    /// The transcript cannot supply a unique, usable language context.
+    #[error("unusable @Languages declaration: {0}")]
+    UnresolvedLanguage(talkbank_model::LanguageDeclarationError),
 }
 
 // ---------------------------------------------------------------------------
@@ -74,15 +77,22 @@ pub fn analyze_file(path: &Path, pair_key: PairKey) -> Result<FileAnalysis, Anal
         source,
     })?;
     let (chat_file, _warnings) = parse_lenient(&parser, &text);
-    Ok(analyze_chat_file(&chat_file, path.to_path_buf(), pair_key))
+    analyze_chat_file(&chat_file, path.to_path_buf(), pair_key)
 }
 
 /// Walk an already-parsed `ChatFile`, producing per-`@s`-word analyses.
 ///
 /// Split from [`analyze_file`] so unit tests can feed in hand-built
 /// `ChatFile` values without round-tripping through the parser.
-pub fn analyze_chat_file(chat: &ChatFile, path: PathBuf, pair_key: PairKey) -> FileAnalysis {
-    let languages: Vec<LanguageCode> = chat.languages.to_vec();
+pub fn analyze_chat_file(
+    chat: &ChatFile,
+    path: PathBuf,
+    pair_key: PairKey,
+) -> Result<FileAnalysis, AnalysisError> {
+    let languages = chat
+        .language_declaration()
+        .map_err(AnalysisError::UnresolvedLanguage)?
+        .to_vec();
     let mut analyses = Vec::new();
     let mut utterance_outcomes: Vec<UtteranceOutcome> = Vec::new();
 
@@ -224,13 +234,13 @@ pub fn analyze_chat_file(chat: &ChatFile, path: PathBuf, pair_key: PairKey) -> F
         }
     }
 
-    FileAnalysis {
+    Ok(FileAnalysis {
         path,
         pair_key,
         languages,
         analyses,
         utterance_outcomes,
-    }
+    })
 }
 
 /// Post-hoc classifier for one utterance's morphotag outcome.
@@ -410,5 +420,5 @@ pub fn extract_gra_deprel(gra_item: &str) -> Option<GrammaticalRelationType> {
     if deprel.is_empty() {
         return None;
     }
-    Some(GrammaticalRelationType::new(deprel))
+    GrammaticalRelationType::new(deprel).ok()
 }

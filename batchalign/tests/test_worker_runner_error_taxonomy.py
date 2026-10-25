@@ -24,6 +24,17 @@ from pydantic import BaseModel, ValidationError
 
 from batchalign.inference._model_access_errors import ModelAccessDeniedError
 from batchalign.inference._provider_errors import ProviderQuotaExhaustedError
+from batchalign.inference.qwen_forced_alignment import (
+    PairedWindowAlignment,
+    WindowAlignedWord,
+)
+from batchalign.inference.qwen_timing import (
+    AudioWindow,
+    RecordingChunkSpeech,
+    RecordingStart,
+    SpokenWindowWords,
+    WindowAlignment,
+)
 from batchalign.inference.types import Wave2VecWordAlignment
 from batchalign.inference.utseg import UtsegModelNotFoundError
 from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request_v2
@@ -78,11 +89,52 @@ def _quota_error() -> Exception:
     return ProviderQuotaExhaustedError("the provider's resource pack is exhausted")
 
 
+def _bad_qwen_timing() -> Exception:
+    try:
+        WindowAlignment(
+            PairedWindowAlignment.of(
+                ["hello", "world"],
+                [
+                    WindowAlignedWord("hello", 0.7, 0.8),
+                    WindowAlignedWord("world", 0.5, 0.6),
+                ],
+            ),
+            AudioWindow(1.0),
+        )
+    except Exception as error:
+        return error
+    raise AssertionError("backwards model timing was admitted")
+
+
+def _bad_recording_placement() -> Exception:
+    aligned = WindowAlignment(
+        PairedWindowAlignment.of(["hello"], [WindowAlignedWord("hello", 0.1, 0.4)]),
+        AudioWindow(1.0),
+    )
+    speech = SpokenWindowWords(aligned)
+    prefix = RecordingStart().append(RecordingChunkSpeech("hello", 180.0, speech))
+    try:
+        prefix.append(RecordingChunkSpeech("hello", 179.0, speech))
+    except Exception as error:
+        return error
+    raise AssertionError("backwards recording placement was admitted")
+
+
 # (what the runner raises, the protocol code the boundary must report).
 # Most specific class first in the classifier: UnsupportedLanguageError
 # subclasses ValueError and ModelAccessDeniedError subclasses RuntimeError,
 # yet each keeps its own code.
 _CASES = [
+    pytest.param(
+        _bad_recording_placement,
+        ProtocolErrorCodeV2.MODEL_OUTPUT_INVALID,
+        id="recording-placement",
+    ),
+    pytest.param(
+        _bad_qwen_timing,
+        ProtocolErrorCodeV2.MODEL_OUTPUT_INVALID,
+        id="generated-qwen-timing",
+    ),
     pytest.param(
         lambda: UnsupportedLanguageError("no Stanza pipeline for 'que'"),
         ProtocolErrorCodeV2.UNSUPPORTED_LANGUAGE,

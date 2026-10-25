@@ -137,7 +137,7 @@ def resolve_huggingface_hub_token(*, config_path: Path | None = None) -> str | N
     parser = configparser.ConfigParser()
     try:
         loaded = parser.read(path)
-    except (configparser.Error, OSError):
+    except configparser.Error, OSError:
         loaded = []
     if loaded and parser.has_section("auth"):
         value = parser.get("auth", "hf_token", fallback="").strip()

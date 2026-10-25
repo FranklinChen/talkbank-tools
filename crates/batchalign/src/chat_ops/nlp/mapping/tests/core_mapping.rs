@@ -198,22 +198,22 @@ fn test_gra_index_shifting_with_mwt() {
     // "do" component (root: head=0)
     assert_eq!(gras[0].index, 1);
     assert_eq!(gras[0].head, 0);
-    assert_eq!(gras[0].relation, "ROOT".into());
+    assert_eq!(gras[0].relation.as_str(), "ROOT");
 
     // "n't" component (advmod of "do", chunk 1)
     assert_eq!(gras[1].index, 2);
     assert_eq!(gras[1].head, 1);
-    assert_eq!(gras[1].relation, "ADVMOD".into());
+    assert_eq!(gras[1].relation.as_str(), "ADVMOD");
 
     // "go" (conj of "do", chunk 1)
     assert_eq!(gras[2].index, 3);
     assert_eq!(gras[2].head, 1);
-    assert_eq!(gras[2].relation, "CONJ".into());
+    assert_eq!(gras[2].relation.as_str(), "CONJ");
 
     // Terminator
     assert_eq!(gras[3].index, 4);
     assert_eq!(gras[3].head, 1);
-    assert_eq!(gras[3].relation, "PUNCT".into());
+    assert_eq!(gras[3].relation.as_str(), "PUNCT");
 }
 
 #[test]
@@ -303,22 +303,26 @@ fn test_validate_generated_gra_accepts_valid() {
         GrammaticalRelation {
             index: 1,
             head: 2,
-            relation: "DET".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("DET")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 2,
             head: 2,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 3,
             head: 2,
-            relation: "OBJ".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("OBJ")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 4,
             head: 2,
-            relation: "PUNCT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("PUNCT")
+                .expect("fixture relation spelling"),
         },
     ];
     validate_generated_gra(&gras).unwrap();
@@ -330,22 +334,26 @@ fn test_validate_generated_gra_rejects_no_root() {
         GrammaticalRelation {
             index: 1,
             head: 2,
-            relation: "SUBJ".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("SUBJ")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 2,
             head: 3,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 3,
             head: 1,
-            relation: "OBJ".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("OBJ")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 4,
             head: 1,
-            relation: "PUNCT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("PUNCT")
+                .expect("fixture relation spelling"),
         },
     ];
     let err = validate_generated_gra(&gras).unwrap_err();
@@ -361,17 +369,20 @@ fn test_validate_generated_gra_rejects_multiple_roots() {
         GrammaticalRelation {
             index: 1,
             head: 1,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 2,
             head: 2,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 3,
             head: 1,
-            relation: "PUNCT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("PUNCT")
+                .expect("fixture relation spelling"),
         },
     ];
     let err = validate_generated_gra(&gras).unwrap_err();
@@ -387,22 +398,26 @@ fn test_validate_generated_gra_rejects_cycle() {
         GrammaticalRelation {
             index: 1,
             head: 2,
-            relation: "FLAT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("FLAT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 2,
             head: 1,
-            relation: "APPOS".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("APPOS")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 3,
             head: 3,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 4,
             head: 3,
-            relation: "PUNCT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("PUNCT")
+                .expect("fixture relation spelling"),
         },
     ];
     let err = validate_generated_gra(&gras).unwrap_err();
@@ -418,17 +433,20 @@ fn test_validate_generated_gra_rejects_invalid_head() {
         GrammaticalRelation {
             index: 1,
             head: 99,
-            relation: "SUBJ".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("SUBJ")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 2,
             head: 2,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 3,
             head: 2,
-            relation: "PUNCT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("PUNCT")
+                .expect("fixture relation spelling"),
         },
     ];
     let err = validate_generated_gra(&gras).unwrap_err();
@@ -444,17 +462,20 @@ fn test_validate_generated_gra_accepts_head_zero() {
         GrammaticalRelation {
             index: 1,
             head: 2,
-            relation: "DET".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("DET")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 2,
             head: 0,
-            relation: "ROOT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("ROOT")
+                .expect("fixture relation spelling"),
         },
         GrammaticalRelation {
             index: 3,
             head: 2,
-            relation: "PUNCT".into(),
+            relation: talkbank_model::GrammaticalRelationType::new("PUNCT")
+                .expect("fixture relation spelling"),
         },
     ];
     validate_generated_gra(&gras).unwrap();
@@ -531,20 +552,20 @@ fn test_gra_talkbank_conventions() {
     // Convention 1: ROOT head=0 (virtual root node)
     assert_eq!(gras[1].index, 2);
     assert_eq!(gras[1].head, 0, "ROOT head must be 0 (virtual root)");
-    assert_eq!(gras[1].relation, "ROOT".into());
+    assert_eq!(gras[1].relation.as_str(), "ROOT");
 
     // Convention 2: UD colon subtypes become TalkBank dashes
     assert_eq!(gras[3].index, 4);
     assert_eq!(gras[3].head, 2);
     assert_eq!(
-        gras[3].relation,
-        "ACL-RELCL".into(),
+        gras[3].relation.as_str(),
+        "ACL-RELCL",
         "TalkBank uses dashes for subtypes, not colons"
     );
 
     // Convention 3: All labels uppercase
-    assert_eq!(gras[0].relation, "DET".into());
-    assert_eq!(gras[2].relation, "NSUBJ".into());
+    assert_eq!(gras[0].relation.as_str(), "DET");
+    assert_eq!(gras[2].relation.as_str(), "NSUBJ");
 
     // Convention 4: Terminator PUNCT head points to ROOT word
     assert_eq!(gras[4].index, 5);
@@ -552,5 +573,5 @@ fn test_gra_talkbank_conventions() {
         gras[4].head, 2,
         "Terminator PUNCT head must point to ROOT word"
     );
-    assert_eq!(gras[4].relation, "PUNCT".into());
+    assert_eq!(gras[4].relation.as_str(), "PUNCT");
 }

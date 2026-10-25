@@ -169,7 +169,7 @@ fn texts(item: &MorphosyntaxBatchItem) -> Vec<&str> {
 /// A code-switched word's language resolution; `None` for any other role.
 fn code_switch(word: &BatchWord) -> Option<&talkbank_model::validation::LanguageResolution> {
     match word.role() {
-        WordRole::CodeSwitched(resolution) => Some(resolution),
+        WordRole::CodeSwitched(resolution) => Some(resolution.resolution()),
         WordRole::Analysed | WordRole::SpecialForm(_) => None,
     }
 }
@@ -272,8 +272,14 @@ fn snapshot_collected_payloads() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let collected = collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll);
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let collected = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    );
     let items = collected.batch_items;
     let total = collected.total_utterances;
 
@@ -307,9 +313,15 @@ fn collect_payloads_uses_file_language_not_batch_default_spa() {
     // Simulate the batch-level default: primary_lang = "eng"
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let batch_item = items[0].item();
@@ -334,9 +346,15 @@ fn collect_payloads_uses_file_language_not_batch_default_rus() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let batch_item = items[0].item();
@@ -359,9 +377,15 @@ fn collect_payloads_uses_file_language_not_batch_default_zho() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let batch_item = items[0].item();
@@ -384,9 +408,15 @@ fn collect_payloads_uses_file_language_not_batch_default_fra() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let batch_item = items[0].item();
@@ -410,9 +440,15 @@ fn collect_payloads_lang_correct_when_primary_matches_header() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let batch_item = items[0].item();
@@ -434,9 +470,15 @@ fn collect_payloads_uses_first_declared_language_for_multilingual() {
     // Batch default is "eng" but file says "spa" first
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let batch_item = items[0].item();
@@ -471,12 +513,13 @@ fn test_inject_results_retokenize_cantonese_retrace() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("yue").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
 
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -581,9 +624,15 @@ fn test_french_elision_in_quoted_context() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("fra").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1, "Should have exactly 1 utterance payload");
     let (item, extracted_words) = (items[0].item(), items[0].words());
@@ -626,9 +675,15 @@ fn collect_payloads_identifies_at_s_positions_single() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1, "should have 1 utterance");
     let item = items[0].item();
@@ -677,9 +732,15 @@ fn collect_payloads_identifies_contiguous_at_s_span() {
 
     let primary =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let item = items[0].item();
@@ -727,11 +788,12 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -922,11 +984,12 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1114,11 +1177,12 @@ fn assert_coraal_injection_complete(raw_words: &str) {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1177,11 +1241,12 @@ fn inject_results_preserve_minga_because_keeps_mor_gra() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1238,11 +1303,12 @@ fn inject_results_preserve_kings_continuation_keeps_mor_gra() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1319,9 +1385,15 @@ fn collect_payloads_bare_at_s_shortcut_resolution() {
     // Primary is German, secondary is English (from @Languages: deu, eng)
     let primary =
         talkbank_model::model::LanguageCode::new("deu").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary);
-    let items =
-        collect_payloads(&chat_file, &primary, &langs, MultilingualPolicy::ProcessAll).batch_items;
+    let langs =
+        declared_languages(&chat_file, &primary).expect("admitted fixture language context");
+    let items = collect_payloads(
+        &chat_file,
+        &primary,
+        langs.as_ref(),
+        MultilingualPolicy::ProcessAll,
+    )
+    .batch_items;
 
     assert_eq!(items.len(), 1);
     let item = items[0].item();
@@ -1513,7 +1585,7 @@ fn collect_payloads_treats_empty_mor_placeholder_as_unprocessed() {
     let items = crate::chat_ops::morphosyntax_ops::collect_payloads(
         &chat,
         &primary_lang,
-        &langs,
+        talkbank_model::DeclaredLanguagesRef::new(&langs).expect("nonempty fixture languages"),
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1529,7 +1601,7 @@ fn collect_payloads_treats_empty_mor_placeholder_as_unprocessed() {
     let collected = crate::chat_ops::morphosyntax_ops::collect_payloads(
         &chat,
         &primary_lang,
-        &langs,
+        talkbank_model::DeclaredLanguagesRef::new(&langs).expect("nonempty fixture languages"),
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
     );
     let items = collected.batch_items;
@@ -1605,11 +1677,12 @@ fn inject_results_count_mismatch_propagates_error() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1672,11 +1745,12 @@ fn mid_utterance_comma_end_to_end_injects_cm_mor() {
     let (mut chat_file, _errors) = parse_lenient(&parser, chat);
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1820,11 +1894,12 @@ fn family_a_single_word_at_o_keeps_root_deprel_when_head_is_zero() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1905,11 +1980,12 @@ fn family_a_multi_word_all_at_si_keeps_root_deprel_at_head_zero() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -1985,11 +2061,12 @@ fn family_a_host_modifier_with_at_o_root_keeps_root_deprel() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2083,11 +2160,12 @@ fn family_a_at_o_with_nonzero_head_does_not_become_root() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2301,11 +2379,12 @@ fn morphotag_inject_results_preserves_utterance_multiplicity_one_to_one() {
         "fixture must contain exactly 3 utterances; got {before:#?}"
     );
 
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2457,11 +2536,12 @@ fn l2_fallback_unsupported_secondary_at_s_lang_remains_l2_xxx() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2531,11 +2611,12 @@ fn l2_fallback_multiple_languages_at_s_marker_remains_l2_xxx() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2595,11 +2676,12 @@ fn l2_fallback_ambiguous_languages_at_s_marker_remains_l2_xxx() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2655,11 +2737,12 @@ fn unsupported_precode_without_analysis_refuses_completion() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2748,11 +2831,12 @@ fn l2_supported_precode_whole_utterance_does_not_fall_back_to_l2_xxx() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2850,11 +2934,12 @@ fn l2_fallback_unresolved_bare_at_s_shortcut_remains_l2_xxx() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -2957,11 +3042,12 @@ fn l2_fallback_bare_at_s_shortcut_resolves_to_unsupported_lang_remains_l2_xxx() 
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3049,11 +3135,12 @@ fn l2_fallback_no_l2_morphotag_flag_off_keeps_l2_xxx_for_supported_lang() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3155,11 +3242,12 @@ fn run_synthesis_root_invariant_check(form_marker: &str, surface: &str, expected
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3356,11 +3444,12 @@ fn assert_empty_stanza_synthesizes_root(form_marker: &str, surface: &str, expect
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3465,11 +3554,12 @@ fn synthesis_stanza_tokenizes_xbxxx_into_two_at_q_root_keeps_root_deprel() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3546,11 +3636,12 @@ fn synthesis_at_top_bypass_runs_for_poker_q_with_synthetic_stanza() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let payloads = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     );
     let batch_items = payloads.batch_items;
@@ -3677,11 +3768,12 @@ fn no_stanza_response_through_inject_should_produce_observed_failure_shape() {
 
         let primary_lang =
             talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-        let langs = declared_languages(&chat_file, &primary_lang);
+        let langs = declared_languages(&chat_file, &primary_lang)
+            .expect("admitted fixture language context");
         let batch_items = collect_payloads(
             &chat_file,
             &primary_lang,
-            &langs,
+            langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
         .batch_items;
@@ -3757,11 +3849,12 @@ fn synthesis_production_fixture_at_q_with_timestamp() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let payloads = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     );
     let batch_items = payloads.batch_items;
@@ -3839,11 +3932,12 @@ fn synthesis_at_n_non_root_position_uses_dep_deprel() {
 
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3912,11 +4006,12 @@ fn injection_writes_no_invented_feature_values() {
     let (mut chat_file, _) = parse_lenient(&parser, chat);
     let primary_lang =
         talkbank_model::model::LanguageCode::new("eng").expect("valid test language code");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;
@@ -3970,11 +4065,12 @@ fn inject_retokenized(
     );
     let (mut chat_file, _errors) = parse_lenient(&parser, &chat);
     let primary_lang = talkbank_model::model::LanguageCode::new("eng").expect("eng");
-    let langs = declared_languages(&chat_file, &primary_lang);
+    let langs =
+        declared_languages(&chat_file, &primary_lang).expect("admitted fixture language context");
     let batch_items = collect_payloads(
         &chat_file,
         &primary_lang,
-        &langs,
+        langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
     .batch_items;

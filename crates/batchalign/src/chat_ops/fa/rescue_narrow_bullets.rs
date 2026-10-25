@@ -253,7 +253,13 @@ pub fn rescue_narrow_bullets(
         else {
             continue;
         };
-        let Some(bullet) = utt.main.content.bullet.as_mut() else {
+        let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_mut()
+            .and_then(talkbank_model::BulletState::as_parsed_mut)
+        else {
             continue;
         };
         let original_end = bullet.timing.end_ms;
@@ -332,7 +338,13 @@ fn collect_rescue_candidates(
     // First pass: build candidates with `next_start_ms` unset.
     let mut observations: Vec<RescueObservation> = Vec::new();
     for (line_idx, utterance_idx, utt) in super::utterances_indexed(chat_file) {
-        let Some(bullet) = utt.main.content.bullet.as_ref() else {
+        let Some(bullet) = utt
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+        else {
             continue;
         };
         let word_count = super::count_alignable_main_words(utt);
@@ -403,6 +415,7 @@ mod tests {
             .content
             .bullet
             .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
             .unwrap_or_else(|| panic!("utterance #{n} has no bullet"));
         (bullet.timing.start_ms, bullet.timing.end_ms)
     }

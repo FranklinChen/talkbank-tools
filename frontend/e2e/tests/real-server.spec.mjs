@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "@playwright/test";
+import { JobWait } from "../job-wait.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -214,28 +215,27 @@ async function fetchJobInfo(request, baseUrl, jobId) {
   return await response.json();
 }
 
-async function waitForJobStatus(request, baseUrl, jobId, predicate, timeoutMs = 120_000) {
+async function waitForJobStatus(request, baseUrl, jobId, wait, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   let lastInfo = null;
-  let lastStatus = "unknown";
 
   while (Date.now() < deadline) {
     const response = await request.get(`${baseUrl}/jobs/${jobId}`);
     if (response.ok()) {
       lastInfo = await response.json();
-      lastStatus = lastInfo.status;
-      if (predicate(lastStatus, lastInfo)) {
+      const observation = wait.observe(lastInfo);
+      if (observation.kind === "reached") {
         return lastInfo;
       }
-      // Fail fast on terminal states the predicate didn't accept,
+      // Fail fast on terminal states the wait target didn't accept,
       // so a failed-job test doesn't burn the full Playwright timeout
       // waiting for an already-dead job. Pull the per-file error
       // detail from the results endpoint so the failure message
       // surfaces *why* the job failed.
-      if (lastStatus === "failed" || lastStatus === "cancelled") {
+      if (observation.kind === "unexpected-terminal") {
         const detail = await fetchJobFailureDetail(request, baseUrl, jobId);
         throw new Error(
-          `job ${jobId} reached terminal status=${lastStatus} but predicate ` +
+          `job ${jobId} reached terminal status=${observation.status} but wait ` +
             `wanted otherwise.\n` +
             `info: ${JSON.stringify(lastInfo, null, 2)}\n` +
             `failure detail: ${detail}`
@@ -246,8 +246,7 @@ async function waitForJobStatus(request, baseUrl, jobId, predicate, timeoutMs = 
   }
 
   throw new Error(
-    `timed out waiting for job ${jobId}; last status=${lastStatus}\n` +
-      `info: ${JSON.stringify(lastInfo, null, 2)}`
+    `timed out waiting for job ${jobId}; last observation: ${JSON.stringify(lastInfo, null, 2)}`
   );
 }
 
@@ -366,7 +365,7 @@ async function cleanupJob(request, baseUrl, jobId) {
       request,
       baseUrl,
       jobId,
-      (status) => status !== "queued" && status !== "running",
+      JobWait.terminal(),
       180_000
     );
   }
@@ -417,7 +416,7 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     const jobId = submitted.job_id;
     createdJobs.push(jobId);
 
-    await waitForJobStatus(request, harness.baseUrl, jobId, (status) => status === "running");
+    await waitForJobStatus(request, harness.baseUrl, jobId, JobWait.running());
 
     await page.goto(`${harness.baseUrl}/dashboard`, { waitUntil: "domcontentloaded" });
     const jobLink = page.locator(`a[href="/dashboard/jobs/${jobId}"]`);
@@ -436,7 +435,7 @@ test.describe("real Rust server e2e (React dashboard)", () => {
       request,
       harness.baseUrl,
       jobId,
-      (status) => status === "completed",
+      JobWait.completed(),
       600_000
     );
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -465,18 +464,15 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     expect(afterDelete.status()).toBe(404);
   });
 
-  test("failed real-model jobs surface errors and can be restarted from the dashboard", async ({
+  test("rejected CHAT jobs surface errors and can be restarted from the dashboard", async ({
     page,
     request,
   }) => {
     test.setTimeout(360_000);
-    // morphotag resolves language per-file from @Languages:; declare a real
-    // language Stanza has no pipeline for (Serbian, as the Rust tests do)
-    // to provoke the per-file refusal. A placeholder code such as `zzz` no
-    // longer reaches analysis: CHAT admission refuses it first (E519).
+    // Invalid CHAT guarantees refusal independently of the evolving model catalog.
     const files = [
       makeChatFile("real-failure.cha", "this job should fail cleanly", {
-        language: "srp",
+        language: "not-a-language",
       }),
     ];
     const submitted = await submitMorphotagJob(request, harness.baseUrl, {
@@ -496,7 +492,7 @@ test.describe("real Rust server e2e (React dashboard)", () => {
       request,
       harness.baseUrl,
       jobId,
-      (status) => status === "failed",
+      JobWait.failed(),
       120_000
     );
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -504,20 +500,15 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     await expect(page.getByRole("button", { name: "Restart" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "real-failure.cha", exact: true })).toBeVisible();
-    // Post-2026-05-10 contract: unsupported primary @Languages surfaces
-    // as a per-file Validation error from the morphotag pipeline rather
-    // than as the legacy "failed to parse ready signal" worker-bootstrap
-    // crash. The error message names the unsupported lang and the
-    // Stanza-support cause; the file row shows its start (the cell truncates
-    // long errors), and the results endpoint below carries the whole cause.
+    // Both the file row and results API expose the admission error.
     await expect(
-      page.locator("table").getByText(/analysis unavailable for primary @Languages 'srp'/),
+      page.locator("table").getByText(/CHAT replacement admission failed/),
     ).toBeVisible();
 
     const failedResults = await fetchJobResults(request, harness.baseUrl, jobId);
     expect(failedResults.status).toBe("failed");
     expect(failedResults.files).toHaveLength(1);
-    expect(failedResults.files[0].error).toContain("not supported by Stanza");
+    expect(failedResults.files[0].error).toContain("CHAT replacement admission failed");
 
     const restartResponse = page.waitForResponse(
       (response) =>
@@ -547,14 +538,14 @@ test.describe("real Rust server e2e (React dashboard)", () => {
       request,
       harness.baseUrl,
       jobId,
-      (status) => status === "failed",
+      JobWait.failed(),
       120_000
     );
     await page.reload({ waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("button", { name: "Restart" })).toBeVisible();
     await expect(
-      page.locator("table").getByText(/analysis unavailable for primary @Languages 'srp'/),
+      page.locator("table").getByText(/CHAT replacement admission failed/),
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Delete" }).click();

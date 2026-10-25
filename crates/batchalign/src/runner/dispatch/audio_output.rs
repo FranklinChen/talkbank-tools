@@ -603,9 +603,9 @@ mod tests {
                     ["F", "B", "I", "said", "b2"]
                         .into_iter()
                         .map(|word| {
-                            UtteranceContent::Word(Box::new(Word::simple(
+                            UtteranceContent::Word(Box::new(Word::new(
                                 talkbank_model::Location::Unlocated,
-                                word,
+                                talkbank_model::WordText::new(word).expect("nonempty fixture word"),
                             )))
                         })
                         .collect(),
