@@ -107,7 +107,12 @@ mod tests {
     #[test]
     fn user_defined_carries_user_code_as_flat_feature() {
         assert_eq!(
-            render(FormType::UserDefined("rtfd".to_string()), "word"),
+            render(
+                FormType::UserDefined(
+                    talkbank_model::model::FormLabel::new("rtfd").expect("valid form label"),
+                ),
+                "word",
+            ),
             "unk|word-rtfd"
         );
     }

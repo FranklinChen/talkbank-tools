@@ -28,7 +28,7 @@ chatter on 2026-06-18.
 `[workspace.dependencies]` in `Cargo.toml` pins `talkbank-model`,
 `talkbank-parser`, `talkbank-parser-tests` and `talkbank-transform` to one
 published Chatter release tag, resolved to an exact commit in `Cargo.lock`.
-The current selection is v0.32.1. The manifest and lockfile own the identity;
+The current selection is v0.33.0. The manifest and lockfile own the identity;
 application version strings do not identify the compiled dependency.
 Adopt a newer reviewed Chatter commit by updating all pins and the lockfile
 together, then verify the consuming targets. **Do NOT re-introduce copies of those

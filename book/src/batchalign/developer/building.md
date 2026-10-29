@@ -1,7 +1,7 @@
 # Building & Development
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-10-29 12:33 EDT
 
 Development is supported on **Windows, macOS, and Linux**. The instructions below use Unix shell syntax; on Windows, use PowerShell or Git Bash equivalently.
 
@@ -30,6 +30,16 @@ model unchanged. To adopt new Chatter APIs, publish the dependency, update all
 BA3 pins and the lockfile together, verify the consumer, and rebuild BA3.
 The [architecture reference](https://github.com/FranklinChen/talkbank-tools/blob/main/docs/agent-reference/architecture.md#how-the-chat-core-is-consumed)
 records the selected release and ownership boundary.
+
+The 0.33 integration uses Chatter's exclusive word-suffix owner and completed
+diagnostic batches. Offline replay refuses an internal parser failure on either
+side of a comparison, even at warning severity, as a local runtime error (exit
+6). It does not report that failure as bad transcript data. Partial output checks
+select morphology counts for `morphotag`, timing for `align`, and terminators for
+the other released commands through an exhaustive enum match. Full output
+construction and preservation checks remain the authoritative write admission.
+See Chatter's [0.33 migration guide](https://talkbank.github.io/chatter/contributing/migration-0.33.html)
+for the underlying library changes.
 
 ## Rust compiler policy
 

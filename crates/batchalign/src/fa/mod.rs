@@ -1064,7 +1064,8 @@ mod tests {
         assert!(
             batchalign_transform::validate::validate_to_level(
                 &degraded,
-                &[],
+                &talkbank_model::CompletedDiagnostics::admit(Vec::new())
+                    .expect("an empty diagnostic batch completes"),
                 ValidityLevel::StructurallyComplete
             )
             .is_ok(),

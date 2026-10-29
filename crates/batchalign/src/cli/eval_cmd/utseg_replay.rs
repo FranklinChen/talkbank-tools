@@ -42,6 +42,7 @@ use crate::chat_ops::{ChatFile, DependentTier, Header, LanguageCode, Line};
 use crate::cli::args::{
     UtsegPostChatReplayArgs, UtsegPreAsrReplayArgs, UtsegReplayAction, UtsegReplayArgs,
 };
+use crate::cli::error::ChatParseOrigin;
 use crate::cli::error::CliError;
 use crate::cli::eval_cmd::InputIdentity;
 use crate::provenance::{GeneratedComment, UnparseableStamp, recognize_generated_comment};
@@ -59,7 +60,7 @@ use batchalign_transform::parse::parse_lenient;
 use batchalign_transform::serialize::to_chat_string;
 use batchalign_transform::utseg::UtsegBatchItem;
 use batchalign_transform::validate::{ValidityLevel, validate_to_level};
-use talkbank_model::SemanticEq;
+use talkbank_model::{CompletedDiagnostics, InternalFailure, ParseError, SemanticEq};
 
 /// Run one utterance-segmentation replay.
 ///
@@ -231,6 +232,15 @@ impl fmt::Display for BindingMismatch {
 /// comparison result: nothing was compared.
 #[derive(Debug, thiserror::Error)]
 enum UtsegReplayRefusal {
+    /// The parser failed internally, without establishing artifact validity.
+    #[error("{origin}: {failure}")]
+    InternalParser {
+        /// Original artifact or rebuilt representation whose attempt failed.
+        origin: ChatParseOrigin,
+        /// Full failed-attempt evidence, including any ordinary findings.
+        #[source]
+        failure: InternalFailure,
+    },
     /// Retained assignments cannot preserve the producing CHAT structure.
     #[error(transparent)]
     Partition(#[from] batchalign_transform::utseg::UtsegApplyRefusal),
@@ -384,10 +394,31 @@ enum UtsegReplayRefusal {
 }
 
 impl From<UtsegReplayRefusal> for CliError {
-    /// Every refusal is an answer about the artifacts the operator named: they
-    /// cannot be replayed together, and the remedy is different inputs.
+    /// Keep tool failure distinct from refusals about the selected artifacts.
     fn from(refusal: UtsegReplayRefusal) -> Self {
-        Self::InvalidArgument(refusal.to_string())
+        match refusal {
+            UtsegReplayRefusal::InternalParser { origin, failure } => {
+                Self::ChatParserFailure { origin, failure }
+            }
+            artifact @ (UtsegReplayRefusal::Partition(_)
+            | UtsegReplayRefusal::Read { .. }
+            | UtsegReplayRefusal::NotUtf8 { .. }
+            | UtsegReplayRefusal::Unparseable { .. }
+            | UtsegReplayRefusal::InputRefused { .. }
+            | UtsegReplayRefusal::Preparation { .. }
+            | UtsegReplayRefusal::Evidence(_)
+            | UtsegReplayRefusal::AsrResponse { .. }
+            | UtsegReplayRefusal::LanguageDisagreement { .. }
+            | UtsegReplayRefusal::PopulationMismatch { .. }
+            | UtsegReplayRefusal::Binding { .. }
+            | UtsegReplayRefusal::Rebuild(_)
+            | UtsegReplayRefusal::RebuiltUnparseable { .. }
+            | UtsegReplayRefusal::DetectedLanguages { .. }
+            | UtsegReplayRefusal::CodeSwitchPrecode { .. }
+            | UtsegReplayRefusal::MediaNameDisagreement { .. }
+            | UtsegReplayRefusal::WorDisagreement { .. }
+            | UtsegReplayRefusal::Stamp(_)) => Self::InvalidArgument(artifact.to_string()),
+        }
     }
 }
 
@@ -447,6 +478,18 @@ impl ReplayArtifact {
         let text = self.text()?;
         let parser = crate::chat_parser();
         let (file, parse_errors) = parse_lenient(&parser, text);
+        self.admit_parse(file, parse_errors, admission)
+    }
+
+    /// Neither replay side can use a model from an internally failed attempt.
+    fn admit_parse(
+        &self,
+        file: ChatFile,
+        parse_errors: Vec<ParseError>,
+        admission: ChatAdmission,
+    ) -> Result<ChatFile, UtsegReplayRefusal> {
+        let completed =
+            complete_attempt(ChatParseOrigin::Artifact(self.path.clone()), parse_errors)?;
         match admission {
             // Exactly what the utseg pipeline does with an input: parse
             // leniently, then hand the gate the document AND its parse errors
@@ -454,26 +497,36 @@ impl ReplayArtifact {
             // refuses, but it refuses through the same gate, with the same
             // message, as the run being replayed.
             ChatAdmission::SegmentationInput => {
-                validate_to_level(&file, &parse_errors, ValidityLevel::StructurallyComplete)
-                    .map_err(|errors| UtsegReplayRefusal::InputRefused {
+                validate_to_level(&file, &completed, ValidityLevel::StructurallyComplete).map_err(
+                    |errors| UtsegReplayRefusal::InputRefused {
                         path: self.path.clone(),
                         details: join_display(errors.iter()),
-                    })?;
+                    },
+                )?;
             }
             // An output is not gated: production never re-gates what it wrote,
             // and gating one here would refuse documents a run really produced.
             // It must parse, because comparing lines needs lines.
             ChatAdmission::RetainedOutput => {
-                if !parse_errors.is_empty() {
+                if !completed.diagnostics().is_empty() {
                     return Err(UtsegReplayRefusal::Unparseable {
                         path: self.path.clone(),
-                        details: join_display(parse_errors.iter()),
+                        details: join_display(completed.diagnostics().iter()),
                     });
                 }
             }
         }
         Ok(file)
     }
+}
+
+/// Admit the complete attempt before classifying input or rebuilt CHAT.
+fn complete_attempt(
+    origin: ChatParseOrigin,
+    diagnostics: Vec<ParseError>,
+) -> Result<CompletedDiagnostics, UtsegReplayRefusal> {
+    CompletedDiagnostics::admit(diagnostics)
+        .map_err(|failure| UtsegReplayRefusal::InternalParser { origin, failure })
 }
 
 /// The one basis both passes compare on: the AST of the CHAT TEXT a run writes.
@@ -487,10 +540,11 @@ fn comparison_basis(file: &ChatFile, stage: &'static str) -> Result<ChatFile, Ut
     let serialized = to_chat_string(file);
     let parser = crate::chat_parser();
     let (reparsed, parse_errors) = parse_lenient(&parser, &serialized);
-    if !parse_errors.is_empty() {
+    let completed = complete_attempt(ChatParseOrigin::Rebuilt(stage), parse_errors)?;
+    if !completed.diagnostics().is_empty() {
         return Err(UtsegReplayRefusal::RebuiltUnparseable {
             stage,
-            details: join_display(parse_errors.iter()),
+            details: join_display(completed.diagnostics().iter()),
         });
     }
     Ok(reparsed)
@@ -979,6 +1033,72 @@ mod tests {
     /// request and a split is observable.
     const INPUT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
 @ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\thello there how are you .\n@End\n";
+
+    #[test]
+    fn internal_parser_failure_on_either_replay_side_is_a_runtime_error() {
+        let artifact = ReplayArtifact {
+            path: PathBuf::from("replay.cha"),
+            bytes: INPUT.as_bytes().to_vec(),
+        };
+        let file = artifact
+            .parse_chat(ChatAdmission::RetainedOutput)
+            .expect("valid retained fixture");
+        for severity in [
+            talkbank_model::Severity::Error,
+            talkbank_model::Severity::Warning,
+        ] {
+            for admission in [
+                ChatAdmission::SegmentationInput,
+                ChatAdmission::RetainedOutput,
+            ] {
+                let mut diagnostic = ParseError::internal(
+                    "parser carrier mismatch",
+                    talkbank_model::Span::new(0, 1),
+                );
+                diagnostic.severity = severity;
+                let refusal = artifact
+                    .admit_parse(file.clone(), vec![diagnostic], admission)
+                    .expect_err("neither replay side may admit an internal failure");
+                let UtsegReplayRefusal::InternalParser { origin, failure } = &refusal else {
+                    panic!("parser failure must not become artifact invalidity: {refusal}");
+                };
+                let ChatParseOrigin::Artifact(path) = origin else {
+                    panic!("artifact failure must preserve its path");
+                };
+                assert_eq!(path, &artifact.path);
+                assert_eq!(failure.diagnostics().len(), 1);
+                assert_eq!(failure.diagnostics()[0].severity, severity);
+                let error = CliError::from(refusal);
+                assert_eq!(error.exit_code(), CliError::EXIT_LOCAL_RUNTIME);
+                assert!(error.to_string().contains("parser carrier mismatch"));
+            }
+        }
+    }
+
+    #[test]
+    fn internal_rebuild_parser_failure_is_not_an_artifact_error() {
+        for severity in [
+            talkbank_model::Severity::Error,
+            talkbank_model::Severity::Warning,
+        ] {
+            let mut diagnostic = ParseError::internal(
+                "rebuilt parser carrier mismatch",
+                talkbank_model::Span::new(0, 1),
+            );
+            diagnostic.severity = severity;
+            let refusal =
+                complete_attempt(ChatParseOrigin::Rebuilt("comparison"), vec![diagnostic])
+                    .expect_err("rebuilt parser failure cannot become completion evidence");
+            let error = CliError::from(refusal);
+            assert_eq!(error.exit_code(), CliError::EXIT_LOCAL_RUNTIME);
+            assert!(error.to_string().contains("rebuilt comparison"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("rebuilt parser carrier mismatch")
+            );
+        }
+    }
 
     /// The words the collector extracts from `INPUT`.
     fn words() -> Vec<&'static str> {

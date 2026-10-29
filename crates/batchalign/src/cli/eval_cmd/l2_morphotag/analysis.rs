@@ -142,7 +142,7 @@ pub fn analyze_chat_file(
                             // by %mor alignment; do NOT advance counter.
                             return;
                         }
-                        (w.cleaned_text().to_string(), w.lang.clone())
+                        (w.cleaned_text().to_string(), w.language_marker().cloned())
                     }
                     WordItem::ReplacedWord(r) => {
                         // The original word is what the transcriber wrote,
@@ -155,7 +155,7 @@ pub fn analyze_chat_file(
                         //
                         // The `@s` marker on the original is preserved.
                         let surface = r.word.cleaned_text().to_string();
-                        let marker = r.word.lang.clone();
+                        let marker = r.word.language_marker().cloned();
                         // One MOR position per replacement word that
                         // counts. Emit one entry per replacement (but
                         // `@s` + surface come from the original).

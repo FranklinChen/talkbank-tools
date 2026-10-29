@@ -67,7 +67,9 @@ use std::sync::OnceLock;
 use crate::api::ReleasedCommand;
 use batchalign_transform::merge_abbreviations;
 use batchalign_transform::serialize::to_chat_string;
-use batchalign_transform::validate::{ValidationError, ValidityLevel, validate_output};
+use batchalign_transform::validate::{
+    OutputChecks, ValidationError, ValidityLevel, validate_output,
+};
 use talkbank_model::ChatFile;
 use talkbank_model::model::Line;
 use talkbank_model::model::TranscriptName;
@@ -1350,7 +1352,23 @@ impl PostValidated {
             Judgement::Admitted | Judgement::Aligned(_) => {
                 let mut errors = Vec::new();
                 // Additional command-specific completion checks.
-                if let Err(output_errors) = validate_output(&file, command.as_str()) {
+                let checks = match command {
+                    ReleasedCommand::Morphotag => OutputChecks::MorphologyCounts,
+                    ReleasedCommand::Align => OutputChecks::UtteranceTiming,
+                    ReleasedCommand::Transcribe
+                    | ReleasedCommand::TranscribeS
+                    | ReleasedCommand::Translate
+                    | ReleasedCommand::Coref
+                    | ReleasedCommand::Utseg
+                    | ReleasedCommand::Benchmark
+                    | ReleasedCommand::Opensmile
+                    | ReleasedCommand::Compare
+                    | ReleasedCommand::Avqi
+                    | ReleasedCommand::Diarize
+                    | ReleasedCommand::SpeakerIdentify
+                    | ReleasedCommand::Convert => OutputChecks::Terminators,
+                };
+                if let Err(output_errors) = validate_output(&file, checks) {
                     errors.extend(output_errors);
                 }
                 if let Judgement::Aligned(census) = judgement

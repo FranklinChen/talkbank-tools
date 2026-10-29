@@ -46,6 +46,16 @@ pub enum CliError {
     #[error(transparent)]
     ParserInitialization(#[from] talkbank_parser::ParserInitError),
 
+    /// Offline parsing failed internally; this is not invalid input. Exit 6.
+    #[error("{origin}: {failure}")]
+    ChatParserFailure {
+        /// The artifact or produced representation whose parser failed.
+        origin: ChatParseOrigin,
+        /// Complete internal-failure evidence, without severity filtering.
+        #[source]
+        failure: talkbank_model::InternalFailure,
+    },
+
     /// ASR backend/count admission failed before inference. Exit code 2.
     #[error(transparent)]
     AsrPlan(#[from] crate::transcribe::TranscribeAsrPlanError),
@@ -291,6 +301,24 @@ pub enum CliError {
     CacheEvidenceUnavailable,
 }
 
+/// Origin of a failed offline parser attempt, without inventing a file path.
+#[derive(Debug)]
+pub enum ChatParseOrigin {
+    /// An artifact explicitly selected by the operator.
+    Artifact(PathBuf),
+    /// CHAT serialized by a named production/replay stage.
+    Rebuilt(&'static str),
+}
+
+impl std::fmt::Display for ChatParseOrigin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Artifact(path) => path.display().fmt(formatter),
+            Self::Rebuilt(stage) => write!(formatter, "rebuilt {stage}"),
+        }
+    }
+}
+
 /// What a server's `/health` said about its build identity when it is not this
 /// CLI's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,7 +390,9 @@ impl CliError {
                     Self::EXIT_USAGE
                 }
             }
-            Self::ParserInitialization(_) => Self::EXIT_LOCAL_RUNTIME,
+            Self::ParserInitialization(_) | Self::ChatParserFailure { .. } => {
+                Self::EXIT_LOCAL_RUNTIME
+            }
             Self::NoInputPaths
             | Self::InputMissing(_)
             | Self::FileListMissing(_)

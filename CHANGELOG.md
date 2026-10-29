@@ -5,6 +5,16 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Chatter 0.33 integration
+
+- Pin every CHAT library crate to Chatter v0.33.0. Retokenization inspects
+  the exclusive word-suffix owner, and L2 evaluation reads language markers
+  through its typed accessor.
+- Partial output checks use an exhaustive command-to-policy match. Replay
+  inputs and retained outputs require completed parser diagnostics before
+  comparison; internal failures, including warning-severity ones, retain their
+  evidence and exit as local runtime failures rather than invalid arguments.
+
 ### Checked CHAT recovery and secondary morphology
 
 - Consume Chatter v0.32.1 through current header declarations and checked

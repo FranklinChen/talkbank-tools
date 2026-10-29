@@ -107,8 +107,7 @@ impl<'ctx, 'source> AdmittedExpansion<'ctx, 'source> {
                 // to make an expansion fit. Plain contractions are splittable.
                 if word.word_id.is_some()
                     || word.category.is_some()
-                    || word.form_type.is_some()
-                    || word.lang.is_some()
+                    || word.suffix.is_some()
                     || word.part_of_speech.is_some()
                     || word.inline_bullet.is_some()
                     || word.content().len() != 1
