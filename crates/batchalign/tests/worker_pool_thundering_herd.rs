@@ -58,7 +58,6 @@ const TEST_DELAY_MS: u64 = 100;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
-    common::test_server_fixture::isolate_host_memory_ledger();
     let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let pool = std::sync::Arc::new(WorkerPool::new(echo_pool_config(

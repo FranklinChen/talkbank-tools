@@ -116,8 +116,6 @@ fn synthetic_item(lang: LanguageCode3) -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "Real Stanza models; opt-in via --ignored. Reads STANZA_PER_KEY."]
 async fn measure_stanza_per_key_throughput() {
-    common::test_server_fixture::isolate_host_memory_ledger();
-
     let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let stanza_k = stanza_per_key_from_env();

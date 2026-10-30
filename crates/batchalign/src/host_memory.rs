@@ -140,43 +140,73 @@ impl HostMemoryRuntimeConfig {
     }
 }
 
-/// Default machine-local ledger path for host memory coordination.
+/// The environment variable naming a process's host-memory ledger file.
+///
+/// Read once, by [`default_host_memory_ledger_path`]. A test harness that
+/// starts `batchalign3` as a child hands it a private ledger by setting this
+/// on that child's `Command`; nothing sets it on its own process.
+pub const HOST_MEMORY_LEDGER_ENV: &str = "BATCHALIGN_HOST_MEMORY_LEDGER";
+
+/// Default machine-local ledger path for host memory coordination: the
+/// file every batchalign3 process on this machine shares, unless
+/// [`HOST_MEMORY_LEDGER_ENV`] names another.
 pub fn default_host_memory_ledger_path() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("BATCHALIGN_HOST_MEMORY_LEDGER") {
+    if let Some(explicit) = std::env::var_os(HOST_MEMORY_LEDGER_ENV) {
         return PathBuf::from(explicit);
     }
     let suffix = host_ledger_suffix();
     std::env::temp_dir().join(format!("batchalign3-host-memory-{suffix}.json"))
 }
 
-/// Test-only: redirect the host-memory ledger to a per-process tempdir
-/// path so concurrent integration-test binaries don't race on the
-/// shared default file. Idempotent (`Once`-guarded); safe to call from
-/// any test entry point that constructs a `HostMemoryRuntimeConfig`.
+/// Which process-private ledger a test process uses.
 ///
-/// Why this lives in the production crate: integration-test sibling
-/// modules (`tests/cli_common`, `tests/common/test_server_fixture`,
-/// the per-binary `require_python!` macros) all need this hook before
-/// any `WorkerHandle::spawn` or `prepare_workers` runs. Rust's test
-/// crate model doesn't let those siblings import each other, so a
-/// shared library function is the only way to de-duplicate.
+/// Two, never one: an in-process declared host decides on declared memory,
+/// and child `batchalign3` processes decide on the live machine, so leases
+/// taken against one must never be counted against the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateLedger {
+    /// The declared test host's ledger (`HostSnapshot::for_tests`).
+    DeclaredHost,
+    /// The ledger a test harness hands its child `batchalign3` processes.
+    ChildProcesses,
+}
+
+/// This process's private ledger file for `which`, emptied the first time
+/// it is named in this process.
+///
+/// Private to the process because concurrent test binaries must not see
+/// each other's leases, and emptied once because a file left by an earlier
+/// process with the same PID would carry leases that look like ours.
+///
+/// This replaced a `Once`-guarded `set_var` of [`HOST_MEMORY_LEDGER_ENV`]
+/// on the test process itself, which every test entry point had to call
+/// before anything built a ledger (about twenty call sites, one forgotten
+/// call away from sharing the machine's ledger). The declared host now
+/// names its own ledger, and a child is handed its ledger explicitly.
 #[doc(hidden)]
-pub fn isolate_host_memory_ledger_for_test() {
-    use std::sync::Once;
-    static SET_LEDGER: Once = Once::new();
-    SET_LEDGER.call_once(|| {
-        let pid = std::process::id();
-        let ledger =
-            std::env::temp_dir().join(format!("batchalign3-host-memory-test-fixture-{pid}.json"));
-        let _ = std::fs::remove_file(&ledger);
-        // Safety: Once::call_once gates this so no concurrent reader of
-        // BATCHALIGN_HOST_MEMORY_LEDGER exists at this point. Setting
-        // the var here, before any HostMemoryRuntimeConfig is built,
-        // means every later read sees the per-process value.
-        unsafe {
-            std::env::set_var("BATCHALIGN_HOST_MEMORY_LEDGER", &ledger);
-        }
-    });
+pub fn private_test_ledger_path(which: PrivateLedger) -> PathBuf {
+    static DECLARED_HOST: LazyLock<PathBuf> =
+        LazyLock::new(|| fresh_private_ledger("declared-host"));
+    static CHILD_PROCESSES: LazyLock<PathBuf> =
+        LazyLock::new(|| fresh_private_ledger("child-processes"));
+    match which {
+        PrivateLedger::DeclaredHost => DECLARED_HOST.clone(),
+        PrivateLedger::ChildProcesses => CHILD_PROCESSES.clone(),
+    }
+}
+
+/// A ledger path private to this process, with any earlier file removed.
+fn fresh_private_ledger(purpose: &str) -> PathBuf {
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("batchalign3-host-memory-{purpose}-{pid}.json"));
+    // Absent is the expected case; any other failure leaves a stale file
+    // whose leases the ledger's own pruning will still reclaim.
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path = %path.display(), "could not empty a private test ledger");
+    }
+    path
 }
 
 /// Summary of the current host-memory coordination state.

@@ -118,7 +118,6 @@ fn test_state_dir() -> &'static std::path::Path {
 }
 
 fn test_pool(python: String) -> WorkerPool {
-    common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable during test

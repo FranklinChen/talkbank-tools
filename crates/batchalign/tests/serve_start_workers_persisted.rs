@@ -70,7 +70,7 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
         // This daemon owns its test workload, so synthetic reservations from
         // other servers in this test binary must not occupy its ledger.
         .env(
-            "BATCHALIGN_HOST_MEMORY_LEDGER",
+            batchalign::host_memory::HOST_MEMORY_LEDGER_ENV,
             harness.state_dir().join("host-memory.json"),
         )
         .args([

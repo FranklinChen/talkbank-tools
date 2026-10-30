@@ -244,11 +244,10 @@ pub fn require_free_memory(required_mb: u64) {
     }
 }
 
-/// The interpreter for a test that spawns its own workers: this binary's
-/// host-memory ledger isolated, the memory one worker needs, and the Python
-/// worker environment.
+/// The interpreter for a test that spawns its own workers: the memory one
+/// worker needs, and the Python worker environment. (Its pool's ledger is
+/// the declared test host's own, so nothing here isolates one.)
 pub fn worker_test_python() -> String {
-    batchalign::host_memory::isolate_host_memory_ledger_for_test();
     require_free_memory(4096);
     PythonWorker::require().interpreter()
 }

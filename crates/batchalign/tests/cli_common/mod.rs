@@ -38,13 +38,22 @@ use crate::live_deadline::{HarnessBudget, ProgressSnapshot, ServerTestDeadline, 
 ///
 /// Tests use a shared baseline environment so they do not accidentally pick up
 /// a developer's configured remote server or auto-open browser behavior.
+///
+/// The child reads the live host, so it gets a ledger private to this test
+/// process, handed to it on its own command: it never shares the machine's
+/// ledger with real servers, another test binary, or this process's
+/// declared host.
 pub fn cli_cmd() -> assert_cmd::Command {
-    // Ensure the per-process ledger override is in place before any
-    // CLI subprocess inherits the parent env.
-    isolate_host_memory_ledger();
+    use batchalign::host_memory::{
+        HOST_MEMORY_LEDGER_ENV, PrivateLedger, private_test_ledger_path,
+    };
     let mut command = cargo_bin_cmd!("batchalign3");
     command.env_remove("BATCHALIGN_SERVER");
     command.env("BATCHALIGN_NO_BROWSER", "1");
+    command.env(
+        HOST_MEMORY_LEDGER_ENV,
+        private_test_ledger_path(PrivateLedger::ChildProcesses),
+    );
     command
 }
 
@@ -87,12 +96,6 @@ impl CliHarness {
     /// Seeds a minimal `~/.batchalign.ini` so the first-run setup gate
     /// (which matches batchalign2 behavior) does not block test commands.
     pub fn new() -> Self {
-        // Isolate the host-memory ledger before any CLI subprocess
-        // inherits the env. The subprocess uses the env var to pick a
-        // per-test-process ledger path, so cross-binary races on the
-        // default ledger don't surface as test flakes.
-        isolate_host_memory_ledger();
-
         let scratch = tempfile::TempDir::new().expect("tempdir");
         let home_dir = scratch.path().join("home");
         let state_dir = home_dir.join(".batchalign3");
@@ -283,18 +286,10 @@ impl LiveTestServer {
     }
 }
 
-/// Re-export of the library's per-process ledger isolator. Both the
-/// test-server fixture and this CLI-subprocess harness need to set
-/// `BATCHALIGN_HOST_MEMORY_LEDGER` before any worker spawns; routing
-/// both through one `Once` in the library guarantees a single env-var
-/// write per process.
-pub use batchalign::host_memory::isolate_host_memory_ledger_for_test as isolate_host_memory_ledger;
-
 pub async fn start_live_server(
     python_path: &str,
     media_roots: Vec<batchalign_types::paths::ServerPath>,
 ) -> Result<LiveTestServer, String> {
-    isolate_host_memory_ledger();
     let tmp = tempfile::TempDir::new().map_err(|error| format!("tempdir failed: {error}"))?;
     let jobs_dir = tmp.path().join("jobs");
     std::fs::create_dir_all(&jobs_dir).map_err(|error| format!("mkdir jobs failed: {error}"))?;

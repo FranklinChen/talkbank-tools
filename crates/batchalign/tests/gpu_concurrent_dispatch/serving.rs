@@ -22,7 +22,6 @@ fn cpu_only_runtime() -> WorkerRuntimeConfig {
 }
 
 fn cpu_only_pool(python: String, per_key: usize) -> WorkerPool {
-    common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),

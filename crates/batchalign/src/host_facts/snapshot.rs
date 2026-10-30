@@ -29,6 +29,7 @@ use super::{ConfigOverrides, EffectiveConfig, HostFacts, HostFactsSource, RealHo
 use crate::config::ServerConfig;
 use crate::host_memory::{
     DeclaredHost, HostMemoryCoordinator, HostMemoryRuntimeConfig, HostReadings, HostUnreadable,
+    PrivateLedger, private_test_ledger_path,
 };
 use crate::host_policy::HostExecutionPolicy;
 use crate::types::runtime::MemoryTier;
@@ -51,13 +52,21 @@ impl HostSnapshot {
             config,
             RealHostFactsSource.detect()?,
             HostReadings::Live,
+            HostMemoryRuntimeConfig::from_server_config(config),
         ))
     }
 
     /// Resolve `config` against `facts`, whose live figures come from
-    /// `readings`. Private: a snapshot is either read (live) or declared, and
-    /// the two constructors are what pair the facts with their readings.
-    fn resolve(config: &ServerConfig, facts: HostFacts, readings: HostReadings) -> Self {
+    /// `readings` and whose leases go in `ledger`. Private: a snapshot is
+    /// either read (live, the machine's ledger) or declared (declared
+    /// figures, a ledger of its own), and the two constructors are what pair
+    /// them.
+    fn resolve(
+        config: &ServerConfig,
+        facts: HostFacts,
+        readings: HostReadings,
+        ledger: HostMemoryRuntimeConfig,
+    ) -> Self {
         let effective = EffectiveConfig::resolve(&ConfigOverrides::from(config), &facts);
         let tier = config.memory_tier_for_total(facts.ram_total_mb);
         // `Some(n)` is the operator's explicit override; `None` falls through
@@ -72,7 +81,7 @@ impl HostSnapshot {
             tier,
             max_concurrent_jobs,
             readings,
-            ledger: HostMemoryRuntimeConfig::from_server_config(config),
+            ledger,
         }
     }
 
@@ -84,10 +93,20 @@ impl HostSnapshot {
     /// the Small tier. It is the only test host. Test servers used to run on
     /// a declared 64 GB host while their worker pools read the live machine,
     /// so one test described two machines and a third decided.
+    ///
+    /// Its ledger is this process's own
+    /// ([`PrivateLedger::DeclaredHost`]): leases taken against declared
+    /// memory never meet the machine's real servers, or another test
+    /// binary's.
     pub fn for_tests(config: &ServerConfig) -> Self {
         let facts = super::test_helpers::laptop_16gb();
         let readings = HostReadings::Declared(DeclaredHost::from_facts(&facts));
-        Self::resolve(config, facts, readings)
+        let ledger = HostMemoryRuntimeConfig::from_sources(
+            private_test_ledger_path(PrivateLedger::DeclaredHost),
+            config.resolved_memory_gate_mb(),
+            config.max_concurrent_worker_startups,
+        );
+        Self::resolve(config, facts, readings, ledger)
     }
 
     /// The facts as read.

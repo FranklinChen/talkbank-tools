@@ -763,7 +763,14 @@ load. The rules that remove it:
   worker launch carries a `RuntimeHost` (tier, readings, ledger) that only
   `HostSnapshot::runtime_host` makes, so the three always describe one
   machine; a test that needs its own ledger path or reserve swaps the
-  ledger alone with `RuntimeHost::with_ledger`. Only `MachineMlTestLock`,
+  ledger alone with `RuntimeHost::with_ledger`. The declared host's
+  ledger is a file private to the test process
+  (`private_test_ledger_path(PrivateLedger::DeclaredHost)`), so its leases
+  never meet the machine's real servers or another test binary. A child
+  `batchalign3` reads the live host, so the CLI harness (`cli_cmd`) hands
+  it a second private ledger (`PrivateLedger::ChildProcesses`) on the
+  child's own command; the two never mix live and declared leases.
+  Nothing sets the ledger variable on the test process itself. Only `MachineMlTestLock`,
   `doctor`, memory-tier detection and the test prerequisites read the live
   host on purpose: ML tests load real models on the real machine.
 - **Wait on progress, not a wall clock.** A wait that can be slow on a busy

@@ -100,6 +100,13 @@ design; this file records how it changed.
     `Default`, which read the live host for whoever called it, is gone,
     and replay and `worker` launches now use the operator's ledger reserve
     rather than the default one. Test launches read no Rev.AI key.
+  - Which ledger file a test used was process state: a `Once`-guarded
+    `set_var` of `BATCHALIGN_HOST_MEMORY_LEDGER` that about twenty test
+    entry points had to remember to call first. The declared test host now
+    names its own process-private ledger, and the CLI harness hands each
+    child `batchalign3` a separate private ledger on its own command, so
+    live and declared leases never share a file. The hook, its two
+    re-exports and every call are gone.
   - The runtime's Rev.AI key is a `RevAiApiKey` (trimmed and non-empty,
     made only by `RevAiApiKey::parse`) instead of a string trimmed again
     at each construction.

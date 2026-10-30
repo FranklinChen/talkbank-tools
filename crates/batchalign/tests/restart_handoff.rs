@@ -18,8 +18,6 @@
 // Test code: fixtures and polling use unwrap/expect by convention.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use crate::common;
-
 use batchalign::api::{
     FilePayload, JobInfo, JobStatus, JobSubmission, LanguageCode3, LanguageSpec, NumSpeakers,
     ReleasedCommand,
@@ -28,7 +26,6 @@ use batchalign::config::ServerConfig;
 use batchalign::create_test_app;
 use batchalign::options::{CommandOptions, CommonOptions, TranscribeOptions};
 use batchalign::worker::pool::PoolConfig;
-use common::test_server_fixture::isolate_host_memory_ledger;
 
 use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
@@ -90,7 +87,6 @@ async fn get_job(client: &reqwest::Client, base_url: &str, job_id: &str) -> JobI
 #[tokio::test]
 async fn cancel_restart_while_running_hands_off_to_one_runner() {
     let python_path = crate::prerequisite::PythonWorker::require().interpreter();
-    isolate_host_memory_ledger();
 
     // Dedicated app (not the shared warm fixture): this test needs a
     // per-response worker delay to hold the race window open.

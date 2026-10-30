@@ -297,7 +297,7 @@ cargo test -p batchalign --test worker_integration_suite worker_integration:: --
 |----------|---------|--------------|
 | `BATCHALIGN_SPAWN_MIN_MEMORY_MB` | `4096` | Minimum free RAM (MB) to allow a worker spawn |
 | `BATCHALIGN_MAX_CONCURRENT_SPAWNS` | `1` | Max concurrent worker spawns (semaphore size) |
-| `BATCHALIGN_HOST_MEMORY_LEDGER` | temp-dir path | Override the shared host-memory ledger path |
+| `BATCHALIGN_HOST_MEMORY_LEDGER` (`HOST_MEMORY_LEDGER_ENV`) | temp-dir path | Override the shared host-memory ledger path. Test harnesses set it only on a child `batchalign3` command, to that test process's private ledger; nothing sets it on its own process |
 | `RUST_TEST_THREADS` | Rust harness default | Optional cap on parallel test functions; pass `--test-threads=1` for isolated worker probes |
 
 ## Key config knobs

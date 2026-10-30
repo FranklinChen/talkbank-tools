@@ -228,10 +228,6 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
     let admission = REAL_APP_ADMISSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Turmoil tests build their own server outside the shared fixture;
-    // opt into the same per-process host-memory ledger override so they
-    // don't race with sessions from other test binaries.
-    common::test_server_fixture::isolate_host_memory_ledger();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

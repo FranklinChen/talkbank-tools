@@ -31,7 +31,6 @@ use batchalign::options::{CommandOptions, CommonOptions, TranscribeOptions};
 use batchalign::worker::pool::PoolConfig;
 use common::test_server_fixture::{
     acquire_test_server_session, acquire_test_server_session_with_config,
-    isolate_host_memory_ledger,
 };
 
 fn test_submission(files: Vec<FilePayload>) -> JobSubmission {
@@ -1176,9 +1175,6 @@ async fn multi_file_job_uses_parallel_workers() {
 #[tokio::test]
 async fn server_starts_with_real_worker_capability_gate() {
     let python_path = crate::prerequisite::PythonWorker::require().interpreter();
-    // This test bypasses the shared fixture (test_echo=false), so opt
-    // into the same per-process ledger override the fixture uses.
-    isolate_host_memory_ledger();
 
     let config = ServerConfig {
         host: "127.0.0.1".into(),

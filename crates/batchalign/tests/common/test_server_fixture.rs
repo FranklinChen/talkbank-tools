@@ -82,15 +82,6 @@ impl TestEchoBackend {
     /// fixture thread reports what is missing to the acquiring test, which
     /// fails with it.
     async fn initialize() -> Result<Self, String> {
-        // Point the host-memory coordinator at a per-process ledger so
-        // concurrent test sessions in one binary do not race against each
-        // other on the shared default ledger (which the original
-        // semaphore-serialized helpers protected by serializing tests).
-        // The path lives under the system tempdir and is overwritten at
-        // every fixture init; that's fine because each integration-test
-        // binary is a single process with a fresh fixture per run.
-        isolate_host_memory_ledger();
-
         let python_path = crate::prerequisite::PythonWorker::establish_shared()
             .map_err(|missing| missing.to_string())?
             .interpreter();
@@ -107,11 +98,6 @@ impl TestEchoBackend {
         })
     }
 }
-
-/// Re-export of the library's per-process ledger isolator so test
-/// helpers in this module and callers of this fixture get one canonical
-/// entry point. See `batchalign::host_memory::isolate_host_memory_ledger_for_test`.
-pub use batchalign::host_memory::isolate_host_memory_ledger_for_test as isolate_host_memory_ledger;
 
 /// Three-state init slot. Matches the live fixture pattern so a one-time
 /// initialization failure (no Python in env, etc.) is cached and every

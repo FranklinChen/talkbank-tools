@@ -18,8 +18,6 @@
 //! All tests use `--test-echo` workers (no ML models). Failures are injected
 //! by killing worker processes (SIGKILL) or using very short timeouts.
 
-use crate::common;
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -42,11 +40,6 @@ fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
 }
 
 fn test_pool(python: String) -> WorkerPool {
-    // Each test in this binary spawns its own pool that touches the
-    // host-memory ledger via the worker spawn memory guard. Opt into
-    // the per-process ledger override the shared fixture uses so tests
-    // here don't race against test binaries running fixture sessions.
-    common::test_server_fixture::isolate_host_memory_ledger();
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable periodic health checks
@@ -358,10 +351,6 @@ async fn multi_file_job_produces_per_file_results() {
 
     static PARTIAL_SLOTS: Semaphore = Semaphore::const_new(1);
     let _permit = PARTIAL_SLOTS.acquire().await.expect("semaphore");
-    // This test bypasses the shared fixture; opt into the same
-    // per-process host-memory ledger override so it doesn't race
-    // against sessions from other test binaries.
-    common::test_server_fixture::isolate_host_memory_ledger();
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let jobs_dir = tmp.path().join("jobs");

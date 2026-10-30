@@ -821,7 +821,6 @@ async fn spawn_failure_bad_python_path() {
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
-    common::test_server_fixture::isolate_host_memory_ledger();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let fake_python = dir.path().join("fake-python");
     let ready = synthetic_runtime_ready(1234);
@@ -856,7 +855,6 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_failure_includes_worker_startup_stderr() {
-    common::test_server_fixture::isolate_host_memory_ledger();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let fake_python = dir.path().join("fake-python");
     std::fs::write(
@@ -902,7 +900,6 @@ async fn spawn_failure_includes_worker_startup_stderr() {
 #[cfg(unix)]
 #[tokio::test]
 async fn health_check_tolerates_non_protocol_stdout_between_requests() {
-    common::test_server_fixture::isolate_host_memory_ledger();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let fake_python = dir.path().join("fake-python");
     let ready = synthetic_runtime_ready(1234);

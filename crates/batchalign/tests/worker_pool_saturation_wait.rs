@@ -37,7 +37,6 @@ fn request(lang: &LanguageCode3) -> BatchInferRequest {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_waits_through_a_saturated_pool_instead_of_failing() {
-    common::test_server_fixture::isolate_host_memory_ledger();
     let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let mut config = echo_pool_config(python, 1, PerProfile::uniform(1), BUSY_RESPONSE_MS);
