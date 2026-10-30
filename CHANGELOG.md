@@ -3,7 +3,7 @@
 Fixes and behaviour changes, newest first. The book describes the current
 design; this file records how it changed.
 
-## Unreleased
+## 0.8.6 (October 30, 2026)
 
 ### Retokenize no longer rewrites what was said
 
