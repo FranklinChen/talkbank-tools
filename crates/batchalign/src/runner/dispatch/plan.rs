@@ -9,7 +9,6 @@ use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, Tokenizatio
 
 use crate::api::ReleasedCommand;
 use crate::chat_ops::CacheTaskName;
-use crate::config::ServerConfig;
 use crate::host_policy::HostExecutionPolicy;
 use crate::params::{CacheOverrides, CachePolicy};
 use crate::runner::dispatch::kernel_plan::CommandKernelPlan;
@@ -129,7 +128,7 @@ impl FaDispatchPlan {
     /// the operator to act on.
     pub(crate) fn from_job(
         job: &RunnerJobSnapshot,
-        config: &ServerConfig,
+        host_policy: &HostExecutionPolicy,
     ) -> Result<Self, DispatchPlanRefusal> {
         let overrides = resolve_cache_overrides(job)?;
         let fa_cache_policy = overrides.policy_for(CacheTaskName::ForcedAlignment);
@@ -145,7 +144,7 @@ impl FaDispatchPlan {
             _ => return Err(DispatchPlanRefusal::Options),
         };
         Ok(Self {
-            kernel_plan: kernel_plan_for_job(job, config),
+            kernel_plan: kernel_plan_for_job(job, host_policy),
             options,
             utr_cache_policy,
             media_dir,
@@ -225,7 +224,7 @@ impl TranscribeDispatchPlan {
     /// Build the transcribe plan from the persisted job snapshot.
     pub(crate) fn from_job(
         job: &RunnerJobSnapshot,
-        config: &ServerConfig,
+        host_policy: &HostExecutionPolicy,
     ) -> Result<Self, DispatchPlanRefusal> {
         let overrides = resolve_cache_overrides(job)?;
         let cache_policies = TranscribeCachePolicies {
@@ -275,7 +274,7 @@ impl TranscribeDispatchPlan {
         )?;
 
         Ok(Self {
-            kernel_plan: kernel_plan_for_job(job, config),
+            kernel_plan: kernel_plan_for_job(job, host_policy),
             base_options: TranscribeOptions {
                 plan,
                 diarize,
@@ -317,7 +316,7 @@ impl BenchmarkDispatchPlan {
     /// Build the benchmark plan from the persisted job snapshot.
     pub(crate) fn from_job(
         job: &RunnerJobSnapshot,
-        config: &ServerConfig,
+        host_policy: &HostExecutionPolicy,
     ) -> Result<Self, DispatchPlanRefusal> {
         // Refused here, once, for the whole job. This used to be a check inside
         // each file's retry loop that failed the file and continued, so every
@@ -344,7 +343,7 @@ impl BenchmarkDispatchPlan {
             .ok_or(DispatchPlanRefusal::Options)?;
 
         Ok(Self {
-            kernel_plan: kernel_plan_for_job(job, config),
+            kernel_plan: kernel_plan_for_job(job, host_policy),
             base_options: TranscribeOptions {
                 // A refusal here means a persisted job names an engine this
                 // build cannot run. Submission validation refuses those up
@@ -434,7 +433,7 @@ impl MediaAnalysisDispatchPlan {
     /// silence.
     pub(crate) fn from_job(
         job: &RunnerJobSnapshot,
-        config: &ServerConfig,
+        host_policy: &HostExecutionPolicy,
     ) -> Result<Self, DispatchPlanRefusal> {
         match job.dispatch.command {
             ReleasedCommand::Opensmile => {
@@ -442,12 +441,12 @@ impl MediaAnalysisDispatchPlan {
                     extract_opensmile_dispatch_params(&job.dispatch.options)
                         .ok_or(DispatchPlanRefusal::Options)?;
                 Ok(Self::Opensmile {
-                    kernel_plan: kernel_plan_for_job(job, config),
+                    kernel_plan: kernel_plan_for_job(job, host_policy),
                     feature_set,
                 })
             }
             ReleasedCommand::Avqi => Ok(Self::Avqi {
-                kernel_plan: kernel_plan_for_job(job, config),
+                kernel_plan: kernel_plan_for_job(job, host_policy),
             }),
             ReleasedCommand::Diarize => {
                 // A diarize job snapshot must carry diarize options; any
@@ -459,7 +458,7 @@ impl MediaAnalysisDispatchPlan {
                     return Err(DispatchPlanRefusal::Options);
                 };
                 Ok(Self::Diarize {
-                    kernel_plan: kernel_plan_for_job(job, config),
+                    kernel_plan: kernel_plan_for_job(job, host_policy),
                     backend: resolve_selected_speaker_backend(options.speaker_engine),
                     // The option type admits only a count a diarizer can answer
                     // (at least two, or absent for automatic); the worker
@@ -487,12 +486,18 @@ fn resolve_cache_overrides(
     CacheOverrides::from_common(job.dispatch.options.common())
 }
 
-fn kernel_plan_for_job(job: &RunnerJobSnapshot, config: &ServerConfig) -> CommandKernelPlan {
-    let host_policy = HostExecutionPolicy::from_server_config(config);
+/// The policy is the dispatch host's snapshot ([`DispatchHostContext`]), not a
+/// fresh reading of the machine per plan.
+///
+/// [`DispatchHostContext`]: crate::runner::context::DispatchHostContext
+fn kernel_plan_for_job(
+    job: &RunnerJobSnapshot,
+    host_policy: &HostExecutionPolicy,
+) -> CommandKernelPlan {
     CommandKernelPlan::for_command_with_policy(
         job.dispatch.command,
         job.pending_files.len(),
-        &host_policy,
+        host_policy,
     )
 }
 

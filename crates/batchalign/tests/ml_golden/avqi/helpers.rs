@@ -17,8 +17,8 @@ pub(super) fn avqi_options() -> CommandOptions {
     })
 }
 
-pub(super) fn prepare_avqi_fixture_job(state_dir: &Path, label: &str) -> Option<AvqiFixtureJob> {
-    let fixtures = prepare_audio_fixtures(state_dir)?;
+pub(super) fn prepare_avqi_fixture_job(state_dir: &Path, label: &str) -> AvqiFixtureJob {
+    let fixtures = prepare_audio_fixtures(state_dir);
     let pair_dir = state_dir.join(format!("avqi_{label}"));
     std::fs::create_dir_all(&pair_dir).expect("mkdir avqi pair dir");
 
@@ -27,12 +27,12 @@ pub(super) fn prepare_avqi_fixture_job(state_dir: &Path, label: &str) -> Option<
     std::fs::copy(&fixtures.audio, &cs_path).expect("copy avqi cs audio");
     std::fs::copy(&fixtures.audio, &sv_path).expect("copy avqi sv audio");
 
-    Some(AvqiFixtureJob {
+    AvqiFixtureJob {
         cs_source_path: cs_path.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, "test.txt")
             .to_string_lossy()
             .into_owned(),
-    })
+    }
 }
 
 fn standard_output_path(state_dir: &Path, label: &str, filename: &str) -> PathBuf {

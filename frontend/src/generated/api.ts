@@ -846,15 +846,7 @@ export interface components {
              *     pre-filled with agreeable values.
              */
             status: components["schemas"]["HealthStatus"];
-            /**
-             * @description Available memory in MB (free + reclaimable).  On macOS this is
-             *     `free + purgeable` which can undercount; see `sysinfo` docs.
-             */
-            system_memory_available_mb?: components["schemas"]["MemoryMb"];
-            /** @description Total physical memory in MB. */
-            system_memory_total_mb?: components["schemas"]["MemoryMb"];
-            /** @description Used memory in MB (`total - available`). */
-            system_memory_used_mb?: components["schemas"]["MemoryMb"];
+            system_memory?: components["schemas"]["SystemMemoryReading"] | null;
             /**
              * @description Server software version (e.g. `"0.6.0"`).  Used by the CLI to
              *     detect stale daemons and auto-restart them.
@@ -1731,6 +1723,24 @@ export interface components {
          *     (`fa::completion`), which has no retired cause to produce.
          */
         StoredUntimedCause: components["schemas"]["UntimedCauseRecord"] | components["schemas"]["RetiredUntimedCause"];
+        /**
+         * @description The host's memory as the operating system reported it for one response.
+         *
+         *     One reading, so the three figures are always from the same moment and are
+         *     present or absent together: an unreadable host is an absent reading, never
+         *     a zero total the dashboard would draw.
+         */
+        SystemMemoryReading: {
+            /**
+             * @description Available memory in MB (free + reclaimable).  On macOS this is
+             *     `free + purgeable` which can undercount; see `sysinfo` docs.
+             */
+            available_mb: components["schemas"]["MemoryMb"];
+            /** @description Total physical memory in MB. */
+            total_mb: components["schemas"]["MemoryMb"];
+            /** @description Used memory in MB (`total - available`). */
+            used_mb: components["schemas"]["MemoryMb"];
+        };
         /** @description Why an utterance's words have no timing: the causes this build writes. */
         UntimedCauseRecord: {
             /** @enum {string} */

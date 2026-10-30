@@ -132,7 +132,8 @@ fn run_l2_in(
         &primary_lang,
         talkbank_model::DeclaredLanguagesRef::new(&codes).expect("nonempty fixture languages"),
         MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
     let responses = vec![UdResponse {
         sentences: vec![ud_sentence(primary)],
     }];

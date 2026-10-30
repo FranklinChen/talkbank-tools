@@ -1,4 +1,4 @@
-use crate::ml_golden::parity_helpers::run_parity_test;
+use crate::ml_golden::parity_helpers::{Ba2Baseline, run_parity_test};
 use batchalign::api::ReleasedCommand;
 use batchalign::options::{CommandOptions, CommonOptions, TranslateOptions};
 use batchalign::worker::InferTask;
@@ -22,6 +22,7 @@ async fn parity_translate_eng() {
         "eng_disfluency",
         "eng",
         translate_opts(),
+        Ba2Baseline::Golden,
     )
     .await;
 }
@@ -34,6 +35,7 @@ async fn parity_translate_spa() {
         "spa_simple",
         "spa",
         translate_opts(),
+        Ba2Baseline::Golden,
     )
     .await;
 }

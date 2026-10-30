@@ -254,7 +254,7 @@ mod reporting_tests {
                 .unwrap();
             let plan = planning::build_job_plan(&snapshot).unwrap();
             let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-            let store = Arc::new(crate::store::JobStore::new(
+            let store = Arc::new(crate::store::JobStore::for_tests(
                 crate::config::ServerConfig::default(),
                 None,
                 tx,

@@ -56,14 +56,13 @@
 use crate::common;
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use batchalign::api::LanguageCode3;
 use batchalign::host_facts::PerProfile;
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::pool_dispatch::{count_successes, launch_oversubscribed_dispatches};
-use common::resolve_python;
 use serde_json::json;
 
 /// Concurrent dispatches launched per sweep point. Must oversubscribe
@@ -83,12 +82,6 @@ const CONCURRENT_DISPATCHES: usize = 16;
 /// without inflating total sweep runtime. Adjust if the test ends up
 /// either too noisy (too short) or too slow (too long).
 const ITEMS_PER_REQUEST: usize = 50;
-
-/// Per-request timeout. With K=3 workers and 16 callers a typical
-/// run queues most callers behind ~5 batches, each batch potentially
-/// hundreds of ms; 90 s gives plenty of headroom even at the slow
-/// end of the sweep without silently passing on a hung pool.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Read the per-key Stanza budget from `STANZA_PER_KEY`, defaulting
 /// to a moderate `7` when unset. Reject obvious nonsense up-front
@@ -125,10 +118,7 @@ fn synthetic_item(lang: LanguageCode3) -> serde_json::Value {
 async fn measure_stanza_per_key_throughput() {
     common::test_server_fixture::isolate_host_memory_ledger();
 
-    let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let stanza_k = stanza_per_key_from_env();
     eprintln!(
@@ -155,7 +145,7 @@ async fn measure_stanza_per_key_throughput() {
         // throughput, not warmup.
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<180>(),
-        ..Default::default()
+        ..PoolConfig::for_tests()
     }));
 
     let lang = LanguageCode3::eng();
@@ -167,7 +157,7 @@ async fn measure_stanza_per_key_throughput() {
     let outcomes = launch_oversubscribed_dispatches(
         &pool,
         CONCURRENT_DISPATCHES,
-        REQUEST_TIMEOUT,
+        crate::live_deadline::WaitSubject::oversubscribed_model_dispatches(CONCURRENT_DISPATCHES),
         |_| lang.clone(),
         |lang, _| BatchInferRequest {
             task: InferTask::Morphosyntax,
@@ -182,7 +172,7 @@ async fn measure_stanza_per_key_throughput() {
 
     let completed = count_successes(&outcomes);
     for outcome in &outcomes {
-        if !matches!(outcome, Ok(Ok(Ok(_)))) {
+        if !matches!(outcome, Ok(Ok(_))) {
             eprintln!("dispatch outcome: {outcome:?}");
         }
     }

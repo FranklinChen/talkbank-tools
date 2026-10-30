@@ -6,29 +6,40 @@ use batchalign::api::{FilePayload, JobStatus, ReleasedCommand};
 use batchalign::options::CommandOptions;
 use batchalign::worker::InferTask;
 
-/// Submit a curated parity fixture through BA3 and compare it to the BA2 Jan 9
-/// golden output when that golden is available locally.
+/// What batchalign2's Jan 9 baseline offers to compare a parity run against.
+///
+/// Declared by each test rather than discovered from the filesystem: a golden
+/// that a test expects and cannot find is a repository defect, and used to
+/// make the test quietly assert less.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ba2Baseline {
+    /// A committed `ba2_reference` golden exists; the output must match it.
+    Golden,
+    /// The committed BA2 baseline has no output for this command (no
+    /// `batchalign/tests/golden/ba2_reference/<command>/`), so only the
+    /// structural checks apply.
+    NoBa2Golden,
+}
+
+/// Submit a curated parity fixture through BA3, check it structurally, and
+/// compare it to the BA2 Jan 9 golden when `baseline` says one exists.
 pub(super) async fn run_parity_test(
     command: ReleasedCommand,
     task: InferTask,
     fixture_name: &str,
     lang: &str,
     options: CommandOptions,
+    baseline: Ba2Baseline,
 ) {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         task,
         command,
         lang,
         &format!("Direct session does not support {task:?} infer"),
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
-    let Some(input) = load_parity_fixture(fixture_name) else {
-        return;
-    };
+    let input = load_parity_fixture(fixture_name);
 
     let files = vec![FilePayload {
         filename: format!("{fixture_name}.cha").into(),
@@ -38,15 +49,20 @@ pub(super) async fn run_parity_test(
     let (info, results) = submit_and_complete_direct(&session, command, lang, files, options).await;
 
     if info.status == JobStatus::Failed {
-        eprintln!("SKIP: {command} {fixture_name} ({lang}) failed (model likely not downloaded)");
-        return;
+        panic!(
+            "PREREQUISITE MISSING: {command} {fixture_name} ({lang}) failed (model likely not downloaded)"
+        )
     }
 
     assert_completed_without_errors(&format!("{command}_{fixture_name}"), &info, &results);
     assert_eq!(results.len(), 1);
 
-    let output = &results[0].content.as_text().expect("text command result");
-    if let Some(golden) = load_ba2_golden(command.as_ref(), fixture_name) {
-        assert_ba2_parity(&format!("{command}_{fixture_name}"), output, &golden);
+    let output = results[0].content.as_text().expect("text command result");
+    match baseline {
+        Ba2Baseline::Golden => {
+            let golden = load_ba2_golden(command.as_ref(), fixture_name);
+            assert_ba2_parity(&format!("{command}_{fixture_name}"), output, &golden);
+        }
+        Ba2Baseline::NoBa2Golden => {}
     }
 }

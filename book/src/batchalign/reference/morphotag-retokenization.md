@@ -104,10 +104,31 @@ each UD word is its own CHAT word, and each UD word gets its own MOR item.
   token is written back as the CHAT word: the text mapping holds and the
   rebuild keeps the word as written (`gumma@c`). When the model's tokens do
   not stand one per CHAT word, an utterance with a special form is reported
-  instead. An utterance whose special-form or code-switched words would be
-  placed by a mapping spread by length (`MappingBasis::Length`, the texts
-  diverged) is reported too, since such a mapping can give a word its
-  neighbour's items. The rebuild and the placement read one mapping.
+  instead. The rebuild and the placement read one mapping.
+- The mapping exists only when the model's tokens spell the transcript's
+  words exactly (after case folding): `build_word_token_mapping` in
+  `retokenize.rs` returns `TextDiverged` otherwise, and the utterance is
+  reported and keeps its transcript. There is no positional or length-based
+  fallback: spreading words over tokens that do not spell them gives a word
+  its neighbour's text.
+- A merge never crosses other main-tier content. A token that joins the word
+  before a retraced group, pause, event or bracket edge to the word after it
+  would be written where its first word stood, moving the content between
+  them; the rewrite is refused instead (`RetokenizeContext::at_boundary` in
+  `retokenize/rebuild.rs`), reported with class `merge_crosses_content`.
+- So that a segmenter cannot produce such a token in the first place, every
+  batch item carries the utterance's **word runs** (`retokenize::WordRuns`,
+  the `runs` field of the IPC item): run lengths partitioning its words,
+  where a run is a stretch of plain words with nothing between them on the
+  main tier. Retraces, untranscribed material (`xxx`), pauses, events and
+  bracket edges end a run; an annotated word, each word of a replacement and
+  a tag separator stand alone. Cantonese retokenize hands PyCantonese one run
+  at a time, so `a b [/] b c` can never segment as a token over `a` and `b c`.
+  The run walk counts words by the rebuild's own rules and must agree with
+  Chatter's extracted word list; a disagreement stops the file as an
+  internal fault (`ServerError::WordRunsDisagree`), never a quiet fallback.
+  Items with no authority to retokenize (secondary-language spans) send
+  every word as its own run.
 - A token the `--lexicon` MWT lexicon names becomes the lexicon's pieces,
   one item each (`SurfaceItems::expand`). The first piece keeps the
   token's analysis and relation; each later piece repeats the analysis
@@ -406,10 +427,13 @@ What BA3 got wrong that BA2 got right (or at least, did simply):
 
 Rust unit tests (inline `#[cfg(test)]` blocks):
 
-- `crates/batchalign-transform/src/retokenize.rs`: mapping
-  deterministic / fallback / mixed cases (e.g.
-  `deterministic_mapping_succeeds_for_split_and_merge` at `:287`),
-  rebuild walk, diagnostics, and taint marking on mismatch.
+- `crates/batchalign-transform/src/retokenize.rs`: the span-join mapping
+  (exact match, split and merge, diverged text and one empty side, each
+  refused as `TextDiverged`), rebuild walk, diagnostics, and taint marking
+  on mismatch.
+- `crates/batchalign-transform/src/retokenize/rebuild.rs`: a merged token
+  never crosses other main-tier content
+  (`a_merged_token_never_crosses_other_main_tier_content`).
 
 Rust ML golden tests:
 

@@ -5,22 +5,16 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn opensmile_server_eng() {
-    let Some(server) = require_live_server_warmed(
+    let server = require_live_server_warmed(
         InferTask::Opensmile,
         ReleasedCommand::Opensmile,
         "eng",
         "live server does not support OpenSMILE infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_opensmile_fixture_job(server.state_dir(), "opensmile_server_eng")
-    else {
-        return;
-    };
+    let fixture = prepare_opensmile_fixture_job(server.state_dir(), "opensmile_server_eng");
 
     let (info, _outputs) = jobs
         .submit_paths_job(

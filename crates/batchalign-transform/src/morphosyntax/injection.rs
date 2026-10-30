@@ -13,58 +13,37 @@ use super::responses::{AdmittedUdResponse, BoundMorphosyntaxResponses, ResponseA
 use super::synthesis::synthesize_special_form_mor;
 use super::{
     BatchWord, CollectedUtterance, ItemLayout, MappedTokens, MappingContext, MappingError,
-    MatchedMorphosyntaxResponses, MisalignmentClass, MisalignmentDiagnostic, MwtDict,
-    TokenizationMode, UdResponse, WordRole, apply_grammatical_invariants, map_tokens,
+    MatchedMorphosyntaxResponses, MisalignmentDiagnostic, MwtDict, TokenizationMode, UdResponse,
+    WordRole, apply_grammatical_invariants, map_tokens,
 };
 use crate::decisions::{DecisionRecord, DecisionStrategy, MorphosyntaxStrategy};
 
-/// Context supplied by the caller to [`enrich_diagnostic`] so the
-/// suspected misalignment class can be inferred more precisely.
+/// Which path produced a misalignment, which decides the decision strategy
+/// it is recorded under.
 enum RetokenizationContext {
     /// Non-retokenize path: Stanza was told to realign to CHAT
     /// boundaries. A mismatch here means realignment did not hold.
     Preserve,
     /// `StanzaRetokenize` mode was used; CHAT was rewritten to match
-    /// Stanza's own tokenization, so a mismatch suggests a retokenize
-    /// or MWT-expansion bug rather than a realignment issue.
+    /// Stanza's own tokenization.
     StanzaRetokenize,
 }
 
-/// Enrich an inner [`MisalignmentDiagnostic`] with caller-held context
-/// that the inner validator didn't have access to: the Stanza tokens
-/// that were sent, and a best-effort suspected-class classification.
+/// Fill in the Stanza tokens an inner [`MisalignmentDiagnostic`] did not
+/// have.
+///
+/// The class is never guessed here. This used to label every retokenize
+/// refusal `mwt_reassembly_bug`, so a token merged across a retrace reached
+/// the user as a multi-word-token defect; the producer now sets the class
+/// from what actually happened (`retokenize::refusal`), and `Unknown`
+/// stays `Unknown`.
 fn enrich_diagnostic(
     mut diag: MisalignmentDiagnostic,
     stanza_tokens: &[String],
-    context: RetokenizationContext,
 ) -> MisalignmentDiagnostic {
     if diag.stanza_tokens_after_mapping.is_empty() && !stanza_tokens.is_empty() {
         diag.stanza_tokens_after_mapping = stanza_tokens.to_vec();
     }
-
-    // Infer the suspected class when the inner validator left it
-    // `Unknown`. This is a heuristic, the real diagnosis requires a
-    // developer looking at the logs, but it points them at the right
-    // stage to investigate first.
-    if matches!(diag.suspected_class, MisalignmentClass::Unknown) {
-        diag.suspected_class = match context {
-            RetokenizationContext::StanzaRetokenize => {
-                // In retokenize mode the main tier is rewritten to match
-                // Stanza's tokenization; a mismatch here usually means
-                // the rebuild step dropped or duplicated tokens.
-                MisalignmentClass::MwtReassemblyBug
-            }
-            RetokenizationContext::Preserve => {
-                // Non-retokenize: Stanza was told to realign. A mismatch
-                // implies either the realignment context wasn't set for
-                // this call (RealignmentSkipped), a terminator-filter
-                // regression (TerminatorFilterBug), or an MWT-reassembly
-                // bug. Without more signal, Unknown is honest.
-                MisalignmentClass::Unknown
-            }
-        };
-    }
-
     diag
 }
 
@@ -165,8 +144,6 @@ pub struct RetokenizationInfo {
     pub stanza_tokens: Vec<String>,
     /// Word→token index mapping: `mapping[word_idx]` = list of token indices.
     pub mapping: Vec<Vec<usize>>,
-    /// Whether the fallback (length-proportional) mapping was used.
-    pub used_fallback: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,8 +555,6 @@ impl UtteranceInjection<'_, '_> {
         alignment: Result<UdAlignment<'_, MorItemIndex>, UdAlignmentError>,
         mwt: &MwtDict,
     ) -> UtteranceCompletion {
-        use crate::retokenize::MappingBasis;
-
         let (mors, gras, token_items) = mapped.into_indexed();
         let expanded = SurfaceItems::pair(surface, mors, gras, self.words)
             .map_err(ExpansionFailure::Geometry)
@@ -604,32 +579,10 @@ impl UtteranceInjection<'_, '_> {
             }
         };
 
-        // A special form's or code-switched word's items are found through
-        // the mapping, and a mapping spread by length can hand them another
-        // word's items (a `c|` analysis on the word before a special form).
-        // Such an utterance is reported, not placed by guesswork.
-        let places_words = self
-            .item
-            .words()
-            .iter()
-            .any(|word| !matches!(word.role(), WordRole::Analysed));
-        if places_words && by_text.basis() == MappingBasis::Length {
-            let refused = crate::inject::MisalignmentDiagnostic {
-                chat_words: self
-                    .words
-                    .iter()
-                    .map(|w| w.text.as_str().to_string())
-                    .collect(),
-                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
-                    self.words.len(),
-                ),
-                actual: talkbank_model::alignment::helpers::MorItemCount::new(tokens.len()),
-                stanza_tokens_after_mapping: tokens,
-                suspected_class: crate::inject::MisalignmentClass::Unknown,
-            };
-            let tokens = refused.stanza_tokens_after_mapping.clone();
-            return self.misalignment(refused, &tokens, RetokenizationContext::StanzaRetokenize);
-        }
+        // The mapping is text-bound ([`build_word_token_mapping`]), so a
+        // special form's or code-switched word's items are found through the
+        // tokens it actually spells. The positional spread that could hand them
+        // another word's items no longer exists to be guarded against here.
         relabel_special_forms(
             &mut mors,
             &mut gras,
@@ -657,7 +610,6 @@ impl UtteranceInjection<'_, '_> {
             mapping: (0..self.words.len())
                 .map(|i| by_text.tokens_for_word(i).to_vec())
                 .collect(),
-            used_fallback: by_text.basis() == MappingBasis::Length,
         });
 
         match crate::retokenize::retokenize_utterance(
@@ -704,7 +656,7 @@ impl UtteranceInjection<'_, '_> {
             RetokenizationContext::Preserve => MorphosyntaxStrategy::MisalignmentBug,
             RetokenizationContext::StanzaRetokenize => MorphosyntaxStrategy::RetokenizationFailed,
         };
-        let diag = enrich_diagnostic(diag, tokens, context);
+        let diag = enrich_diagnostic(diag, tokens);
         Err(Box::new(DecisionRecord::new_and_trace(
             self.line_idx,
             self.utt.main.speaker.as_str().to_string(),
@@ -771,15 +723,7 @@ fn surface_tokens(
     if has_special_form && per_token.len() != words.len() {
         let surface: Vec<String> = per_token.into_iter().flatten().collect();
         return Err(SurfaceError::Unplaced(
-            crate::inject::MisalignmentDiagnostic {
-                chat_words: words.iter().map(|w| w.text.as_str().to_string()).collect(),
-                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
-                    words.len(),
-                ),
-                actual: talkbank_model::alignment::helpers::MorItemCount::new(surface.len()),
-                stanza_tokens_after_mapping: surface,
-                suspected_class: crate::inject::MisalignmentClass::Unknown,
-            },
+            crate::inject::MisalignmentDiagnostic::unplaced(words, surface),
         ));
     }
     let mut surfaces = Vec::with_capacity(per_token.len());
@@ -801,23 +745,22 @@ fn surface_tokens(
         flattened.extend(components);
         ranges.push(start..flattened.len());
     }
-    let surface_mapping = crate::retokenize::build_word_token_mapping(words, &surfaces);
-    let mapping = if surface_mapping.basis() == crate::retokenize::MappingBasis::Text {
-        surface_mapping.expanded(&ranges).ok_or_else(|| {
-            SurfaceError::Unplaced(crate::inject::MisalignmentDiagnostic {
-                chat_words: words.iter().map(|w| w.text.as_str().to_owned()).collect(),
-                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
-                    words.len(),
-                ),
-                actual: talkbank_model::alignment::helpers::MorItemCount::new(flattened.len()),
-                stanza_tokens_after_mapping: flattened.clone(),
-                suspected_class: crate::inject::MisalignmentClass::Unknown,
-            })
-        })?
-    } else {
+    let unplaced = |tokens: &[String]| {
+        SurfaceError::Unplaced(crate::inject::MisalignmentDiagnostic::unplaced(
+            words,
+            tokens.to_vec(),
+        ))
+    };
+    let mapping = match crate::retokenize::build_word_token_mapping(words, &surfaces) {
+        Ok(by_surface) => by_surface
+            .expanded(&ranges)
+            .ok_or_else(|| unplaced(&flattened))?,
         // A model may omit/change a range surface while its components still
-        // spell the source exactly. Retain that existing text-bound path.
-        crate::retokenize::build_word_token_mapping(words, &flattened)
+        // spell the source exactly; failing that too, nothing spells it.
+        Err(crate::retokenize::TextDiverged) => {
+            crate::retokenize::build_word_token_mapping(words, &flattened)
+                .map_err(|crate::retokenize::TextDiverged| unplaced(&flattened))?
+        }
     };
     Ok(GroupedSurface {
         tokens: flattened,

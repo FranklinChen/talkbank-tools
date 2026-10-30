@@ -538,7 +538,7 @@ mod tests {
                 invalid_non_english,
             ),
         ];
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let results = run_coref_batch_impl(&files, &pool, async |_pool, items| {
             assert_eq!(
                 items.len(),

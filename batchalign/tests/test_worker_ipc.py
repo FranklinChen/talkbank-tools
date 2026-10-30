@@ -153,6 +153,7 @@ def test_infer_request_serialization() -> None:
             "words": ["the", "dog", "runs"],
             "terminator": ".",
             "special_forms": [],
+            "runs": [3],
             "lang": "eng",
         },
     )
@@ -235,8 +236,20 @@ def test_batch_infer_request_serialization() -> None:
         task=InferTask.MORPHOSYNTAX,
         lang="eng",
         items=[
-            {"words": ["hello"], "terminator": ".", "special_forms": [], "lang": "eng"},
-            {"words": ["world"], "terminator": ".", "special_forms": [], "lang": "eng"},
+            {
+                "words": ["hello"],
+                "terminator": ".",
+                "special_forms": [],
+                "runs": [1],
+                "lang": "eng",
+            },
+            {
+                "words": ["world"],
+                "terminator": ".",
+                "special_forms": [],
+                "runs": [1],
+                "lang": "eng",
+            },
         ],
     )
     data = json.loads(req.model_dump_json())
@@ -269,6 +282,7 @@ def test_rust_can_parse_python_infer_request() -> None:
                 "words": ["hello", "world"],
                 "terminator": ".",
                 "special_forms": [],
+                "runs": [2],
                 "lang": "eng",
             },
         }

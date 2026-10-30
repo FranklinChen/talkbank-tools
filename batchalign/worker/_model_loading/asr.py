@@ -16,6 +16,7 @@ from batchalign.inference._domain_types import (
     parse_choice,
 )
 from batchalign.worker._model_loading.pinned_hub import (
+    HubFiles,
     hub_commit_of,
     resolve_pinned_snapshot,
 )
@@ -217,6 +218,7 @@ def _load_hub_member(
     member: RequestedModelV2,
     *,
     kind: str,
+    files: HubFiles,
     artifacts: tuple[str, ...] | None = None,
 ) -> tuple[str, LoadedModelV2]:
     """Materialize one Hugging Face member, and record what actually loaded.
@@ -233,8 +235,10 @@ def _load_hub_member(
     where the loader has been handed a local path, asks whether a DIRECTORY is
     a cached repository, which it never is.
 
-    ``kind`` names this member's role for the operator; ``artifacts`` widens
-    the cache probe for loaders that pull more than ``config.json``.
+    ``kind`` names this member's role for the operator; ``files`` names which
+    of the repository's files the loader reads, and only those download;
+    ``artifacts`` widens the cache probe for loaders that pull more than
+    ``config.json``.
     """
     from batchalign.worker._progress import emit_hf_download_if_missing
 
@@ -242,7 +246,7 @@ def _load_hub_member(
     emit_hf_download_if_missing(
         member.id, kind=kind, artifacts=artifacts, revision=commit
     )
-    resolved = resolve_pinned_snapshot(member.id, commit)
+    resolved = resolve_pinned_snapshot(member.id, commit, files)
     return resolved.path, LoadedModelV2(
         id=member.id,
         requested=member.revision,
@@ -392,9 +396,13 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
             # pin nothing. The snapshots are resolved here instead and the
             # loader is given local paths, which is also what makes the
             # observed commit a fact about the bytes on disk.
-            asr_path, asr_loaded = _load_hub_member(asr_member, kind="ASR")
+            asr_path, asr_loaded = _load_hub_member(
+                asr_member, kind="ASR", files=HubFiles.WHOLE_REPOSITORY
+            )
             vad_path, vad_loaded = _load_hub_member(
-                vad_member, kind="voice activity detection"
+                vad_member,
+                kind="voice activity detection",
+                files=HubFiles.WHOLE_REPOSITORY,
             )
             load_funaudio_asr(
                 lang,
@@ -429,9 +437,11 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         else:
             asr_member = qwen_pinned.asr
             aligner_member = qwen_pinned.aligner
-        asr_path, asr_loaded = _load_hub_member(asr_member, kind="ASR")
+        asr_path, asr_loaded = _load_hub_member(
+            asr_member, kind="ASR", files=HubFiles.TRANSFORMERS
+        )
         aligner_path, aligner_loaded = _load_hub_member(
-            aligner_member, kind="forced alignment"
+            aligner_member, kind="forced alignment", files=HubFiles.TRANSFORMERS
         )
         load_qwen_asr(
             lang,
@@ -466,7 +476,10 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         else:
             member = hub_pinned.asr
         path, loaded = _load_hub_member(
-            member, kind="ASR", artifacts=HF_ARTIFACTS_WHISPER
+            member,
+            kind="ASR",
+            files=HubFiles.TRANSFORMERS,
+            artifacts=HF_ARTIFACTS_WHISPER,
         )
         handle = load_whisper_hub_asr(
             lang,
@@ -492,7 +505,10 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
             else RequestedModelV2(id=_STOCK_WHISPER_ID, revision=RequestedUnpinnedV2())
         )
         path, loaded = _load_hub_member(
-            member, kind="ASR", artifacts=HF_ARTIFACTS_WHISPER
+            member,
+            kind="ASR",
+            files=HubFiles.TRANSFORMERS,
+            artifacts=HF_ARTIFACTS_WHISPER,
         )
         handle = load_whisper_asr(
             model=path,

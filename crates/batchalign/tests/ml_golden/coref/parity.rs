@@ -1,4 +1,4 @@
-use crate::ml_golden::parity_helpers::run_parity_test;
+use crate::ml_golden::parity_helpers::{Ba2Baseline, run_parity_test};
 use batchalign::api::ReleasedCommand;
 use batchalign::options::{CommandOptions, CommonOptions, CorefOptions};
 use batchalign::worker::InferTask;
@@ -21,6 +21,7 @@ async fn parity_coref_eng_disfluency() {
         "eng_disfluency",
         "eng",
         coref_opts(),
+        Ba2Baseline::NoBa2Golden,
     )
     .await;
 }
@@ -33,6 +34,7 @@ async fn parity_coref_eng_multi_speaker() {
         "eng_multi_speaker",
         "eng",
         coref_opts(),
+        Ba2Baseline::NoBa2Golden,
     )
     .await;
 }

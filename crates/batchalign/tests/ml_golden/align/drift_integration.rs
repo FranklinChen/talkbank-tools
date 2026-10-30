@@ -19,11 +19,10 @@
 //!   rhd/      { minga044.cha, minga044.<ext> }
 //! ```
 //!
-//! When the env var is unset, all four corpus tests return silently. When it
-//! is set but a specific file's media cannot be resolved, that file is
-//! logged-and-skipped via `run_one_file`. When ALL files in a test subdir lack
-//! media, the test SKIPs cleanly via `skip_if_empty` rather than passing
-//! vacuously (I-2).
+//! The four tests are `#[ignore]`d: the corpus is private, so a default run
+//! reports them as ignored rather than as passes. An explicit `--ignored` run
+//! fails when the env var is unset, when a subdirectory is missing or empty,
+//! or when a staged file lacks its media (I-2: no vacuous pass).
 //!
 //! These tests are expected to fail on the current GlobalUtr pipeline (MICASE
 //! crashes with `InvalidAudioWindow`; samtale strips many silent timings;
@@ -37,38 +36,31 @@
 //!   `locate_adjacent_media`, `CorpusFileName`).
 //! - [`crate::ml_golden::align::drift_runner`]: align-pipeline driver and
 //!   outcome aggregator (`FileOutcome`, `run_one_file`,
-//!   `assert_all_files_pass`, `skip_if_empty`).
+//!   `assert_all_files_pass`).
 //! - This file: test bodies only.
 
 use batchalign::worker::InferTask;
 
 use crate::common::drift_staging::{enumerate_staged_files, require_drift_corpus_dir};
 use crate::common::{LiveDirectJobClient, require_live_direct};
-use crate::ml_golden::align::drift_runner::{
-    FileOutcome, assert_all_files_pass, run_one_file, skip_if_empty,
-};
+use crate::ml_golden::align::drift_runner::{FileOutcome, assert_all_files_pass, run_one_file};
 
 #[tokio::test]
+#[ignore = "private drift corpus: set BATCHALIGN3_DRIFT_CORPUS_DIR and run with --ignored"]
 async fn drift_micase_all_eight_failures() {
-    let Some(root) = require_drift_corpus_dir() else {
-        return;
-    };
+    let root = require_drift_corpus_dir();
     let micase_dir = root.join("micase");
     if !micase_dir.is_dir() {
-        eprintln!(
-            "SKIP: drift_micase_all_eight_failures: {} does not exist",
+        panic!(
+            "PREREQUISITE MISSING: drift_micase_all_eight_failures: {} does not exist",
             micase_dir.display()
-        );
-        return;
+        )
     }
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Fa,
         "drift_micase_all_eight_failures: direct session does not support FA infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let expected = [
@@ -83,152 +75,116 @@ async fn drift_micase_all_eight_failures() {
     ];
     let staged = enumerate_staged_files(&micase_dir, &expected);
     if staged.is_empty() {
-        eprintln!(
-            "SKIP: drift_micase_all_eight_failures: no .cha files found in {}",
+        panic!(
+            "PREREQUISITE MISSING: drift_micase_all_eight_failures: no .cha files found in {}",
             micase_dir.display()
-        );
-        return;
+        )
     }
 
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        if let Some(outcome) = run_one_file(&jobs, f, "eng").await {
-            outcomes.push(outcome);
-        }
-    }
-    if skip_if_empty("drift_micase_all_eight_failures", &outcomes) {
-        return;
+        outcomes.push(run_one_file(&jobs, f, "eng").await);
     }
     assert_all_files_pass("drift_micase_all_eight_failures", &outcomes);
 }
 
 #[tokio::test]
+#[ignore = "private drift corpus: set BATCHALIGN3_DRIFT_CORPUS_DIR and run with --ignored"]
 async fn drift_samtale_seiden2() {
-    let Some(root) = require_drift_corpus_dir() else {
-        return;
-    };
+    let root = require_drift_corpus_dir();
     let dir = root.join("samtale");
     if !dir.is_dir() {
-        eprintln!(
-            "SKIP: drift_samtale_seiden2: {} does not exist",
+        panic!(
+            "PREREQUISITE MISSING: drift_samtale_seiden2: {} does not exist",
             dir.display()
-        );
-        return;
+        )
     }
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Fa,
         "drift_samtale_seiden2: direct session does not support FA infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let staged = enumerate_staged_files(&dir, &["seiden2"]);
     if staged.is_empty() {
-        eprintln!(
-            "SKIP: drift_samtale_seiden2: no .cha files found in {}",
+        panic!(
+            "PREREQUISITE MISSING: drift_samtale_seiden2: no .cha files found in {}",
             dir.display()
-        );
-        return;
+        )
     }
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        if let Some(outcome) = run_one_file(&jobs, f, "dan").await {
-            outcomes.push(outcome);
-        }
-    }
-    if skip_if_empty("drift_samtale_seiden2", &outcomes) {
-        return;
+        outcomes.push(run_one_file(&jobs, f, "dan").await);
     }
     assert_all_files_pass("drift_samtale_seiden2", &outcomes);
 }
 
 #[tokio::test]
+#[ignore = "private drift corpus: set BATCHALIGN3_DRIFT_CORPUS_DIR and run with --ignored"]
 async fn drift_biling_mle_mpf_28() {
     // MLE-MPF/28.cha-855 `+<` markers across 1369 utterances (62% density).
     // Chosen over biling-data/Koge/danish-group/306a-gs.cha (also 62% density)
     // because Koge has no matching media on NFS, while MLE-MPF/28.mp3 does.
     // Languages declared in the CHAT header: `fra, eng`, we pass `fra` to
     // the Rev.AI engine, which supports French.
-    let Some(root) = require_drift_corpus_dir() else {
-        return;
-    };
+    let root = require_drift_corpus_dir();
     let dir = root.join("biling");
     if !dir.is_dir() {
-        eprintln!(
-            "SKIP: drift_biling_mle_mpf_28: {} does not exist",
+        panic!(
+            "PREREQUISITE MISSING: drift_biling_mle_mpf_28: {} does not exist",
             dir.display()
-        );
-        return;
+        )
     }
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Fa,
         "drift_biling_mle_mpf_28: direct session does not support FA infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let staged = enumerate_staged_files(&dir, &["28"]);
     if staged.is_empty() {
-        eprintln!(
-            "SKIP: drift_biling_mle_mpf_28: no .cha files found in {}",
+        panic!(
+            "PREREQUISITE MISSING: drift_biling_mle_mpf_28: no .cha files found in {}",
             dir.display()
-        );
-        return;
+        )
     }
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        if let Some(outcome) = run_one_file(&jobs, f, "fra").await {
-            outcomes.push(outcome);
-        }
-    }
-    if skip_if_empty("drift_biling_mle_mpf_28", &outcomes) {
-        return;
+        outcomes.push(run_one_file(&jobs, f, "fra").await);
     }
     assert_all_files_pass("drift_biling_mle_mpf_28", &outcomes);
 }
 
 #[tokio::test]
+#[ignore = "private drift corpus: set BATCHALIGN3_DRIFT_CORPUS_DIR and run with --ignored"]
 async fn drift_rhd_minga044() {
-    let Some(root) = require_drift_corpus_dir() else {
-        return;
-    };
+    let root = require_drift_corpus_dir();
     let dir = root.join("rhd");
     if !dir.is_dir() {
-        eprintln!("SKIP: drift_rhd_minga044: {} does not exist", dir.display());
-        return;
+        panic!(
+            "PREREQUISITE MISSING: drift_rhd_minga044: {} does not exist",
+            dir.display()
+        )
     }
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Fa,
         "drift_rhd_minga044: direct session does not support FA infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let staged = enumerate_staged_files(&dir, &["minga044"]);
     if staged.is_empty() {
-        eprintln!(
-            "SKIP: drift_rhd_minga044: no .cha files found in {}",
+        panic!(
+            "PREREQUISITE MISSING: drift_rhd_minga044: no .cha files found in {}",
             dir.display()
-        );
-        return;
+        )
     }
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        if let Some(outcome) = run_one_file(&jobs, f, "eng").await {
-            outcomes.push(outcome);
-        }
-    }
-    if skip_if_empty("drift_rhd_minga044", &outcomes) {
-        return;
+        outcomes.push(run_one_file(&jobs, f, "eng").await);
     }
     assert_all_files_pass("drift_rhd_minga044", &outcomes);
 }

@@ -36,7 +36,6 @@ use batchalign::types::worker_v2::{
 };
 use batchalign::worker::WorkerProfile;
 use batchalign::worker::handle::WorkerConfig;
-use common::resolve_python;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -886,24 +885,6 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
 }
 
 /// Require a Python interpreter for real Rust->Python worker tests.
-macro_rules! require_python {
-    () => {{
-        common::test_server_fixture::isolate_host_memory_ledger();
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!("SKIP: insufficient memory ({available_mb} MB available, 4096 MB required)");
-            return;
-        }
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign.worker not available");
-                return;
-            }
-        }
-    }};
-}
-
 /// Build one intentionally mismatched execute request that should fail before
 /// any model host is required.
 fn mismatched_execute_request(request_id: &str, task: InferenceTaskV2) -> ExecuteRequestV2 {
@@ -1088,14 +1069,14 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
 
 #[tokio::test]
 async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_matrix() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()

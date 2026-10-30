@@ -90,24 +90,33 @@ impl ExecutionEngine {
 pub(crate) struct DispatchHostContext {
     store: Arc<JobStore>,
     config: Arc<ServerConfig>,
-    effective_config: Arc<EffectiveConfig>,
+    /// The store's host snapshot: job sizing and the dispatch plans take the
+    /// tier, policy and resolved knobs from it rather than reading the machine.
+    host: Arc<crate::host_facts::HostSnapshot>,
     sink: Arc<dyn RunnerEventSink>,
 }
 
 impl DispatchHostContext {
     pub(crate) fn from_store(store: Arc<JobStore>) -> Self {
-        let config = store.config().clone();
-        // Snapshot host facts once at host construction; per-job
-        // dispatch reads the resolved view rather than re-polling.
-        // Runtime memory pressure is handled by the live memory-guard
-        // poll (`worker::memory_guard`), not by re-detecting facts.
-        let effective_config = Arc::new(EffectiveConfig::resolve_from_server_config(&config));
+        // The host was read once, where the server was composed; per-job
+        // dispatch reads that snapshot rather than re-detecting facts. Runtime
+        // memory pressure is the live memory guard's (`worker::memory_guard`).
         Self {
-            store: store.clone(),
-            config: Arc::new(config),
-            effective_config,
-            sink: StoreRunnerEventSink::wrap(store),
+            config: Arc::new(store.config().clone()),
+            host: store.host().clone(),
+            sink: StoreRunnerEventSink::wrap(store.clone()),
+            store,
         }
+    }
+
+    /// The host's memory tier, from the store's snapshot.
+    pub(crate) fn memory_tier(&self) -> crate::types::runtime::MemoryTier {
+        self.host.tier()
+    }
+
+    /// The host's execution policy, from the store's snapshot.
+    pub(crate) fn host_policy(&self) -> crate::host_policy::HostExecutionPolicy {
+        self.host.policy()
     }
 
     pub(crate) fn config(&self) -> &ServerConfig {
@@ -117,7 +126,7 @@ impl DispatchHostContext {
     /// Resolved per-host configuration view (operator overrides merged with
     /// host-facts recommendations).
     pub(crate) fn effective_config(&self) -> &EffectiveConfig {
-        self.effective_config.as_ref()
+        self.host.effective()
     }
 
     pub(crate) fn sink(&self) -> &Arc<dyn RunnerEventSink> {

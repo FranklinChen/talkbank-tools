@@ -1,7 +1,7 @@
 //! Config-vs-host-facts validation.
 //!
-//! At server startup, after `EffectiveConfig::resolve_from_server_config`
-//! has merged operator overrides with the host-facts recommendation,
+//! At server startup, after [`super::HostSnapshot`] has merged operator
+//! overrides with the host-facts recommendation,
 //! [`validate`] inspects the *original* operator overrides against the
 //! detected facts and reports two kinds of finding:
 //!

@@ -23,7 +23,7 @@ struct FixtureExecutionOutput {
     parsed_chat: ChatFile,
 }
 
-pub fn load_fixture(command_dir: &str, bug_dir: &str) -> Option<DiscoveredFixture> {
+pub fn load_fixture(command_dir: &str, bug_dir: &str) -> DiscoveredFixture {
     let candidates = resolve_fixture_candidates(command_dir, bug_dir);
     for dir in candidates {
         let manifest_path = dir.join("source.json");
@@ -32,14 +32,13 @@ pub fn load_fixture(command_dir: &str, bug_dir: &str) -> Option<DiscoveredFixtur
         }
         let manifest = FixtureManifest::load(&manifest_path)
             .unwrap_or_else(|e| panic!("loading manifest at {}: {e}", manifest_path.display()));
-        return Some(DiscoveredFixture { dir, manifest });
+        return DiscoveredFixture { dir, manifest };
     }
-    eprintln!(
-        "SKIP: regression fixture {command_dir}/{bug_dir} not found in any candidate \
-         location (set BATCHALIGN3_PRIVATE_FIXTURES_DIR to the private fixture \
-         checkout to enable this test)"
-    );
-    None
+    panic!(
+        "PREREQUISITE MISSING: regression fixture {command_dir}/{bug_dir} not found in any \
+         candidate location; set BATCHALIGN3_PRIVATE_FIXTURES_DIR to the private fixture \
+         checkout (these tests are #[ignore]d so only an explicit --ignored run reaches here)"
+    )
 }
 
 fn batchalign3_repo_root() -> PathBuf {
@@ -170,7 +169,7 @@ fn stage_fixture_source(fixture: &DiscoveredFixture, stage_dir: &Path) -> PathBu
     }
 }
 
-async fn execute_fixture(fixture: &DiscoveredFixture) -> Option<FixtureExecutionOutput> {
+async fn execute_fixture(fixture: &DiscoveredFixture) -> FixtureExecutionOutput {
     let task = infer_task_for(fixture.manifest.command);
     let session = require_live_direct(
         task,
@@ -179,28 +178,23 @@ async fn execute_fixture(fixture: &DiscoveredFixture) -> Option<FixtureExecution
             fixture.dir.display()
         ),
     )
-    .await?;
+    .await;
 
-    if fixture.manifest.transcribe.unwrap_or_default().diarize
-        && !session.has_infer_task(InferTask::Speaker)
-    {
-        eprintln!(
-            "SKIP: regression fixture {} requires speaker diarization support",
-            fixture.dir.display()
-        );
-        return None;
-    }
-
-    if fixture.manifest.transcribe.unwrap_or_default().asr_engine
-        == FixtureTranscribeAsrEngine::RevAi
-        && require_revai_key().is_none()
-    {
-        eprintln!(
-            "SKIP: regression fixture {} requires Rev.AI credentials",
-            fixture.dir.display()
-        );
-        return None;
-    }
+    // The suite is opt-in (feature-gated), so a fixture it cannot run is a
+    // broken environment and fails, never a pass.
+    assert!(
+        !fixture.manifest.transcribe.unwrap_or_default().diarize
+            || session.has_infer_task(InferTask::Speaker),
+        "PREREQUISITE MISSING: regression fixture {} requires speaker diarization support",
+        fixture.dir.display()
+    );
+    assert!(
+        fixture.manifest.transcribe.unwrap_or_default().asr_engine
+            != FixtureTranscribeAsrEngine::RevAi
+            || require_revai_key().is_some(),
+        "PREREQUISITE MISSING: regression fixture {} requires Rev.AI credentials",
+        fixture.dir.display()
+    );
 
     let stage_dir = session
         .state_dir()
@@ -257,10 +251,10 @@ async fn execute_fixture(fixture: &DiscoveredFixture) -> Option<FixtureExecution
         fixture.dir.display(),
     );
 
-    Some(FixtureExecutionOutput {
+    FixtureExecutionOutput {
         raw_chat: outputs[0].clone(),
         parsed_chat: file,
-    })
+    }
 }
 
 fn run_assertions(fixture: &DiscoveredFixture, output: &FixtureExecutionOutput) {
@@ -413,6 +407,7 @@ fn run_one_assertion(
                 output_utts
                     .get(**idx)
                     .and_then(|utt| utt.main.content.bullet.as_ref())
+                    .and_then(talkbank_model::BulletState::as_parsed)
                     .is_some()
             })
             .count();
@@ -588,9 +583,15 @@ fn run_one_assertion(
             max_proportion: MaxProportion(max),
             ..
         } => {
-            let utt_bullet = utt.main.content.bullet.as_ref().ok_or_else(|| {
+            let utt_bullet = utt
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
+                .ok_or_else(|| {
                 format!(
-                    "max_wor_word_duration_proportion: utterance #{} has no main-tier bullet, cannot compute proportion",
+                    "max_wor_word_duration_proportion: utterance #{} has no parsed main-tier bullet, cannot compute proportion",
                     target.0,
                 )
             })?;
@@ -644,9 +645,15 @@ fn run_one_assertion(
             threshold_ms: MaxLeadMs(threshold),
             ..
         } => {
-            let utt_bullet = utt.main.content.bullet.as_ref().ok_or_else(|| {
+            let utt_bullet = utt
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
+                .ok_or_else(|| {
                 format!(
-                    "max_main_tier_lead_before_first_wor_ms: utterance #{} has no main-tier bullet",
+                    "max_main_tier_lead_before_first_wor_ms: utterance #{} has no parsed main-tier bullet",
                     target.0,
                 )
             })?;
@@ -683,9 +690,15 @@ fn run_one_assertion(
             threshold_ms: MaxOverrunMs(threshold),
             ..
         } => {
-            let utt_bullet = utt.main.content.bullet.as_ref().ok_or_else(|| {
+            let utt_bullet = utt
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
+                .ok_or_else(|| {
                 format!(
-                    "max_last_wor_overrun_past_main_end_ms: utterance #{} has no main-tier bullet",
+                    "max_last_wor_overrun_past_main_end_ms: utterance #{} has no parsed main-tier bullet",
                     target.0,
                 )
             })?;
@@ -755,11 +768,7 @@ fn nth_main_tier_utterance(
 }
 
 pub async fn run_fixture(command_dir: &str, bug_dir: &str) {
-    let Some(fixture) = load_fixture(command_dir, bug_dir) else {
-        return;
-    };
-    let Some(output) = execute_fixture(&fixture).await else {
-        return;
-    };
+    let fixture = load_fixture(command_dir, bug_dir);
+    let output = execute_fixture(&fixture).await;
     run_assertions(&fixture, &output);
 }

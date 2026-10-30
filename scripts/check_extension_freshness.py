@@ -245,6 +245,11 @@ class ExtensionInputs:
             "python_abi": sysconfig.get_config_var("SOABI"),
             "machine": platform.machine(),
             "platform": sys.platform,
+            # The toolchain's identity (release, commit, host). It, not the
+            # RUSTUP_TOOLCHAIN that may have selected it, is the build input:
+            # rustup's proxy sets that variable for every child of a cargo
+            # process, so hashing it made one toolchain fingerprint two ways
+            # and a Rust test harness saw every fresh build as stale.
             "rustc": _run(self.root, "rustc", "-vV"),
             "environment": {
                 key: os.environ.get(key)
@@ -253,7 +258,6 @@ class ExtensionInputs:
                     "CARGO_ENCODED_RUSTFLAGS",
                     "CARGO_BUILD_TARGET",
                     "CARGO_TARGET_DIR",
-                    "RUSTUP_TOOLCHAIN",
                     "PYO3_PYTHON",
                     "PYO3_CONFIG_FILE",
                     "MACOSX_DEPLOYMENT_TARGET",

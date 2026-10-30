@@ -11,7 +11,7 @@ pub fn try_parse_token_as_utterance_content(
     parser: &talkbank_parser::TreeSitterParser,
     text: &str,
     expected_terminator: Option<&str>,
-    diagnostics: &mut Vec<String>,
+    diagnostics: &mut Vec<super::refusal::RebuildRefusal>,
 ) -> Option<UtteranceContent> {
     use talkbank_model::Location;
     use talkbank_model::model::Separator;
@@ -42,7 +42,7 @@ pub fn try_parse_token_as_bracketed_item(
     parser: &talkbank_parser::TreeSitterParser,
     text: &str,
     expected_terminator: Option<&str>,
-    diagnostics: &mut Vec<String>,
+    diagnostics: &mut Vec<super::refusal::RebuildRefusal>,
 ) -> Option<BracketedItem> {
     use talkbank_model::Location;
     use talkbank_model::model::Separator;
@@ -89,7 +89,7 @@ pub fn is_ending_punct(text: &str) -> bool {
 pub fn handle_ending_punct_skip(
     text: &str,
     expected_terminator: Option<&str>,
-    diagnostics: &mut Vec<String>,
+    diagnostics: &mut Vec<super::refusal::RebuildRefusal>,
 ) -> bool {
     if !is_ending_punct(text) {
         return false;
@@ -98,9 +98,10 @@ pub fn handle_ending_punct_skip(
     if let Some(expected) = expected_terminator
         && text != expected
     {
-        diagnostics.push(format!(
-            "skipped Stanza terminator {text:?} does not match existing terminator {expected:?}; keeping existing terminator"
-        ));
+        diagnostics.push(super::refusal::RebuildRefusal::TerminatorDiffers {
+            model: text.to_owned(),
+            transcript: expected.to_owned(),
+        });
     }
     true
 }
@@ -109,7 +110,7 @@ pub fn handle_ending_punct_skip(
 pub fn try_parse_token_as_word(
     parser: &talkbank_parser::TreeSitterParser,
     text: &str,
-    diagnostics: &mut Vec<String>,
+    diagnostics: &mut Vec<super::refusal::RebuildRefusal>,
 ) -> Option<Word> {
     let errors = NullErrorSink;
     match parser.parse_word_fragment(text, 0, &errors).into_option() {
@@ -119,9 +120,9 @@ pub fn try_parse_token_as_word(
                 token = text,
                 "Stanza token is not valid CHAT word syntax; keeping original word"
             );
-            diagnostics.push(format!(
-                "token {text:?} is not valid CHAT word syntax; keeping original word"
-            ));
+            diagnostics.push(super::refusal::RebuildRefusal::NotAWord {
+                token: text.to_owned(),
+            });
             None
         }
     }

@@ -133,7 +133,9 @@ def resolve_huggingface_hub_token(*, config_path: Path | None = None) -> str | N
     supplied, which is correct for every artifact that is not gated.
     """
 
-    path = config_path or Path.home() / ".batchalign.ini"
+    from batchalign.config import batchalign_home
+
+    path = config_path or batchalign_home() / ".batchalign.ini"
     parser = configparser.ConfigParser()
     try:
         loaded = parser.read(path)

@@ -5,6 +5,112 @@ design; this file records how it changed.
 
 ## Unreleased
 
+### Retokenize no longer rewrites what was said
+
+- `morphotag --retokenize` could change the main tier's speech. Where the
+  model's tokens did not spell the transcript's words (a Cantonese
+  terminator the segmenter emitted as a word), a positional, length-based
+  fallback mapping wrote a neighbouring token's text into a word, so one
+  word appeared twice and another vanished. Where a merged token spanned a
+  retraced group, the merged word moved ahead of the retrace (in the shape
+  `a <b c> [/] b c d`, a token over `abcd` gave `abcd <b c> [/]`): valid CHAT
+  that was admitted silently unless the retrace landed last (E370). Both are
+  now refused: a mapping exists only when the tokens spell the words, a
+  merge never crosses other main-tier content, and a refused utterance keeps
+  its transcript and is reported. The length fallback is deleted.
+- The Cantonese segmenter no longer merges across retraces. PyCantonese was
+  given each utterance as one string, so it joined characters on either side
+  of a retrace, untranscribed material or a pause, and the rebuild then had
+  to refuse the utterance: on child speech, most files failed. Each batch
+  item now carries the main tier's word runs (stretches with nothing between
+  their words), and each run is segmented on its own.
+- A refused retokenization is reported with its real cause
+  (`merge_crosses_content`, `tokens_diverge_from_words`) or as `unknown`.
+  Every retokenize refusal used to be labelled `mwt_reassembly_bug`, a
+  guess; the guess and the four classes nothing ever set are gone.
+- Python names who owns tokenization (`TokenizationOwner`: CHAT,
+  PyCantonese or Stanza), so Cantonese segmentation and Stanza realignment
+  are chosen by one match instead of flags.
+
+### The host is read once, and an unreadable host is an error
+
+- Adopted sysinfo 0.40, whose memory and process readings can fail. A host
+  whose operating system will not report its memory used to read as zero RAM
+  (a "Small" host with no headroom, every lease owner dead); it is now
+  `HostUnreadable`. A server or direct run refuses to start on it; admission
+  and spawn refuse; pressure eviction and RSS sampling skip that pass with a
+  warning; the CPU gate admits with a warning. `/health` reports system
+  memory as unavailable rather than zero, and `doctor` fails its memory
+  check.
+- Each process reads the host's fixed facts once (`HostSnapshot`) and hands
+  them down. Dispatch no longer re-detects the host (including the
+  `nvidia-smi` probe) for every job, and validation and dispatch cannot
+  disagree about it.
+- A worker spawn blocked by the memory guard is retried as memory pressure
+  only when memory blocked it. An unreadable host, a host-memory ledger the
+  guard cannot read or write, or a server shutting down is now a system
+  failure and is not retried as pressure.
+- `--server http://[::ffff:127.0.0.1]:PORT` (an IPv4-mapped loopback) was
+  classified as a remote server, which refused `transcribe` and sent
+  transcripts as uploads; it is now local like every other loopback
+  spelling.
+
+### Tests fail rather than skip, and do not depend on how busy the machine is
+
+- Worker, server and live-model tests printed `SKIP` and returned when
+  Python, a model, a credential or a fixture was missing, and a Rust test
+  that returns reports `ok`: a machine without the worker environment
+  reported those suites green without running them, and CI had never run
+  them. An unmet prerequisite now fails the test, naming the remedy
+  (`make batchalign-develop`). The worker environment must also import a
+  compiled extension built from the checkout's sources. Tests that need
+  private data (regression fixtures, the drift corpus) are `#[ignore]`d
+  with their reason and fail when run without it.
+- CI runs the worker integration suite in a new job,
+  `batchalign-worker-integration`, after building the development
+  environment (`make batchalign-test-worker-integration` locally).
+- Extension freshness no longer hashes `RUSTUP_TOOLCHAIN`, which rustup
+  sets for every child of cargo; the toolchain's identity is `rustc -vV`,
+  already recorded. A build from `make` and a check under `cargo test` now
+  agree.
+- Tests that had been passing without running are repaired: the align
+  fixture's `@Options: multi` (rejected by CLAN CHECK and Chatter alike) is
+  removed; a Spanish transcribe test authorizes the utterance-segmentation
+  fallback the server requires; a cancel-provenance test parses the RFC 3339
+  time the API has returned since `MachineTime`; and the ML golden suite
+  compiles again against Chatter's `BulletState`.
+- Tests no longer flake under host load, each cause removed at the root
+  and verified with every suite run while the load average sat above the
+  CPU count:
+  - A test pool's spawn count depended on the live CPU-load gate, switched
+    off by a hand-written `f64::INFINITY` that one test forgot. The gate is
+    now `CpuGatePolicy::{HostLoad, Disabled}` and test pools start disabled.
+  - The oversubscription test gave each dispatch a fixed 60 s; a busy
+    machine's slow queue timed out. Dispatch bursts now wait on a progress
+    deadline (dispatches returning, workers starting) and every dispatch
+    must complete.
+  - The harness killed `serve stop` at 10 s while the command itself waits
+    up to 60 s per server for a graceful shutdown; the budget is now
+    derived from the command's own (`serve_cmd::stop_budget`).
+  - CLI tests isolated batchalign3 by faking `HOME`, which also moved every
+    model library's cache, so live tests re-downloaded models (23 GB for
+    whisper-large-v3) into a temporary directory: one run filled the disk,
+    the next timed out. New `BATCHALIGN_HOME` roots everything batchalign3
+    owns (`.batchalign.ini`, state, its caches) and nothing else; the
+    harness sets it and leaves `HOME`, and so the model caches, alone.
+- Hugging Face models download only the files their loader reads. Every
+  repository was fetched whole, so whisper-large-v3 cost 24.7 GB of Flax,
+  PyTorch, fp32 and safetensors copies for a loader reading 3.1 GB. Each
+  loader now declares its family (`HubFiles::TRANSFORMERS`: configs plus
+  safetensors, else PyTorch weights; `WHOLE_REPOSITORY` for FunASR). Checked
+  against every model BA3 loads, and loaded from an empty cache.
+- `BATCHALIGN_HOME`: a new variable naming the one root of batchalign3's
+  config, state and caches (default: your home). The "server logs at" hint
+  now names the log in the actual state directory; it ignored
+  `BATCHALIGN_STATE_DIR`.
+- Bumped `actions/setup-node` and `actions/setup-python` to v7 and
+  `astral-sh/setup-uv` to v10.3.3.
+
 ### Chatter 0.33 integration
 
 - Pin every CHAT library crate to Chatter v0.33.0. Retokenization inspects

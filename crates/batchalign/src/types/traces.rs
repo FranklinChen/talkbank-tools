@@ -1302,14 +1302,10 @@ pub struct RetokenizationTrace {
     pub original_words: Vec<String>,
     /// Stanza tokens after retokenization.
     pub stanza_tokens: Vec<String>,
-    /// Normalized concatenation of original words.
-    pub normalized_original: String,
-    /// Normalized concatenation of Stanza tokens.
-    pub normalized_tokens: String,
     /// Word→token index mapping: `mapping[word_idx]` = list of token indices.
+    /// Always text-bound: tokens that do not spell the words are refused, not
+    /// spread over them by position.
     pub mapping: Vec<Vec<usize>>,
-    /// Whether the fallback (length-proportional) mapping was used.
-    pub used_fallback: bool,
 }
 
 #[cfg(test)]

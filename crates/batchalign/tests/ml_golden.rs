@@ -23,6 +23,7 @@
 
 mod common;
 mod live_deadline;
+mod prerequisite;
 
 // ML test submodules, each was previously a separate binary with its own
 // worker pool. Now they share one process-global LazyLock<LiveFixtureBackend>.

@@ -707,18 +707,68 @@ correctness), these tests verify resource usage:
 
 Run with `make batchalign-test-ml-golden`.
 
-### ML test skip behavior
+### Unmet prerequisites fail; private data is ignored, never skipped
 
-Model-gated tests use `require_live_server(InferTask::Xxx, "message")`:
+A Rust test has no "skipped" outcome: one that returns early reports `ok`.
+So no Rust integration test skips. Three rules cover everything a test can
+need from its machine:
 
-1. Tries to acquire a `LiveServerSession` with a warm worker pool
-2. Checks if the required InferTask is available (model installed)
-3. Returns `None` (test silently skips) if models are unavailable
+1. **The suite's own environment fails when missing.** Worker and server
+   tests require the checkout's Python development environment with a
+   current extension (`tests/prerequisite.rs`; run `make batchalign-develop`).
+   Model-gated tests use `require_live_server(InferTask::Xxx, "requirement")`
+   and friends, which return the session or fail with
+   `PREREQUISITE MISSING: ...`; the ML golden suite is opt-in
+   (`--features ml-golden`), so a missing model or credential there is a
+   broken environment, not a pass. Committed fixtures that are missing fail
+   too: that is a repository defect.
+2. **Data outside the repository is `#[ignore]`d with its reason.** Tests
+   that need the private regression fixtures
+   (`BATCHALIGN3_PRIVATE_FIXTURES_DIR`) or the private drift corpus
+   (`BATCHALIGN3_DRIFT_CORPUS_DIR`) carry `#[ignore = "..."]`, so a default
+   run reports them as ignored, and an explicit `--ignored` run fails when
+   the data is absent.
+3. **A machine condition the test cannot control is `#[ignore]`d where it
+   applies.** The remote-server contact test is ignored on macOS, where the
+   application firewall holds inbound LAN connections to an unsigned test
+   binary; two morphotag recovery tests that need a model absent from the
+   local cache are ignored everywhere until the failure can be induced
+   deterministically.
 
-Python uses `@pytest.mark.skipif` or `pytest.skip()` for similar gating.
+Python uses `pytest.mark.skipif`, which pytest reports as skipped, a
+visible outcome distinct from a pass.
 
-Even under `--profile ml`, tests skip gracefully if models are not
-installed. You won't get false failures, just silent skips.
+CI runs the worker suite in its own job (`batchalign-worker-integration` in
+`.github/workflows/batchalign-rust.yml`), which builds the development
+environment first; locally, `make batchalign-test-worker-integration`.
+
+### A test's outcome must not depend on how busy the machine is
+
+Most flaky tests here have had one cause: an outcome that changes with host
+load. The rules that remove it:
+
+- **No live host gate in a test pool.** `PoolConfig::for_tests()` sets
+  `CpuGatePolicy::Disabled`, so a test's spawn count never depends on the
+  machine's load average; the CPU gate's own behavior is unit-tested in
+  `worker/pool/cpu_gate.rs`.
+- **Wait on progress, not a wall clock.** A wait that can be slow on a busy
+  machine uses a `ServerTestDeadline` (`tests/live_deadline`): it fails
+  only when nothing it watches changes for its idle window, or when it
+  outlives its ceiling. Dispatch bursts watch dispatches returning and
+  workers starting.
+- **A harness kill outlasts the command's own wait.** A subprocess budget
+  that the command itself bounds is derived from that bound
+  (`CliRunBudget::DaemonStart`, `CliRunBudget::ServeStop`), never written as
+  a second number.
+- **Isolate batchalign3, not the machine.** The CLI harness sets
+  `BATCHALIGN_HOME` to a temporary directory and leaves `HOME` alone, so
+  model libraries keep their real caches and no test downloads a model.
+
+To check a change against this, run the suites while every CPU is busy and
+the 1-minute load average is above the CPU count (confirm it before
+starting; a load generator that silently failed proves nothing). A test
+that passes idle and fails loaded is flaky, and its cause is one of the
+above.
 
 ## Worker process safety
 

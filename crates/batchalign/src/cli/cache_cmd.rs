@@ -17,7 +17,7 @@ use crate::cli::error::CliError;
 fn default_cache_db_path() -> PathBuf {
     default_cache_db_path_from(
         crate::runtime_paths::analysis_cache_dir_override_from_env(),
-        dirs::cache_dir(),
+        crate::runtime_paths::BatchalignHome::from_env().cache_base(),
     )
 }
 
@@ -25,7 +25,7 @@ fn default_cache_db_path() -> PathBuf {
 fn default_media_cache_dir() -> PathBuf {
     default_media_cache_dir_from(
         crate::runtime_paths::media_cache_dir_override_from_env(),
-        dirs::data_dir(),
+        crate::runtime_paths::BatchalignHome::from_env().data_base(),
     )
 }
 

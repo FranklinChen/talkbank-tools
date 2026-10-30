@@ -138,6 +138,28 @@ const WORKER_ADMISSION: WaitBudget = WaitBudget {
     poll_interval: Duration::from_millis(50),
 };
 
+/// A burst of concurrent dispatches against a deliberately oversubscribed
+/// test-echo pool, settling.
+///
+/// Was a fixed 60 s per dispatch, and on a saturated machine the callers
+/// queued behind four cold worker starts ran out of it although nothing was
+/// wrong: slowness, not a stall. Progress here is dispatches completing and
+/// workers starting, so a queue that drains slowly keeps the wait alive and
+/// a pool that stops serving still fails inside the idle window.
+const OVERSUBSCRIBED_ECHO_DISPATCHES: WaitBudget = WaitBudget {
+    idle_window: Duration::from_secs(60),
+    ceiling: Duration::from_secs(600),
+    poll_interval: Duration::from_millis(50),
+};
+
+/// The same burst against real models, where one request can occupy a
+/// worker for minutes while a model runs.
+const OVERSUBSCRIBED_MODEL_DISPATCHES: WaitBudget = WaitBudget {
+    idle_window: Duration::from_secs(300),
+    ceiling: Duration::from_secs(1_800),
+    poll_interval: Duration::from_millis(500),
+};
+
 /// A killed worker process leaving the process table.
 const WORKER_PROCESS_EXIT: WaitBudget = WaitBudget {
     idle_window: Duration::from_secs(5),
@@ -214,6 +236,23 @@ impl WaitSubject {
         }
     }
 
+    /// `count` concurrent dispatches against an oversubscribed test-echo
+    /// pool all returning.
+    pub fn oversubscribed_echo_dispatches(count: usize) -> Self {
+        Self {
+            what: format!("{count} oversubscribed test-echo dispatches to return"),
+            budget: OVERSUBSCRIBED_ECHO_DISPATCHES,
+        }
+    }
+
+    /// `count` concurrent dispatches against real models all returning.
+    pub fn oversubscribed_model_dispatches(count: usize) -> Self {
+        Self {
+            what: format!("{count} oversubscribed live-model dispatches to return"),
+            budget: OVERSUBSCRIBED_MODEL_DISPATCHES,
+        }
+    }
+
     /// A worker process actually leaving the process table after a kill.
     pub fn worker_process_exit(pid: u32) -> Self {
         Self {
@@ -264,6 +303,12 @@ impl ProgressSnapshot {
         Self(format!(
             "free_spawn_permits={free_spawn_permits} live_workers={live_workers}"
         ))
+    }
+
+    /// How far a burst of concurrent dispatches has got: how many have
+    /// returned, and how many workers the pool has started for them.
+    pub fn dispatch_burst(returned: usize, live_workers: usize) -> Self {
+        Self(format!("returned={returned} live_workers={live_workers}"))
     }
 
     /// Whether a process is still in the process table.
@@ -516,7 +561,10 @@ impl CliRunBudget {
             // margin it needs to report its own failure. A number written here
             // could silently fall under `startup_budget()` again.
             Self::DaemonStart => batchalign::cli::daemon::startup_budget() + SUBJECT_REFUSAL_GRACE,
-            Self::ServeStop => Duration::from_secs(10),
+            // Derived like `DaemonStart`: `serve stop` waits for each server's
+            // graceful shutdown, so a fixed number here (it was 10 s) killed
+            // a slow but healthy shutdown before the command's own wait ended.
+            Self::ServeStop => batchalign::cli::serve_cmd::stop_budget() + SUBJECT_REFUSAL_GRACE,
             Self::LiveModelRun => Duration::from_secs(300),
         }
     }
@@ -529,13 +577,6 @@ impl CliRunBudget {
 pub enum HarnessBudget {
     /// How long a fixture session's `shutdown_for_reuse` may take.
     SessionShutdown,
-    /// How long one oversubscribed test-echo dispatch may take.
-    ///
-    /// Oversubscription is the point of the test that uses this: most callers
-    /// are meant to queue. The budget bounds the queue, and the test asserts
-    /// on how many completed, so this is a cap on the experiment rather than a
-    /// deadline on one subject.
-    OversubscribedEchoDispatch,
     /// How long a test fixture's worker may take to be admitted AND report
     /// ready.
     ///
@@ -568,7 +609,6 @@ impl HarnessBudget {
     pub fn as_positive_seconds(self) -> batchalign::api::PositiveSeconds {
         match self {
             Self::SessionShutdown => batchalign::api::PositiveSeconds::literal::<5>(),
-            Self::OversubscribedEchoDispatch => batchalign::api::PositiveSeconds::literal::<60>(),
             Self::FixtureWorkerReady => batchalign::api::PositiveSeconds::literal::<300>(),
         }
     }

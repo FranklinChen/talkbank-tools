@@ -20,7 +20,6 @@ use batchalign::host_facts::PerProfile;
 use batchalign::worker::pool::WorkerPool;
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::pool_dispatch::echo_pool_config;
-use common::resolve_python;
 use serde_json::json;
 
 /// How long the busy worker answers, against a one-second report interval:
@@ -39,15 +38,10 @@ fn request(lang: &LanguageCode3) -> BatchInferRequest {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_waits_through_a_saturated_pool_instead_of_failing() {
     common::test_server_fixture::isolate_host_memory_ledger();
-    let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let mut config = echo_pool_config(python, 1, PerProfile::uniform(1), BUSY_RESPONSE_MS);
     config.checkout_wait_report_interval = Some(PositiveSeconds::literal::<1>());
-    // Isolate the global cap from the host's live CPU load.
-    config.cpu_gate_threshold_override = Some(f64::INFINITY);
     let pool = Arc::new(WorkerPool::new(config));
 
     let eng = LanguageCode3::eng();

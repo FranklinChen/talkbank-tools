@@ -1,4 +1,4 @@
-use crate::ml_golden::parity_helpers::run_parity_test;
+use crate::ml_golden::parity_helpers::{Ba2Baseline, run_parity_test};
 use batchalign::api::ReleasedCommand;
 use batchalign::options::{CommandOptions, CommonOptions, UtsegOptions};
 use batchalign::worker::InferTask;
@@ -29,6 +29,7 @@ async fn parity_utseg_eng_multi() {
         "eng_multi_speaker",
         "eng",
         utseg_opts(),
+        Ba2Baseline::Golden,
     )
     .await;
 }
@@ -43,6 +44,7 @@ async fn parity_utseg_spa() {
         // Spanish has no TalkBank boundary model; Stanza is its only
         // segmenter and must be authorized.
         utseg_opts_with_fallback(true),
+        Ba2Baseline::Golden,
     )
     .await;
 }
@@ -55,6 +57,7 @@ async fn parity_utseg_eng_disfluency() {
         "eng_disfluency",
         "eng",
         utseg_opts(),
+        Ba2Baseline::Golden,
     )
     .await;
 }

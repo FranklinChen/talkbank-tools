@@ -149,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_job_is_not_requeued_by_the_memory_gate() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -198,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_job_is_not_resurrected_by_mark_running() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -245,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn interrupt_all_for_shutdown_marks_active_jobs_interrupted() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn restart_preserves_successful_morphotag_results_and_requeues_failed_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -431,7 +431,7 @@ mod tests {
                 .expect("open JobDB for shutdown audit test"),
         );
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             Some(db),
             tx,
@@ -567,7 +567,7 @@ mod tests {
                     .expect("open JobDB for first lifecycle"),
             );
             let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-            let store = JobStore::new(
+            let store = JobStore::for_tests(
                 test_config(),
                 Some(db),
                 tx,
@@ -609,7 +609,7 @@ mod tests {
                 .expect("re-open JobDB after restart"),
         );
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             Some(db.clone()),
             tx,

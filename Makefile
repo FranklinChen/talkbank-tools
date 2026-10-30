@@ -1,4 +1,4 @@
-.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-typecheck-python-source batchalign-stubtest batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
+.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-worker-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-typecheck-python-source batchalign-stubtest batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
 
 help:
 	@echo "talkbank-tools task index (batchalign3 workspace)"
@@ -16,6 +16,7 @@ help:
 	@echo "  make batchalign-check              Imported Batchalign compile checks"
 	@echo "  make batchalign-test-rust          Imported Batchalign Rust library suites"
 	@echo "  make batchalign-test-integration   Imported Batchalign focused integration gates"
+	@echo "  make batchalign-test-worker-integration  Worker suite with real Python workers (after batchalign-develop)"
 	@echo "  make batchalign-build-pyo3         Imported standalone PyO3 crate"
 	@echo "  make batchalign-develop            Locked editable Python development install"
 	@echo "  make batchalign-test-python-dev    Focused tests against the development install"
@@ -143,6 +144,21 @@ batchalign-test-ml-golden:
 batchalign-test-python-golden:
 	@echo "==> Python golden suite (real NLP models; pytest -m golden)"
 	uv run --no-sync pytest batchalign/tests -m golden -rfEX --maxfail=1000000
+
+# The worker integration suite: real Python test-echo workers spawned from the
+# checkout's development environment, no model weights.
+#
+# WHY THIS TARGET EXISTS. Until 2026-10-30 every worker test printed "SKIP"
+# and returned when Python was missing, and a Rust test that returns reports
+# `ok`. CI ran only `contract_suite`, on a runner without the worker package,
+# so these suites had never executed in CI, and a local run without the
+# environment "passed" in a tenth of a second. An unmet prerequisite now fails
+# the test (crates/batchalign/tests/prerequisite.rs), which also requires the
+# compiled extension to be this checkout's build. Run `make batchalign-develop`
+# first; CI's `batchalign-worker-integration` job does both.
+batchalign-test-worker-integration:
+	@echo "==> Worker integration suite (real test-echo workers)..."
+	cargo test -p batchalign --test worker_integration_suite --locked
 
 batchalign-test-integration:
 	@echo "==> Running imported Batchalign CI hygiene..."

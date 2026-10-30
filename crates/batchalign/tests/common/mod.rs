@@ -79,8 +79,9 @@ struct LiveFixtureBackend {
 impl LiveFixtureBackend {
     /// Build the shared worker backend used by live-model tests.
     async fn initialize() -> Result<Self, String> {
-        let python_path = resolve_python()
-            .ok_or_else(|| "Python 3 with batchalign is not available".to_string())?;
+        let python_path = crate::prerequisite::PythonWorker::establish_shared()
+            .map_err(|missing| missing.to_string())?
+            .interpreter();
         let session_config = live_fixture_server_config();
         let machine_lock = MachineMlTestLock::acquire("batchalign live fixture")
             .map_err(|error| format!("machine-wide ML test lock unavailable: {error}"))?;
@@ -104,7 +105,8 @@ enum BackendState {
     Uninitialized,
     /// Prepared workers are ready for reuse.
     Ready(Box<LiveFixtureBackend>),
-    /// Backend initialization failed and later callers should skip quickly.
+    /// Backend initialization failed; every later caller fails with the same
+    /// reason rather than retrying it.
     Unavailable(String),
 }
 
@@ -144,7 +146,8 @@ enum FixtureCommand {
         /// Optional command/lang pairs to pre-scale on the fixture runtime
         /// before handing the server snapshot back to the test runtime.
         warmups: Vec<DirectWarmupRequest>,
-        /// Synchronous reply channel for session metadata or skip reasons.
+        /// Synchronous reply channel for session metadata or why the
+        /// fixture is unavailable.
         reply: mpsc::Sender<Result<SessionSnapshot, String>>,
     },
     /// Return a clone of the shared warmed worker backend for direct execution.
@@ -152,7 +155,8 @@ enum FixtureCommand {
         /// Optional command/lang pairs to pre-scale on the fixture runtime
         /// before handing the direct snapshot back to the test runtime.
         warmups: Vec<DirectWarmupRequest>,
-        /// Synchronous reply channel for prepared workers or skip reasons.
+        /// Synchronous reply channel for prepared workers or why the
+        /// fixture is unavailable.
         reply: mpsc::Sender<Result<DirectSnapshot, String>>,
     },
     /// Tear down the currently active isolated session.
@@ -198,13 +202,13 @@ impl LiveServerSession {
     /// Each call then creates a fresh runtime layout rooted in a new temp dir so
     /// jobs, SQLite state, cache state, and the runtime supervisor do not bleed
     /// into the next session.
-    pub async fn acquire() -> Option<Self> {
+    pub async fn acquire() -> Self {
         Self::acquire_with_warmups(Vec::new()).await
     }
 
     /// Acquire an isolated live-model server session and optionally pre-scale
     /// the requested command/lang pairs on the fixture runtime first.
-    pub async fn acquire_with_warmups(warmups: Vec<(ReleasedCommand, &str)>) -> Option<Self> {
+    pub async fn acquire_with_warmups(warmups: Vec<(ReleasedCommand, &str)>) -> Self {
         let bridge = LIVE_FIXTURE.clone();
         let slot = bridge
             .session_slots
@@ -225,22 +229,19 @@ impl LiveServerSession {
         })
         .await
         .expect("live fixture acquire task should not panic");
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(message) => {
-                eprintln!("SKIP: {message}");
-                return None;
-            }
-        };
+        // An unavailable fixture fails the test: a test that returned here
+        // would report a pass it never earned (see `crate::prerequisite`).
+        let snapshot =
+            snapshot.unwrap_or_else(|message| panic!("live fixture unavailable: {message}"));
 
-        Some(Self {
+        Self {
             base_url: snapshot.base_url,
             client: reqwest::Client::new(),
             state_dir: snapshot.state_dir,
             infer_tasks: snapshot.infer_tasks,
             slot: Some(slot),
             bridge,
-        })
+        }
     }
 
     /// HTTP base URL for the isolated server instance.
@@ -320,13 +321,13 @@ impl Drop for LiveServerSession {
 
 impl LiveDirectSession {
     /// Acquire one isolated direct-execution session.
-    pub async fn acquire() -> Option<Self> {
+    pub async fn acquire() -> Self {
         Self::acquire_with_warmups(Vec::new()).await
     }
 
     /// Acquire one isolated direct-execution session and optionally pre-scale
     /// the requested command/lang pairs on the fixture runtime first.
-    pub async fn acquire_with_warmups(warmups: Vec<(ReleasedCommand, &str)>) -> Option<Self> {
+    pub async fn acquire_with_warmups(warmups: Vec<(ReleasedCommand, &str)>) -> Self {
         let bridge = LIVE_FIXTURE.clone();
         let slot = bridge
             .session_slots
@@ -347,18 +348,19 @@ impl LiveDirectSession {
         })
         .await
         .expect("live direct fixture acquire task should not panic");
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(message) => {
-                eprintln!("SKIP: {message}");
-                return None;
-            }
-        };
+        // An unavailable fixture fails the test: a test that returned here
+        // would report a pass it never earned (see `crate::prerequisite`).
+        let snapshot =
+            snapshot.unwrap_or_else(|message| panic!("live fixture unavailable: {message}"));
 
         let runtime_root = tempfile::TempDir::new().expect("tempdir");
         let state_dir = runtime_root.path().to_path_buf();
+        let config = live_fixture_server_config();
+        let host_snapshot =
+            std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(&config));
         let host = DirectHost::new(
-            live_fixture_server_config(),
+            config,
+            host_snapshot,
             RuntimeLayout::from_state_dir(state_dir.clone()),
             None,
             Some(state_dir.join("cache")),
@@ -368,13 +370,13 @@ impl LiveDirectSession {
         .await
         .expect("create live direct host");
 
-        Some(Self {
+        Self {
             host,
             state_dir,
             infer_tasks: snapshot.infer_tasks,
             _runtime_root: runtime_root,
             _slot: slot,
-        })
+        }
     }
 
     /// Runtime-owned state directory for this isolated direct session.
@@ -427,71 +429,65 @@ pub async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &st
     }
 }
 
-/// Acquire one isolated live-server session and skip cleanly when a task is unavailable.
-pub async fn require_live_server(task: InferTask, skip_message: &str) -> Option<LiveServerSession> {
-    let server = LiveServerSession::acquire().await?;
-    if !server.has_infer_task(task) {
-        eprintln!("SKIP: {skip_message}");
-        return None;
-    }
-    Some(server)
+/// Fail the test when a live session lacks `task`: the fixture is meant to
+/// serve it, so its absence is a broken environment, never a pass.
+#[track_caller]
+fn require_task(advertises: bool, task: InferTask, requirement: &str) {
+    assert!(
+        advertises,
+        "PREREQUISITE MISSING (this test fails rather than skip): \
+         the live fixture does not serve {task:?}: {requirement}"
+    );
 }
 
-/// Acquire one isolated live-server session and pre-scale the requested
-/// command/lang on the fixture runtime before the test uses it.
+/// Acquire one isolated live-server session that serves `task`.
+pub async fn require_live_server(task: InferTask, requirement: &str) -> LiveServerSession {
+    let server = LiveServerSession::acquire().await;
+    require_task(server.has_infer_task(task), task, requirement);
+    server
+}
+
+/// Acquire one isolated live-server session that serves `task`, with one
+/// command/lang pair pre-scaled on the fixture runtime first.
 pub async fn require_live_server_warmed(
     task: InferTask,
     command: ReleasedCommand,
     lang: &str,
-    skip_message: &str,
-) -> Option<LiveServerSession> {
-    let server = LiveServerSession::acquire_with_warmups(vec![(command, lang)]).await?;
-    if !server.has_infer_task(task) {
-        eprintln!("SKIP: {skip_message}");
-        return None;
-    }
-    Some(server)
+    requirement: &str,
+) -> LiveServerSession {
+    let server = LiveServerSession::acquire_with_warmups(vec![(command, lang)]).await;
+    require_task(server.has_infer_task(task), task, requirement);
+    server
 }
 
-/// Acquire one isolated live direct-execution session and skip cleanly when a task is unavailable.
-pub async fn require_live_direct(task: InferTask, skip_message: &str) -> Option<LiveDirectSession> {
-    let session = LiveDirectSession::acquire().await?;
-    if !session.has_infer_task(task) {
-        eprintln!("SKIP: {skip_message}");
-        return None;
-    }
-    Some(session)
+/// Acquire one isolated live direct-execution session that serves `task`.
+pub async fn require_live_direct(task: InferTask, requirement: &str) -> LiveDirectSession {
+    let session = LiveDirectSession::acquire().await;
+    require_task(session.has_infer_task(task), task, requirement);
+    session
 }
 
-/// Acquire one isolated live direct-execution session and pre-scale the
-/// requested command/lang on the fixture runtime before the test uses it.
+/// Acquire one isolated live direct-execution session that serves `task`,
+/// with one command/lang pair pre-scaled first.
 pub async fn require_live_direct_warmed(
     task: InferTask,
     command: ReleasedCommand,
     lang: &str,
-    skip_message: &str,
-) -> Option<LiveDirectSession> {
-    let session = LiveDirectSession::acquire_with_warmups(vec![(command, lang)]).await?;
-    if !session.has_infer_task(task) {
-        eprintln!("SKIP: {skip_message}");
-        return None;
-    }
-    Some(session)
+    requirement: &str,
+) -> LiveDirectSession {
+    require_live_direct_warmed_many(task, vec![(command, lang)], requirement).await
 }
 
-/// Acquire one isolated live direct-execution session and pre-scale multiple
-/// command/lang pairs on the fixture runtime before the test uses it.
+/// Acquire one isolated live direct-execution session that serves `task`,
+/// with several command/lang pairs pre-scaled first.
 pub async fn require_live_direct_warmed_many(
     task: InferTask,
     warmups: Vec<(ReleasedCommand, &str)>,
-    skip_message: &str,
-) -> Option<LiveDirectSession> {
-    let session = LiveDirectSession::acquire_with_warmups(warmups).await?;
-    if !session.has_infer_task(task) {
-        eprintln!("SKIP: {skip_message}");
-        return None;
-    }
-    Some(session)
+    requirement: &str,
+) -> LiveDirectSession {
+    let session = LiveDirectSession::acquire_with_warmups(warmups).await;
+    require_task(session.has_infer_task(task), task, requirement);
+    session
 }
 
 async fn collect_direct_content_results(detail: &batchalign::store::JobDetail) -> Vec<FileResult> {
@@ -668,66 +664,6 @@ pub fn assert_completed_without_errors(label: &str, info: &JobInfo, results: &[F
     );
 }
 
-/// Resolve the Python path for tests. Prefers the project venv over `python3`.
-pub fn resolve_python_for_module(module: &str) -> Option<String> {
-    if let Ok(dir) = std::env::current_dir() {
-        let mut cursor = dir;
-        loop {
-            for venv in preferred_venv_pythons(&cursor) {
-                if venv.exists() && python_imports_module(&venv, module) {
-                    return Some(venv.to_string_lossy().to_string());
-                }
-            }
-            if !cursor.pop() {
-                break;
-            }
-        }
-    }
-
-    for candidate in preferred_path_pythons() {
-        if python_imports_module(candidate, module) {
-            return Some((*candidate).to_string());
-        }
-    }
-
-    None
-}
-
-pub fn resolve_python() -> Option<String> {
-    resolve_python_for_module("batchalign.worker")
-}
-
-fn python_imports_module(command: impl AsRef<std::ffi::OsStr>, module: &str) -> bool {
-    let snippet = format!("import {module}");
-    std::process::Command::new(command)
-        .args(["-c", &snippet])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn preferred_venv_pythons(root: &Path) -> Vec<PathBuf> {
-    if cfg!(windows) {
-        vec![root.join(".venv").join("Scripts").join("python.exe")]
-    } else {
-        let bin = root.join(".venv").join("bin");
-        vec![
-            bin.join("python3.14"),
-            bin.join("python3"),
-            bin.join("python"),
-        ]
-    }
-}
-
-fn preferred_path_pythons() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &["python"]
-    } else {
-        &["python3.14", "python3"]
-    }
-}
-
 /// Start the dedicated fixture thread and return the test-side bridge.
 fn start_fixture_thread() -> Arc<FixtureBridge> {
     let (commands, receiver) = mpsc::channel();
@@ -865,8 +801,12 @@ async fn start_session(
     let runtime_root = tempfile::TempDir::new().expect("tempdir");
     let layout = RuntimeLayout::from_state_dir(runtime_root.path().to_path_buf());
     let cache_dir = runtime_root.path().join("cache");
+    let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(
+        &backend.session_config,
+    ));
     let (router, state) = create_app_with_prepared_workers(
         backend.session_config.clone(),
+        host,
         layout,
         AppStorageOverrides {
             jobs_dir: None,
@@ -1003,20 +943,6 @@ fn release_active_session(bridge: &Arc<FixtureBridge>) -> Result<(), String> {
     Ok(())
 }
 
-/// Walk upward from cwd to find the repo root (directory containing `Cargo.toml`
-/// with `[workspace]` or the `batchalign/` directory).
-pub(crate) fn find_repo_root() -> Option<PathBuf> {
-    let mut cursor = std::env::current_dir().ok()?;
-    loop {
-        if cursor.join("batchalign").is_dir() && cursor.join("Cargo.toml").is_file() {
-            return Some(cursor);
-        }
-        if !cursor.pop() {
-            return None;
-        }
-    }
-}
-
 /// Read the Rev.AI API key from environment variables.
 ///
 /// Checks environment variables first, then the legacy `~/.batchalign.ini`
@@ -1030,8 +956,8 @@ pub fn require_revai_key() -> Option<String> {
 }
 
 fn load_legacy_revai_key() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let contents = std::fs::read_to_string(PathBuf::from(home).join(".batchalign.ini")).ok()?;
+    let ini = batchalign::runtime_paths::BatchalignHome::from_env().config_ini();
+    let contents = std::fs::read_to_string(ini).ok()?;
     parse_legacy_revai_key(&contents)
 }
 
@@ -1070,57 +996,54 @@ fn parse_legacy_revai_key(contents: &str) -> Option<String> {
 
 /// Load a CHAT fixture from `batchalign/tests/support/parity/{name}.cha`.
 ///
-/// Returns `None` if the fixture file doesn't exist (test should skip).
-pub fn load_parity_fixture(name: &str) -> Option<String> {
-    let repo_root = find_repo_root()?;
+/// Fails the test when the committed fixture is missing.
+pub fn load_parity_fixture(name: &str) -> String {
+    let repo_root = crate::prerequisite::repo_root();
     let path = repo_root.join(format!("batchalign/tests/support/parity/{name}.cha"));
     if !path.exists() {
-        eprintln!("SKIP: parity fixture not found: {}", path.display());
-        return None;
+        panic!(
+            "committed test fixture missing: parity fixture not found: {}",
+            path.display()
+        )
     }
-    Some(
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Failed to read parity fixture {}: {e}", path.display())),
-    )
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read parity fixture {}: {e}", path.display()))
 }
 
 /// Load a BA2 Jan 9 golden reference output.
 ///
 /// Reads from `batchalign/tests/golden/ba2_reference/{command}/{name}.jan9.cha`.
-/// Returns `None` if not yet generated (parity test should still run with
-/// structural assertions only).
-pub fn load_ba2_golden(command: &str, name: &str) -> Option<String> {
-    let repo_root = find_repo_root()?;
+/// Fails the test when the golden is missing: a test that expects one
+/// declares it (`ml_golden::parity_helpers::Ba2Baseline::Golden`), so a missing
+/// golden is a repository defect, never a quieter test.
+pub fn load_ba2_golden(command: &str, name: &str) -> String {
+    let repo_root = crate::prerequisite::repo_root();
     let path = repo_root.join(format!(
         "batchalign/tests/golden/ba2_reference/{command}/{name}.jan9.cha"
     ));
     if !path.exists() {
-        eprintln!(
-            "NOTE: BA2 golden not found (run scripts/generate_ba2_golden.sh): {}",
+        panic!(
+            "committed test fixture missing: BA2 golden not found (run scripts/generate_ba2_golden.sh): {}",
             path.display()
-        );
-        return None;
+        )
     }
-    Some(
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("Failed to read BA2 golden {}: {e}", path.display())),
-    )
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read BA2 golden {}: {e}", path.display()))
 }
 
 /// Load a compare fixture pair (`FILE.cha` plus `FILE.gold.cha`).
 ///
-/// Returns `None` if either companion file does not exist.
-pub fn load_compare_fixture_pair(name: &str) -> Option<(String, String)> {
-    let repo_root = find_repo_root()?;
+/// Fails the test when either companion file is missing.
+pub fn load_compare_fixture_pair(name: &str) -> (String, String) {
+    let repo_root = crate::prerequisite::repo_root();
     let main_path = repo_root.join(format!("batchalign/tests/support/parity/{name}.cha"));
     let gold_path = repo_root.join(format!("batchalign/tests/support/parity/{name}.gold.cha"));
     if !main_path.exists() || !gold_path.exists() {
-        eprintln!(
-            "SKIP: compare fixture pair not found: {} / {}",
+        panic!(
+            "committed test fixture missing: compare fixture pair not found: {} / {}",
             main_path.display(),
             gold_path.display()
-        );
-        return None;
+        )
     }
     let main = std::fs::read_to_string(&main_path).unwrap_or_else(|e| {
         panic!(
@@ -1134,15 +1057,15 @@ pub fn load_compare_fixture_pair(name: &str) -> Option<(String, String)> {
             gold_path.display()
         )
     });
-    Some((main, gold))
+    (main, gold)
 }
 
 /// Load committed batchalign2-master compare golden outputs.
 ///
 /// Reads from `batchalign/tests/golden/ba2_reference/compare/{name}.master.cha`
 /// plus the companion `.master.compare.csv`.
-pub fn load_ba2_compare_master_golden(name: &str) -> Option<(String, String)> {
-    let repo_root = find_repo_root()?;
+pub fn load_ba2_compare_master_golden(name: &str) -> (String, String) {
+    let repo_root = crate::prerequisite::repo_root();
     let chat_path = repo_root.join(format!(
         "batchalign/tests/golden/ba2_reference/compare/{name}.master.cha"
     ));
@@ -1150,12 +1073,11 @@ pub fn load_ba2_compare_master_golden(name: &str) -> Option<(String, String)> {
         "batchalign/tests/golden/ba2_reference/compare/{name}.master.compare.csv"
     ));
     if !chat_path.exists() || !csv_path.exists() {
-        eprintln!(
-            "SKIP: BA2 master compare golden not found: {} / {}",
+        panic!(
+            "committed test fixture missing: BA2 master compare golden not found: {} / {}",
             chat_path.display(),
             csv_path.display()
-        );
-        return None;
+        )
     }
     let chat = std::fs::read_to_string(&chat_path).unwrap_or_else(|e| {
         panic!(
@@ -1169,7 +1091,7 @@ pub fn load_ba2_compare_master_golden(name: &str) -> Option<(String, String)> {
             csv_path.display()
         )
     });
-    Some((chat, csv))
+    (chat, csv)
 }
 
 /// Compare BA3 output to BA2 golden reference, ignoring metadata differences.
@@ -1368,8 +1290,10 @@ fn live_fixture_pool_config(python_path: &str) -> PoolConfig {
         // for a prior test's checked-out worker to be returned to the pool.
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     }
 }
 

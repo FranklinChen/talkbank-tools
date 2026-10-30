@@ -75,13 +75,24 @@ interface MemoryPanelProps {
 export function MemoryPanel({ health }: MemoryPanelProps) {
   if (!health) return null;
 
-  const totalMb = health.system_memory_total_mb ?? 0;
-  const usedMb = health.system_memory_used_mb ?? 0;
-  const availableMb = health.system_memory_available_mb ?? 0;
+  // One reading, absent when the server host would not report its memory:
+  // say so, rather than drawing a gauge from made-up zeros.
+  const reading = health.system_memory;
+  if (!reading) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-lg px-4 py-2.5">
+        <span className="text-sm font-semibold text-gray-700">Memory</span>
+        <span className="ml-2 text-xs text-gray-500">
+          unavailable: {health.host_memory_error ?? "the server host would not report it"}
+        </span>
+      </div>
+    );
+  }
+  const totalMb = reading.total_mb;
+  const usedMb = reading.used_mb;
+  const availableMb = reading.available_mb;
   const gateMb = health.memory_gate_threshold_mb ?? 0;
   const gateAborts = health.memory_gate_aborts ?? 0;
-
-  if (totalMb === 0) return null;
 
   const pressure = health.host_memory_pressure as PressureLevel | undefined;
 

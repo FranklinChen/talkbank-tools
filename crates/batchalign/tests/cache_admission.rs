@@ -141,9 +141,7 @@ fn conflicting_cache_cli_policy_fails_before_server_contact() {
 
 #[tokio::test]
 async fn conflicting_cache_http_policy_is_rejected_without_creating_job() {
-    let session = crate::common::test_server_fixture::acquire_test_server_session()
-        .await
-        .unwrap();
+    let session = crate::common::test_server_fixture::acquire_test_server_session().await;
     let response = session
         .client()
         .post(format!("{}/jobs", session.base_url()))

@@ -38,7 +38,9 @@ impl FixedSpanBatch {
         self.spans
             .iter()
             .map(|span| {
-                MorphosyntaxBatchItem::new(
+                // A secondary span has no authority to retokenize, so no
+                // word may merge with another.
+                MorphosyntaxBatchItem::unmergeable(
                     span.words().cloned().map(BatchWord::analysed).collect(),
                     span.terminator().clone(),
                     span.target_lang().clone(),
@@ -343,6 +345,7 @@ mod tests {
         let lang = crate::chat_ops::LanguageCode::new("eng").unwrap();
         let langs = declared_languages(&chat, &lang).expect("admitted fixture language context");
         let items = collect_payloads(&chat, &lang, langs.as_ref(), MultilingualPolicy::ProcessAll)
+            .expect("the run walk agrees with extraction")
             .batch_items;
         let response = serde_json::from_str(
             r#"{"sentences":[{"words":[
@@ -454,7 +457,7 @@ mod tests {
         let cache = UtteranceCache::sqlite(Some(scratch.path().join("cache")))
             .await
             .expect("test cache");
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
         let result = dispatch_secondary_l2(
@@ -488,7 +491,7 @@ mod tests {
         let cache = UtteranceCache::sqlite(Some(scratch.path().join("cache")))
             .await
             .expect("test cache");
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let result = dispatch_secondary_l2(
             &mut chat,
             Vec::new(),

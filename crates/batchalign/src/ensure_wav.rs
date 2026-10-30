@@ -355,7 +355,7 @@ fn media_fingerprint(path: &Path) -> Result<String, std::io::Error> {
 fn default_cache_dir() -> PathBuf {
     default_cache_dir_from(
         crate::runtime_paths::media_cache_dir_override_from_env(),
-        dirs::data_dir(),
+        crate::runtime_paths::BatchalignHome::from_env().data_base(),
     )
 }
 

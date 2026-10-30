@@ -98,7 +98,7 @@ async fn await_file(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
-    let python = require_python!();
+    let python = super::worker_python();
     let scratch = tempfile::tempdir().expect("scratch");
     let state_dir = scratch.path().join("state");
     std::fs::create_dir_all(&state_dir).expect("state dir");
@@ -121,9 +121,9 @@ async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
         worker_registry_path: Some(state_dir.join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(state_dir.clone()),
-            ..Default::default()
+            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
         },
-        ..Default::default()
+        ..PoolConfig::for_tests()
     };
     let workers = batchalign::worker_setup::prepare_echo_workers_behind_live_runner(pool_config)
         .await

@@ -100,12 +100,42 @@ re-rendered.
 
 ### Layer 3: `EffectiveConfig`
 
-The resolved per-host runtime view. Constructed via
-`EffectiveConfig::resolve_from_server_config(&cfg)` (which detects
-facts, lifts `ServerConfig` to `ConfigOverrides`, and merges) or
-the lower-level `EffectiveConfig::resolve(&overrides, &facts)` for
-tests. Stored as `Arc<EffectiveConfig>` on `DispatchHostContext`
-so per-job dispatch reads the resolved view rather than re-detecting.
+The resolved per-host runtime view, built by the pure
+`EffectiveConfig::resolve(&overrides, &facts)`. Production code never
+calls it directly: it is one field of the host snapshot below.
+
+### The host snapshot: one reading per process
+
+`HostSnapshot` (`host_facts/snapshot.rs`) holds the facts as read and
+everything derived from them for one `ServerConfig`: the
+`EffectiveConfig`, the memory tier (`ServerConfig::memory_tier_for_total`,
+the operator's declared tier or the one the RAM sizes to) and the
+`HostExecutionPolicy` the tier implies. Total RAM, CPU count and the GPU
+are fixed for a process's lifetime, so each composition root reads the
+host exactly once:
+
+| Composition root | Reads the host with |
+|---|---|
+| `serve start --foreground` | `HostSnapshot::read`, then hands it to `serve_with_runtime` |
+| direct CLI dispatch | `HostSnapshot::read`, then hands it to `DirectHost::new` |
+| `worker`, `replay`, daemon device flags, transcribe replay | `HostSnapshot::read` |
+| tests | `HostSnapshot::for_tests` (a declared 64 GB Apple Silicon host) |
+
+`HostSnapshot::read` is the only place host reading can fail: a host
+whose operating system will not report its memory is an error
+(`HostUnreadable`) there, and the process does not start. Everything
+downstream (`JobStore`, `DispatchHostContext`, per-job worker sizing)
+takes the snapshot and cannot fail on the host. CLI device switches
+(`--force-cpu`, `--allow-mps`) are applied first, by
+`ServerConfig::with_device_flags`, so the snapshot resolves the config
+the process will actually run with.
+
+Live readings are deliberately not in the snapshot: available memory
+for admission (`host_memory::read_system_memory`, cached for one
+second), the process table for lease pruning, and the load average.
+Each consumer has its own policy when one is unreadable: admission and
+spawn refuse, pressure eviction and the RSS observer skip that pass
+with a warning, and the CPU gate admits with a warning.
 
 The merge rule per knob is uniform: `override.unwrap_or(recommendation)`.
 Per-profile and per-command merges follow the same rule, applied per
@@ -155,18 +185,17 @@ sequenceDiagram
     participant Validate as validate()
     participant Workers
 
-    CLI->>serve_with_runtime: cfg, pool_config, layout
-    serve_with_runtime->>Validate: cfg + RealHostFactsSource.detect()
+    CLI->>CLI: cfg.with_device_flags, HostSnapshot::read (fails on an unreadable host)
+    CLI->>serve_with_runtime: cfg, host snapshot, pool_config, layout
+    serve_with_runtime->>Validate: cfg + host.facts()
     Validate-->>serve_with_runtime: warnings -> tracing::warn!; errors -> abort
-    serve_with_runtime->>DispatchHostContext: from_store (per JobStore)
-    DispatchHostContext->>DispatchHostContext: EffectiveConfig::resolve_from_server_config
-    DispatchHostContext-->>Workers: WorkerRuntimeConfig populated from EffectiveConfig
+    serve_with_runtime->>DispatchHostContext: from_store (the JobStore holds the snapshot)
+    DispatchHostContext-->>Workers: WorkerRuntimeConfig from host.effective() and host.tier()
 ```
 
-The two `RealHostFactsSource.detect()` calls per startup
-(`serve_with_runtime` for validation, `DispatchHostContext` for
-runtime) are both millisecond-scale. Sharing the snapshot would be
-a small cleanup; deferred until the cost actually shows up.
+Validation and every job's dispatch read the same snapshot, so they
+cannot disagree about the host, and dispatch never re-runs detection
+(the `nvidia-smi` probe included).
 
 ## Adding a new knob
 

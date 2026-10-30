@@ -24,27 +24,12 @@ use crate::common;
 
 use common::test_server_fixture::{acquire_test_server_session, times_prepared};
 
-/// Skip cleanly when Python is unavailable, matching the rest of the
-/// python-workers test binaries.
-macro_rules! require_python_or_skip {
-    () => {{
-        if common::resolve_python().is_none() {
-            eprintln!("SKIP: Python 3 with batchalign not available");
-            return;
-        }
-    }};
-}
-
 #[tokio::test]
 async fn two_sessions_have_distinct_state_dirs_and_base_urls() {
-    require_python_or_skip!();
+    crate::prerequisite::PythonWorker::require();
 
-    let session_a = acquire_test_server_session()
-        .await
-        .expect("first acquire should succeed");
-    let session_b = acquire_test_server_session()
-        .await
-        .expect("second acquire should succeed");
+    let session_a = acquire_test_server_session().await;
+    let session_b = acquire_test_server_session().await;
 
     assert_ne!(
         session_a.base_url(),
@@ -60,15 +45,11 @@ async fn two_sessions_have_distinct_state_dirs_and_base_urls() {
 
 #[tokio::test]
 async fn two_sessions_share_one_warm_pool() {
-    require_python_or_skip!();
+    crate::prerequisite::PythonWorker::require();
 
     // First acquire warms the pool. Second acquire must reuse it.
-    let _session_a = acquire_test_server_session()
-        .await
-        .expect("first acquire should succeed");
-    let _session_b = acquire_test_server_session()
-        .await
-        .expect("second acquire should succeed");
+    let _session_a = acquire_test_server_session().await;
+    let _session_b = acquire_test_server_session().await;
 
     assert_eq!(
         times_prepared(),
@@ -79,11 +60,9 @@ async fn two_sessions_share_one_warm_pool() {
 
 #[tokio::test]
 async fn session_health_endpoint_is_reachable() {
-    require_python_or_skip!();
+    crate::prerequisite::PythonWorker::require();
 
-    let session = acquire_test_server_session()
-        .await
-        .expect("acquire should succeed");
+    let session = acquire_test_server_session().await;
 
     let resp = session
         .client()

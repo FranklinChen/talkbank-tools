@@ -26,6 +26,7 @@ pub mod effective;
 pub mod gpu;
 pub mod os;
 pub mod recommendations;
+pub mod snapshot;
 pub mod test_helpers;
 pub mod validation;
 pub mod warnings;
@@ -40,6 +41,7 @@ pub use gpu::{
     detect_gpu_presence,
 };
 pub use os::{CpuArch, OperatingSystem};
+pub use snapshot::HostSnapshot;
 // `recommend_max_workers_per_job` is intentionally NOT re-exported.
 // External callers go through `EffectiveConfig::max_workers_per_job`,
 // which composes the operator override with the per-command
@@ -62,8 +64,8 @@ use crate::api::MachineTime;
 /// else in the runtime polls the OS for facts that live here.
 ///
 /// The split between this struct (static-ish facts) and
-/// `worker::memory_guard::available_memory_mb()` (live RAM pressure
-/// poll) is intentional. `ram_total_mb` and `ram_available_mb` here are
+/// `host_memory::read_system_memory()` (live RAM pressure poll) is
+/// intentional. `ram_total_mb` and `ram_available_mb` here are
 /// snapshots at startup; the live coordinator continues to poll
 /// available memory for runtime gating decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,8 +119,9 @@ pub trait HostFactsSource: Send + Sync {
     /// Production impls perform live detection and return what they see;
     /// the `Mock` impl returns the struct it was constructed from. Either
     /// way, the snapshot is owned, callers may store, share via `Arc`,
-    /// or pass to pure functions without ceremony.
-    fn detect(&self) -> HostFacts;
+    /// or pass to pure functions without ceremony. A live source fails
+    /// when the operating system will not report the host's memory.
+    fn detect(&self) -> Result<HostFacts, crate::host_memory::HostUnreadable>;
 }
 
 /// Production source: detects facts from the running host.
@@ -128,9 +131,9 @@ pub trait HostFactsSource: Send + Sync {
 /// the host, not a parallel sysinfo poll with subtle drift.
 ///
 /// Field-by-field provenance:
-/// - `ram_total_mb` / `ram_available_mb`: `host_memory::detect_total_memory_mb`
-///   / `detect_available_memory_mb`: the same helpers
-///   the host-memory coordinator uses.
+/// - `ram_total_mb` / `ram_available_mb`: one
+///   `host_memory::read_system_memory` reading, the reader the host-memory
+///   coordinator uses.
 /// - `cpu_logical_count`: `std::thread::available_parallelism`.
 /// - `cpu_physical_count`: same as logical for now; refined in a later
 ///   phase that adds physical-vs-logical separation if we need to
@@ -154,9 +157,10 @@ pub trait HostFactsSource: Send + Sync {
 pub struct RealHostFactsSource;
 
 impl HostFactsSource for RealHostFactsSource {
-    fn detect(&self) -> HostFacts {
-        let ram_total_mb = crate::host_memory::detect_total_memory_mb().0;
-        let ram_available_mb = crate::host_memory::detect_available_memory_mb().0;
+    fn detect(&self) -> Result<HostFacts, crate::host_memory::HostUnreadable> {
+        let memory = crate::host_memory::read_system_memory()?;
+        let ram_total_mb = memory.total_mb.0;
+        let ram_available_mb = memory.available_mb.0;
 
         let cpu_logical_count = std::thread::available_parallelism()
             .map(|p| u32::try_from(p.get()).unwrap_or(u32::MAX))
@@ -178,7 +182,7 @@ impl HostFactsSource for RealHostFactsSource {
         let probe = RealNvidiaSmiProbe;
         let (gpu, detection_warnings) = detect_gpu_presence(&os, &arch, &probe);
 
-        HostFacts {
+        Ok(HostFacts {
             os,
             arch,
             cpu_logical_count,
@@ -197,7 +201,7 @@ impl HostFactsSource for RealHostFactsSource {
             // disk-free probe) into the same vector before constructing
             // this struct.
             detection_warnings,
-        }
+        })
     }
 }
 
@@ -222,8 +226,8 @@ impl MockHostFactsSource {
 }
 
 impl HostFactsSource for MockHostFactsSource {
-    fn detect(&self) -> HostFacts {
-        (*self.facts).clone()
+    fn detect(&self) -> Result<HostFacts, crate::host_memory::HostUnreadable> {
+        Ok((*self.facts).clone())
     }
 }
 
@@ -236,7 +240,7 @@ mod tests {
     fn mock_source_round_trips_facts() {
         let original = apple_silicon_64gb();
         let source = MockHostFactsSource::new(original.clone());
-        let detected = source.detect();
+        let detected = source.detect().expect("a mock source always reads");
         assert_eq!(
             detected, original,
             "MockHostFactsSource::detect() must return the facts it was \
@@ -295,7 +299,9 @@ mod tests {
             );
             return;
         }
-        let facts = RealHostFactsSource.detect();
+        let facts = RealHostFactsSource
+            .detect()
+            .expect("the test host reports its memory");
         assert_eq!(
             facts.gpu,
             GpuPresence::AppleMps {
@@ -312,37 +318,6 @@ mod tests {
             "Apple Silicon detection must not produce nvidia-smi warnings; \
              observed: {:?}",
             facts.detection_warnings
-        );
-    }
-
-    /// `RealHostFactsSource::detect()` must report the same total RAM as
-    /// the existing `host_memory::detect_total_memory_mb` helper that
-    /// host-memory accounting uses. This is the contract that proves the
-    /// new consolidator is consistent with the live runtime's RAM model;
-    /// any drift between the two would mean two parts of the system have
-    /// different ideas about how big this host is.
-    ///
-    /// Snapshot-vs-snapshot tolerance: both calls poll sysinfo
-    /// independently, and `available_memory()` jitters between
-    /// invocations as kernel page caches shift. The total figure is
-    /// stable, so this test asserts on `ram_total_mb` only. Available
-    /// memory is exercised by `Phase A` later when we have a tier-
-    /// aware comparison that tolerates jitter.
-    #[test]
-    fn real_source_ram_total_matches_host_memory_helper() {
-        use crate::host_memory::detect_total_memory_mb;
-
-        let source = RealHostFactsSource;
-        let facts = source.detect();
-        assert_eq!(
-            facts.ram_total_mb,
-            detect_total_memory_mb().0,
-            "HostFacts ram_total_mb must equal host_memory::detect_total_memory_mb \
-             - they are the same physical fact, polled through different APIs"
-        );
-        assert!(
-            facts.ram_total_mb > 0,
-            "ram_total_mb must be positive on any host that can run this test"
         );
     }
 }

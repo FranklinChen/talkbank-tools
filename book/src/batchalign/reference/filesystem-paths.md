@@ -1,14 +1,25 @@
 # Filesystem Paths Used by batchalign3
 
 **Status:** Current
-**Last updated:** 2026-10-01 18:40 EDT
+**Last updated:** 2026-10-30 11:42 EDT
 
 All current filesystem paths used by the public `batchalign3` runtime.
 
-Unless otherwise noted, paths are rooted under
-`batchalign::types::config::layout::ba_state_dir()` (defined at
-`crates/batchalign/src/types/config/layout.rs:98`), which defaults
-to `~/.batchalign3` and can be overridden with `BATCHALIGN_STATE_DIR`.
+Everything batchalign3 owns is rooted at the **Batchalign home**:
+`BATCHALIGN_HOME` when set, otherwise your home directory
+(`runtime_paths::BatchalignHome`). Under it live `.batchalign.ini`, the
+`.batchalign3` state directory, and batchalign3's own caches; the `~` in the
+tables below means that root. More specific variables still win:
+`BATCHALIGN_STATE_DIR` for state, `BATCHALIGN_ANALYSIS_CACHE_DIR` and
+`BATCHALIGN_MEDIA_CACHE_DIR` for the caches.
+
+Model libraries (Hugging Face, Stanza, torch) are not under it: their caches
+follow your real home and their own variables (`HF_HOME`,
+`STANZA_RESOURCES_DIR`). Setting `BATCHALIGN_HOME` gives you a second,
+fully separate batchalign3 (its own config, jobs and caches) that still shares
+the downloaded models. The developer page
+[Model Downloads and Caching](../developer/model-downloads-and-caching.md#where-things-live-on-disk)
+has the complete map.
 
 ## File modes
 

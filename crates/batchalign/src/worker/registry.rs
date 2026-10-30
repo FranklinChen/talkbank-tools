@@ -199,17 +199,12 @@ impl std::fmt::Display for ReportedBuild {
 // Registry file I/O
 // ---------------------------------------------------------------------------
 
-/// Default registry file path: `~/.batchalign3/workers.json`.
+/// Default registry file path: `workers.json` in the runtime state
+/// directory (`~/.batchalign3` unless `BATCHALIGN_STATE_DIR` or
+/// `BATCHALIGN_HOME` says otherwise), resolved by the one layout resolver.
 pub fn default_registry_path() -> PathBuf {
-    if let Ok(state_dir) = std::env::var("BATCHALIGN_STATE_DIR") {
-        let state_dir = state_dir.trim();
-        if !state_dir.is_empty() {
-            return PathBuf::from(state_dir).join("workers.json");
-        }
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".batchalign3")
+    crate::config::RuntimeLayout::from_env()
+        .state_dir()
         .join("workers.json")
 }
 

@@ -25,6 +25,7 @@
 
 mod common;
 mod live_deadline;
+mod prerequisite;
 
 use std::time::Duration;
 
@@ -55,20 +56,20 @@ fn stress_server_config() -> ServerConfig {
 }
 
 /// Start a stress server on the shared warmed worker pool, default config.
-async fn start_stress_server() -> Option<StressServer> {
-    let session = acquire_test_server_session_with_config(stress_server_config()).await?;
-    Some(StressServer { session })
+async fn start_stress_server() -> StressServer {
+    let session = acquire_test_server_session_with_config(stress_server_config()).await;
+    StressServer { session }
 }
 
 /// Start a stress server with a custom server config layered onto the
 /// stress defaults.
-async fn start_stress_server_with_config(mut config: ServerConfig) -> Option<StressServer> {
+async fn start_stress_server_with_config(mut config: ServerConfig) -> StressServer {
     config.host = "127.0.0.1".into();
     config.port = batchalign::config::PortRequest::from_u16(0);
     config.job_ttl_days = batchalign::config::JobTtlDays::literal::<7>();
     config.memory_gate_mb = Some(MemoryMb(0));
-    let session = acquire_test_server_session_with_config(config).await?;
-    Some(StressServer { session })
+    let session = acquire_test_server_session_with_config(config).await;
+    StressServer { session }
 }
 
 #[allow(dead_code)]
@@ -245,9 +246,7 @@ fn multi_file_submission(count: usize) -> JobSubmission {
 /// recovered all permits (workers_available == live_workers in health).
 #[tokio::test]
 async fn pool_permits_match_idle_count_after_burst() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     // Submit 10 jobs with unique filenames
     let mut job_ids = Vec::new();
@@ -285,9 +284,7 @@ async fn pool_permits_match_idle_count_after_burst() {
 /// Submit-cancel cycle 10 times. If permits leak, the final iteration hangs.
 #[tokio::test]
 async fn cancel_job_returns_worker_permits() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     for i in 0..10 {
         let sub = morphotag_submission(&format!("cancel-cycle-{i}.cha"));
@@ -316,9 +313,7 @@ async fn cancel_job_returns_worker_permits() {
 /// If any permit leaked, the final job hangs forever.
 #[tokio::test]
 async fn rapid_submit_cancel_cycle_no_permit_leak() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     for i in 0..50 {
         let sub = morphotag_submission(&format!("rapid-{i}.cha"));
@@ -359,9 +354,7 @@ async fn rapid_submit_cancel_cycle_no_permit_leak() {
 /// 5 concurrent cancel requests on the same job. All should succeed (200).
 #[tokio::test]
 async fn concurrent_cancels_on_same_job() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     let sub = morphotag_submission("concurrent-cancel.cha");
     let id = server.submit_ok(&sub).await;
@@ -411,9 +404,7 @@ async fn max_concurrent_jobs_enforced() {
         max_concurrent_jobs: Some(2),
         ..Default::default()
     };
-    let Some(server) = start_stress_server_with_config(config).await else {
-        return;
-    };
+    let server = start_stress_server_with_config(config).await;
 
     let mut job_ids = Vec::new();
     for i in 0..3 {
@@ -433,9 +424,7 @@ async fn max_concurrent_jobs_enforced() {
 /// operations should return valid responses.
 #[tokio::test]
 async fn job_list_consistent_under_concurrent_mutations() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     // Submit 5 jobs
     let mut ids = Vec::new();
@@ -495,9 +484,7 @@ async fn job_list_consistent_under_concurrent_mutations() {
 /// Exactly one should succeed (200), the other should get 409 conflict.
 #[tokio::test]
 async fn concurrent_identical_file_conflict_detected() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     let sub = morphotag_submission("conflict.cha");
 
@@ -536,9 +523,7 @@ async fn concurrent_identical_file_conflict_detected() {
 /// 5 concurrent poll requests for the same job during state transitions.
 #[tokio::test]
 async fn concurrent_poll_during_rapid_state_changes() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     let sub = morphotag_submission("poll-race.cha");
     let id = server.submit_ok(&sub).await;
@@ -571,9 +556,7 @@ async fn concurrent_poll_during_rapid_state_changes() {
 /// Submit a multi-file job, connect SSE. Verify snapshot + complete events.
 #[tokio::test]
 async fn sse_stream_under_rapid_file_completions() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     let sub = multi_file_submission(5);
     let id = server.submit_ok(&sub).await;
@@ -616,9 +599,7 @@ async fn sse_stream_under_rapid_file_completions() {
 /// SQLITE_BUSY errors surfacing as 500 responses.
 #[tokio::test]
 async fn concurrent_job_completions_no_sqlite_busy() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     let mut ids = Vec::new();
     for i in 0..5 {
@@ -640,9 +621,7 @@ async fn concurrent_job_completions_no_sqlite_busy() {
 /// should always be in [0, 5] and status should always be "ok".
 #[tokio::test]
 async fn health_endpoint_consistent_under_load() {
-    let Some(server) = start_stress_server().await else {
-        return;
-    };
+    let server = start_stress_server().await;
 
     // Submit 5 jobs
     for i in 0..5 {

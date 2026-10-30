@@ -8,19 +8,14 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn transcribe_direct_unsupported_asr_language_fails_cleanly() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
 
-    let Some(fixture) = prepare_named_transcribe_fixture_job(
+    let fixture = prepare_named_transcribe_fixture_job(
         session.state_dir(),
         "transcribe_direct_unsupported_asr_language",
         "biling_vec_hrv_clip",
-    ) else {
-        return;
-    };
+    );
 
     let submission = batchalign::api::JobSubmission {
         command: ReleasedCommand::Transcribe,
@@ -61,20 +56,15 @@ async fn transcribe_direct_unsupported_asr_language_fails_cleanly() {
 
 #[tokio::test]
 async fn transcribe_server_unsupported_asr_language_fails_cleanly() {
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_named_transcribe_fixture_job(
+    let fixture = prepare_named_transcribe_fixture_job(
         server.state_dir(),
         "transcribe_server_unsupported_asr_language",
         "biling_vec_hrv_clip",
-    ) else {
-        return;
-    };
+    );
 
     let (info, _outputs) = jobs
         .submit_paths_job(

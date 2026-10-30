@@ -30,10 +30,10 @@
 use crate::api::{MemoryMb, ReleasedCommand};
 use crate::config::ServerConfig;
 
+use super::HostFacts;
 use super::recommendations::{
     PerProfile, RecommendedKnobs, recommend, recommend_max_workers_per_job,
 };
-use super::{HostFacts, HostFactsSource, RealHostFactsSource};
 
 /// Operator-supplied overrides, one per migrated knob. `None` means
 /// "no override; use the recommendation." `Some(v)` means "use `v`."
@@ -201,26 +201,6 @@ impl EffectiveConfig {
             max_workers_per_job_override: overrides.max_workers_per_job,
             host_facts: facts.clone(),
         }
-    }
-
-    /// Convenience: detect live `HostFacts`, lift a `ServerConfig`
-    /// into a `ConfigOverrides` via [`From<&ServerConfig>`], and
-    /// resolve.
-    ///
-    /// This is the standard production entry point, the triple-step
-    /// dance (detect → bridge → resolve) lives in one place so
-    /// callers don't have to repeat it. The detection runs through
-    /// [`RealHostFactsSource`] (millisecond-scale sysinfo poll) and
-    /// is intended to be invoked at startup boundaries
-    /// (`DispatchHostContext::from_store`, daemon serve, direct
-    /// dispatch builders), not in per-job or per-request hot paths.
-    /// Tests that need to exercise the same wiring against a
-    /// synthesized fact set should call [`EffectiveConfig::resolve`]
-    /// directly with a `MockHostFactsSource`-produced `HostFacts`.
-    pub fn resolve_from_server_config(config: &ServerConfig) -> Self {
-        let facts = RealHostFactsSource.detect();
-        let overrides = ConfigOverrides::from(config);
-        Self::resolve(&overrides, &facts)
     }
 
     /// Resolved `max_workers_per_job` for one command.

@@ -1,7 +1,6 @@
 //! Per-job file parallelism auto-tuning.
 
 use crate::api::{NumWorkers, ReleasedCommand};
-use crate::config::ServerConfig;
 use crate::host_facts::EffectiveConfig;
 use crate::runtime;
 
@@ -10,11 +9,10 @@ use crate::runtime;
 /// Reads from the resolved [`EffectiveConfig`] (operator override merged
 /// with host-facts recommendation) for the per-command worker cap, the
 /// host-facts-derived GPU thread-pool cap, and the GPU-heavy-vs-CPU
-/// category split. The legacy [`ServerConfig`] is consulted only for
-/// `resolved_memory_tier()`, which honors the operator's
-/// `memory_tier` override (used by the test affordance for
-/// constrained-memory simulation on large hosts), this knob has no
-/// `EffectiveConfig` analog yet.
+/// category split. `memory_tier` is the dispatch host's snapshot
+/// (`DispatchHostContext::memory_tier`, which honors the operator's
+/// `memory_tier` override), passed in so sizing a job never reads the
+/// machine; this knob has no `EffectiveConfig` analog yet.
 ///
 /// File-count clamping (`min(num_files)`) and CPU clamping
 /// (`min(available_parallelism)`) stay at the dispatch site because
@@ -29,7 +27,7 @@ pub(in crate::runner) fn compute_job_workers(
     command: ReleasedCommand,
     num_files: usize,
     effective: &EffectiveConfig,
-    config: &ServerConfig,
+    memory_tier: crate::types::runtime::MemoryTier,
 ) -> NumWorkers {
     if num_files <= 1 {
         return NumWorkers(1);
@@ -57,7 +55,7 @@ pub(in crate::runner) fn compute_job_workers(
     let by_cpu = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
-    let tier_cap = config.resolved_memory_tier().max_suggested_workers;
+    let tier_cap = memory_tier.max_suggested_workers;
 
     // Apply per-category cap. GPU commands share one model process and
     // should not dispatch more in-process requests than the configured

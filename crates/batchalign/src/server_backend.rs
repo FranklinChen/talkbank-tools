@@ -200,8 +200,11 @@ pub(crate) struct LocalServerBackend {
     ws_tx: broadcast::Sender<WsEvent>,
     config: crate::config::ServerConfig,
     jobs_dir: std::path::PathBuf,
-    /// Cached hostname for staged remote job provenance. Computed once at startup.
-    hostname: String,
+    /// This host's name, read once at startup. It names the remote scratch
+    /// directory a staged job runs in (`<scratch>/<host>/<job>`), so a host
+    /// that would not report one stages nothing remotely; `"unknown"` would
+    /// have put every such host's jobs in one shared directory.
+    hostname: Option<String>,
 }
 
 fn local_control_plane_info() -> JobControlPlaneInfo {
@@ -246,6 +249,9 @@ impl ServerBackend for LocalServerBackend {
                 })
                 .unwrap_or_else(|| self.jobs_dir.clone());
 
+            let Some(hostname) = self.hostname.clone() else {
+                return Err(ServerError::RemoteStagingWithoutHostName);
+            };
             let cancel_token = job.runtime.cancel_token.clone();
             let submission_template = crate::types::request::JobSubmission {
                 command: job.dispatch.command,
@@ -271,7 +277,6 @@ impl ServerBackend for LocalServerBackend {
 
             let store = self.store.clone();
             let jobs_dir = self.jobs_dir.clone();
-            let hostname = self.hostname.clone();
             self.runtime
                 .spawn_detached(crate::staging::run_staged_remote_job(
                     store,
@@ -397,6 +402,7 @@ impl ServerBackend for LocalServerBackend {
 /// `job_task` for each so they don't stall indefinitely.
 pub(crate) async fn bootstrap_local_server_backend(
     config: crate::config::ServerConfig,
+    host: Arc<crate::host_facts::HostSnapshot>,
     db: Arc<JobDB>,
     engine: ExecutionEngine,
     jobs_dir: std::path::PathBuf,
@@ -405,6 +411,7 @@ pub(crate) async fn bootstrap_local_server_backend(
     let (ws_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     let store = Arc::new(JobStore::new(
         config.clone(),
+        host,
         Some(db),
         ws_tx.clone(),
         clock,
@@ -425,7 +432,13 @@ pub(crate) async fn bootstrap_local_server_backend(
     let runtime_for_resume = runtime.clone();
     let host_for_resume = host.clone();
 
-    let hostname = sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_string());
+    let hostname = match sysinfo::System::host_name() {
+        Ok(hostname) => Some(hostname),
+        Err(error) => {
+            tracing::warn!(%error, "host name unreadable; remote staging unavailable");
+            None
+        }
+    };
     let backend: Arc<dyn ServerBackend> = Arc::new(LocalServerBackend {
         store,
         host,
@@ -583,7 +596,7 @@ mod tests {
         );
         let pool = Arc::new(WorkerPool::new(PoolConfig {
             test_echo: true,
-            ..Default::default()
+            ..PoolConfig::for_tests()
         }));
         let _ = pool.start_background_tasks();
         let cache = Arc::new(
@@ -595,6 +608,9 @@ mod tests {
 
         let bootstrap = bootstrap_local_server_backend(
             crate::config::ServerConfig::default(),
+            Arc::new(crate::host_facts::HostSnapshot::for_tests(
+                &crate::config::ServerConfig::default(),
+            )),
             db,
             engine,
             tempdir.path().join("jobs"),

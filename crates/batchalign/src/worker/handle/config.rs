@@ -55,17 +55,28 @@ pub struct WorkerRuntimeConfig {
     pub server_process_id: Option<u32>,
 }
 
-impl Default for WorkerRuntimeConfig {
-    fn default() -> Self {
-        // `gpu_thread_pool_size` is the in-process default for legacy
-        // callers (chiefly `PoolConfig::default()` and tests that
-        // construct a `WorkerRuntimeConfig` without specifying every
-        // field). Production builders override this via
-        // `EffectiveConfig::resolve` against detected `HostFacts`, so
-        // this constant only matters when nobody has consulted the
-        // host-facts pipeline yet. `4` matches the pre-migration
-        // static default; raising or lowering it here would silently
-        // shift any test that relies on it.
+/// The memory tier test fixtures launch with: declared, never read from the
+/// machine running the tests, so a test's outcome cannot depend on how much
+/// RAM that machine has or on whether the operating system reports it.
+pub fn test_memory_tier() -> MemoryTier {
+    MemoryTier::from_total_mb(64_000)
+}
+
+impl WorkerRuntimeConfig {
+    /// Local launch inputs with the legacy defaults and the caller's tier.
+    ///
+    /// This was `Default`, and it read the host to find the tier: a `Default`
+    /// cannot fail, so an unreadable host became whatever zero total RAM
+    /// tiers to. The tier is now an argument, taken from the one reading of
+    /// the host ([`HostSnapshot::tier`], whose `read` reports an unreadable
+    /// host) or declared by a test ([`test_memory_tier`]).
+    ///
+    /// [`HostSnapshot::tier`]: crate::host_facts::HostSnapshot::tier
+    pub fn local(memory_tier: MemoryTier) -> Self {
+        // `gpu_thread_pool_size` is the in-process default for callers that
+        // have not consulted the host-facts pipeline (`EffectiveConfig`
+        // overrides it in production). `4` matches the pre-migration static
+        // default; changing it would silently shift any test relying on it.
         const LEGACY_DEFAULT_GPU_THREAD_POOL_SIZE: u32 = 4;
         Self::from_sources(
             false,
@@ -75,7 +86,7 @@ impl Default for WorkerRuntimeConfig {
                 .map(|key| key.as_str().to_string()),
             LEGACY_DEFAULT_GPU_THREAD_POOL_SIZE,
             HostMemoryRuntimeConfig::default(),
-            crate::config::ServerConfig::default().resolved_memory_tier(),
+            memory_tier,
         )
     }
 }
@@ -156,8 +167,11 @@ pub struct WorkerConfig {
     pub test_delay_ms: u64,
 }
 
-impl Default for WorkerConfig {
-    fn default() -> Self {
+impl WorkerConfig {
+    /// A worker launch with every field at its default except `runtime`.
+    /// Private: production launches are built field by field where the pool
+    /// or a replay knows each value, so no default stands in for one of them.
+    fn with_runtime(runtime: WorkerRuntimeConfig) -> Self {
         Self {
             python_path: resolve_python_executable(),
             profile: WorkerProfile::Stanza,
@@ -168,10 +182,15 @@ impl Default for WorkerConfig {
             test_echo: false,
             ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
-            runtime: WorkerRuntimeConfig::default(),
+            runtime,
             task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
             test_delay_ms: 0,
         }
+    }
+
+    /// A test worker launch at the declared [`test_memory_tier`].
+    pub fn for_tests() -> Self {
+        Self::with_runtime(WorkerRuntimeConfig::local(test_memory_tier()))
     }
 }
 
@@ -267,13 +286,17 @@ impl WorkerLaunch {
     }
 
     /// A worker config that spawns this worker again with `python_path`;
-    /// everything not recorded (timeouts, verbosity, credentials) is this
-    /// process's own.
-    pub(crate) fn into_config(self, python_path: String) -> WorkerConfig {
-        let mut runtime = WorkerRuntimeConfig::default().with_bootstrap_mode(self.bootstrap_mode);
+    /// everything not recorded (timeouts, verbosity, credentials, and the
+    /// host's `memory_tier`) is this process's own.
+    pub(crate) fn into_config(self, python_path: String, memory_tier: MemoryTier) -> WorkerConfig {
+        let mut runtime =
+            WorkerRuntimeConfig::local(memory_tier).with_bootstrap_mode(self.bootstrap_mode);
         runtime.force_cpu = self.force_cpu;
         runtime.allow_mps = self.allow_mps;
         runtime.gpu_thread_pool_size = self.gpu_thread_pool_size;
+        // Spelled out in full: a replay is a diagnostic launch, so it never
+        // runs the echo test path, keeps the default ready budget and quiet
+        // logging, and applies no operator task-timeout overrides.
         WorkerConfig {
             python_path,
             profile: self.profile,
@@ -281,8 +304,12 @@ impl WorkerLaunch {
             lang: self.lang,
             num_speakers: self.num_speakers,
             engine_overrides: self.engine_overrides,
+            test_echo: false,
+            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            verbose: 0,
             runtime,
-            ..WorkerConfig::default()
+            task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
+            test_delay_ms: 0,
         }
     }
 }
@@ -327,7 +354,7 @@ mod tests {
         let config = WorkerConfig {
             profile: WorkerProfile::Stanza,
             runtime,
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         };
         assert_eq!(config.startup_reservation_mb().0, 3_000);
     }
@@ -337,7 +364,7 @@ mod tests {
         let config = WorkerConfig {
             profile: WorkerProfile::Stanza,
             task: Some(InferTask::Morphosyntax),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         };
         assert_eq!(config.bootstrap_label(), "infer:morphosyntax");
     }

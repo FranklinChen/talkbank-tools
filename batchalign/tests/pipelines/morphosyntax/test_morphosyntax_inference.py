@@ -193,21 +193,30 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
                     "words": ["hello", "world"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "eng",
                 },
                 {
                     "words": ["goodbye", "moon"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "eng",
                 },
                 {
                     "words": ["salut"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "fra",
                 },
-                {"words": [], "terminator": ".", "special_forms": [], "lang": "eng"},
+                {
+                    "words": [],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "runs": [],
+                    "lang": "eng",
+                },
                 {"bad": "shape"},
             ],
         ),
@@ -288,6 +297,7 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
                     "words": ["salut", "toi"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "fra",
                 }
             ],
@@ -348,18 +358,21 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
                     "words": ["salut", "toi"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "fra",
                 },
                 {
                     "words": ["hello", "world"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "eng",
                 },
                 {
                     "words": ["bonjour"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "fra",
                 },
             ],
@@ -431,6 +444,7 @@ def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
                     "words": ["salut"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "fra",
                 }
             ],
@@ -472,6 +486,7 @@ def test_batch_infer_morphosyntax_reports_why_a_reload_failed(monkeypatch) -> No
                     "words": ["kuku"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "zzz",
                 }
             ],
@@ -524,18 +539,21 @@ def test_batch_infer_morphosyntax_reports_missing_pipelines_and_mismatches(
                     "words": ["no", "pipeline"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "spa",
                 },
                 {
                     "words": ["hello", "world"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "eng",
                 },
                 {
                     "words": ["goodbye", "moon"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "eng",
                 },
             ],
@@ -580,7 +598,13 @@ def test_batch_infer_morphosyntax_returns_early_when_no_nonempty_items(
             task="morphosyntax",
             lang="eng",
             items=[
-                {"words": [], "terminator": ".", "special_forms": [], "lang": "eng"},
+                {
+                    "words": [],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "runs": [],
+                    "lang": "eng",
+                },
                 {"bad": "shape"},
             ],
         ),
@@ -652,6 +676,7 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
                     "words": ["attenzione"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "ita",
                 }
             ],
@@ -725,6 +750,7 @@ def test_batch_infer_morphosyntax_removes_padding_feature_values_and_reports_the
                     "words": ["кітап"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "kaz",
                 }
             ],
@@ -793,6 +819,7 @@ def test_words_ending_in_the_terminator_are_rejected_not_silently_deduped() -> N
                 "words": ["hello", "."],
                 "terminator": ".",
                 "special_forms": [],
+                "runs": [2],
                 "lang": "eng",
             }
         ],
@@ -813,7 +840,15 @@ def test_terminator_word_is_stripped_by_position_not_by_recognition() -> None:
     this test would fail.
     """
     response, nlp = _run_eng(
-        [{"words": ["hello"], "terminator": ".", "special_forms": [], "lang": "eng"}],
+        [
+            {
+                "words": ["hello"],
+                "terminator": ".",
+                "special_forms": [],
+                "runs": [1],
+                "lang": "eng",
+            }
+        ],
         [_raw_sentence(["hello", "."])],
     )
 
@@ -871,6 +906,7 @@ def test_batch_infer_morphosyntax_names_the_cantonese_variant(monkeypatch) -> No
                     "words": ["食"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "yue",
                 }
             ],

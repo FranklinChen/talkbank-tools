@@ -29,16 +29,13 @@ fn morphotag_options(
 
 #[tokio::test]
 async fn option_morphotag_cantonese_retokenize_cache_isolated_from_preserve_mode() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "yue",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let files = vec![FilePayload {
         filename: "yue_cache_key.cha".into(),
@@ -74,8 +71,9 @@ async fn option_morphotag_cantonese_retokenize_cache_isolated_from_preserve_mode
         || info_b.status == JobStatus::Failed
         || info_c.status == JobStatus::Failed
     {
-        eprintln!("SKIP: Cantonese cache isolation test needs the yue morphotag backend");
-        return;
+        panic!(
+            "PREREQUISITE MISSING: Cantonese cache isolation test needs the yue morphotag backend"
+        )
     }
 
     assert_completed_without_errors("yue_cache_preserve_first", &info_a, &results_a);
@@ -95,7 +93,7 @@ async fn option_morphotag_cantonese_retokenize_cache_isolated_from_preserve_mode
 
 #[tokio::test]
 async fn option_morphotag_multilingual_warm_cache_preserves_per_language_outputs() {
-    let Some(session) = require_live_direct_warmed_many(
+    let session = require_live_direct_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
@@ -103,10 +101,7 @@ async fn option_morphotag_multilingual_warm_cache_preserves_per_language_outputs
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let files = vec![
         FilePayload {
@@ -137,10 +132,9 @@ async fn option_morphotag_multilingual_warm_cache_preserves_per_language_outputs
     .await;
 
     if info_a.status == JobStatus::Failed || info_b.status == JobStatus::Failed {
-        eprintln!(
-            "SKIP: multilingual cache test needs both English and Spanish morphotag backends"
-        );
-        return;
+        panic!(
+            "PREREQUISITE MISSING: multilingual cache test needs both English and Spanish morphotag backends"
+        )
     }
 
     assert_completed_without_errors("multilingual_cache_cold", &info_a, &results_a);
@@ -174,16 +168,13 @@ async fn option_morphotag_multilingual_warm_cache_preserves_per_language_outputs
 
 #[tokio::test]
 async fn option_override_media_cache_forces_recompute() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let input = "\
 @UTF8

@@ -644,12 +644,34 @@ fn roundtrip_json() {
 
 // ---- Memory tier overrides ----
 
+/// A host size for the tier tests below: every one of them either declares
+/// its tier or tests only the startup overrides, so the RAM is immaterial and
+/// fixed here rather than read from the machine running the test. (Reading
+/// the real host is `HostSnapshot`'s test.)
+const ANY_HOST_MB: u64 = 64_000;
+
 #[test]
-fn resolved_tier_defaults_to_detect() {
+fn a_declared_tier_and_given_facts_never_read_the_host() {
+    // `memory_tier_for_total` sizes from the facts it is handed: the same
+    // config gives different tiers for different hosts, and a declared tier
+    // wins over any of them.
     let cfg = ServerConfig::default();
-    let tier = cfg.resolved_memory_tier();
-    let detected = crate::types::runtime::MemoryTier::detect();
-    assert_eq!(tier.kind, detected.kind);
+    assert_eq!(
+        cfg.memory_tier_for_total(16_000).kind,
+        crate::types::runtime::MemoryTierKind::Small
+    );
+    assert_eq!(
+        cfg.memory_tier_for_total(256_000).kind,
+        crate::types::runtime::MemoryTierKind::Fleet
+    );
+    let declared = ServerConfig {
+        memory_tier: Some(crate::types::runtime::MemoryTierKind::Small),
+        ..Default::default()
+    };
+    assert_eq!(
+        declared.memory_tier_for_total(256_000).kind,
+        crate::types::runtime::MemoryTierKind::Small
+    );
 }
 
 #[test]
@@ -658,7 +680,7 @@ fn resolved_tier_override_small() {
         memory_tier: Some(crate::types::runtime::MemoryTierKind::Small),
         ..Default::default()
     };
-    let tier = cfg.resolved_memory_tier();
+    let tier = cfg.memory_tier_for_total(ANY_HOST_MB);
     assert_eq!(tier.kind, crate::types::runtime::MemoryTierKind::Small);
     assert_eq!(tier.headroom_mb.0, 2_000);
     assert_eq!(tier.stanza_startup_mb.0, 3_000);
@@ -671,7 +693,7 @@ fn resolved_tier_individual_startup_overrides() {
         gpu_startup_mb: Some(crate::api::MemoryMb(8_000)),
         ..Default::default()
     };
-    let tier = cfg.resolved_memory_tier();
+    let tier = cfg.memory_tier_for_total(ANY_HOST_MB);
     assert_eq!(tier.stanza_startup_mb.0, 5_000);
     assert_eq!(tier.gpu_startup_mb.0, 8_000);
     // IO should be unchanged (None falls through to tier default)
@@ -701,7 +723,7 @@ fn startup_mb_overrides_are_optional_not_sentinel() {
         io_startup_mb: None,
         ..Default::default()
     };
-    let tier_none = cfg_none.resolved_memory_tier();
+    let tier_none = cfg_none.memory_tier_for_total(ANY_HOST_MB);
     assert_eq!(tier_none.gpu_startup_mb.0, 6_000, "Small-tier GPU default");
     assert_eq!(
         tier_none.stanza_startup_mb.0, 3_000,
@@ -717,7 +739,7 @@ fn startup_mb_overrides_are_optional_not_sentinel() {
         io_startup_mb: Some(MemoryMb(9_999)),
         ..Default::default()
     };
-    let tier_some = cfg_some.resolved_memory_tier();
+    let tier_some = cfg_some.memory_tier_for_total(ANY_HOST_MB);
     assert_eq!(tier_some.gpu_startup_mb.0, 7_777);
     assert_eq!(tier_some.stanza_startup_mb.0, 8_888);
     assert_eq!(tier_some.io_startup_mb.0, 9_999);
@@ -730,7 +752,7 @@ memory_tier: small
 stanza_startup_mb: 4000
 "#;
     let cfg: ServerConfig = yaml_serde::from_str(yaml).unwrap();
-    let tier = cfg.resolved_memory_tier();
+    let tier = cfg.memory_tier_for_total(ANY_HOST_MB);
     assert_eq!(tier.kind, crate::types::runtime::MemoryTierKind::Small);
     // Stanza overridden from small default (3000) to 4000
     assert_eq!(tier.stanza_startup_mb.0, 4_000);

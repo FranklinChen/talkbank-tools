@@ -197,7 +197,7 @@ impl ConfigAudit {
             max_total_workers: KnobAudit::new(r.max_total_workers, cfg.max_total_workers),
             max_concurrent_jobs: KnobAudit::new(r.max_concurrent_jobs, cfg.max_concurrent_jobs),
             memory_gate_mb: KnobAudit::new(
-                cfg.resolved_memory_tier().headroom_mb.0,
+                cfg.memory_tier_for_total(facts.ram_total_mb).headroom_mb.0,
                 cfg.memory_gate_mb.map(|m| m.0),
             ),
             max_workers_per_key: mwpk_audit,
@@ -378,18 +378,25 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
     record(&mut results, "morphosyntax_smoke", start, morpho_check);
 
     // --- Check 5: Memory ---
-    let mem_info = sysinfo::System::new_all();
-    let total_mb = mem_info.total_memory() / (1024 * 1024);
-    let available_mb = mem_info.available_memory() / (1024 * 1024);
-    results.push(CheckResult {
-        name: "memory".into(),
-        status: if available_mb >= 4096 {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Fail
+    let memory_reading = crate::host_memory::read_system_memory()
+        .map(|memory| (memory.total_mb, memory.available_mb));
+    results.push(match memory_reading {
+        Ok((total, available)) => CheckResult {
+            name: "memory".into(),
+            status: if available.0 >= 4096 {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            detail: format!("{} MB available / {} MB total", available.0, total.0),
+            duration_ms: None,
         },
-        detail: format!("{available_mb} MB available / {total_mb} MB total"),
-        duration_ms: None,
+        Err(error) => CheckResult {
+            name: "memory".into(),
+            status: CheckStatus::Fail,
+            detail: error.to_string(),
+            duration_ms: None,
+        },
     });
 
     // --- Server config ---
@@ -417,7 +424,7 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
     };
 
     // --- Host-facts report ---
-    let host_facts_report = build_host_facts_report(&config);
+    let host_facts_report = build_host_facts_report(&config)?;
 
     // --- Output ---
     let any_fail = results
@@ -485,7 +492,7 @@ fn run_host_facts_only(
     format: &crate::cli::args::DoctorFormat,
     warnings_as_errors: bool,
 ) -> Result<(), CliError> {
-    let report = build_host_facts_report(&load_doctor_server_config()?);
+    let report = build_host_facts_report(&load_doctor_server_config()?)?;
     let any_validation_error = !report.validation.errors.is_empty();
     let any_warning = !report.validation.warnings.is_empty();
     match format {
@@ -548,7 +555,7 @@ fn check_exit_outcome(
 /// listing the valid choices.
 fn run_explain(knob: &str, format: &crate::cli::args::DoctorFormat) -> Result<(), CliError> {
     let config = load_doctor_server_config()?;
-    let facts = RealHostFactsSource.detect();
+    let facts = RealHostFactsSource.detect()?;
     let explanation = explain_knob(knob, &config, &facts).ok_or_else(|| {
         CliError::InvalidArgument(format!(
             "unknown knob `{knob}`; valid choices: \
@@ -718,12 +725,12 @@ fn explain_knob(
             })
         }
         "memory_gate_mb" => {
-            // `memory_gate_mb` falls through to the tier-derived
-            // headroom rather than a `recommend_*` function (the
-            // tier resolution honors the operator's `memory_tier`
-            // override).
+            // `memory_gate_mb` resolves to the operator's value or the
+            // fixed OS-protection floor; the recommendation shown beside
+            // it is the tier's headroom (the tier honors the operator's
+            // `memory_tier` override).
             let resolved = cfg.resolved_memory_gate_mb();
-            let recommendation_value = cfg.resolved_memory_tier().headroom_mb;
+            let recommendation_value = cfg.memory_tier_for_total(facts.ram_total_mb).headroom_mb;
             let source = if cfg.memory_gate_mb.is_some() {
                 ValueSource::OperatorOverride
             } else {
@@ -734,9 +741,9 @@ fn explain_knob(
                 resolved_value: format!("{} MB", resolved.0),
                 source,
                 recommendation: format!("{} MB (from MemoryTier headroom)", recommendation_value.0),
-                rule: "tier-derived host-memory headroom; falls through \
-                       to resolved_memory_tier().headroom_mb when no \
-                       operator override is set"
+                rule: "operator override if set, otherwise the fixed \
+                       OS-protection floor; the recommendation is the \
+                       memory tier's headroom"
                     .to_owned(),
                 facts_used: format!(
                     "memory_tier = {:?}, ram_total_mb = {}",
@@ -769,7 +776,9 @@ fn print_explanation_human(e: &KnobExplanation) {
 /// Production entry point: loads the deployed `server.yaml` and
 /// detects facts via [`RealHostFactsSource`], then delegates to the
 /// pure [`build_host_facts_report_from`] for the actual assembly.
-fn build_host_facts_report(config: &crate::config::ServerConfig) -> HostFactsReport {
+fn build_host_facts_report(
+    config: &crate::config::ServerConfig,
+) -> Result<HostFactsReport, crate::host_memory::HostUnreadable> {
     build_host_facts_report_from(config, &RealHostFactsSource)
 }
 
@@ -781,17 +790,17 @@ fn build_host_facts_report(config: &crate::config::ServerConfig) -> HostFactsRep
 fn build_host_facts_report_from(
     config: &crate::config::ServerConfig,
     source: &dyn HostFactsSource,
-) -> HostFactsReport {
-    let detected = source.detect();
+) -> Result<HostFactsReport, crate::host_memory::HostUnreadable> {
+    let detected = source.detect()?;
     let overrides = host_facts::ConfigOverrides::from(config);
     let effective = EffectiveConfig::resolve(&overrides, &detected);
     let validation = host_facts::validate(config, &detected);
     let summary = EffectiveConfigSummary::from_effective(&effective, config, &detected);
-    HostFactsReport {
+    Ok(HostFactsReport {
         detected,
         effective: summary,
         validation: ValidationReport::from_validation(&validation),
-    }
+    })
 }
 
 /// Best-effort load of the deployed `server.yaml` for validation. A
@@ -1336,7 +1345,8 @@ fn smoke_batch_items(
         talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(lang))
             .map_err(|error| format!("doctor language context: {error}"))?,
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
-    );
+    )
+    .map_err(|error| format!("doctor payload collection: {error}"))?;
     if collection.batch_items.is_empty() {
         return Err(
             "the probe transcript produced no batch items; the payload builder \
@@ -1631,19 +1641,16 @@ mod tests {
     /// flow through unchanged.
     #[test]
     fn snapshot_host_facts_report_default_apple_silicon_json() {
-        // Pin memory_tier so resolved_memory_tier() does not call
-        // MemoryTier::detect() (which reads live host RAM via sysinfo
-        // and is not driven by MockHostFactsSource). Without this,
-        // the audit's `memory_gate_mb.recommended` shifts with the
-        // host's RAM tier and the snap diverges between Apple Silicon
-        // dev machines (Fleet, 8000 MB) and small CI runners (Small,
-        // 2000 MB).
+        // The tier comes from the mock's RAM (`memory_tier_for_total`),
+        // never the machine running the test; the declared Fleet tier
+        // pins the case this snapshot records, a declared tier winning
+        // over the facts.
         let cfg = ServerConfig {
             memory_tier: Some(crate::types::runtime::MemoryTierKind::Fleet),
             ..Default::default()
         };
         let source = host_facts::MockHostFactsSource::new(apple_silicon_64gb());
-        let report = build_host_facts_report_from(&cfg, &source);
+        let report = build_host_facts_report_from(&cfg, &source).expect("mock facts");
         insta::assert_json_snapshot!("host_facts_report_default_apple_silicon", report);
     }
 
@@ -1660,7 +1667,7 @@ mod tests {
             ..Default::default()
         };
         let source = host_facts::MockHostFactsSource::new(apple_silicon_64gb());
-        let report = build_host_facts_report_from(&cfg, &source);
+        let report = build_host_facts_report_from(&cfg, &source).expect("mock facts");
         insta::assert_json_snapshot!("host_facts_report_with_warning_apple_silicon", report);
     }
 

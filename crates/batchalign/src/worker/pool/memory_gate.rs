@@ -102,15 +102,14 @@ pub(super) struct MemoryConstrained {
     pub(super) threshold_mb: u64,
 }
 
-/// Read the host's currently-available memory in MB.
-///
-/// Delegates to [`crate::worker::memory_guard::available_memory_mb`]
-/// so the admission gate and the in-spawn `memory_guard` agree on
-/// what "available" means: important on macOS, where naive
-/// `sysinfo::available_memory()` undercounts by excluding inactive
-/// pages that the kernel can reclaim on demand.
-fn current_available_memory_mb() -> u64 {
-    crate::worker::memory_guard::available_memory_mb()
+/// Why the memory gate refused a spawn.
+#[derive(Debug)]
+pub(super) enum GateRefusal {
+    /// The projection fell below the floor: wait for memory to free.
+    Constrained(MemoryConstrained),
+    /// The host would not report its memory: nothing to project from, and
+    /// waiting will not change that.
+    Unreadable(crate::host_memory::HostUnreadable),
 }
 
 /// Tier-scaled minimum-free floor in MB. The 2048-MB hardcode the
@@ -221,18 +220,21 @@ pub(super) fn check_memory_saturation_with_state(
     state: PoolGateState,
     threshold_mb: u64,
     reservation_mb: u64,
-) -> Result<(), MemoryConstrained> {
+) -> Result<(), GateRefusal> {
     if state == PoolGateState::ColdStart {
         return Ok(());
     }
-    let available_mb = current_available_memory_mb();
+    let available_mb = crate::host_memory::read_system_memory()
+        .map_err(GateRefusal::Unreadable)?
+        .available_mb
+        .0;
     let projected_after_spawn_mb = available_mb.saturating_sub(reservation_mb);
     if projected_after_spawn_mb <= threshold_mb {
-        Err(MemoryConstrained {
+        Err(GateRefusal::Constrained(MemoryConstrained {
             available_mb,
             reservation_mb,
             threshold_mb,
-        })
+        }))
     } else {
         Ok(())
     }
@@ -244,10 +246,7 @@ pub(super) fn check_memory_saturation_with_state(
 /// without modification. Production callers must use the
 /// state-aware variant.
 #[cfg(test)]
-fn check_memory_saturation(
-    threshold_mb: u64,
-    reservation_mb: u64,
-) -> Result<(), MemoryConstrained> {
+fn check_memory_saturation(threshold_mb: u64, reservation_mb: u64) -> Result<(), GateRefusal> {
     check_memory_saturation_with_state(PoolGateState::Warm, threshold_mb, reservation_mb)
 }
 
@@ -463,7 +462,7 @@ mod tests {
     #[test]
     fn rejects_when_floor_alone_exceeds_available() {
         let result = check_memory_saturation(u64::MAX, 0);
-        let Err(constrained) = result else {
+        let Err(GateRefusal::Constrained(constrained)) = result else {
             panic!("expected MemoryConstrained rejection at threshold=u64::MAX");
         };
         assert_eq!(constrained.threshold_mb, u64::MAX);
@@ -476,7 +475,7 @@ mod tests {
     #[test]
     fn rejects_when_reservation_alone_exceeds_available() {
         let result = check_memory_saturation(0, u64::MAX);
-        let Err(constrained) = result else {
+        let Err(GateRefusal::Constrained(constrained)) = result else {
             panic!("expected rejection when reservation > available");
         };
         assert_eq!(constrained.reservation_mb, u64::MAX);

@@ -383,7 +383,7 @@ impl<D: AnalysisScope> Analysis<Admitted, D> {
             &self.language.model,
             languages.as_ref(),
             options.multilingual,
-        );
+        )?;
         let hints = if options.hints.should_apply() {
             HintPlan::Captured(collect_pos_hints(&self.chat))
         } else {

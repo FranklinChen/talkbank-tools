@@ -240,7 +240,7 @@ mod tests {
     /// not a worker failure or a silent hang.
     #[tokio::test]
     async fn cancelled_before_dispatch_returns_cancelled_without_attempting() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let lang = LanguageCode3::eng();
         let request = minimal_asr_request();
         let cancel_token = CancellationToken::new();
@@ -262,7 +262,7 @@ mod tests {
 
     /// [`Cancellation::NotWired`] can never produce `Err(Cancelled)`: its
     /// `cancelled()` future never resolves, so the dispatch runs to its
-    /// own outcome (here, a worker failure, since `PoolConfig::default()`
+    /// own outcome (here, a worker failure, since `PoolConfig::for_tests()`
     /// has no engine registered) rather than being interrupted. This is
     /// the outcome-type half of the reviewer's ask: a `NotWired` call
     /// cannot be cancelled, and the returned `Result` proves it by never
@@ -300,7 +300,7 @@ mod tests {
     /// `Pending`.
     #[tokio::test]
     async fn not_wired_dispatch_is_not_spuriously_resolved() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let lang = LanguageCode3::eng();
         let request = minimal_text_request();
 
@@ -328,7 +328,7 @@ mod tests {
 
     /// A cancellation that fires while the FIRST attempt is still being
     /// awaited must win the race and stop the loop, not wait for that
-    /// attempt to finish on its own. `PoolConfig::default()` with no
+    /// attempt to finish on its own. `PoolConfig::for_tests()` with no
     /// engine registered makes the attempt itself take real, unbounded
     /// time (spawning/loading a worker that cannot succeed).
     ///
@@ -342,7 +342,7 @@ mod tests {
     /// rather than a call that had not started yet.
     #[tokio::test]
     async fn cancelled_during_the_first_attempt_stops_the_loop() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let lang = LanguageCode3::eng();
         let request = minimal_text_request();
         let cancel_token = CancellationToken::new();

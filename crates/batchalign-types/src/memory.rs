@@ -135,14 +135,6 @@ impl MemoryTier {
             max_suggested_workers: max_workers,
         }
     }
-
-    /// Detect the tier from actual system RAM via sysinfo.
-    pub fn detect() -> Self {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let total_mb = sys.total_memory() / (1024 * 1024);
-        Self::from_total_mb(total_mb)
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -16,18 +16,13 @@ fn media_header(chat: &str, label: &str) -> String {
 
 #[tokio::test]
 async fn golden_benchmark_eng() {
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Asr,
         "Direct session does not support ASR infer (required for benchmark)",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
-    let Some(fixtures) = prepare_audio_fixtures(session.state_dir()) else {
-        return;
-    };
+    let fixtures = prepare_audio_fixtures(session.state_dir());
 
     let out_dir = session.state_dir().join("out_benchmark");
     std::fs::create_dir_all(&out_dir).expect("mkdir");

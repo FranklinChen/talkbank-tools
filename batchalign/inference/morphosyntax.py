@@ -113,7 +113,31 @@ class MorphosyntaxBatchItem(BaseModel):
     # language reach Stanza looking well-formed, which is the failure mode
     # that silently mixes languages rather than reporting anything.
     special_forms: list[list[str | None]]
+    # Where a tokenizer may merge the words: run lengths partitioning
+    # `words`, each run a stretch with nothing (a retrace, a pause, a
+    # bracket edge) between its words on the main tier. Required: a missing
+    # partition defaulting to "one run" is exactly the joined string that
+    # let the Cantonese segmenter merge across retraces.
+    runs: list[int]
     lang: LanguageCode
+
+    @model_validator(mode="after")
+    def _runs_must_partition_the_words(self) -> MorphosyntaxBatchItem:
+        """Every run is nonempty and together they cover the words exactly."""
+        if any(run < 1 for run in self.runs) or sum(self.runs) != len(self.words):
+            raise ValueError(
+                f"runs {self.runs} do not partition the {len(self.words)} words"
+            )
+        return self
+
+    def word_runs(self) -> list[list[str]]:
+        """The words grouped into their runs, in order."""
+        grouped: list[list[str]] = []
+        start = 0
+        for run in self.runs:
+            grouped.append(self.words[start : start + run])
+            start += run
+        return grouped
 
     @model_validator(mode="after")
     def _words_must_not_contain_the_terminator(self) -> MorphosyntaxBatchItem:
@@ -208,6 +232,40 @@ class UnrealignedFallback:
     lang_code: LanguageCode
 
 
+class TokenizationOwner(StrEnum):
+    """Who decides a language group's word boundaries, resolved once per group.
+
+    `--retokenize` asks for model word boundaries, but WHICH model draws them
+    differs by language, and the difference decides how the terminator cue is
+    taken back out:
+
+    - CHAT: no retokenize; the transcript's words are the boundaries.
+    - PYCANTONESE: Cantonese retokenize. PyCantonese segments the words and
+      the Stanza pipeline is pretokenized, so the boundaries handed to Stanza
+      are still ours and the cue is the last one by construction.
+    - STANZA: any other retokenize. Stanza's own tokenizer (and MWT) draws
+      them, so only Stanza knows where the cue landed.
+
+    PYCANTONESE used to be treated as STANZA. The cue then came back as an
+    ordinary token, the PyCantonese POS override relabelled `+...` as a noun
+    or verb, the punctuation test that was guessing the cue no longer matched,
+    and the terminator was written into the transcript as a word.
+    """
+
+    CHAT = "chat"
+    PYCANTONESE = "pycantonese"
+    STANZA = "stanza"
+
+    @classmethod
+    def of(cls, *, retokenize: bool, lang: LanguageCode) -> TokenizationOwner:
+        """The owner for a group in `lang`; one answer for segmentation and mode."""
+        if not retokenize:
+            return cls.CHAT
+        if lang == "yue":
+            return cls.PYCANTONESE
+        return cls.STANZA
+
+
 # Named `RealignmentMode`, not `TokenizationMode`, because Rust already owns
 # that name for a COARSER and different fact: `TokenizationMode::{Preserve,
 # StanzaRetokenize}` is what the CALLER asked for. This is the resolved answer
@@ -222,7 +280,7 @@ RealignmentMode = (
 def _realignment_mode(
     *,
     context: TokenizerContext | None,
-    stanza_owns_tokenization: bool,
+    owner: TokenizationOwner,
     inputs: list[StanzaInput],
     lang_code: LanguageCode,
 ) -> RealignmentMode:
@@ -234,11 +292,18 @@ def _realignment_mode(
     As a sum type it is a named variant instead, and every consumer must say
     what it does in that case rather than falling through a condition.
     """
-    if stanza_owns_tokenization:
-        return StanzaOwnsTokenization()
-    if context is None:
-        return UnrealignedFallback(lang_code=lang_code)
-    return Realigned(context=context, inputs=tuple(inputs))
+    match owner:
+        case TokenizationOwner.STANZA:
+            return StanzaOwnsTokenization()
+        case TokenizationOwner.CHAT | TokenizationOwner.PYCANTONESE:
+            # Our boundaries either way: the transcript's, or PyCantonese's
+            # segments of it. Holding Stanza to them is what lets the cue be
+            # projected out by position rather than recognised by its tag.
+            if context is None:
+                return UnrealignedFallback(lang_code=lang_code)
+            return Realigned(context=context, inputs=tuple(inputs))
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @contextlib.contextmanager
@@ -382,18 +447,21 @@ JSONObject = dict[str, WorkerJSONValue]
 # ---------------------------------------------------------------------------
 
 
-def _segment_cantonese(words: list[str]) -> list[str]:
+def _segment_cantonese(runs: list[list[str]]) -> list[str]:
     """Segment Cantonese per-character tokens into words using PyCantonese.
 
-    Only re-segments contiguous runs of single-CJK-character tokens.
-    Existing multi-character tokens are preserved as-is to avoid breaking
-    word boundaries that are already correct (e.g., from Tencent ASR or
-    hand-transcribed corpora).
+    ``runs`` are the utterance's words grouped by the main tier's runs
+    (``MorphosyntaxBatchItem.word_runs``). Each run is segmented on its own,
+    so a segmented word can only join characters with nothing between them
+    in the transcript: PyCantonese given the whole utterance as one string
+    merged characters on either side of a retrace or untranscribed material,
+    and the rebuild had to refuse the utterance.
 
-    This prevents the bug where joining all words into one string causes
-    PyCantonese to merge tokens across word boundaries (e.g., 啦+飯+啦
-    becoming 啦飯啦).
+    Only per-character input is re-segmented. An utterance that already has
+    a multi-character CJK word keeps its words as written, so word
+    boundaries a transcriber or ASR engine drew are never redrawn.
     """
+    words = [word for run in runs for word in run]
     if not words:
         return []
     import pycantonese
@@ -409,11 +477,13 @@ def _segment_cantonese(words: list[str]) -> list[str]:
         # This prevents merging tokens across existing boundaries.
         return list(words)
 
-    # All CJK tokens are single characters, safe to join and segment.
-    text = "".join(words)
-    if not text:
-        return []
-    return pycantonese.segment(text)
+    # All CJK tokens are single characters: segment each run on its own.
+    return [
+        word
+        for run in runs
+        if (text := "".join(run))
+        for word in pycantonese.segment(text)
+    ]
 
 
 def _override_pos_with_pycantonese(
@@ -1073,9 +1143,15 @@ def batch_infer_morphosyntax(
         words = list(item.words)
         item_lang = item.lang or req.lang
 
-        # Apply PyCantonese word segmentation for Cantonese retokenize
-        if req.retokenize and item_lang in ("yue",):
-            words = _segment_cantonese(words)
+        # The same owner the group's mode is resolved from below, so the
+        # words cannot be segmented by one rule and realigned by another.
+        match TokenizationOwner.of(retokenize=req.retokenize, lang=item_lang):
+            case TokenizationOwner.PYCANTONESE:
+                words = _segment_cantonese(item.word_runs())
+            case TokenizationOwner.CHAT | TokenizationOwner.STANZA:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
 
         # Rust cleaned_text() already handles CHAT notation. Stripping parens
         # here silently drops bare "(" / ")" words, causing MOR count
@@ -1179,13 +1255,14 @@ def batch_infer_morphosyntax(
                     tok_ctx = fallback.context
                     break
 
-        # `retokenize` is the whole condition: `use_retok_pipeline` is a
-        # narrowing of it (Mandarin, both job and utterance), so it adds
-        # nothing here. Under it Stanza owns tokenization and we want its MWT
-        # expansion (gonna -> gon+na, don't -> do+n't) to pass through.
+        # The owner, not `retokenize` alone: `use_retok_pipeline` is a
+        # narrowing of STANZA (Mandarin, both job and utterance), so it adds
+        # nothing here. Under STANZA we want its MWT expansion (gonna ->
+        # gon+na, don't -> do+n't) to pass through; under PYCANTONESE the
+        # boundaries are ours and Stanza is held to them.
         mode = _realignment_mode(
             context=tok_ctx,
-            stanza_owns_tokenization=req.retokenize,
+            owner=TokenizationOwner.of(retokenize=req.retokenize, lang=lang_code),
             inputs=lang_items,
             lang_code=lang_code,
         )

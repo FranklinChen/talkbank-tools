@@ -5,21 +5,16 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn avqi_server_eng_pair() {
-    let Some(server) = require_live_server_warmed(
+    let server = require_live_server_warmed(
         InferTask::Avqi,
         ReleasedCommand::Avqi,
         "eng",
         "live server does not support AVQI infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_avqi_fixture_job(server.state_dir(), "avqi_server_eng") else {
-        return;
-    };
+    let fixture = prepare_avqi_fixture_job(server.state_dir(), "avqi_server_eng");
 
     let (info, _outputs) = jobs
         .submit_paths_job(

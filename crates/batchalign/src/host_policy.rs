@@ -6,7 +6,6 @@
 //! minimize resident memory.
 
 use crate::command_model::ConstrainedHostPolicy;
-use crate::config::ServerConfig;
 use crate::runtime::{MemoryTier, MemoryTierKind};
 use crate::worker::WorkerBootstrapMode;
 
@@ -48,11 +47,6 @@ impl HostExecutionPolicy {
                 bootstrap_mode: WorkerBootstrapMode::Profile,
             },
         }
-    }
-
-    /// Resolve host policy from the validated server configuration.
-    pub fn from_server_config(config: &ServerConfig) -> Self {
-        Self::from_memory_tier(config.resolved_memory_tier())
     }
 
     /// Whether this host should take the constrained-memory path.

@@ -212,8 +212,11 @@ behavior change. The TOML constants remain as the Large/Fleet
 baseline; the tier system scales them down for smaller machines.
 
 **Source:** `crates/batchalign/src/types/runtime.rs`,
-`MemoryTier::from_total_mb()` (pure, testable) and
-`MemoryTier::detect()` (reads sysinfo).
+`MemoryTier::from_total_mb()` (pure, testable), applied to the one reading
+of the host each process takes at its composition root
+(`HostSnapshot::read` in `crates/batchalign/src/host_facts/snapshot.rs`).
+A host that will not report its memory stops the process with an error; it
+is never sized as if it had none.
 
 ### Why small machines need smaller budgets
 
@@ -241,7 +244,7 @@ flowchart TD
     start["CLI: batchalign3 morphotag corpus/ output/"]
     daemon["ensure_daemon()\n(daemon.rs)"]
     spawn_server["spawn batchalign3 serve start\n--foreground"]
-    tier_detect["MemoryTier::detect()\n(runtime.rs)"]
+    tier_detect["HostSnapshot::read()\n(host_facts/snapshot.rs)"]
     bind["Bind TCP port immediately\n/health available\nno Python running yet"]
     health_poll["CLI polls /health\n(passes instantly)"]
     job_submit["POST /jobs\n(accepted optimistically)"]

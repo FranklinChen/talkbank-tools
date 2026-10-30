@@ -92,7 +92,12 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
     eprintln!();
 
     let loads_on_demand = launch.loads_on_demand();
-    let config = launch.into_config(python);
+    // The dump records the launch, not the host; size it as a server on
+    // this host would, from the operator's config.
+    let server_config =
+        crate::config::load_config_from_layout(&crate::config::RuntimeLayout::from_env(), None)?;
+    let memory_tier = crate::host_facts::HostSnapshot::read(&server_config)?.tier();
+    let config = launch.into_config(python, memory_tier);
     let ensure_task_timeout = config.ready_timeout_s;
     let mut worker = WorkerHandle::spawn(config)
         .await
@@ -143,7 +148,7 @@ mod tests {
     /// replay rebuilds the very config the pool spawned.
     #[test]
     fn a_replay_rebuilds_the_worker_the_dump_records() {
-        let mut runtime = WorkerRuntimeConfig::default()
+        let mut runtime = WorkerRuntimeConfig::local(crate::worker::handle::test_memory_tier())
             .with_bootstrap_mode(crate::worker::WorkerBootstrapMode::LazyProfile);
         runtime.force_cpu = true;
         let original = WorkerConfig {
@@ -152,13 +157,16 @@ mod tests {
             lang: crate::api::WorkerLanguage::parse_untrusted("yue").expect("yue"),
             engine_overrides: r#"{"fa":"wav2vec_canto"}"#.to_owned(),
             runtime,
-            ..WorkerConfig::default()
+            ..WorkerConfig::for_tests()
         };
         let dump = dump_of(&original);
 
         let replayed = replay_launch(&dump, None)
             .expect("the dump records its launch")
-            .into_config("python3".to_owned());
+            .into_config(
+                "python3".to_owned(),
+                crate::worker::handle::test_memory_tier(),
+            );
         assert_eq!(WorkerLaunch::of(&replayed), WorkerLaunch::of(&original));
         assert!(WorkerLaunch::of(&original).loads_on_demand());
         assert_eq!(

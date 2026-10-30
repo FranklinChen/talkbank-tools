@@ -8,16 +8,13 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn golden_coref_eng() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Coref,
         ReleasedCommand::Coref,
         "eng",
         "Direct session does not support coref infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let options = CommandOptions::Coref(CorefOptions {
         common: CommonOptions {
@@ -44,7 +41,7 @@ async fn golden_coref_eng() {
         info.error
     );
     let file = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "coref_eng",
     );
     if has_user_defined_tier(&file, "xcoref") {
@@ -54,22 +51,19 @@ async fn golden_coref_eng() {
     }
     assert_golden_snapshot!(
         "coref_eng",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }
 
 #[tokio::test]
 async fn golden_coref_spa_passthrough() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Coref,
         ReleasedCommand::Coref,
         "eng",
         "Direct session does not support coref infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let options = CommandOptions::Coref(CorefOptions {
         common: CommonOptions {
@@ -96,7 +90,7 @@ async fn golden_coref_spa_passthrough() {
         info.error
     );
     let file = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "coref_spa_passthrough",
     );
     assert!(
@@ -105,6 +99,6 @@ async fn golden_coref_spa_passthrough() {
     );
     assert_golden_snapshot!(
         "coref_spa_passthrough",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }

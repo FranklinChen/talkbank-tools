@@ -22,7 +22,7 @@ fn morphotag_options(skipmultilang: bool) -> CommandOptions {
 
 #[tokio::test]
 async fn option_morphotag_skipmultilang() {
-    let Some(session) = require_live_direct_warmed_many(
+    let session = require_live_direct_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
@@ -30,10 +30,7 @@ async fn option_morphotag_skipmultilang() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info_a, results_a) = submit_and_complete_direct(
         &session,
@@ -59,8 +56,9 @@ async fn option_morphotag_skipmultilang() {
     .await;
 
     if info_a.status == JobStatus::Failed || info_b.status == JobStatus::Failed {
-        eprintln!("SKIP: skipmultilang differential test needs both English and Spanish models");
-        return;
+        panic!(
+            "PREREQUISITE MISSING: skipmultilang differential test needs both English and Spanish models"
+        )
     }
 
     assert_completed_without_errors("skipmultilang_false", &info_a, &results_a);
@@ -89,7 +87,7 @@ async fn option_morphotag_skipmultilang() {
 
 #[tokio::test]
 async fn option_morphotag_skipmultilang_only_skips_multilingual_neighbors() {
-    let Some(session) = require_live_direct_warmed_many(
+    let session = require_live_direct_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
@@ -97,10 +95,7 @@ async fn option_morphotag_skipmultilang_only_skips_multilingual_neighbors() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = submit_and_complete_direct(
         &session,

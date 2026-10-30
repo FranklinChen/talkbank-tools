@@ -74,8 +74,9 @@ def _default_registry_path() -> Path:
     state_dir = os.environ.get("BATCHALIGN_STATE_DIR", "")
     if state_dir.strip():
         return Path(state_dir) / "workers.json"
-    home = Path.home()
-    return home / ".batchalign3" / "workers.json"
+    from batchalign.config import batchalign_home
+
+    return batchalign_home() / ".batchalign3" / "workers.json"
 
 
 # ---------------------------------------------------------------------------

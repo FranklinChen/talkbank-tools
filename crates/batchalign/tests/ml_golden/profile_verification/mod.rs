@@ -10,7 +10,8 @@
 //! - FA models (Wave2Vec) for GPU profile tests
 //! - Stanza models for Stanza profile tests
 //!
-//! Tests skip gracefully if models are unavailable.
+//! The suite is opt-in, so a missing model fails the test rather than
+//! skipping it.
 //!
 //! Run: `cargo test -p batchalign --features ml-golden --test ml_golden`
 

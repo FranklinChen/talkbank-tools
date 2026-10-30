@@ -77,6 +77,11 @@ impl std::fmt::Display for WorkerWait {
 /// Errors arising from Python worker process management.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
+    /// The operating system would not report this host's memory, so no
+    /// worker is admitted on a guess about it. Not a capacity wait: the
+    /// request fails rather than queueing behind a pool that looks full.
+    #[error(transparent)]
+    HostUnreadable(#[from] crate::host_memory::HostUnreadable),
     /// A native operation was incorrectly routed to Python inference. This
     /// is a deterministic orchestration defect, not a missing model or a
     /// transient worker failure. Admission refuses before touching the pool.
@@ -479,6 +484,7 @@ impl WorkerError {
             | Self::ModelRuntime(_)
             | Self::RequestRefused(_)
             | Self::MemoryGuard(_)
+            | Self::HostUnreadable(_)
             | Self::NoWorker { .. }
             | Self::NativeCommand { .. }
             | Self::UnroutedGpuRequest { .. }

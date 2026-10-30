@@ -17,9 +17,10 @@ pub struct RuntimeLayout {
 impl RuntimeLayout {
     /// Resolve the runtime layout from ambient environment variables.
     pub fn from_env() -> Self {
+        let home = crate::runtime_paths::BatchalignHome::from_env();
         Self::from_sources(
             std::env::var("BATCHALIGN_STATE_DIR").ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
+            home.base().to_str(),
         )
     }
 

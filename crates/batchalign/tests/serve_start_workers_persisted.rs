@@ -22,7 +22,7 @@
 //! level.
 //!
 //! Run: `cargo test -p batchalign --test cli_integration_suite serve_start_workers_persisted::`
-//! (skips gracefully if Python with batchalign deps is unavailable).
+//! (fails, never skips, without the Python development environment).
 // Integration tests are exempt from the crate's deny-level panic lints,
 // matching the src/lib.rs `#![cfg_attr(test, allow(...))]` pattern
 // (see docs/panic-audit/).
@@ -42,7 +42,7 @@ use batchalign::api::{FilePayload, JobInfo, JobSubmission, NumSpeakers, Released
 use batchalign::api::{LanguageCode3, LanguageSpec};
 use batchalign::options::{AsrEngineName, CommandOptions, CommonOptions, TranscribeOptions};
 
-use cli_common::{CliHarness, poll_job_done, resolve_python};
+use cli_common::{CliHarness, poll_job_done};
 
 /// The detached server must receive the operator's worker override. Completed
 /// jobs respect that ceiling, with CPU and memory admission allowed to grant less.
@@ -50,10 +50,7 @@ use cli_common::{CliHarness, poll_job_done, resolve_python};
 /// missing forwarded override even when both runs would grant a single worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
-    let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign deps not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let daemon = DaemonSession(CliHarness::new());
     let harness = &daemon.0;
@@ -106,7 +103,7 @@ async fn serve_start_workers_propagates_to_submitted_job_num_workers() {
     .expect("started daemon publishes handshake");
     let port = handshake.bound_port().expect("daemon bound its port").get();
     let pid = sysinfo::Pid::from_u32(handshake.pid());
-    let mut processes = sysinfo::System::new();
+    let mut processes = sysinfo::System::new().expect("the test host reports processes");
     processes.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[pid]),
         true,
@@ -221,7 +218,7 @@ impl Drop for DaemonSession {
             .0
             .cmd()
             .args(["serve", "stop"])
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(CliRunBudget::ServeStop.as_duration())
             .output();
     }
 }

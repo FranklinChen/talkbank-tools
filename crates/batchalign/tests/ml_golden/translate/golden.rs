@@ -20,16 +20,13 @@ fn translate_options() -> CommandOptions {
 
 #[tokio::test]
 async fn golden_translate_eng_simple() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Translate,
         ReleasedCommand::Translate,
         "eng",
         "Direct session does not support translate infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -44,22 +41,19 @@ async fn golden_translate_eng_simple() {
     assert_completed_without_errors("translate_eng_simple", &info, &results);
     assert_golden_snapshot!(
         "translate_eng_simple",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }
 
 #[tokio::test]
 async fn golden_translate_spa_to_eng() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Translate,
         ReleasedCommand::Translate,
         "spa",
         "Direct session does not support translate infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -72,18 +66,17 @@ async fn golden_translate_spa_to_eng() {
         .await;
 
     if info.status == JobStatus::Failed {
-        eprintln!("SKIP: Spanish translate failed (model likely not downloaded)");
-        return;
+        panic!("PREREQUISITE MISSING: Spanish translate failed (model likely not downloaded)")
     }
 
     assert_completed_without_errors("translate_spa_to_eng", &info, &results);
     let file = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "translate_spa_to_eng",
     );
     assert!(has_user_defined_tier(&file, "xtra"));
     assert_golden_snapshot!(
         "translate_spa_to_eng",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }

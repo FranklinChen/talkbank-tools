@@ -24,10 +24,13 @@ from batchalign.worker._pipeline_cache import static_pipelines
 
 @pytest.mark.golden
 def test_retokenize_retrace_utterance_returns_correct_count() -> None:
-    """Stanza preserves 6 words plus the utterance terminator.
+    """Stanza returns the 6 words as sent, and the terminator cue is taken back.
 
     The words are: 呢 度 食飯 啦 飯 啦 (retrace <下次> [/] already removed
-    by Rust before reaching Python).
+    by Rust before reaching Python). Cantonese retokenize is PyCantonese-owned
+    and realigned like plain morphotag: the terminator travels as a cue that
+    `project_cue` removes by position, and Rust writes the terminator from the
+    typed model, so the analysis never carries it as a word.
     """
 
     import stanza
@@ -69,8 +72,7 @@ def test_retokenize_retrace_utterance_returns_correct_count() -> None:
     assert len(sentences) == 1, f"Expected 1 sentence, got {len(sentences)}"
 
     ud_words = sentences[0]
-    assert len(ud_words) == 7, (
-        f"Stanza should return 6 lexical words plus punctuation, got {len(ud_words)}: "
+    assert [w.get("text") for w in ud_words] == words, (
+        f"Stanza should return exactly the 6 words sent, cue removed: "
         f"{[w.get('text') for w in ud_words]}"
     )
-    assert ud_words[-1]["text"] == "."

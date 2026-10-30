@@ -43,41 +43,41 @@ pub(super) fn transcribe_options(
 pub(super) fn prepare_transcribe_fixture_job(
     state_dir: &Path,
     label: &str,
-) -> Option<TranscribeFixtureJob> {
-    let fixtures = prepare_audio_fixtures(state_dir)?;
-    Some(TranscribeFixtureJob {
+) -> TranscribeFixtureJob {
+    let fixtures = prepare_audio_fixtures(state_dir);
+    TranscribeFixtureJob {
         source_path: fixtures.audio.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, "test.cha")
             .to_string_lossy()
             .into_owned(),
-    })
+    }
 }
 
 pub(super) fn prepare_named_transcribe_fixture_job(
     state_dir: &Path,
     label: &str,
     audio_name: &str,
-) -> Option<TranscribeFixtureJob> {
-    let fixtures = prepare_named_audio(state_dir, audio_name, None)?;
-    Some(TranscribeFixtureJob {
+) -> TranscribeFixtureJob {
+    let fixtures = prepare_named_audio(state_dir, audio_name, None);
+    TranscribeFixtureJob {
         source_path: fixtures.audio.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, &format!("{audio_name}.cha"))
             .to_string_lossy()
             .into_owned(),
-    })
+    }
 }
 
 pub(super) fn prepare_multi_speaker_transcribe_fixture_job(
     state_dir: &Path,
     label: &str,
-) -> Option<TranscribeFixtureJob> {
-    let fixtures = prepare_multi_speaker_audio(state_dir)?;
-    Some(TranscribeFixtureJob {
+) -> TranscribeFixtureJob {
+    let fixtures = prepare_multi_speaker_audio(state_dir);
+    TranscribeFixtureJob {
         source_path: fixtures.audio.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, "eng_multi_speaker.cha")
             .to_string_lossy()
             .into_owned(),
-    })
+    }
 }
 
 fn standard_output_path(state_dir: &Path, label: &str, filename: &str) -> PathBuf {

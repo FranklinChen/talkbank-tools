@@ -49,10 +49,11 @@ pub(crate) struct RevAiCredentialSources {
 impl RevAiCredentialSources {
     /// Resolve credential inputs from ambient environment variables.
     pub(crate) fn from_env() -> Self {
+        let home = crate::runtime_paths::BatchalignHome::from_env();
         Self::from_sources(
             std::env::var("BATCHALIGN_REV_API_KEY").ok().as_deref(),
             std::env::var("REVAI_API_KEY").ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
+            home.base().to_str(),
         )
     }
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import check_extension_freshness
 from scripts.check_extension_freshness import (
     CurrentExtension,
     ExtensionInputs,
@@ -95,3 +96,25 @@ def test_build_configuration_and_new_files_change_the_fingerprint(
     new_source = tmp_path / "new.rs"
     new_source.write_text("new")
     assert ExtensionInputs(tmp_path, (source, new_source)).fingerprint() != before
+
+
+def test_the_toolchain_selector_is_not_an_input_its_identity_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rustup's proxy sets RUSTUP_TOOLCHAIN for every child of cargo, so a
+    build run from make and a check run from `cargo test` must agree on one
+    toolchain; `rustc -vV` carries which toolchain it is."""
+    source = tmp_path / "source.rs"
+    source.write_text("source")
+    inputs = ExtensionInputs(tmp_path, (source,))
+    monkeypatch.setattr(
+        check_extension_freshness, "_run", lambda _root, *_args: "rustc 1.0.0"
+    )
+    monkeypatch.delenv("RUSTUP_TOOLCHAIN", raising=False)
+    unset = inputs.fingerprint()
+    monkeypatch.setenv("RUSTUP_TOOLCHAIN", "stable-aarch64-apple-darwin")
+    assert inputs.fingerprint() == unset
+    monkeypatch.setattr(
+        check_extension_freshness, "_run", lambda _root, *_args: "rustc 2.0.0"
+    )
+    assert inputs.fingerprint() != unset

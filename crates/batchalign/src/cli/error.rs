@@ -26,6 +26,10 @@ use crate::api::{JobId, ReleasedCommand};
 /// Scripts should match on exit codes, not error messages.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
+    /// The operating system would not report this host's memory or
+    /// processes, which the command needs to size or admit its work.
+    #[error(transparent)]
+    HostUnreadable(#[from] crate::host_memory::HostUnreadable),
     /// A binary result did not match its admitted encoding/identity or could
     /// not be published new-only. A bad producer is not a CLI argument error.
     #[error("binary result {filename} refused: {refusal}")]
@@ -390,9 +394,9 @@ impl CliError {
                     Self::EXIT_USAGE
                 }
             }
-            Self::ParserInitialization(_) | Self::ChatParserFailure { .. } => {
-                Self::EXIT_LOCAL_RUNTIME
-            }
+            Self::ParserInitialization(_)
+            | Self::ChatParserFailure { .. }
+            | Self::HostUnreadable(_) => Self::EXIT_LOCAL_RUNTIME,
             Self::NoInputPaths
             | Self::InputMissing(_)
             | Self::FileListMissing(_)

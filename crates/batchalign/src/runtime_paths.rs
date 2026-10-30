@@ -4,7 +4,85 @@
 //! the app runtime and the CLI `cache` command agree on where analysis/media
 //! artifacts live.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Environment variable naming the one root of everything Batchalign owns.
+pub const HOME_ENV: &str = "BATCHALIGN_HOME";
+
+/// Where Batchalign keeps what it owns: `.batchalign.ini`, the
+/// `.batchalign3` state directory, and its analysis and media caches.
+///
+/// Model libraries (Hugging Face, Stanza, torch) are NOT under it: they keep
+/// resolving their caches from the process's real `HOME`. That separation is
+/// the point. The test harness used to isolate Batchalign by faking `HOME`,
+/// which relocated every library's cache too, so each live test re-downloaded
+/// its models (23 GB for whisper-large-v3) into a temporary directory inside
+/// its time budget. Setting `BATCHALIGN_HOME` instead isolates exactly what
+/// Batchalign owns and nothing else, and needs no list of libraries.
+///
+/// The more specific overrides keep precedence over this root:
+/// `BATCHALIGN_STATE_DIR` for state, [`ANALYSIS_CACHE_DIR_ENV`] and
+/// [`MEDIA_CACHE_DIR_ENV`] for the caches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchalignHome {
+    /// The user's home: `~/.batchalign.ini`, `~/.batchalign3`, and the
+    /// platform's cache and data directories.
+    User(PathBuf),
+    /// An explicit root (`BATCHALIGN_HOME`): everything Batchalign owns lives
+    /// under it, the caches in `.cache` and `.local/share` whatever the
+    /// platform.
+    Rooted(PathBuf),
+}
+
+impl BatchalignHome {
+    /// The root from `BATCHALIGN_HOME`, else the user's home (else the
+    /// temporary directory, where a process with no home has always kept its
+    /// state).
+    pub fn from_env() -> Self {
+        Self::from_sources(std::env::var(HOME_ENV).ok().as_deref(), dirs::home_dir())
+    }
+
+    /// The root from explicit sources.
+    pub fn from_sources(root: Option<&str>, user_home: Option<PathBuf>) -> Self {
+        match override_dir_from(root) {
+            Some(root) => Self::Rooted(root),
+            None => Self::User(user_home.unwrap_or_else(std::env::temp_dir)),
+        }
+    }
+
+    /// The directory holding `.batchalign.ini` and `.batchalign3`.
+    pub fn base(&self) -> &Path {
+        match self {
+            Self::User(home) | Self::Rooted(home) => home,
+        }
+    }
+
+    /// `.batchalign.ini`: the default ASR engine and provider credentials.
+    pub fn config_ini(&self) -> PathBuf {
+        self.base().join(".batchalign.ini")
+    }
+
+    /// The state directory when `BATCHALIGN_STATE_DIR` does not name one.
+    pub fn default_state_dir(&self) -> PathBuf {
+        self.base().join(".batchalign3")
+    }
+
+    /// The base the analysis cache lives under, when its own override is unset.
+    pub fn cache_base(&self) -> Option<PathBuf> {
+        match self {
+            Self::User(_) => dirs::cache_dir(),
+            Self::Rooted(root) => Some(root.join(".cache")),
+        }
+    }
+
+    /// The base the media cache lives under, when its own override is unset.
+    pub fn data_base(&self) -> Option<PathBuf> {
+        match self {
+            Self::User(_) => dirs::data_dir(),
+            Self::Rooted(root) => Some(root.join(".local").join("share")),
+        }
+    }
+}
 
 /// Environment variable that overrides the analysis-cache directory.
 ///
@@ -59,6 +137,36 @@ pub fn media_cache_dir_override_from(source: Option<&str>) -> Option<PathBuf> {
 /// environment.
 pub fn media_cache_dir_override_from_env() -> Option<PathBuf> {
     media_cache_dir_override_from(std::env::var(MEDIA_CACHE_DIR_ENV).ok().as_deref())
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::BatchalignHome;
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_explicit_root_holds_everything_batchalign_owns() {
+        let home = BatchalignHome::from_sources(Some(" /srv/ba3 "), Some(PathBuf::from("/home/u")));
+        assert_eq!(home, BatchalignHome::Rooted(PathBuf::from("/srv/ba3")));
+        assert_eq!(home.config_ini(), PathBuf::from("/srv/ba3/.batchalign.ini"));
+        assert_eq!(
+            home.default_state_dir(),
+            PathBuf::from("/srv/ba3/.batchalign3")
+        );
+        assert_eq!(home.cache_base(), Some(PathBuf::from("/srv/ba3/.cache")));
+        assert_eq!(
+            home.data_base(),
+            Some(PathBuf::from("/srv/ba3/.local/share"))
+        );
+    }
+
+    #[test]
+    fn without_a_root_the_user_home_keeps_todays_layout() {
+        let home = BatchalignHome::from_sources(Some("  "), Some(PathBuf::from("/home/u")));
+        assert_eq!(home, BatchalignHome::User(PathBuf::from("/home/u")));
+        assert_eq!(home.config_ini(), PathBuf::from("/home/u/.batchalign.ini"));
+        assert_eq!(home.cache_base(), dirs::cache_dir());
+    }
 }
 
 #[cfg(test)]

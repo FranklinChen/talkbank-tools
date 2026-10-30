@@ -27,18 +27,6 @@
 //! race where N concurrent checks all see "enough" before any model is loaded,
 //! and the host-wide ledger extends that protection across separate local
 //! servers, ports, and test binaries.
-//!
-//! # Usage in tests
-//!
-//! ```rust,ignore
-//! use crate::worker::memory_guard;
-//!
-//! #[tokio::test]
-//! async fn my_worker_test() {
-//!     memory_guard::skip_if_insufficient_memory(4096); // need 4 GB
-//!     // ... spawn workers ...
-//! }
-//! ```
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -75,7 +63,12 @@ static SPAWN_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(max_concurrent_spawns()));
 
 /// Error returned when a worker spawn is blocked by the memory guard.
-#[derive(Debug, Clone, thiserror::Error)]
+///
+/// Each cause keeps its own type so the job-failure classifier
+/// (`runner::util::error_classification`) can tell memory pressure, which a
+/// later retry may get past, from a host or ledger the guard cannot use,
+/// which no retry fixes.
+#[derive(Debug, thiserror::Error)]
 pub enum MemoryGuardError {
     /// Not enough free memory to safely spawn a worker.
     #[error(
@@ -97,9 +90,19 @@ pub enum MemoryGuardError {
     #[error("worker spawn semaphore closed (server shutting down)")]
     SemaphoreClosed,
 
-    /// Host-wide coordinator rejected or timed out the startup reservation.
+    /// Host-wide coordinator rejected or timed out the startup reservation,
+    /// or could not use its ledger; the coordinator's own error says which.
     #[error("host memory coordinator blocked worker spawn: {0}")]
-    HostReservation(String),
+    HostReservation(#[source] crate::host_memory::HostMemoryError),
+
+    /// The blocking task taking the reservation panicked or was cancelled.
+    #[error("host memory reservation task did not finish: {0}")]
+    ReservationTaskFailed(#[source] tokio::task::JoinError),
+
+    /// The operating system would not report this host's memory, so the
+    /// guard has nothing to check the spawn against and refuses it.
+    #[error(transparent)]
+    HostUnreadable(#[from] crate::host_memory::HostUnreadable),
 }
 
 /// Combined local+host guard that protects one worker startup window.
@@ -129,27 +132,6 @@ impl SpawnPermit {
             );
         }
     }
-}
-
-/// Query current available memory in MB.
-///
-/// Delegates to [`crate::host_memory::detect_available_memory_mb`],
-/// which is process-globally TTL-cached so admission gates,
-/// eviction pre-pass, and the in-spawn guard agree on one reading
-/// per second instead of each constructing a fresh
-/// `sysinfo::System`. Returned as raw `u64` so existing callers
-/// don't need to thread `MemoryMb` through.
-///
-/// On macOS, sysinfo's `available_memory` is conservative (excludes
-/// inactive pages the kernel can reclaim), see the host_memory
-/// docs.
-pub fn available_memory_mb() -> u64 {
-    crate::host_memory::detect_available_memory_mb().0
-}
-
-/// Query total physical memory in MB.
-pub fn total_memory_mb() -> u64 {
-    crate::host_memory::detect_total_memory_mb().0
 }
 
 /// Free permits on the process-global spawn semaphore, i.e. how many spawns
@@ -184,8 +166,11 @@ pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, 
 
     let startup_reservation = config.startup_reservation_mb();
     let required_mb = startup_reservation.0.max(min_spawn_memory_mb());
-    let available = available_memory_mb();
-    let total = total_memory_mb();
+    // Drops the permit on refusal (`?` returns before it is held), so other
+    // spawns can proceed; an unreadable host is refused, never waved through.
+    let memory = crate::host_memory::read_system_memory()?;
+    let available = memory.available_mb.0;
+    let total = memory.total_mb.0;
     let threshold = required_mb;
 
     if available < threshold {
@@ -220,74 +205,13 @@ pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, 
         )
     })
     .await
-    .map_err(|error| MemoryGuardError::HostReservation(error.to_string()))?
-    .map_err(|error| MemoryGuardError::HostReservation(error.to_string()))?;
+    .map_err(MemoryGuardError::ReservationTaskFailed)?
+    .map_err(MemoryGuardError::HostReservation)?;
 
     Ok(SpawnPermit {
         _local_permit: permit,
         host_lease,
     })
-}
-
-/// Check available memory and skip the current test if insufficient.
-///
-/// Call this at the top of any `#[test]` or `#[tokio::test]` that spawns
-/// Python workers. The test will print a message and return early (pass
-/// without running) rather than risk an OOM crash.
-///
-/// ```rust,ignore
-/// #[tokio::test]
-/// async fn test_with_workers() {
-///     memory_guard::skip_if_insufficient_memory(8192); // need 8 GB
-///     // ... test body ...
-/// }
-/// ```
-pub fn skip_if_insufficient_memory(required_mb: u64) {
-    let available = available_memory_mb();
-    let total = total_memory_mb();
-    let threshold = required_mb.max(min_spawn_memory_mb());
-
-    if available < threshold {
-        eprintln!(
-            "SKIPPING TEST: insufficient memory ({available} MB available, \
-             {threshold} MB required, {total} MB total). \
-             Run on a machine with more RAM (e.g., net with 256 GB)."
-        );
-        // Return from the test function. In Rust test harness, this counts as "pass".
-        // The test body after this call won't execute.
-    }
-}
-
-/// Macro version that returns early from the calling function.
-///
-/// Usage:
-/// ```rust,ignore
-/// #[tokio::test]
-/// async fn my_test() {
-///     bail_if_low_memory!(8192);
-///     // ... test body only runs if 8 GB available ...
-/// }
-/// ```
-#[macro_export]
-macro_rules! bail_if_low_memory {
-    ($required_mb:expr) => {
-        if $crate::worker::memory_guard::available_memory_mb()
-            < ($required_mb as u64).max(
-                std::env::var("BATCHALIGN_SPAWN_MIN_MEMORY_MB")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(4096u64),
-            )
-        {
-            eprintln!(
-                "SKIPPING TEST: insufficient memory ({} MB available, {} MB required). \
-                 Run on a machine with more RAM.",
-                $crate::worker::memory_guard::available_memory_mb(),
-                ($required_mb as u64).max(4096),
-            );
-            return;
-        }
-    };
 }
 
 #[cfg(test)]
@@ -314,9 +238,9 @@ mod tests {
                     MemoryMb(1_000_000_000),
                     crate::config::WorkerStartupLimit::literal::<1>(),
                 ),
-                crate::types::runtime::MemoryTier::detect(),
+                crate::worker::handle::test_memory_tier(),
             ),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         };
         let result = acquire_spawn_permit(&config).await;
         assert!(

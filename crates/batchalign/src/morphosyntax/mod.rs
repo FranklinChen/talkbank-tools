@@ -198,7 +198,7 @@ pub(crate) async fn process_morphosyntax_incremental(
         &primary_lang,
         langs.as_ref(),
         params.multilingual_policy,
-    )
+    )?
     .batch_items;
 
     if filtered_payloads.is_empty() {
@@ -356,7 +356,7 @@ impl<'source> ReusablePriorMorphology<'source> {
         let languages = declared_languages(prior.document(), primary_lang).map_err(|error| {
             ServerError::Validation(format!("unusable @Languages declaration: {error}"))
         })?;
-        Ok(prior
+        prior
             .document()
             .lines
             .iter()
@@ -378,34 +378,41 @@ impl<'source> ReusablePriorMorphology<'source> {
                         None
                     }
                 });
-                Some(mor.zip(gra).and_then(|(mor, gra)| {
+                let Some((mor, gra)) = mor.zip(gra) else {
+                    return Some(Ok(None));
+                };
+                Some(
                     batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
                         utterance,
                         languages.as_ref(),
                     )
-                    .map(|input| Self { mor, gra, input })
-                }))
+                    .map(|input| input.map(|input| Self { mor, gra, input }))
+                    .map_err(ServerError::from),
+                )
             })
-            .collect())
+            .collect()
     }
 
     fn bind_to<'destination>(
         &self,
         destination: &'destination mut talkbank_model::model::Utterance,
         languages: talkbank_model::DeclaredLanguagesRef<'_>,
-    ) -> Option<CompatiblePriorMorphology<'source, 'destination>> {
-        let input = batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
+    ) -> Result<Option<CompatiblePriorMorphology<'source, 'destination>>, ServerError> {
+        let Some(input) = batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
             destination,
             languages,
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         if !self.input.equivalent_to(&input) {
-            return None;
+            return Ok(None);
         }
-        Some(CompatiblePriorMorphology {
+        Ok(Some(CompatiblePriorMorphology {
             mor: self.mor,
             gra: self.gra,
             destination,
-        })
+        }))
     }
 }
 
@@ -480,7 +487,7 @@ fn preserve_complete_prior_morphology(
         if let (Some(Some(analysis)), Some(destination)) = (
             analyses.get(before_idx.raw()),
             destinations.get_mut(after_idx.raw()),
-        ) && let Some(compatible) = analysis.bind_to(destination, languages.as_ref())
+        ) && let Some(compatible) = analysis.bind_to(destination, languages.as_ref())?
         {
             compatible.install();
             preserved += 1;
@@ -548,6 +555,7 @@ mod tests {
             languages.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
+        .expect("the run walk agrees with extraction")
         .batch_items
         .into_iter()
         .map(|item| item.utt_ordinal())
@@ -724,6 +732,7 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::SkipNonPrimary,
         )
+        .expect("the run walk agrees with extraction")
         .batch_items;
         // With ProcessAll, all utterances should be included
         let items_all = collect_payloads(
@@ -732,6 +741,7 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
+        .expect("the run walk agrees with extraction")
         .batch_items;
 
         // SkipNonPrimary should produce fewer items than ProcessAll
@@ -759,6 +769,7 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
+        .expect("the run walk agrees with extraction")
         .batch_items;
         // Both utterances should be included
         assert_eq!(items.len(), 2, "ProcessAll should include all utterances");
@@ -781,6 +792,7 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
+        .expect("the run walk agrees with extraction")
         .batch_items;
         assert!(!items.is_empty());
         assert!(

@@ -24,6 +24,7 @@
 
 mod common;
 mod live_deadline;
+mod prerequisite;
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -259,8 +260,10 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
             ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
             max_workers_per_key: PerProfile::uniform(1),
             verbose: 0,
-            runtime: Default::default(),
-            ..Default::default()
+            runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+                batchalign::worker::handle::test_memory_tier(),
+            ),
+            ..PoolConfig::for_tests()
         };
 
         let (router, state) = create_test_app(
@@ -443,19 +446,6 @@ fn test_submission_with_filename(filename: &str) -> JobSubmission {
     let mut sub = test_submission();
     sub.files[0].filename = filename.into();
     sub
-}
-
-/// Skip the test if Python with batchalign is not available.
-macro_rules! require_python {
-    () => {
-        match common::resolve_python() {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: Python not available");
-                return Ok(());
-            }
-        }
-    };
 }
 
 /// Poll a job until it reaches a terminal state. Returns the final status string.
@@ -792,7 +782,7 @@ fn slow_response_eventually_arrives() -> turmoil::Result {
 /// The fundamental "an operator submits a job from the dashboard" scenario.
 #[test]
 fn real_app_submit_and_poll_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
@@ -827,7 +817,7 @@ fn real_app_submit_and_poll_job() -> turmoil::Result {
 /// Client reconnects and sees the result.
 #[test]
 fn real_app_partition_during_job_processing() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
@@ -863,7 +853,7 @@ fn real_app_partition_during_job_processing() -> turmoil::Result {
 /// Models an operator bookmarking a deleted job URL.
 #[test]
 fn real_app_sse_nonexistent_job_returns_404() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(30))
@@ -893,7 +883,7 @@ fn real_app_sse_nonexistent_job_returns_404() -> turmoil::Result {
 /// After 2026-03-30 incident where health showed live_workers: 0 incorrectly.
 #[test]
 fn real_app_health_reports_workers() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(60))
@@ -934,7 +924,7 @@ fn real_app_health_reports_workers() -> turmoil::Result {
 /// crossed simulated network hops.
 #[test]
 fn cancel_running_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1011,7 +1001,7 @@ fn cancel_running_job() -> turmoil::Result {
 /// Cancel an already-completed job → 200 no-op.
 #[test]
 fn cancel_already_completed_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1035,7 +1025,7 @@ fn cancel_already_completed_job() -> turmoil::Result {
 /// Cancel a nonexistent job → 404.
 #[test]
 fn cancel_nonexistent_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(30))
         .build();
@@ -1058,7 +1048,7 @@ fn cancel_nonexistent_job() -> turmoil::Result {
 /// Delete a completed job → 200, then poll → 404.
 #[test]
 fn delete_completed_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1083,7 +1073,7 @@ fn delete_completed_job() -> turmoil::Result {
 /// Delete a running job → 409 (must cancel first).
 #[test]
 fn delete_running_job_rejected() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1110,7 +1100,7 @@ fn delete_running_job_rejected() -> turmoil::Result {
 /// Submit two jobs with the same file → second gets 409 conflict.
 #[test]
 fn submit_duplicate_files_conflict() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1146,7 +1136,7 @@ fn submit_duplicate_files_conflict() -> turmoil::Result {
 /// Connect to SSE, receive snapshot event for an active job.
 #[test]
 fn sse_stream_receives_snapshot() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1188,7 +1178,7 @@ fn sse_stream_receives_snapshot() -> turmoil::Result {
 /// SSE for a completed job: snapshot + complete, then stream closes.
 #[test]
 fn sse_stream_completed_job_closes() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1229,7 +1219,7 @@ fn sse_stream_completed_job_closes() -> turmoil::Result {
 /// Drop SSE client connection mid-stream → server stays healthy.
 #[test]
 fn sse_client_disconnect_no_panic() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1263,7 +1253,7 @@ fn sse_client_disconnect_no_panic() -> turmoil::Result {
 /// Partition during SSE, repair, reconnect, get fresh snapshot.
 #[test]
 fn sse_partition_then_reconnect() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1300,7 +1290,7 @@ fn sse_partition_then_reconnect() -> turmoil::Result {
 /// Download results of a completed job → 200 with content.
 #[test]
 fn download_results_completed_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1328,7 +1318,7 @@ fn download_results_completed_job() -> turmoil::Result {
 /// Download results of a running job → 409.
 #[test]
 fn download_results_running_job_rejected() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1353,7 +1343,7 @@ fn download_results_running_job_rejected() -> turmoil::Result {
 /// Download single result file by name.
 #[test]
 fn download_single_result_file() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1383,7 +1373,7 @@ fn download_single_result_file() -> turmoil::Result {
 /// Download results for nonexistent job → 404.
 #[test]
 fn download_results_nonexistent_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(30))
         .build();
@@ -1406,7 +1396,7 @@ fn download_results_nonexistent_job() -> turmoil::Result {
 /// 3 clients submit different jobs simultaneously → all succeed.
 #[test]
 fn concurrent_job_submissions() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1434,7 +1424,7 @@ fn concurrent_job_submissions() -> turmoil::Result {
 /// 3 clients poll the same job simultaneously → all get consistent state.
 #[test]
 fn concurrent_poll_same_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1470,7 +1460,7 @@ fn concurrent_poll_same_job() -> turmoil::Result {
 /// Health endpoint reports active_jobs > 0 during processing.
 #[test]
 fn health_accurate_during_processing() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1505,7 +1495,7 @@ fn health_accurate_during_processing() -> turmoil::Result {
 /// Submit with unknown command → 400.
 #[test]
 fn submit_unknown_command() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(30))
         .build();
@@ -1546,7 +1536,7 @@ fn submit_unknown_command() -> turmoil::Result {
 /// Submit with empty files list → 400.
 #[test]
 fn submit_empty_files() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(30))
         .build();
@@ -1571,7 +1561,7 @@ fn submit_empty_files() -> turmoil::Result {
 /// GET nonexistent job → 404.
 #[test]
 fn get_nonexistent_job() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(30))
         .build();
@@ -1596,7 +1586,7 @@ fn get_nonexistent_job() -> turmoil::Result {
 /// Cancel during partition: times out, repair, cancel again → succeeds.
 #[test]
 fn cancel_during_partition() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1633,7 +1623,7 @@ fn cancel_during_partition() -> turmoil::Result {
 /// Submit job under message hold, release → job processes normally.
 #[test]
 fn submit_under_message_hold_then_release() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();
@@ -1686,7 +1676,7 @@ fn submit_under_message_hold_then_release() -> turmoil::Result {
 /// Job list endpoint works and returns array.
 #[test]
 fn list_jobs_returns_array() -> turmoil::Result {
-    let python = require_python!();
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(120))
         .build();

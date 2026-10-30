@@ -8,12 +8,9 @@ use batchalign::worker::InferTask;
 /// The fixture should reuse the same warmed worker process across isolated sessions.
 #[tokio::test]
 async fn live_fixture_reuses_warmed_workers_across_sessions() {
-    let Some(first) = LiveServerSession::acquire().await else {
-        return;
-    };
+    let first = LiveServerSession::acquire().await;
     if !first.has_infer_task(InferTask::Morphosyntax) {
-        eprintln!("SKIP: live fixture does not support morphosyntax infer");
-        return;
+        panic!("PREREQUISITE MISSING: live fixture does not support morphosyntax infer")
     }
 
     let first_health = first.health().await;
@@ -27,12 +24,9 @@ async fn live_fixture_reuses_warmed_workers_across_sessions() {
     let first_pipelines = first_health.loaded_pipelines.clone();
     first.close().await;
 
-    let Some(second) = LiveServerSession::acquire().await else {
-        return;
-    };
+    let second = LiveServerSession::acquire().await;
     if !second.has_infer_task(InferTask::Morphosyntax) {
-        eprintln!("SKIP: live fixture does not support morphosyntax infer");
-        return;
+        panic!("PREREQUISITE MISSING: live fixture does not support morphosyntax infer")
     }
 
     let second_health = second.health().await;
@@ -51,12 +45,9 @@ async fn live_fixture_reuses_warmed_workers_across_sessions() {
 /// The fixture should provide a fresh runtime layout and empty job store each time.
 #[tokio::test]
 async fn live_fixture_isolates_runtime_state_between_sessions() {
-    let Some(first) = LiveServerSession::acquire().await else {
-        return;
-    };
+    let first = LiveServerSession::acquire().await;
     if !first.has_infer_task(InferTask::Morphosyntax) {
-        eprintln!("SKIP: live fixture does not support morphosyntax infer");
-        return;
+        panic!("PREREQUISITE MISSING: live fixture does not support morphosyntax infer")
     }
 
     let first_state_dir = first.state_dir().to_path_buf();
@@ -97,12 +88,9 @@ async fn live_fixture_isolates_runtime_state_between_sessions() {
     );
     first.close().await;
 
-    let Some(second) = LiveServerSession::acquire().await else {
-        return;
-    };
+    let second = LiveServerSession::acquire().await;
     if !second.has_infer_task(InferTask::Morphosyntax) {
-        eprintln!("SKIP: live fixture does not support morphosyntax infer");
-        return;
+        panic!("PREREQUISITE MISSING: live fixture does not support morphosyntax infer")
     }
 
     assert_ne!(

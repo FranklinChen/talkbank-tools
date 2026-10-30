@@ -491,7 +491,7 @@ impl WorkerKey {
     }
 }
 
-/// Default per-profile `max_workers_per_key` for `PoolConfig::default()`
+/// Default per-profile `max_workers_per_key` for `PoolConfig::for_tests()`
 /// test fixtures.
 ///
 /// Production sets this from
@@ -505,7 +505,7 @@ const DEFAULT_MAX_WORKERS_PER_KEY: PerProfile<usize> = PerProfile {
     io: 4,
 };
 
-/// Default `max_total_workers` for `PoolConfig::default()` test fixtures.
+/// Default `max_total_workers` for `PoolConfig::for_tests()` test fixtures.
 ///
 /// Production sets this from `EffectiveConfig::max_total_workers` (the
 /// host-facts recommendation, RAM-derived, clamped to `[2, 32]`). Tests
@@ -564,17 +564,27 @@ pub struct PoolConfig {
     /// budget is not consumed by queue-wait when many callers contend for one
     /// shared GPU worker process.
     pub test_delay_ms: u64,
-    /// Test-only override for the CPU-loadavg admission threshold.
-    ///
-    /// Production leaves this `None`; the CPU gate uses
-    /// `cpu_gate::host_cpu_count_as_threshold()` (live
-    /// `available_parallelism()`). Tests that need to exercise the
-    /// permit / per-key-cap / metrics paths set this to a value
-    /// far above any realistic load (e.g. `f64::INFINITY`) so
-    /// `try_claim_spawn_slot` does not reject at Layer 0 on
-    /// CPU-saturated CI runners. Setting a finite override lets the
-    /// `cpu_gate` tests in [`super::cpu_gate`] cover both branches.
-    pub cpu_gate_threshold_override: Option<f64>,
+    /// Whether spawn admission consults the host's live CPU load.
+    pub cpu_gate: CpuGatePolicy,
+}
+
+/// Whether spawn admission consults the host's live CPU load.
+///
+/// This was `Option<f64>`, with `None` for the live gate and
+/// `f64::INFINITY` written by hand in every test that needed the gate
+/// out of the way: a sentinel each test had to remember. One that forgot
+/// (`pool_serializes_worker_bootstrap_per_key`) asserted three spawns
+/// and got one whenever the machine running it was busy. Test pools now
+/// start [`Self::Disabled`] (`PoolConfig::for_tests`), so no test's spawn
+/// count depends on what else the machine is doing; the gate's own
+/// behavior is tested directly in `cpu_gate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuGatePolicy {
+    /// Refuse a spawn while the 1-minute load average is at or above the
+    /// host's logical CPU count.
+    HostLoad,
+    /// Never consult the live load.
+    Disabled,
 }
 
 /// Built-in default for `ensure_task` timeout (seconds).
@@ -586,8 +596,10 @@ const DEFAULT_ENSURE_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<
 /// reported, short enough that a wait an operator should look at is.
 const DEFAULT_CHECKOUT_WAIT_REPORT_INTERVAL: PositiveSeconds = PositiveSeconds::literal::<300>();
 
-impl Default for PoolConfig {
-    fn default() -> Self {
+impl PoolConfig {
+    /// A pool with every field at its default except `runtime`, which
+    /// carries the host decisions (tier, device) the caller resolved.
+    pub fn with_runtime(runtime: WorkerRuntimeConfig) -> Self {
         Self {
             python_path: resolve_python_executable(),
             health_check_interval_s: PositiveSeconds::literal::<30>(),
@@ -597,12 +609,24 @@ impl Default for PoolConfig {
             max_total_workers: DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS,
             checkout_wait_report_interval: None,
             verbose: 0,
-            runtime: WorkerRuntimeConfig::default(),
+            runtime,
             task_timeouts: TaskTimeoutOverrides::NONE,
             ensure_task_timeout: None,
             worker_registry_path: None,
             test_delay_ms: 0,
-            cpu_gate_threshold_override: None,
+            cpu_gate: CpuGatePolicy::HostLoad,
+        }
+    }
+
+    /// A test pool at the declared [`test_memory_tier`].
+    ///
+    /// [`test_memory_tier`]: crate::worker::handle::test_memory_tier
+    pub fn for_tests() -> Self {
+        Self {
+            cpu_gate: CpuGatePolicy::Disabled,
+            ..Self::with_runtime(WorkerRuntimeConfig::local(
+                crate::worker::handle::test_memory_tier(),
+            ))
         }
     }
 }
@@ -611,7 +635,7 @@ impl PoolConfig {
     /// Resolved global worker cap. Returns `self.max_total_workers`
     /// directly; production fills it from `EffectiveConfig`, tests
     /// from `DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS` via
-    /// `PoolConfig::default()`.
+    /// `PoolConfig::for_tests()`.
     pub fn effective_max_total_workers(&self) -> usize {
         self.max_total_workers
     }
@@ -1244,7 +1268,7 @@ impl WorkerPool {
     pub(crate) fn with_test_stanza_registry(
         registry: crate::stanza_registry::StanzaRegistry,
     ) -> Self {
-        let pool = Self::new(PoolConfig::default());
+        let pool = Self::new(PoolConfig::for_tests());
         pool.stanza_registry.record(
             "test".to_owned(),
             crate::stanza_registry::StanzaCatalogReport::Catalog {
@@ -1564,7 +1588,7 @@ mod capability_admission_tests {
     /// returned for `/health`, until the key reports again and is admitted.
     #[test]
     fn a_refused_report_is_returned_with_its_key_and_reason_until_replaced() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let key = WorkerKey::without_engine_selection(
             WorkerTarget::profile(WorkerProfile::Gpu),
             WorkerLanguage::from(LanguageCode3::eng()),
@@ -1613,7 +1637,7 @@ mod capability_admission_tests {
     /// lookup, and so every morphotag refusal, with the worker's reason.
     #[test]
     fn a_failed_stanza_report_is_the_registrys_stated_reason() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let key = WorkerKey::without_engine_selection(
             WorkerTarget::profile(WorkerProfile::Stanza),
             WorkerLanguage::from(LanguageCode3::eng()),
@@ -1646,13 +1670,13 @@ mod capability_admission_tests {
 mod default_pool_config_tests {
     use super::*;
 
-    /// `PoolConfig::default()` must produce concrete numeric values rather
+    /// `PoolConfig::for_tests()` must produce concrete numeric values rather
     /// than a sentinel that routes to a sysinfo probe at runtime
     /// production fills the field from `EffectiveConfig` and tests must
     /// be deterministic across machines.
     #[test]
     fn pool_default_has_concrete_max_total_workers() {
-        let cfg = PoolConfig::default();
+        let cfg = PoolConfig::for_tests();
         assert!(
             cfg.max_total_workers > 0,
             "Default::default() must use a concrete value, not the legacy 0-sentinel"
@@ -1661,8 +1685,8 @@ mod default_pool_config_tests {
 
     #[test]
     fn pool_default_effective_cap_is_deterministic() {
-        let a = PoolConfig::default().effective_max_total_workers();
-        let b = PoolConfig::default().effective_max_total_workers();
+        let a = PoolConfig::for_tests().effective_max_total_workers();
+        let b = PoolConfig::for_tests().effective_max_total_workers();
         assert_eq!(
             a, b,
             "effective_max_total_workers must not depend on transient sysinfo state"
@@ -1724,8 +1748,7 @@ mod default_pool_config_tests {
             // are CPU-saturated by parallel cargo-test workers and
             // the gate would otherwise reject every claim with
             // CpuSaturated before the assertions run.
-            cpu_gate_threshold_override: Some(f64::INFINITY),
-            ..Default::default()
+            ..PoolConfig::for_tests()
         });
         let lang = WorkerLanguage::from(LanguageCode3::eng());
 
@@ -1808,8 +1831,7 @@ mod default_pool_config_tests {
             // Disable Layer 0 so the test exercises the spawn-failure
             // permit-refund path and is not gated out on saturated
             // CI runners.
-            cpu_gate_threshold_override: Some(f64::INFINITY),
-            ..Default::default()
+            ..PoolConfig::for_tests()
         });
         let baseline = pool.metrics_snapshot().permits_available;
         let lang = WorkerLanguage::from(LanguageCode3::eng());
@@ -1842,7 +1864,7 @@ mod default_pool_config_tests {
         let pool = WorkerPool::new(PoolConfig {
             max_total_workers: 8,
             max_workers_per_key: PerProfile::uniform(4),
-            ..Default::default()
+            ..PoolConfig::for_tests()
         });
         // Acquire 5 permits to simulate 5 live workers across two
         // groups; track them in the group totals as well.
@@ -1880,8 +1902,7 @@ mod default_pool_config_tests {
             max_workers_per_key: PerProfile::uniform(8),
             max_total_workers: 1,
             // Disable Layer 0: see the parallel test fixture above.
-            cpu_gate_threshold_override: Some(f64::INFINITY),
-            ..Default::default()
+            ..PoolConfig::for_tests()
         });
         let lang = WorkerLanguage::from(LanguageCode3::eng());
         let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
@@ -1916,8 +1937,7 @@ mod default_pool_config_tests {
             max_workers_per_key: PerProfile::uniform(1),
             max_total_workers: 8,
             // Disable Layer 0: see the parallel test fixture above.
-            cpu_gate_threshold_override: Some(f64::INFINITY),
-            ..Default::default()
+            ..PoolConfig::for_tests()
         });
         let lang = WorkerLanguage::from(LanguageCode3::eng());
         let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
@@ -2010,7 +2030,7 @@ mod default_pool_config_tests {
                 max_total_workers: PROPTEST_MAX_TOTAL,
                 max_workers_per_key: PerProfile::uniform(PROPTEST_MAX_TOTAL),
                 test_echo: true,
-                ..Default::default()
+                ..PoolConfig::for_tests()
             });
             let groups = proptest_groups(&pool);
             let mut bookkept = [0usize; PROPTEST_NUM_KEYS];

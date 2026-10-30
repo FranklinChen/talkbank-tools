@@ -7,16 +7,14 @@ use talkbank_model::model::{
 };
 
 use super::{RetokenizeContext, excluded_from_mor, should_retokenize};
-use crate::retokenize::{MappingBasis, resolve_token_text, try_parse_token_as_word};
+use crate::retokenize::{resolve_token_text, try_parse_token_as_word};
 
-#[derive(Debug, thiserror::Error)]
-enum ExpansionRefusal {
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ExpansionRefusal {
     #[error("no character-level mapping for scoped word")]
     Unmapped,
     #[error("the mapped source word does not match this scoped word")]
     WrongSource,
-    #[error("length-based mapping cannot establish annotation ownership")]
-    LengthMapping,
     #[error("a model token crosses a scoped source-word boundary")]
     CrossesScope,
     #[error("a scoped model token was already emitted")]
@@ -78,9 +76,6 @@ impl<'ctx, 'source> AdmittedExpansion<'ctx, 'source> {
             .ok_or(ExpansionRefusal::WrongSource)?;
         if original.text.as_str() != word.cleaned_text() {
             return Err(ExpansionRefusal::WrongSource);
-        }
-        if ctx.mapping.basis() != MappingBasis::Text {
-            return Err(ExpansionRefusal::LengthMapping);
         }
         for index in &indices {
             if ctx.emitted_tokens.contains(index) {
@@ -150,9 +145,10 @@ fn expand_word(word: Word, ctx: &mut RetokenizeContext<'_>) -> ExpandedWords {
     match AdmittedExpansion::admit(&word, ctx) {
         Ok(admitted) => admitted.commit(),
         Err(refused) => {
-            ctx.diagnostics.push(format!(
-                "retokenize scoped word: {refused}; keeping original"
-            ));
+            ctx.diagnostics
+                .push(crate::retokenize::refusal::RebuildRefusal::ScopedExpansion(
+                    refused,
+                ));
             ExpandedWords::retained(word)
         }
     }
@@ -220,7 +216,7 @@ pub(super) fn rebuild_replaced_word(
     let mut original = replaced.replacement.words.clone().into_vec().into_iter();
     let Some(first) = original.next() else {
         ctx.diagnostics
-            .push("retokenize: replacement has no admitted words; keeping original".into());
+            .push(crate::retokenize::refusal::RebuildRefusal::ReplacementWithoutWords);
         return replaced;
     };
     let mut rewritten = expand_word(first, ctx).into_replacement_words();
@@ -266,7 +262,8 @@ mod tests {
         );
         let original = &extracted[0].words;
         let tokens = vec!["ca".to_owned(), "n't".to_owned()];
-        let mapping = crate::retokenize::build_word_token_mapping(original, &tokens);
+        let mapping = crate::retokenize::build_word_token_mapping(original, &tokens)
+            .expect("the tokens spell the scoped word");
         check(
             word,
             RetokenizeContext {

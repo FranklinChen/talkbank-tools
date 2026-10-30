@@ -4,8 +4,9 @@
 //! then exercise the CLI command functions (`jobs_cmd`, `serve_cmd`,
 //! `dispatch`) against it.
 //!
-//! Requirements: Python 3 with batchalign installed.
-//! Tests skip gracefully if unavailable.
+//! Requirements: the checkout's Python development environment
+//! (`make batchalign-develop`); a test fails, never skips, without it (see
+//! `tests/prerequisite.rs`).
 // Integration tests are exempt from the crate's deny-level panic lints,
 // matching the src/lib.rs `#![cfg_attr(test, allow(...))]` pattern
 // (see docs/panic-audit/).
@@ -66,9 +67,7 @@ fn test_submission(files: Vec<FilePayload>) -> JobSubmission {
 
 #[tokio::test]
 async fn jobs_list_empty_server() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let args = JobsArgs {
@@ -84,9 +83,7 @@ async fn jobs_list_empty_server() {
 
 #[tokio::test]
 async fn jobs_list_after_submit() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -115,9 +112,7 @@ async fn jobs_list_after_submit() {
 
 #[tokio::test]
 async fn jobs_inspect_single() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -153,9 +148,7 @@ async fn jobs_inspect_single() {
 
 #[tokio::test]
 async fn serve_status_healthy() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let args = ServeStatusArgs {
@@ -172,9 +165,7 @@ async fn serve_status_healthy() {
 
 #[tokio::test]
 async fn client_submit_poll_fetch() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = BatchalignClient::new().expect("HTTP client build should not fail in tests");
@@ -203,9 +194,7 @@ async fn client_submit_poll_fetch() {
 
 #[tokio::test]
 async fn client_submit_multiple_files() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = BatchalignClient::new().expect("HTTP client build should not fail in tests");

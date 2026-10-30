@@ -25,14 +25,11 @@ use batchalign::worker::InferTask;
 /// operator watching one long file actually needs.
 #[tokio::test]
 async fn morphotag_job_reports_per_file_utterance_progress() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     // One file, big enough that its inference certainly spans several progress

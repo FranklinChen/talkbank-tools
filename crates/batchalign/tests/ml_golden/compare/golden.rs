@@ -10,16 +10,13 @@ use crate::ml_golden::golden::helpers::{
 
 #[tokio::test]
 async fn golden_compare_eng() {
-    let Some(session) = require_direct_session_warmed(
+    let session = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Compare,
         "eng",
         "Direct session does not support morphosyntax infer (required for compare)",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let options = CommandOptions::Compare(CompareOptions {
         common: CommonOptions {
@@ -53,7 +50,7 @@ async fn golden_compare_eng() {
     assert!(results[0].error.is_none());
 
     let file = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "compare_eng",
     );
     assert!(has_user_defined_tier(&file, "xsrep"));
@@ -73,22 +70,19 @@ async fn golden_compare_eng() {
     );
     assert_golden_snapshot!(
         "compare_eng",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }
 
 #[tokio::test]
 async fn golden_compare_uses_template_gold_fallback() {
-    let Some(session) = require_direct_session_warmed(
+    let session = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Compare,
         "eng",
         "Direct session does not support morphosyntax infer (required for compare)",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let options = CommandOptions::Compare(CompareOptions {
         common: CommonOptions {
@@ -122,7 +116,7 @@ async fn golden_compare_uses_template_gold_fallback() {
     assert!(results[0].error.is_none());
 
     let file = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "compare_template_gold",
     );
     assert!(has_user_defined_tier(&file, "xsrep"));
@@ -144,16 +138,13 @@ async fn golden_compare_uses_template_gold_fallback() {
 
 #[tokio::test]
 async fn golden_compare_sequential_jobs_stay_isolated() {
-    let Some(session) = require_direct_session_warmed(
+    let session = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Compare,
         "eng",
         "Direct session does not support morphosyntax infer (required for compare)",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let options = CommandOptions::Compare(CompareOptions {
         common: CommonOptions {
@@ -219,16 +210,13 @@ fn golden_compare_warmed_session_survives_tokio_runtime_restart() {
 
     let run_once = |label: &str, filename: &str| {
         build_runtime().block_on(async move {
-            let Some(session) = require_direct_session_warmed(
+            let session = require_direct_session_warmed(
                 InferTask::Morphosyntax,
                 ReleasedCommand::Compare,
                 "eng",
                 "Direct session does not support morphosyntax infer (required for compare)",
             )
-            .await
-            else {
-                return;
-            };
+            .await;
 
             let options = CommandOptions::Compare(CompareOptions {
                 common: CommonOptions {

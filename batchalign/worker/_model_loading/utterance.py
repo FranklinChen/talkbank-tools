@@ -8,6 +8,7 @@ from pydantic import TypeAdapter
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.worker._model_loading.pinned_hub import (
+    HubFiles,
     hub_commit_of,
     resolve_pinned_snapshot,
 )
@@ -86,7 +87,7 @@ def load_utterance_model(
     # handed a local path and the revision is read off the directory that
     # actually exists. Loading by name and asking the library afterwards is
     # what made the revision optional.
-    resolved = resolve_pinned_snapshot(pinned.id, commit)
+    resolved = resolve_pinned_snapshot(pinned.id, commit, HubFiles.TRANSFORMERS)
     _state.utterance_boundary_model = BertUtteranceModel(
         model_id=pinned.id,
         model_path=resolved.path,

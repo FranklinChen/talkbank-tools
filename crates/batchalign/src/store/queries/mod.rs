@@ -285,7 +285,7 @@ impl JobStore {
     /// Approximate number of job slots available.
     pub async fn workers_available(&self) -> i64 {
         let active = self.active_jobs().await;
-        (self.max_concurrent as i64 - active).max(0)
+        (self.host.max_concurrent_jobs() as i64 - active).max(0)
     }
 
     /// Operational counters for health endpoint.
@@ -507,7 +507,7 @@ mod tests {
 
         // A fresh store over the same database restores the same phase.
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let restored = JobStore::new(
+        let restored = JobStore::for_tests(
             test_config(),
             Some(Arc::new(
                 JobDB::open(Some(dir.path())).await.expect("reopen"),
@@ -532,7 +532,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(JobDB::open(Some(dir.path())).await.unwrap());
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             Some(db.clone()),
             tx,
@@ -636,7 +636,7 @@ mod tests {
     #[tokio::test]
     async fn submit_and_get() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -654,7 +654,7 @@ mod tests {
     #[tokio::test]
     async fn conflict_detection() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -672,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_job() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -693,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn delete_completed_job() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -760,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn list_all_ordered() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -787,7 +787,7 @@ mod tests {
     #[tokio::test]
     async fn claim_ready_queued_jobs_orders_by_submission_time() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -835,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_deferred_and_reports_next_wake() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -893,7 +893,7 @@ mod tests {
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_unexpired_leases_and_reclaims_expired_ones() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -953,7 +953,7 @@ mod tests {
     #[tokio::test]
     async fn release_runner_claim_makes_job_eligible_again() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -986,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn renew_job_lease_updates_heartbeat_and_expiry_for_local_claim() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -1023,7 +1023,7 @@ mod tests {
     #[tokio::test]
     async fn renew_job_lease_stops_after_claim_is_released() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,

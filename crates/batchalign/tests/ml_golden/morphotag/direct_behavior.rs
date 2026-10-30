@@ -38,16 +38,13 @@ fn default_morphotag_options() -> CommandOptions {
 /// that defect; the deterministic unit guard lives alongside the collection code.
 #[tokio::test]
 async fn direct_morphotag_strips_ca_segment_repetition_before_tagging() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "nld",
         "Direct session does not support Dutch morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     // One Dutch utterance whose sole content word carries the CA
     // segment-repetition delimiter. Built in-memory per the morphotag-test
     // idiom (no ad-hoc .cha fixture file). Morphotag is a per-file-language
@@ -73,7 +70,7 @@ async fn direct_morphotag_strips_ca_segment_repetition_before_tagging() {
     assert_completed_without_errors("ca_segment_repetition_morphotag", &info, &results);
     assert_eq!(results.len(), 1, "Should produce 1 output file");
 
-    let out = &results[0].content.as_text().expect("text command result");
+    let out = results[0].content.as_text().expect("text command result");
     let mor = find_mor_line_for(out, "schaap")
         .expect("the utterance containing 'schaap' should have a %mor tier");
 
@@ -92,16 +89,13 @@ async fn direct_morphotag_strips_ca_segment_repetition_before_tagging() {
 /// materialization on the direct path.
 #[tokio::test]
 async fn direct_morphotag_multi_file_batching() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let files = vec![
@@ -128,11 +122,11 @@ async fn direct_morphotag_multi_file_batching() {
     assert_eq!(results.len(), 2, "Should produce 2 output files");
 
     let file_a = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "file_a",
     );
     let file_b = parse_output(
-        &results[1].content.as_text().expect("text command result"),
+        results[1].content.as_text().expect("text command result"),
         "file_b",
     );
 
@@ -152,16 +146,13 @@ async fn direct_morphotag_multi_file_batching() {
 /// not collapse file-local outputs.
 #[tokio::test]
 async fn direct_morphotag_multi_speaker_batching() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let files = vec![
@@ -188,11 +179,11 @@ async fn direct_morphotag_multi_speaker_batching() {
     assert_eq!(results.len(), 2, "Should produce 2 output files");
 
     let file_a = parse_output(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "speaker_a",
     );
     let file_b = parse_output(
-        &results[1].content.as_text().expect("text command result"),
+        results[1].content.as_text().expect("text command result"),
         "speaker_b",
     );
     assert!(has_mor_tier(&file_a), "speaker_a should have %mor tier");
@@ -205,16 +196,13 @@ async fn direct_morphotag_multi_speaker_batching() {
 /// output semantics for the edited file.
 #[tokio::test]
 async fn direct_morphotag_before_matches_full_rerun_output() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveDirectJobClient::new(&session);
 
     let input_dir = jobs.state_dir().join("incremental_inputs");

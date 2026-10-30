@@ -15,7 +15,7 @@ mod protocol;
 pub mod spawn;
 
 pub(crate) use config::WorkerLaunch;
-pub use config::{WorkerConfig, WorkerRuntimeConfig};
+pub use config::{WorkerConfig, WorkerRuntimeConfig, test_memory_tier};
 pub use spawn::spawn_tcp_daemon;
 // The wire envelopes and the reported-failure mapping are shared by every
 // transport (`worker::tcp_handle` and the shared GPU reader read the same
@@ -126,7 +126,9 @@ impl WorkerHandle {
             force_cpu = config.runtime.force_cpu,
             python = %config.python_path,
             startup_reservation_mb = startup_reservation.0,
-            available_memory_mb = crate::worker::memory_guard::available_memory_mb(),
+            available_memory_mb = ?crate::host_memory::read_system_memory()
+                .ok()
+                .map(|memory| memory.available_mb.0),
             "Spawning worker (memory guard passed)"
         );
 
@@ -326,7 +328,7 @@ impl WorkerHandle {
         });
 
         Self {
-            config: WorkerConfig::default(),
+            config: WorkerConfig::for_tests(),
             child,
             pid: WorkerPid(ready.pid),
             runtime: ready.runtime,
@@ -389,9 +391,9 @@ mod tests {
                 None,
                 4,
                 HostMemoryRuntimeConfig::default(),
-                crate::types::runtime::MemoryTier::detect(),
+                crate::worker::handle::test_memory_tier(),
             ),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
 
         assert!(args.iter().any(|arg| arg == "--force-cpu"));
@@ -414,9 +416,9 @@ mod tests {
                 None,
                 4,
                 HostMemoryRuntimeConfig::default(),
-                crate::types::runtime::MemoryTier::detect(),
+                crate::worker::handle::test_memory_tier(),
             ),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
 
         assert!(args.iter().any(|arg| arg == "--allow-mps"));
@@ -429,7 +431,7 @@ mod tests {
             python_path: "python3".to_string(),
             profile: WorkerProfile::Stanza,
             task: Some(InferTask::Morphosyntax),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
 
         assert!(
@@ -450,9 +452,9 @@ mod tests {
                 None,
                 7,
                 HostMemoryRuntimeConfig::default(),
-                crate::types::runtime::MemoryTier::detect(),
+                crate::worker::handle::test_memory_tier(),
             ),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
 
         assert!(
@@ -471,7 +473,7 @@ mod tests {
     fn worker_command_names_this_process_as_the_supervisor() {
         let args = command_args(&WorkerConfig {
             python_path: "python3".to_string(),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
         let own_pid = std::process::id().to_string();
 
@@ -495,9 +497,9 @@ mod tests {
                 None,
                 7,
                 HostMemoryRuntimeConfig::default(),
-                crate::types::runtime::MemoryTier::detect(),
+                crate::worker::handle::test_memory_tier(),
             ),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
 
         assert!(
@@ -527,9 +529,9 @@ mod tests {
                 Some("  injected-key  ".to_string()),
                 4,
                 HostMemoryRuntimeConfig::default(),
-                crate::types::runtime::MemoryTier::detect(),
+                crate::worker::handle::test_memory_tier(),
             ),
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         });
 
         assert_eq!(
@@ -556,9 +558,9 @@ mod tests {
                     None,
                     4,
                     HostMemoryRuntimeConfig::default(),
-                    crate::types::runtime::MemoryTier::detect(),
+                    crate::worker::handle::test_memory_tier(),
                 ),
-                ..Default::default()
+                ..WorkerConfig::for_tests()
             },
             &HkAsrCredentialSources::from_sources(
                 Some("id"),

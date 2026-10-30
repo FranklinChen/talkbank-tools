@@ -56,9 +56,11 @@ impl DirectHost {
     /// The host owns an in-memory [`JobStore`] and runs jobs inline with no
     /// queue, HTTP transport, registry discovery, or daemon lifecycle layer.
     /// `clock` is the one clock the store records with, created by the caller
-    /// where the program is composed.
+    /// where the program is composed; `host` is the one reading of the host,
+    /// taken there too.
     pub async fn new(
         config: ServerConfig,
+        host: Arc<crate::host_facts::HostSnapshot>,
         layout: RuntimeLayout,
         jobs_dir: Option<PathBuf>,
         cache_dir: Option<PathBuf>,
@@ -78,7 +80,7 @@ impl DirectHost {
             engine,
         } = workers.resolve_execution_runtime(cache);
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = Arc::new(JobStore::new(config, None, tx, clock));
+        let store = Arc::new(JobStore::new(config, host, None, tx, clock));
         let runner = DirectExecutionHost::new(store.clone(), engine);
 
         Ok(Self {
@@ -294,14 +296,15 @@ mod tests {
         let workers = prepare_workers(
             PoolConfig {
                 test_echo: true,
-                ..Default::default()
+                ..PoolConfig::for_tests()
             },
             RegistryDiscovery::Ignore,
         )
         .await
         .expect("prepare workers");
         let host = DirectHost::new(
-            config,
+            config.clone(),
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),
@@ -354,14 +357,15 @@ mod tests {
         let workers = prepare_workers(
             PoolConfig {
                 test_echo: true,
-                ..Default::default()
+                ..PoolConfig::for_tests()
             },
             RegistryDiscovery::Ignore,
         )
         .await
         .expect("prepare workers");
         let host = DirectHost::new(
-            config,
+            config.clone(),
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),
@@ -411,14 +415,15 @@ mod tests {
         let workers = prepare_workers(
             PoolConfig {
                 test_echo: true,
-                ..Default::default()
+                ..PoolConfig::for_tests()
             },
             RegistryDiscovery::Ignore,
         )
         .await
         .expect("prepare workers");
         let host = DirectHost::new(
-            config,
+            config.clone(),
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),
@@ -464,14 +469,15 @@ mod tests {
         let workers = prepare_workers(
             PoolConfig {
                 test_echo: true,
-                ..Default::default()
+                ..PoolConfig::for_tests()
             },
             RegistryDiscovery::Ignore,
         )
         .await
         .expect("prepare workers");
         let host = DirectHost::new(
-            config,
+            config.clone(),
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),

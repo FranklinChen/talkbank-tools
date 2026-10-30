@@ -21,14 +21,11 @@ fn morphotag_options() -> CommandOptions {
 /// validation rather than reaching the worker layer.
 #[tokio::test]
 async fn error_morphotag_unsupported_language_rejected() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let body = serde_json::json!({
@@ -76,16 +73,13 @@ async fn error_morphotag_unsupported_language_rejected() {
 /// Morphotag on an empty CHAT file should complete or fail gracefully.
 #[tokio::test]
 async fn error_morphotag_empty_file() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let empty_chat = "\
 @UTF8
@@ -131,16 +125,13 @@ async fn error_morphotag_empty_file() {
 /// Morphotag on `xxx` (unintelligible) should pass through without crash.
 #[tokio::test]
 async fn edge_morphotag_xxx_utterance() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let chat = "\
 @UTF8
@@ -185,16 +176,13 @@ async fn edge_morphotag_xxx_utterance() {
 /// Morphotag on `www` (untranscribed speech) should pass through without crash.
 #[tokio::test]
 async fn edge_morphotag_www_utterance() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let chat = "\
 @UTF8
@@ -239,16 +227,13 @@ async fn edge_morphotag_www_utterance() {
 /// Malformed CHAT (no @Begin) should fail gracefully.
 #[tokio::test]
 async fn error_morphotag_invalid_chat() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let bad_chat = "\
 @UTF8

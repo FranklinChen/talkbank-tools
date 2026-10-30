@@ -10,16 +10,11 @@ use crate::ml_golden::audio_helpers::{
 
 #[tokio::test]
 async fn golden_align_eng_wav2vec() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_align_fixture_job(jobs.state_dir(), "align_wav2vec") else {
-        return;
-    };
+    let fixture = prepare_align_fixture_job(jobs.state_dir(), "align_wav2vec");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -46,16 +41,11 @@ async fn golden_align_eng_wav2vec() {
 
 #[tokio::test]
 async fn golden_align_eng_whisper_fa() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_align_fixture_job(jobs.state_dir(), "align_whisper") else {
-        return;
-    };
+    let fixture = prepare_align_fixture_job(jobs.state_dir(), "align_whisper");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -82,16 +72,11 @@ async fn golden_align_eng_whisper_fa() {
 
 #[tokio::test]
 async fn golden_align_eng_no_wor() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_align_fixture_job(jobs.state_dir(), "align_no_wor") else {
-        return;
-    };
+    let fixture = prepare_align_fixture_job(jobs.state_dir(), "align_no_wor");
 
     let (info, outputs) = jobs
         .submit_paths_job(

@@ -481,9 +481,21 @@ fn draw_metrics(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(worker_spans)), rows[0]);
 
     // ── Row 2: Memory ──
-    let total = health.system_memory_total_mb.0;
-    let used = health.system_memory_used_mb.0;
-    let avail = health.system_memory_available_mb.0;
+    // A host that would not report its memory shows as such, not as an
+    // empty 0 GB gauge.
+    let Some(reading) = health.system_memory else {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  Memory: unavailable (the server host would not report it)",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            rows[1],
+        );
+        return;
+    };
+    let total = reading.total_mb.0;
+    let used = reading.used_mb.0;
+    let avail = reading.available_mb.0;
     let gate = health.memory_gate_threshold_mb.0;
 
     let (total_gb, used_gb) = (total as f64 / 1024.0, used as f64 / 1024.0);
@@ -778,9 +790,11 @@ mod tests {
         state.health = Some(crate::cli::tui::app::ServerHealth {
             live_workers: 2,
             live_worker_keys: vec!["infer:morphosyntax:eng".into(), "infer:utseg:eng".into()],
-            system_memory_total_mb: MemoryMb(262144),
-            system_memory_available_mb: MemoryMb(100000),
-            system_memory_used_mb: MemoryMb(162144),
+            system_memory: Some(crate::types::response::SystemMemoryReading {
+                total_mb: MemoryMb(262144),
+                available_mb: MemoryMb(100000),
+                used_mb: MemoryMb(162144),
+            }),
             memory_gate_threshold_mb: MemoryMb(2048),
             host_memory_pressure: "healthy".into(),
             worker_crashes: 0,
@@ -801,9 +815,11 @@ mod tests {
         state.health = Some(crate::cli::tui::app::ServerHealth {
             live_workers: 1,
             live_worker_keys: vec!["infer:asr:eng".into()],
-            system_memory_total_mb: MemoryMb(65536),
-            system_memory_available_mb: MemoryMb(30000),
-            system_memory_used_mb: MemoryMb(35536),
+            system_memory: Some(crate::types::response::SystemMemoryReading {
+                total_mb: MemoryMb(65536),
+                available_mb: MemoryMb(30000),
+                used_mb: MemoryMb(35536),
+            }),
             memory_gate_threshold_mb: MemoryMb(2048),
             host_memory_pressure: "guarded".into(),
             worker_crashes: 0,

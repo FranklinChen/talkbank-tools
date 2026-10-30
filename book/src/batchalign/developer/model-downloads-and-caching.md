@@ -1,13 +1,59 @@
 # Model Downloads and Caching (Developer Reference)
 
 **Status:** Current
-**Last updated:** 2026-10-24 18:07 EDT
+**Last updated:** 2026-10-30 11:23 EDT
 
 This page documents how batchalign3 downloads, caches, and verifies ML
 models, the contributor-facing complement to the
 [user-facing chapter](../user-guide/model-downloads.md). It is the
 authoritative inventory of every model load site, every cache location, and
 every download mechanism BA3 currently uses.
+
+## Where things live on disk
+
+Two owners, two roots. What BA3 owns is rooted at the **Batchalign home**
+(`runtime_paths::BatchalignHome` in Rust, `batchalign.config.batchalign_home`
+in Python); what model libraries own follows the process's real `HOME`.
+
+```mermaid
+flowchart LR
+    BH["Batchalign home<br/>BATCHALIGN_HOME, else HOME"] --> INI[".batchalign.ini<br/>engine, provider credentials"]
+    BH --> STATE[".batchalign3/<br/>(unless BATCHALIGN_STATE_DIR)"]
+    BH --> AC["analysis cache<br/>(unless BATCHALIGN_ANALYSIS_CACHE_DIR)"]
+    BH --> MC["media cache<br/>(unless BATCHALIGN_MEDIA_CACHE_DIR)"]
+    H["real HOME"] --> HF["Hugging Face<br/>HF_HOME, HF_HUB_CACHE"]
+    H --> ST["Stanza<br/>STANZA_RESOURCES_DIR"]
+    H --> TO["torch, ModelScope"]
+```
+
+**Owned by BA3**, under the Batchalign home:
+
+| What | Default (no `BATCHALIGN_HOME`) | With `BATCHALIGN_HOME=R` | Specific override |
+|---|---|---|---|
+| Config and credentials | `~/.batchalign.ini` | `R/.batchalign.ini` | none |
+| Runtime state: `server.yaml`, `jobs.db`, `daemon.log`, `workers.json`, worker debug dumps | `~/.batchalign3/` | `R/.batchalign3/` | `BATCHALIGN_STATE_DIR` |
+| Analysis (utterance) cache, `cache.db` | platform cache dir + `batchalign3/` (macOS `~/Library/Caches/batchalign3/`, Linux `~/.cache/batchalign3/`) | `R/.cache/batchalign3/` | `BATCHALIGN_ANALYSIS_CACHE_DIR` |
+| Media conversion cache | platform data dir + `batchalign3/media_cache/` (macOS `~/Library/Application Support/...`, Linux `~/.local/share/...`) | `R/.local/share/batchalign3/media_cache/` | `BATCHALIGN_MEDIA_CACHE_DIR` |
+
+A specific override always wins over the root. A Python worker inherits
+`BATCHALIGN_HOME` from the server that spawned it, so both languages
+resolve the same files.
+
+**Owned by model libraries**, under the real `HOME` (see the two sections
+below for each library's resolution order): Hugging Face (`~/.cache/huggingface`),
+Stanza (`~/Library/Caches/stanza/<resver>/resources` on macOS), torch
+(`~/.cache/torch`), ModelScope (`~/.cache/modelscope`). These are large
+(whisper-large-v3's repository holds 24.7 GB across its weight formats, of
+which BA3 fetches the 3.1 GB it loads; see below)
+and machine-wide, so operators often point them at another volume with a
+symlink or `HF_HOME`; BA3 never relocates them.
+
+**Why the split matters for tests.** The CLI test harness isolates each
+test's BA3 by setting `BATCHALIGN_HOME` to a temporary directory and leaving
+`HOME` alone. It used to fake `HOME` instead, which also relocated every
+library's cache: each live test then re-downloaded its models into the
+temporary directory, on the system volume and inside its time budget, which
+filled a disk on one run and timed a test out on the next.
 
 ## The on-demand download contract
 
@@ -67,6 +113,23 @@ the [user-facing chapter](../user-guide/model-downloads.md) for the table
 of OS-resolved paths.
 
 ### Rows 14 and 15: the pinned path
+
+**Only the files a loader reads are downloaded.** Every pinned Hugging Face
+load goes through `pinned_hub.resolve_pinned_snapshot(model_id, commit,
+files)`, and `files` is a required `HubFiles` family the loader declares:
+
+| Family | Fetches | Loaders |
+|---|---|---|
+| `TRANSFORMERS` | configs, tokenizer and template files (`*.json`, `*.txt`, `*.jinja`, `*.model`, `*.tiktoken`) and the default-variant weights: safetensors when the revision has them, otherwise PyTorch `.bin` (the precedence `from_pretrained` applies); a revision with neither is refused | Whisper, Qwen3 ASR and forced aligner, the BERT utterance-boundary models |
+| `WHOLE_REPOSITORY` | everything | FunASR (SenseVoice and its VAD), which reads whatever its `config.yaml` names |
+
+Without it `snapshot_download` fetched every format a repository carries:
+`openai/whisper-large-v3` holds Flax, PyTorch `.bin`, fp32 shards and
+safetensors, 24.7 GB, for a loader that reads the 3.1 GB `model.safetensors`.
+When adding a hub model, run `scripts/check_hub_file_selection.py` (metadata
+only: what would download, and whether weights are among it) and, for a new
+architecture, `scripts/verify_hub_selection_loads.py`, which resolves into an
+empty cache and loads the model from exactly those files.
 
 Row 14 is a manifest, not a loader. It exists so a model's identity is known
 BEFORE dispatch: it is what the request carries, what the worker's report is

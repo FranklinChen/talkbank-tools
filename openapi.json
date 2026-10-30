@@ -1004,17 +1004,16 @@
             "$ref": "#/components/schemas/HealthStatus",
             "description": "Server health status.  Always `Ok` in the current implementation\n(the endpoint itself being reachable implies health), but future\nversions may report degraded states.\n\nREQUIRED, and that is what makes this type an identification rather\nthan a shape any JSON happens to fit. With `#[serde(default)]` here and\non every other field, `{\"error\":{\"message\":\"unknown endpoint\"}}`\ndeserialized into a perfectly healthy response, because `HealthStatus`\nhas a single `#[default] Ok` variant. On 2026-08-27 an unrelated local\nservice holding port 8000 was therefore accepted as a Batchalign\nserver and dispatched real jobs. Parse at the boundary into a type\nwhose existence proves what it claims: a body without these fields is\nnot a Batchalign health response and must fail to parse, not arrive\npre-filled with agreeable values."
           },
-          "system_memory_available_mb": {
-            "$ref": "#/components/schemas/MemoryMb",
-            "description": "Available memory in MB (free + reclaimable).  On macOS this is\n`free + purgeable` which can undercount; see `sysinfo` docs."
-          },
-          "system_memory_total_mb": {
-            "$ref": "#/components/schemas/MemoryMb",
-            "description": "Total physical memory in MB."
-          },
-          "system_memory_used_mb": {
-            "$ref": "#/components/schemas/MemoryMb",
-            "description": "Used memory in MB (`total - available`)."
+          "system_memory": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SystemMemoryReading",
+                "description": "The host's memory, absent when the operating system would not report\nit (the reason is in `host_memory_error`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "version": {
             "description": "Server software version (e.g. `\"0.6.0\"`).  Used by the CLI to\ndetect stale daemons and auto-restart them.\n\nREQUIRED for the same reason as `status`. A server that could omit it\nwould already have broken the stale-daemon check this field exists for.",
@@ -2685,6 +2684,29 @@
             "description": "A cause only earlier builds wrote."
           }
         ]
+      },
+      "SystemMemoryReading": {
+        "description": "The host's memory as the operating system reported it for one response.\n\nOne reading, so the three figures are always from the same moment and are\npresent or absent together: an unreadable host is an absent reading, never\na zero total the dashboard would draw.",
+        "properties": {
+          "available_mb": {
+            "$ref": "#/components/schemas/MemoryMb",
+            "description": "Available memory in MB (free + reclaimable).  On macOS this is\n`free + purgeable` which can undercount; see `sysinfo` docs."
+          },
+          "total_mb": {
+            "$ref": "#/components/schemas/MemoryMb",
+            "description": "Total physical memory in MB."
+          },
+          "used_mb": {
+            "$ref": "#/components/schemas/MemoryMb",
+            "description": "Used memory in MB (`total - available`)."
+          }
+        },
+        "required": [
+          "total_mb",
+          "available_mb",
+          "used_mb"
+        ],
+        "type": "object"
       },
       "UntimedCauseRecord": {
         "description": "Why an utterance's words have no timing: the causes this build writes.",

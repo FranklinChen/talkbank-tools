@@ -129,7 +129,7 @@ opentelemetry-otlp = { version = "0.33", default-features = false, features = ["
 utoipa = { version = "6", features = ["axum_extras", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 whatlang = "0.18"
-sysinfo = "0.39"
+sysinfo = "0.40"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Logging and tracing

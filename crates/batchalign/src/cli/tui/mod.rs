@@ -151,9 +151,7 @@ impl ProgressDisplay for TuiProgress {
         self.send_update(TuiUpdate::HealthSnapshot(ServerHealth {
             live_workers: health.live_workers,
             live_worker_keys: health.live_worker_keys.clone(),
-            system_memory_total_mb: health.system_memory_total_mb,
-            system_memory_available_mb: health.system_memory_available_mb,
-            system_memory_used_mb: health.system_memory_used_mb,
+            system_memory: health.system_memory,
             memory_gate_threshold_mb: health.memory_gate_threshold_mb,
             host_memory_pressure: pressure_label,
             worker_crashes: health.worker_crashes,

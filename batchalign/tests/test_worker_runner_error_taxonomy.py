@@ -212,6 +212,7 @@ def _morphosyntax_request(tmp_path: Path) -> ExecuteRequestV2:
         "words": ["hi"],
         "terminator": ".",
         "special_forms": [[None, None]],
+        "runs": [1],
         "lang": "eng",
     }
     payload_path.write_text(json.dumps({"items": [item], "mwt": {}}), encoding="utf-8")

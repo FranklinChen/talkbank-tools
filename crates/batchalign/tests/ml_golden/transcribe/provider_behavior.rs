@@ -1,5 +1,5 @@
 use crate::common::{LiveServerJobClient, require_live_server};
-use crate::ml_golden::audio_helpers::{assert_valid_chat_structure, revai_available};
+use crate::ml_golden::audio_helpers::{assert_valid_chat_structure, require_revai};
 use crate::ml_golden::transcribe::helpers::{prepare_transcribe_fixture_job, transcribe_options};
 use batchalign::api::{JobStatus, ReleasedCommand};
 use batchalign::options::{AsrEngineName, WorTierPolicy};
@@ -14,23 +14,16 @@ fn media_header(chat: &str, label: &str) -> String {
 
 #[tokio::test]
 async fn transcribe_server_eng_revai_completes_when_configured() {
-    if !revai_available() {
-        return;
-    }
+    require_revai();
 
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(
+    let fixture = prepare_transcribe_fixture_job(
         server.state_dir(),
         "transcribe_server_eng_revai_completes_when_configured",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -57,23 +50,16 @@ async fn transcribe_server_eng_revai_completes_when_configured() {
 
 #[tokio::test]
 async fn transcribe_server_eng_revai_preserves_source_media_basename() {
-    if !revai_available() {
-        return;
-    }
+    require_revai();
 
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(
+    let fixture = prepare_transcribe_fixture_job(
         server.state_dir(),
         "transcribe_server_eng_revai_preserves_source_media_basename",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(

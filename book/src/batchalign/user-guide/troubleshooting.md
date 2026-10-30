@@ -33,6 +33,38 @@ Test one affected file with an alternative engine before repeating a batch.
 Do not edit CHAT pitch marks or reorder timestamps to hide an error generated
 from audio-only input.
 
+## A completed job can still contain diagnosed or failed files
+
+A job's status describes the job as a whole. `completed` means every file was
+processed, not that every file came out clean; `failed` can mean that most
+files succeeded and a few did not. Check each file before using a batch:
+
+```bash
+# The local daemon listens on port 8001 unless configured otherwise.
+batchalign3 jobs --server http://localhost:8001            # recent jobs
+batchalign3 jobs --server http://localhost:8001 JOB_ID     # one status per file
+batchalign3 jobs --server http://localhost:8001 --json JOB_ID
+```
+
+Without `--server`, `jobs JOB_ID` inspects only the local artifact directory
+and does not show per-file results. The
+[dashboard](dashboard.md#job-detail-page) shows the same per-file statuses.
+
+| File status | Meaning | What to do |
+| --- | --- | --- |
+| `done` | Output written and admitted. | Review the content as usual. |
+| `diagnosed` | Output written, with findings that need review. The `--json` detail lists each finding (code, message) and any `stage_held_out` or `stage_skipped` stage: the utterances a stage such as utterance segmentation or `%mor` did not process, or a stage not applied at all. | Review the listed findings in the written file before using it; report them if they come from generated output. |
+| `error` | No admitted output for that file. The message gives the cause. | Report it. A file left in the output folder by an earlier run is not output of this job. |
+
+`chatter validate OUT_DIR` checks every written file independently of the job
+record, including files edited after the run.
+
+When you report a problem, include the job ID, the file name, the exact
+command, `batchalign3 version` and the complete diagnostic (the `--json` file
+entry is ideal). Report a diagnosed or failed file when you first see it, even
+if you plan to correct the transcript by hand: the same cause will recur in
+later batches until it is fixed.
+
 ## Worker Python resolution order
 
 When debugging which Python the CLI selects, the full resolution order is:

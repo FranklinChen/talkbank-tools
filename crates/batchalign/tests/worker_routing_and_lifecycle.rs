@@ -27,26 +27,7 @@ use batchalign::host_facts::PerProfile;
 use batchalign::worker::handle::{WorkerConfig, WorkerHandle};
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask, WorkerProfile};
-use common::resolve_python;
 use serde_json::{Value, json};
-
-macro_rules! require_python {
-    () => {{
-        common::test_server_fixture::isolate_host_memory_ledger();
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!("SKIP: insufficient memory ({available_mb} MB available, 4096 MB required)");
-            return;
-        }
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    }};
-}
 
 fn batch_request(task: InferTask, lang: LanguageCode3, items: Vec<Value>) -> BatchInferRequest {
     BatchInferRequest {
@@ -66,8 +47,10 @@ fn test_pool(python: String) -> WorkerPool {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     })
 }
 
@@ -79,7 +62,7 @@ fn test_pool(python: String) -> WorkerPool {
 /// groups and both should succeed without cross-contamination.
 #[tokio::test]
 async fn concurrent_dispatch_to_different_languages() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     let eng_item = json!({"words": ["hello"], "lang": "eng"});
@@ -146,7 +129,7 @@ async fn concurrent_dispatch_to_different_languages() {
 /// should all succeed simultaneously without blocking each other.
 #[tokio::test]
 async fn concurrent_dispatch_across_task_types() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     let pool_ptr = &pool as *const WorkerPool as usize;
@@ -215,14 +198,14 @@ async fn concurrent_dispatch_across_task_types() {
 /// This test is platform-agnostic, it verifies the basic lifecycle.
 #[tokio::test]
 async fn cross_platform_worker_spawn_and_shutdown() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let handle = WorkerHandle::spawn(config).await.expect("spawn failed");
@@ -238,7 +221,7 @@ async fn cross_platform_worker_spawn_and_shutdown() {
 /// Pool creation, dispatch, and shutdown form a complete lifecycle on any platform.
 #[tokio::test]
 async fn cross_platform_pool_lifecycle() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     // Dispatch.
@@ -265,14 +248,14 @@ async fn cross_platform_pool_lifecycle() {
 /// Worker health check works on the current platform.
 #[tokio::test]
 async fn cross_platform_worker_health_check() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -286,14 +269,14 @@ async fn cross_platform_worker_health_check() {
 /// Worker capabilities detection works on the current platform.
 #[tokio::test]
 async fn cross_platform_worker_capabilities() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -315,7 +298,7 @@ async fn cross_platform_worker_capabilities() {
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_kills_idle_workers() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     // Spawn a worker by dispatching.
@@ -353,7 +336,7 @@ async fn shutdown_kills_idle_workers() {
 #[cfg(unix)]
 #[tokio::test]
 async fn drop_without_shutdown_still_reaps_workers() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pid = {
         let pool = test_pool(python);
         pool.dispatch_batch_infer(
@@ -388,7 +371,7 @@ async fn drop_without_shutdown_still_reaps_workers() {
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_cleans_up_multiple_worker_groups() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     // Create workers in 3 different profiles.

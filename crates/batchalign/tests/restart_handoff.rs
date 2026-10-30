@@ -28,7 +28,6 @@ use batchalign::config::ServerConfig;
 use batchalign::create_test_app;
 use batchalign::options::{CommandOptions, CommonOptions, TranscribeOptions};
 use batchalign::worker::pool::PoolConfig;
-use common::resolve_python;
 use common::test_server_fixture::isolate_host_memory_ledger;
 
 use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
@@ -90,10 +89,7 @@ async fn get_job(client: &reqwest::Client, base_url: &str, job_id: &str) -> JobI
 
 #[tokio::test]
 async fn cancel_restart_while_running_hands_off_to_one_runner() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
     isolate_host_memory_ledger();
 
     // Dedicated app (not the shared warm fixture): this test needs a
@@ -109,7 +105,7 @@ async fn cancel_restart_while_running_hands_off_to_one_runner() {
         test_echo: true,
         test_delay_ms: ECHO_DELAY_MS,
         verbose: 0,
-        ..Default::default()
+        ..PoolConfig::for_tests()
     };
     let (router, _state) = create_test_app(
         ServerConfig::default(),

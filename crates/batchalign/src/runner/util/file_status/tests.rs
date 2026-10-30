@@ -251,7 +251,7 @@ async fn forwarder_drains_queued_wait_changes_before_finishing() {
 #[tokio::test]
 async fn supervised_task_marks_non_terminal_exit_as_error() {
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(
+    let store = Arc::new(JobStore::for_tests(
         test_config(),
         None,
         tx,
@@ -291,7 +291,7 @@ async fn supervised_task_marks_non_terminal_exit_as_error() {
 #[tokio::test]
 async fn supervised_task_marks_panic_as_error() {
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(
+    let store = Arc::new(JobStore::for_tests(
         test_config(),
         None,
         tx,
@@ -341,7 +341,7 @@ async fn file_run_tracker_retries_then_completes_cleanly() {
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
     let start = crate::unix_time(1_700_000_000.0);
     let clock = Arc::new(crate::clock::ManualClock::at(start));
-    let store = Arc::new(JobStore::new(
+    let store = Arc::new(JobStore::for_tests(
         test_config(),
         Some(db.clone()),
         tx,
@@ -423,7 +423,7 @@ async fn file_run_tracker_records_setup_failure() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(JobDB::open(Some(tempdir.path())).await.expect("open db"));
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(
+    let store = Arc::new(JobStore::for_tests(
         test_config(),
         Some(db.clone()),
         tx,

@@ -162,9 +162,7 @@ async fn submit_and_verify(
 /// Morphotag: batched text inference (Stanza profile).
 #[tokio::test]
 async fn smoke_morphotag() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = reqwest::Client::new();
 
@@ -190,9 +188,7 @@ async fn smoke_morphotag() {
 /// Utseg: batched text inference (Stanza constituency profile).
 #[tokio::test]
 async fn smoke_utseg() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = reqwest::Client::new();
 
@@ -217,9 +213,7 @@ async fn smoke_utseg() {
 /// Translate: batched text inference (IO profile).
 #[tokio::test]
 async fn smoke_translate() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = reqwest::Client::new();
 
@@ -244,9 +238,7 @@ async fn smoke_translate() {
 /// Coref: batched text inference (Stanza coref profile).
 #[tokio::test]
 async fn smoke_coref() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = reqwest::Client::new();
 
@@ -271,9 +263,7 @@ async fn smoke_coref() {
 /// Test-echo workers process this without real audio.
 #[tokio::test]
 async fn smoke_transcribe() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = reqwest::Client::new();
 
@@ -305,9 +295,7 @@ async fn smoke_transcribe() {
 /// Test-echo workers process this without real audio.
 #[tokio::test]
 async fn smoke_align() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = reqwest::Client::new();
 

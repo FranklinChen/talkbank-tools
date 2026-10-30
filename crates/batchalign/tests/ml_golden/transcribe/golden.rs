@@ -1,7 +1,7 @@
 use crate::common::{LiveDirectJobClient, require_live_direct};
 use crate::ml_golden::audio_helpers::{
     assert_first_utterance_max_words, assert_min_utterances, assert_valid_chat_structure,
-    count_wor_tiers, revai_available,
+    count_wor_tiers, require_revai,
 };
 use crate::ml_golden::transcribe::helpers::{
     MULTI_SPEAKER_FIXTURE_SPEAKERS, prepare_multi_speaker_transcribe_fixture_job,
@@ -13,17 +13,11 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn golden_transcribe_eng_whisper() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_whisper")
-    else {
-        return;
-    };
+    let fixture = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_whisper");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -52,20 +46,13 @@ async fn golden_transcribe_eng_whisper() {
 
 #[tokio::test]
 async fn golden_transcribe_eng_revai() {
-    if !revai_available() {
-        return;
-    }
+    require_revai();
 
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_revai") else {
-        return;
-    };
+    let fixture = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_revai");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -88,16 +75,11 @@ async fn golden_transcribe_eng_revai() {
 
 #[tokio::test]
 async fn golden_transcribe_eng_whisper_wor() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_wor") else {
-        return;
-    };
+    let fixture = prepare_transcribe_fixture_job(jobs.state_dir(), "transcribe_wor");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -124,20 +106,15 @@ async fn golden_transcribe_eng_whisper_wor() {
 
 #[tokio::test]
 async fn transcribe_eng_acr_clip_whisper_produces_multiple_utterances() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_named_transcribe_fixture_job(
+    let fixture = prepare_named_transcribe_fixture_job(
         jobs.state_dir(),
         "transcribe_eng_acr_clip",
         "eng_acr_first13p5",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -161,24 +138,17 @@ async fn transcribe_eng_acr_clip_whisper_produces_multiple_utterances() {
 
 #[tokio::test]
 async fn transcribe_eng_acr_clip_revai_avoids_giant_first_utterance() {
-    if !revai_available() {
-        return;
-    }
+    require_revai();
 
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_named_transcribe_fixture_job(
+    let fixture = prepare_named_transcribe_fixture_job(
         jobs.state_dir(),
         "transcribe_eng_acr_clip_revai",
         "eng_acr_first13p5",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -203,14 +173,10 @@ async fn transcribe_eng_acr_clip_revai_avoids_giant_first_utterance() {
 
 #[tokio::test]
 async fn transcribe_eng_diarize() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     if !session.has_infer_task(InferTask::Speaker) {
-        eprintln!("SKIP: Direct session does not support speaker diarization");
-        return;
+        panic!("PREREQUISITE MISSING: Direct session does not support speaker diarization")
     }
     let jobs = LiveDirectJobClient::new(&session);
 
@@ -222,11 +188,8 @@ async fn transcribe_eng_diarize() {
     // transcription completes and yields valid CHAT, needs audio where
     // separation means something; the two `*_surfaces_multiple_speakers*`
     // tests cover the stronger claim that more than one speaker comes back.
-    let Some(fixture) =
-        prepare_multi_speaker_transcribe_fixture_job(jobs.state_dir(), "transcribe_diarize")
-    else {
-        return;
-    };
+    let fixture =
+        prepare_multi_speaker_transcribe_fixture_job(jobs.state_dir(), "transcribe_diarize");
 
     let (info, outputs) = jobs
         .submit_paths_job_with_speakers(

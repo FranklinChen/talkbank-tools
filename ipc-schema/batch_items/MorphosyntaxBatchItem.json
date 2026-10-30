@@ -8,6 +8,15 @@
       "description": "Language code for this utterance (ISO 639-3).",
       "type": "string"
     },
+    "runs": {
+      "description": "Run lengths partitioning `words`: a tokenizer may merge words only\nwithin one run, since something (a retrace, a pause, a bracket)\nstands between runs on the main tier.",
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 0
+      }
+    },
     "special_forms": {
       "description": "Special form and language per word: (form_type, resolved_language).",
       "type": "array",
@@ -47,6 +56,7 @@
     "words",
     "terminator",
     "special_forms",
+    "runs",
     "lang"
   ]
 }

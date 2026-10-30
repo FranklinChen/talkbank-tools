@@ -321,10 +321,7 @@ impl MorphosyntaxResult {
                 utterance_index: info.utterance_ordinal,
                 original_words: info.original_words,
                 stanza_tokens: info.stanza_tokens,
-                normalized_original: String::new(), // not captured at this level
-                normalized_tokens: String::new(),
                 mapping: info.mapping,
-                used_fallback: info.used_fallback,
             })
             .collect()
     }

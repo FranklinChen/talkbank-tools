@@ -9,14 +9,11 @@ use batchalign::worker::InferTask;
 /// leave behind partial output artifacts from the new compare execution path.
 #[tokio::test]
 async fn error_compare_missing_gold_companion_fails_cleanly() {
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Morphosyntax,
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let input_dir = session.state_dir().join("compare_missing_gold_in");
     let output_dir = session.state_dir().join("compare_missing_gold_out");

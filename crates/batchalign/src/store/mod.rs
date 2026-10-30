@@ -34,7 +34,6 @@ use crate::api::{
     FileStatusKind, JobStatus, MachineTime, NodeId, NonNegativeSeconds, OutputExclusionRecord,
 };
 use crate::config::ServerConfig;
-use crate::host_policy::HostExecutionPolicy;
 #[cfg(test)]
 use crate::host_policy::auto_max_concurrent_from as host_auto_max_concurrent_from;
 use crate::scheduling::FailureCategory;
@@ -814,9 +813,12 @@ pub struct JobStore {
     config: ServerConfig,
     node_id: NodeId,
     trace_store: crate::trace_store::TraceStore,
-    max_concurrent: usize,
     /// The one source of the current time for the store and its runners.
     clock: Arc<dyn crate::clock::Clock>,
+    /// The host as read where the server was composed. Every job's dispatch
+    /// context takes its tier and resolved knobs from here, never from a fresh
+    /// reading of the machine.
+    host: Arc<crate::host_facts::HostSnapshot>,
 }
 
 impl JobStore {
@@ -827,21 +829,17 @@ impl JobStore {
     /// The clock is required: it is created once where the program is
     /// composed (the server, the direct host) and handed down, so there is
     /// no second clock for a store to fall back to. Tests pass a
-    /// `ManualClock` where they need exact instants.
+    /// `ManualClock` where they need exact instants. The host snapshot is
+    /// likewise read once by the composing caller; a store cannot fail on the
+    /// host.
     pub fn new(
         config: ServerConfig,
+        host: Arc<crate::host_facts::HostSnapshot>,
         db: Option<Arc<JobDB>>,
         ws_tx: broadcast::Sender<WsEvent>,
         clock: Arc<dyn crate::clock::Clock>,
     ) -> Self {
-        // `Some(n)` is an explicit operator override; `None` falls
-        // through to the host-aware auto-tune. (Future host-facts
-        // work will subsume `auto_max_concurrent_jobs` into
-        // `EffectiveConfig::max_concurrent_jobs`.)
-        let max_concurrent = match config.max_concurrent_jobs {
-            Some(n) => n as usize,
-            None => HostExecutionPolicy::from_server_config(&config).auto_max_concurrent_jobs(),
-        };
+        let max_concurrent = host.max_concurrent_jobs();
         info!(
             max_concurrent_jobs = max_concurrent,
             config_value = ?config.max_concurrent_jobs,
@@ -857,9 +855,26 @@ impl JobStore {
             node_id: NodeId::from(format!("node-{}", uuid::Uuid::new_v4().simple())),
             trace_store: crate::trace_store::TraceStore::new(),
             config,
-            max_concurrent,
             clock,
+            host,
         }
+    }
+
+    /// A store at a declared test host ([`crate::host_facts::HostSnapshot::for_tests`]).
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        config: ServerConfig,
+        db: Option<Arc<JobDB>>,
+        ws_tx: broadcast::Sender<WsEvent>,
+        clock: Arc<dyn crate::clock::Clock>,
+    ) -> Self {
+        let host = Arc::new(crate::host_facts::HostSnapshot::for_tests(&config));
+        Self::new(config, host, db, ws_tx, clock)
+    }
+
+    /// The host this store was composed on.
+    pub(crate) fn host(&self) -> &Arc<crate::host_facts::HostSnapshot> {
+        &self.host
     }
 
     /// Now, by the store's clock.

@@ -69,16 +69,11 @@ async fn align_audio_clip_with_options(
     label: &str,
     options: batchalign::options::CommandOptions,
 ) {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_named_audio(jobs.state_dir(), audio_name, Some(chat_name)) else {
-        return;
-    };
+    let fixtures = prepare_named_audio(jobs.state_dir(), audio_name, Some(chat_name));
 
     let out_dir = jobs.state_dir().join(format!("out_{label}"));
     std::fs::create_dir_all(&out_dir).expect("mkdir output dir");
@@ -144,16 +139,11 @@ async fn align_untimed_audio_clip_with_options(
     label: &str,
     options: batchalign::options::CommandOptions,
 ) -> (batchalign::api::JobInfo, Vec<String>) {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        panic!("{label}: direct FA session unavailable");
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_named_audio(jobs.state_dir(), audio_name, Some(chat_name)) else {
-        panic!("{label}: named audio fixture unavailable");
-    };
+    let fixtures = prepare_named_audio(jobs.state_dir(), audio_name, Some(chat_name));
 
     let untimed_path = fixtures.stripped_chat.clone();
     std::fs::write(
@@ -187,16 +177,10 @@ async fn align_untimed_audio_clip_with_options_detailed(
     label: &str,
     options: batchalign::options::CommandOptions,
 ) -> (batchalign::api::JobInfo, batchalign::store::JobDetail) {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        panic!("{label}: direct FA session unavailable");
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
 
-    let Some(fixtures) = prepare_named_audio(session.state_dir(), audio_name, Some(chat_name))
-    else {
-        panic!("{label}: named audio fixture unavailable");
-    };
+    let fixtures = prepare_named_audio(session.state_dir(), audio_name, Some(chat_name));
 
     let untimed_path = fixtures.stripped_chat.clone();
     std::fs::write(
@@ -241,17 +225,10 @@ async fn align_audio_clip_server_with_options(
     label: &str,
     options: batchalign::options::CommandOptions,
 ) {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixtures) = prepare_named_audio(server.state_dir(), audio_name, Some(chat_name))
-    else {
-        return;
-    };
+    let fixtures = prepare_named_audio(server.state_dir(), audio_name, Some(chat_name));
 
     let out_dir = server.state_dir().join(format!("out_{label}"));
     std::fs::create_dir_all(&out_dir).expect("mkdir output dir");
@@ -294,17 +271,10 @@ async fn align_server_untimed_audio_clip_with_options(
     batchalign::api::JobResultResponse,
     Vec<String>,
 ) {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        panic!("{label}: live server FA session unavailable");
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixtures) = prepare_named_audio(server.state_dir(), audio_name, Some(chat_name))
-    else {
-        panic!("{label}: named audio fixture unavailable");
-    };
+    let fixtures = prepare_named_audio(server.state_dir(), audio_name, Some(chat_name));
 
     let untimed_path = fixtures.stripped_chat.clone();
     std::fs::write(
@@ -476,8 +446,7 @@ async fn align_server_yue_untimed_whisper_utr_succeeds() {
 #[tokio::test]
 async fn align_eng_untimed_rev_utr_succeeds_when_key_available() {
     if require_revai_key().is_none() {
-        eprintln!("SKIP: REVAI_API_KEY / BATCHALIGN_REV_API_KEY not set");
-        return;
+        panic!("PREREQUISITE MISSING: REVAI_API_KEY / BATCHALIGN_REV_API_KEY not set")
     }
 
     let (info, outputs) = align_untimed_audio_clip_with_options(

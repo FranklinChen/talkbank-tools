@@ -664,7 +664,7 @@ mod tests {
         }
         let plan = build_job_plan(&snapshot).expect("plan");
         let (_tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        let store = std::sync::Arc::new(crate::store::JobStore::new(
+        let store = std::sync::Arc::new(crate::store::JobStore::for_tests(
             crate::config::ServerConfig::default(),
             None,
             _tx,

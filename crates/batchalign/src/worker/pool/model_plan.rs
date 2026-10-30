@@ -640,7 +640,7 @@ mod tests {
     /// dispatch refuses it before deriving any key or spawning anything.
     #[tokio::test]
     async fn request_keyed_dispatch_refuses_gpu_requests() {
-        let pool = super::super::WorkerPool::new(super::super::PoolConfig::default());
+        let pool = super::super::WorkerPool::new(super::super::PoolConfig::for_tests());
         let error = pool
             .dispatch_execute_v2(
                 english(),

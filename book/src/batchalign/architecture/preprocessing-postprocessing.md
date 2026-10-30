@@ -179,12 +179,12 @@ Stanza tokens:  ["do", "n't", "wan", "na"]
 ```
 
 The retokenizer:
-1. Concatenates both word lists into character strings
-2. Runs character-level DP alignment
-3. Builds a deterministic mapping from Stanza token indices back to CHAT word indices
+1. Normalizes and concatenates both word lists into character strings
+2. Requires the two strings to be identical; if they are not, the utterance is refused and keeps its transcript
+3. Builds a deterministic span-join mapping from CHAT word indices to Stanza token indices
 4. Uses this mapping to assign Stanza annotations (POS, lemma, depparse) to the correct CHAT words
 
-This handles splits (`don't` → `do` + `n't`), merges, and even reorderings across languages. The mapping uses a length-aware fallback for ambiguous cases.
+This handles splits (`don't` as `do` + `n't`) and merges. It never reorders: a merge that would cross a retraced group, pause, event or bracket edge is refused, and there is no length-based fallback for text that diverges.
 
 ## Cache Keys
 

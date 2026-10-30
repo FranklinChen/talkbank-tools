@@ -70,29 +70,19 @@ pub(crate) async fn require_direct_session_warmed(
     task: InferTask,
     command: ReleasedCommand,
     lang: &str,
-    skip_message: &str,
-) -> Option<DirectGoldenSession> {
-    let session = require_live_direct_warmed(task, command, lang, skip_message)
-        .await
-        .unwrap_or_else(|| {
-            panic!(
-                "ml-golden requested but no live session for {command:?}/{lang} \
-                 ({task:?}): {skip_message}. The suite is feature-gated, so \
-                 reaching here means the environment cannot honour an explicit \
-                 request; a silent skip would report a pass for a test that \
-                 never ran."
-            )
-        });
-    Some(DirectGoldenSession { session })
+    requirement: &str,
+) -> DirectGoldenSession {
+    let session = require_live_direct_warmed(task, command, lang, requirement).await;
+    DirectGoldenSession { session }
 }
 
 pub(crate) async fn require_direct_session_warmed_many(
     task: InferTask,
     warmups: Vec<(ReleasedCommand, &str)>,
-    skip_message: &str,
-) -> Option<DirectGoldenSession> {
-    let session = require_live_direct_warmed_many(task, warmups, skip_message).await?;
-    Some(DirectGoldenSession { session })
+    requirement: &str,
+) -> DirectGoldenSession {
+    let session = require_live_direct_warmed_many(task, warmups, requirement).await;
+    DirectGoldenSession { session }
 }
 
 pub(crate) fn unique_test_dir(prefix: &str) -> String {

@@ -43,7 +43,7 @@ fn native_export_cli_refuses_in_place_before_reading_sources_or_starting_models(
 use batchalign::media::tools::MediaTool;
 use cli_common::{
     CliHarness, MEDIA_CHAT, MINIMAL_CHAT, RemoteStub, RemoteStubOutcome, cli_cmd as cmd,
-    resolve_python, start_live_server, transcode_audio_to_mp4, write_silent_mp4, write_silent_wav,
+    start_live_server, transcode_audio_to_mp4, write_silent_mp4, write_silent_wav,
 };
 use common::test_server_fixture::acquire_test_server_session;
 
@@ -141,10 +141,7 @@ fn start_daemon_on_ephemeral_port(
 /// lives on [`PortRequest`] and in `server_handshake`.
 #[test]
 fn serve_start_with_ephemeral_port_publishes_the_bound_port() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
     let harness = CliHarness::new();
     // The helper asks for `port: 0` and reads back what was published, which is
@@ -361,10 +358,7 @@ fn openapi_check_fails_when_schema_is_stale() {
 fn models_python_module_importable() {
     // The `models` command forwards to `python -m batchalign.models.training.run`.
     // Verify the Python module can at least be found (import check).
-    let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let output = std::process::Command::new(&python)
         .args(["-c", "import batchalign.models.training.run"])
@@ -552,10 +546,7 @@ fn serve_status_unknown_config_field_is_config_error() {
 async fn cli_morphotag_real_server() {
     use batchalign::worker::InferTask;
 
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     // Set up input directory with a .cha file
@@ -568,23 +559,18 @@ async fn cli_morphotag_real_server() {
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI||female|||Target_Child|||\n*CHI:\thello world .\n@End\n",
     ).expect("write input");
 
-    let server = match start_live_server(
+    let server = start_live_server(
         &python_path,
         vec![batchalign_types::paths::ServerPath::new(in_dir.clone())],
     )
     .await
-    {
-        Ok(server) => server,
-        Err(message) => {
-            eprintln!("SKIP: {message}");
-            return;
-        }
-    };
-    if !server.has_infer_task(InferTask::Morphosyntax) {
-        eprintln!("SKIP: live server does not advertise morphosyntax infer support");
-        server.shutdown().await;
-        return;
-    }
+    .unwrap_or_else(|message| {
+        panic!("PREREQUISITE MISSING: the live server did not start: {message}")
+    });
+    assert!(
+        server.has_infer_task(InferTask::Morphosyntax),
+        "PREREQUISITE MISSING: live server does not advertise morphosyntax infer support"
+    );
 
     // Run CLI subprocess in a blocking task so it doesn't block the tokio
     // runtime (which is serving the axum server on the same runtime).
@@ -638,10 +624,7 @@ async fn cli_morphotag_real_server() {
 async fn cli_align_real_server_live_fa_succeeds() {
     use batchalign::worker::InferTask;
 
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -651,8 +634,7 @@ async fn cli_align_real_server_live_fa_succeeds() {
     let source_audio = repo.join("batchalign/tests/support/test.mp3");
     let source_chat = repo.join("batchalign/tests/formats/chat/support/test.cha");
     if !source_audio.is_file() || !source_chat.is_file() {
-        eprintln!("SKIP: committed align fixture pair is unavailable");
-        return;
+        panic!("PREREQUISITE MISSING: committed align fixture pair is unavailable")
     }
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -673,23 +655,18 @@ async fn cli_align_real_server_live_fa_succeeds() {
         + "\n";
     std::fs::write(in_dir.join("test.cha"), stripped_chat).expect("write stripped chat");
 
-    let server = match start_live_server(
+    let server = start_live_server(
         &python_path,
         vec![batchalign_types::paths::ServerPath::new(in_dir.clone())],
     )
     .await
-    {
-        Ok(server) => server,
-        Err(message) => {
-            eprintln!("SKIP: {message}");
-            return;
-        }
-    };
-    if !server.has_infer_task(InferTask::Fa) {
-        eprintln!("SKIP: live server does not advertise FA infer support");
-        server.shutdown().await;
-        return;
-    }
+    .unwrap_or_else(|message| {
+        panic!("PREREQUISITE MISSING: the live server did not start: {message}")
+    });
+    assert!(
+        server.has_infer_task(InferTask::Fa),
+        "PREREQUISITE MISSING: live server does not advertise FA infer support"
+    );
 
     let in_str = in_dir.to_str().unwrap().to_string();
     let out_str = out_dir.to_str().unwrap().to_string();
@@ -740,10 +717,7 @@ async fn cli_align_real_server_live_fa_succeeds() {
 
 #[test]
 fn cli_transcribe_explicit_server_never_falls_back_to_local_daemon() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
     let harness = CliHarness::new();
     let in_dir = harness.home_dir().join("input");
@@ -835,13 +809,24 @@ fn cli_transcribe_explicit_remote_server_refuses_unshippable_audio() {
 /// the CLI must get as far as contacting it rather than refusing up front.
 /// The witness is a stub on this machine's non-loopback address that answers
 /// the health check with 503: the CLI reaches it, is turned away without a
-/// retry, and submits nothing. Skipped where the machine has no non-loopback
-/// address.
+/// retry, and submits nothing. Fails where the machine has no non-loopback
+/// address: the witness cannot be built there.
+///
+/// Ignored on macOS: the stub listens inside this unsigned test binary, and
+/// with the application firewall on, macOS holds every inbound LAN flow to
+/// such a binary for an approval nobody can give (the firewall log shows
+/// "Enqueuing new inbound flow for cli_integration_suite-..."), so the CLI's
+/// connection hangs until the budget kills it. The admission half of this
+/// contract (align to a remote origin is accepted) is the unit test
+/// `explicit_remote_server_admits_transcript_input_commands_as_content`.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS application firewall holds inbound LAN connections to an unsigned test binary"
+)]
 fn cli_align_explicit_remote_server_is_contacted_not_refused() {
     let Some(stub) = RemoteStub::answering("HTTP/1.1 503 Service Unavailable") else {
-        eprintln!("SKIP: no non-loopback IPv4 address on this machine");
-        return;
+        panic!("PREREQUISITE MISSING: no non-loopback IPv4 address on this machine")
     };
 
     let harness = CliHarness::new();
@@ -886,10 +871,7 @@ fn cli_align_explicit_remote_server_is_contacted_not_refused() {
 
 #[test]
 fn cli_align_explicit_loopback_uses_shared_paths_mode() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
     let harness = CliHarness::new();
     let media_dir = harness.home_dir().join("media");
@@ -964,10 +946,7 @@ fn cli_align_explicit_loopback_uses_shared_paths_mode() {
 
 #[test]
 fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
     MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
 
     let harness = CliHarness::new();
@@ -1018,10 +997,7 @@ fn cli_transcribe_in_place_mp4_succeeds_via_local_daemon() {
 
 #[test]
 fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3.14 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
     MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
 
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1031,8 +1007,7 @@ fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
         .expect("repo root");
     let source_audio = repo.join("batchalign/tests/support/test.mp3");
     if !source_audio.is_file() {
-        eprintln!("SKIP: committed speech fixture is unavailable");
-        return;
+        panic!("PREREQUISITE MISSING: committed speech fixture is unavailable")
     }
 
     let harness = CliHarness::new();
@@ -1124,14 +1099,9 @@ fn cli_transcribe_in_place_mp4_populates_injected_media_cache_live() {
 /// using the shared filesystem.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_compare_explicit_loopback_uses_shared_paths_mode() {
-    let Some(_python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let _python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let server_url = session.base_url().to_owned();
     let harness = CliHarness::new();
     let in_dir = harness.home_dir().join("input");
@@ -1146,7 +1116,7 @@ async fn cli_compare_explicit_loopback_uses_shared_paths_mode() {
     let url = server_url.clone();
     let cli_result = batchalign::blocking::spawn_in_span(move || {
         let mut command = cmd();
-        command.env("HOME", &home);
+        command.env(batchalign::runtime_paths::HOME_ENV, &home);
         command
             .args(["compare", &in_str, &out_str, "--server", &url])
             .output()
@@ -1179,10 +1149,7 @@ async fn cli_compare_explicit_loopback_uses_shared_paths_mode() {
 
 #[test]
 fn cli_compare_failed_auto_daemon_job_returns_server_exit_code() {
-    let Some(python_path) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
 
     let harness = CliHarness::new();
     let in_dir = harness.home_dir().join("input");

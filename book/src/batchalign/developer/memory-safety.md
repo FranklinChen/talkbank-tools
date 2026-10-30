@@ -261,23 +261,21 @@ tick (default: 30s). This catches orphaned workers from server crashes without
 waiting for the next server restart. Previously, orphans only got cleaned up
 when a new server instance started.
 
-### Layer 8: Test-level skip (bail out before any setup)
+### Layer 8: Test prerequisites fail, never skip
 
-Every test file that spawns workers has a `require_python!()` macro that checks
-available memory BEFORE attempting to spawn:
+Every test that spawns workers calls
+`crate::prerequisite::worker_test_python()` (`crates/batchalign/tests/prerequisite.rs`)
+before any setup. It isolates the binary's host-memory ledger, requires
+4096 MB free (`require_free_memory`, reading `host_memory::read_system_memory`),
+and requires the Python worker environment: the checkout's `.venv`
+interpreter, importing `batchalign.worker`, with a compiled extension built
+from this checkout's sources (the same evidence check `make` runs).
 
-```rust
-macro_rules! require_python {
-    () => {{
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!("SKIP: insufficient memory ({available_mb} MB)");
-            return;
-        }
-        // ... resolve python path ...
-    }};
-}
-```
+A test with an unmet prerequisite **fails** with a `PREREQUISITE MISSING`
+message naming the remedy. It does not print a skip and return: a Rust test
+that returns reports `ok`, so a skipping test is indistinguishable from a
+passing one, and the worker suites once "passed" for months on machines and
+runners that could not run them.
 
 ### Layer 9: Test isolation and explicit ML opt-in
 
@@ -366,13 +364,11 @@ ordering or resource-admission behavior.
 | `crates/batchalign/src/worker/pool/memory_gate.rs` | Layer 0 admission: `available − reservation > host_min_free_mb_threshold_for_tier(tier)` (Warm); ColdStart bypasses. Tier-scaled floor: 1024/2048/4096/4096 by tier |
 | `crates/batchalign/src/worker/pool/rss_observer.rs` | Per-process RSS sampling for the Mode B admission estimate |
 | `crates/batchalign/src/worker/pool/idle_eviction.rs` | Pressure-driven idle-worker eviction (largest-RSS first when `available <= 4096 MB`) |
-| `crates/batchalign/src/host_memory.rs` | Host-wide ledger, startup leases, job execution leases, ML test lock; TTL-cached `system_memory_snapshot` shared by every memory poll |
+| `crates/batchalign/src/host_memory.rs` | Host-wide ledger, startup leases, job execution leases, ML test lock; TTL-cached `read_system_memory` shared by every memory poll |
 | `crates/batchalign/src/worker/memory_guard.rs` | Local spawn semaphore plus host-memory startup reservation |
 | `crates/batchalign/src/worker/handle/mod.rs` and `crates/batchalign/src/worker/handle/spawn.rs` | `WorkerHandle::spawn()` (`mod.rs:73`) and `spawn_tcp_daemon()` (`spawn.rs:135`) both call `acquire_spawn_permit()` |
 | `crates/batchalign/src/runner/mod.rs` | Coordinator-backed job execution planning and requeue |
 | `crates/batchalign/tests/common/mod.rs` | Machine-wide ML fixture lock |
-| `crates/batchalign/tests/worker_integration.rs` | `require_python!` macro with memory check |
-| `crates/batchalign/tests/gpu_concurrent_dispatch.rs` | Same |
-| `crates/batchalign/tests/worker_protocol_matrix.rs` | Same |
+| `crates/batchalign/tests/prerequisite.rs` | Test prerequisites (worker environment, extension freshness, free memory) that fail rather than skip |
 | `.cargo/config.toml` | `RUST_TEST_THREADS = "1"` |
 | `Makefile` | Tiered test targets: `test-rust`, `test-workers`, `test-ml` |

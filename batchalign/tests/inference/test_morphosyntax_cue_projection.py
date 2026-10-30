@@ -48,6 +48,7 @@ def _run(rows, words):
                 "words": words,
                 "terminator": ".",
                 "special_forms": [],
+                "runs": [len(words)] if words else [],
                 "lang": "fra",
             }
         ],
@@ -93,6 +94,7 @@ def test_ambiguous_cue_uses_one_model_owned_lexical_retry(retry_kind):
                     "words": ["alpha", "beta"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [2],
                     "lang": "fra",
                 }
             ],
@@ -264,7 +266,13 @@ def test_projection_failure_does_not_poison_other_items_in_language_group(bad_sh
             task="morphosyntax",
             lang="fra",
             items=[
-                {"words": [word], "terminator": ".", "special_forms": [], "lang": "fra"}
+                {
+                    "words": [word],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "runs": [1],
+                    "lang": "fra",
+                }
                 for word in ["alpha", "beta"]
             ],
         ),
@@ -288,6 +296,7 @@ def test_free_tokenization_does_not_claim_positional_cue_ownership():
                     "words": ["alpha"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "fra",
                 },
             ],
@@ -347,6 +356,7 @@ def test_cantonese_pos_sees_only_projected_lexical_rows(monkeypatch):
                     "words": ["alpha"],
                     "terminator": ".",
                     "special_forms": [],
+                    "runs": [1],
                     "lang": "yue",
                 },
             ],

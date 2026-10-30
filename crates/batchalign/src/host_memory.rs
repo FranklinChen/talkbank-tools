@@ -246,6 +246,10 @@ pub struct JobExecutionPlan {
 /// Errors raised by the host-memory coordinator.
 #[derive(Debug, thiserror::Error)]
 pub enum HostMemoryError {
+    /// The operating system would not report this host's memory or processes,
+    /// so no admission decision can be made from it.
+    #[error(transparent)]
+    Unreadable(#[from] HostUnreadable),
     /// Failed to read or write the machine-local ledger.
     #[error("host-memory ledger I/O failed at {path}: {source}")]
     Io {
@@ -506,10 +510,24 @@ struct MemoryLeaseRequest {
     label: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SystemMemorySnapshot {
-    total_mb: MemoryMb,
-    available_mb: MemoryMb,
+/// One reading of this host's RAM: both figures from the same refresh, so a
+/// caller that needs both never pairs two readings taken apart.
+///
+/// "Available" follows the sysinfo definition (`free + reclaimable`), which
+/// on macOS undercounts against Activity Monitor's "memory pressure".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemMemory {
+    /// Total physical RAM.
+    pub total_mb: MemoryMb,
+    /// RAM the operating system reports as available now.
+    pub available_mb: MemoryMb,
+}
+
+impl SystemMemory {
+    /// RAM in use: total less available.
+    pub fn used_mb(&self) -> MemoryMb {
+        MemoryMb(self.total_mb.0.saturating_sub(self.available_mb.0))
+    }
 }
 
 /// Machine-local coordinator that serializes access to the shared memory ledger.
@@ -537,7 +555,7 @@ impl HostMemoryCoordinator {
     /// Return the current host-memory snapshot for health/status reporting.
     pub fn snapshot(&self) -> Result<HostMemorySnapshot, HostMemoryError> {
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
-            let system = system_memory_snapshot();
+            let system = read_system_memory()?;
             let active_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             let startup_leases = ledger
@@ -659,7 +677,7 @@ impl HostMemoryCoordinator {
         label: &str,
     ) -> Result<JobExecutionPlan, HostMemoryError> {
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
-            let system = system_memory_snapshot();
+            let system = read_system_memory()?;
             // Tier-aware envelope: clamp the fleet-conservative
             // worst-case to this host's per-profile startup
             // reservation. Without the clamp, a 16 GB host that
@@ -790,7 +808,7 @@ impl HostMemoryCoordinator {
                 }
             }
 
-            let system = system_memory_snapshot();
+            let system = read_system_memory()?;
             let pending_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             // What `effective_reserved_mb` would be AFTER admitting the
@@ -882,7 +900,7 @@ fn with_locked_ledger<T>(
         })?
     };
 
-    prune_stale_leases(&mut ledger);
+    prune_stale_leases(&mut ledger)?;
 
     let result = action(&mut ledger);
 
@@ -931,7 +949,57 @@ fn with_locked_ledger<T>(
 /// budget.
 const PRE_SPAWN_INTENT_DEADLINE: Duration = Duration::from_secs(1_800);
 
-fn prune_stale_leases(ledger: &mut MemoryLedger) {
+/// The operating system would not report this host's memory or processes.
+///
+/// Until sysinfo 0.40 this was not an error at all: an unsupported platform
+/// or a failed read gave zero total memory, zero available memory and no
+/// processes, which admission, tiering and lease pruning then read as facts
+/// (a "Small" host, no headroom, every lease owner dead). Every memory and
+/// process reading now goes through [`open_system`], the one place it can fail.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("cannot read this host's memory or processes from the operating system: {0}")]
+pub struct HostUnreadable(#[source] std::sync::Arc<sysinfo::Error>);
+
+/// The one way to open a sysinfo handle, so no memory or process reading can
+/// mistake an unreadable host for an empty one. (CPU count and GPU detection
+/// in `host_facts` do not use sysinfo and report their own failures.)
+pub(crate) fn open_system() -> Result<System, HostUnreadable> {
+    System::new().map_err(|error| HostUnreadable(std::sync::Arc::new(error)))
+}
+
+/// Whether a lease's process still exists, as the operating system reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Alive,
+    Dead,
+}
+
+/// Drop leases whose owners are gone or whose pre-spawn intent expired.
+///
+/// One process table read for the whole pass. If the table cannot be read the
+/// pass fails and no lease is reclaimed: "could not tell" is not "dead", and
+/// reclaiming a live worker's reservation is how a host gets oversubscribed.
+///
+/// An empty ledger has nothing to judge and reads nothing. Otherwise only the
+/// process each lease is bound to is refreshed (its worker when it names one,
+/// else its owner, the same choice the retain below makes), once per PID.
+fn prune_stale_leases(ledger: &mut MemoryLedger) -> Result<(), HostUnreadable> {
+    if ledger.leases.is_empty() {
+        return Ok(());
+    }
+    let mut system = open_system()?;
+    let mut pids: Vec<Pid> = ledger
+        .leases
+        .iter()
+        .map(|lease| Pid::from_u32(lease.worker_pid.unwrap_or(lease.owner_pid).0))
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    system.refresh_processes(ProcessesToUpdate::Some(&pids), false);
+    let liveness = |pid: WorkerPid| match system.process(Pid::from_u32(pid.0)) {
+        Some(_) => Liveness::Alive,
+        None => Liveness::Dead,
+    };
     let now = ledger_now();
     ledger.leases.retain(|lease| {
         // Bug 2 fix (Contract B): when a lease names a specific worker
@@ -943,14 +1011,14 @@ fn prune_stale_leases(ledger: &mut MemoryLedger) {
         // liveness is what closes the ghost-slot accounting drift
         // that wedged a development host (the historical "Bug 2" incident).
         if let Some(worker_pid) = lease.worker_pid {
-            return process_is_alive(worker_pid);
+            return liveness(worker_pid) == Liveness::Alive;
         }
 
         // No worker_pid: this is a pre-spawn intent or daemon-side
         // bookkeeping lease. First check the owner's liveness, a dead
         // daemon's leases are reclaimed at first ledger access (Contract
         // F, restart hygiene).
-        if !process_is_alive(lease.owner_pid) {
+        if liveness(lease.owner_pid) == Liveness::Dead {
             return false;
         }
 
@@ -964,16 +1032,10 @@ fn prune_stale_leases(ledger: &mut MemoryLedger) {
         // healthy long-lived state.
         now.saturating_duration_since(lease.created_at) < PRE_SPAWN_INTENT_DEADLINE
     });
+    Ok(())
 }
 
-fn process_is_alive(pid: WorkerPid) -> bool {
-    let mut system = System::new();
-    let pid = Pid::from_u32(pid.0);
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
-    system.process(pid).is_some()
-}
-
-/// TTL the cached `SystemMemorySnapshot` is good for. Admission gates
+/// TTL the cached `SystemMemory` is good for. Admission gates
 /// and the eviction pre-pass both poll memory; with a 1 s TTL the
 /// kernel-side `/proc/meminfo` (Linux) / `host_statistics64` (macOS)
 /// is read at most once per second across all callers, regardless
@@ -981,56 +1043,50 @@ fn process_is_alive(pid: WorkerPid) -> bool {
 /// between.
 const SNAPSHOT_TTL: Duration = Duration::from_millis(1000);
 
-/// Process-global TTL-cached memory snapshot. Internal to this
-/// module; callers go through [`detect_total_memory_mb`] /
-/// [`detect_available_memory_mb`].
-static SNAPSHOT_CACHE: LazyLock<Mutex<(SystemMemorySnapshot, Instant)>> = LazyLock::new(|| {
-    let snap = refresh_system_memory_snapshot();
-    Mutex::new((snap, Instant::now()))
-});
-
-fn refresh_system_memory_snapshot() -> SystemMemorySnapshot {
-    let mut system = System::new();
-    system.refresh_memory();
-    SystemMemorySnapshot {
-        total_mb: MemoryMb(system.total_memory() / (1024 * 1024)),
-        available_mb: MemoryMb(system.available_memory() / (1024 * 1024)),
-    }
+/// What the process-global memory cache holds.
+///
+/// `Empty` until the first successful read, rather than a reading taken
+/// eagerly at first touch: a first read that fails has nothing true to store.
+#[derive(Clone, Copy)]
+enum CachedSnapshot {
+    Empty,
+    Read(SystemMemory, Instant),
 }
 
-fn system_memory_snapshot() -> SystemMemorySnapshot {
+/// Process-global TTL-cached memory reading, served by
+/// [`read_system_memory`].
+static SNAPSHOT_CACHE: LazyLock<Mutex<CachedSnapshot>> =
+    LazyLock::new(|| Mutex::new(CachedSnapshot::Empty));
+
+fn refresh_read_system_memory() -> Result<SystemMemory, HostUnreadable> {
+    let mut system = open_system()?;
+    system.refresh_memory();
+    Ok(SystemMemory {
+        total_mb: MemoryMb(system.total_memory() / (1024 * 1024)),
+        available_mb: MemoryMb(system.available_memory() / (1024 * 1024)),
+    })
+}
+
+/// This host's RAM: the one place it is read. The reading is cached
+/// process-wide for [`SNAPSHOT_TTL`], so the admission gate, pressure
+/// eviction and the spawn guard decide from the same figures rather than
+/// each constructing a `sysinfo::System`. A failed refresh is the caller's error: a reading older than the TTL
+/// is not served in its place, because admission decides from it.
+pub fn read_system_memory() -> Result<SystemMemory, HostUnreadable> {
     // Recover from a poisoned mutex, the snapshot has no invariant
     // that a panicking holder could leave broken; it's just a
     // stale-cache pair.
     let mut state = SNAPSHOT_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if state.1.elapsed() >= SNAPSHOT_TTL {
-        state.0 = refresh_system_memory_snapshot();
-        state.1 = Instant::now();
+    match *state {
+        CachedSnapshot::Read(snapshot, read_at) if read_at.elapsed() < SNAPSHOT_TTL => Ok(snapshot),
+        CachedSnapshot::Read(..) | CachedSnapshot::Empty => {
+            let snapshot = refresh_read_system_memory()?;
+            *state = CachedSnapshot::Read(snapshot, Instant::now());
+            Ok(snapshot)
+        }
     }
-    state.0
-}
-
-/// Total physical RAM on this host, in MB.
-///
-/// Public delegator over `system_memory_snapshot()` so the
-/// `host_facts::RealHostFactsSource` can populate `HostFacts::ram_total_mb`
-/// without depending on this module's internal `SystemMemorySnapshot`
-/// shape. Held in this module so all sysinfo polling for the host's
-/// RAM lives in one place.
-pub fn detect_total_memory_mb() -> MemoryMb {
-    system_memory_snapshot().total_mb
-}
-
-/// Currently-available RAM on this host, in MB.
-///
-/// "Available" follows the sysinfo definition (`free + reclaimable`),
-/// which on macOS undercounts vs Activity Monitor's "memory pressure"
-///: see `worker::memory_guard` for the live polling helper that
-/// applies tier-aware reserves on top of this raw figure.
-pub fn detect_available_memory_mb() -> MemoryMb {
-    system_memory_snapshot().available_mb
 }
 
 fn pressure_level_for(available_mb: MemoryMb, reserve_mb: MemoryMb) -> HostMemoryPressureLevel {
@@ -1081,7 +1137,9 @@ fn retryable_error(error: &HostMemoryError) -> bool {
             ..
         } => capacity_rejection_is_retryable(*total_mb, *requested_mb, *reserve_mb),
         HostMemoryError::MlTestLockBusy { .. } | HostMemoryError::StartupSlotsBusy { .. } => true,
-        HostMemoryError::Io { .. }
+        // Waiting for capacity cannot make the operating system report it.
+        HostMemoryError::Unreadable(_)
+        | HostMemoryError::Io { .. }
         | HostMemoryError::CorruptLedger { .. }
         | HostMemoryError::TimedOut { .. } => false,
     }

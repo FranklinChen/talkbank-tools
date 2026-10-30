@@ -123,9 +123,8 @@ pub struct ServerConfig {
     /// Operator override for the host-memory headroom (MB) the
     /// coordinator keeps free after worker-start and job-execution
     /// reservations. `None` (the canonical post-migration form) means
-    /// "let `resolved_memory_gate_mb` derive the value from
-    /// `resolved_memory_tier().headroom_mb`": that's tier-aware and
-    /// honors any `memory_tier` override. The `zero_as_none` shim
+    /// "let `resolved_memory_gate_mb` fall through to the fixed
+    /// OS-protection floor". The `zero_as_none` shim
     /// collapses pre-migration `memory_gate_mb: 0` (the legacy
     /// "disable host-memory checks" sentinel and the value used by
     /// `--sequential` mode) to `None`; setting an explicit small

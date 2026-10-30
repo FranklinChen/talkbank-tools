@@ -13,9 +13,7 @@ mod single;
 use std::time::Duration;
 
 use crate::config::{RuntimeLayout, load_config_from_layout};
-use crate::host_facts::EffectiveConfig;
 use crate::host_memory::HostMemoryRuntimeConfig;
-use crate::host_policy::HostExecutionPolicy;
 use crate::options::CommandOptions;
 use crate::worker::handle::WorkerRuntimeConfig;
 use crate::worker::pool::PoolConfig;
@@ -371,14 +369,19 @@ async fn dispatch_direct_mode(
     crate::cli::discover::print_passthrough_skips(&prepared.passthrough);
     eprintln!("Running locally (direct mode)...\n");
 
+    // One reading of the host for this run, with the CLI's device switches
+    // applied: the pool and every job's dispatch context resolve from it.
+    let cfg = cfg.with_device_flags(force_cpu, allow_mps);
+    let host_snapshot = std::sync::Arc::new(crate::host_facts::HostSnapshot::read(&cfg)?);
     let direct_workers = prepare_workers(
-        build_direct_pool_config(&cfg, force_cpu, allow_mps, layout.state_dir()),
+        build_direct_pool_config(&cfg, &host_snapshot, layout.state_dir()),
         RegistryDiscovery::Ignore,
     )
     .await
     .map_err(CliError::from)?;
     let host = DirectHost::new(
         cfg,
+        host_snapshot,
         layout,
         None,
         None,
@@ -468,51 +471,44 @@ async fn dispatch_direct_mode(
     )
 }
 
+/// The direct-mode pool for `cfg` (device switches already applied) on the
+/// host as read. Every field is stated: a production pool is never built on
+/// a base of defaults, so a new `PoolConfig` field breaks this literal until
+/// it is decided here, instead of silently taking a test value.
 pub(crate) fn build_direct_pool_config(
     cfg: &ServerConfig,
-    force_cpu: bool,
-    allow_mps: bool,
+    host: &crate::host_facts::HostSnapshot,
     state_dir: &std::path::Path,
 ) -> PoolConfig {
-    let tier = cfg.resolved_memory_tier();
-    let host_policy = HostExecutionPolicy::from_server_config(cfg);
-    // Same boundary conversion as `serve_cmd::start`: CLI
-    // `--force-cpu` becomes `Some(true)`; absent leaves the YAML
-    // value (default `None`) intact for the recommendation to fill.
-    let mut cfg_for_resolve = cfg.clone();
-    if force_cpu {
-        cfg_for_resolve.force_cpu = Some(true);
-    }
-    if allow_mps {
-        cfg_for_resolve.allow_mps = Some(true);
-    }
-    let effective = EffectiveConfig::resolve_from_server_config(&cfg_for_resolve);
+    let effective = host.effective();
     let worker_runtime = WorkerRuntimeConfig {
         force_cpu: effective.force_cpu,
         allow_mps: effective.allow_mps,
         gpu_thread_pool_size: effective.gpu_thread_pool_size,
         host_memory: HostMemoryRuntimeConfig::from_server_config(cfg),
-        memory_tier: tier,
-        bootstrap_mode: host_policy.bootstrap_mode,
-        ..WorkerRuntimeConfig::default()
+        bootstrap_mode: host.policy().bootstrap_mode,
+        ..WorkerRuntimeConfig::local(host.tier())
     };
     PoolConfig {
         python_path: resolve_python_executable(),
         health_check_interval_s: cfg.worker_health_interval_s,
-        verbose: 0,
-        // See serve_cmd: the state dir comes from the resolved RuntimeLayout,
-        // never inferred from worker_registry_path.
-        runtime: worker_runtime.with_state_dir(state_dir.to_path_buf()),
+        ready_timeout_s: cfg.worker_ready_timeout_s,
+        test_echo: false,
         max_workers_per_key: match cfg.max_workers_per_key {
             Some(n) => crate::host_facts::PerProfile::uniform(n as usize),
             None => effective.max_workers_per_key_by_profile.map(|n| n as usize),
         },
-        ready_timeout_s: cfg.worker_ready_timeout_s,
         max_total_workers: effective.max_total_workers as usize,
+        checkout_wait_report_interval: None,
+        verbose: 0,
+        // See serve_cmd: the state dir comes from the resolved RuntimeLayout,
+        // never inferred from worker_registry_path.
+        runtime: worker_runtime.with_state_dir(state_dir.to_path_buf()),
         task_timeouts: cfg.task_timeouts(),
         ensure_task_timeout: cfg.ensure_task_timeout_s,
         worker_registry_path: cfg.worker_registry_path.clone(),
-        ..PoolConfig::default()
+        test_delay_ms: 0,
+        cpu_gate: crate::worker::pool::CpuGatePolicy::HostLoad,
     }
 }
 

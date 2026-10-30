@@ -14,7 +14,7 @@ async fn rev_cold_and_replayed_transcribe_are_semantically_identical() {
     let cache_dir = tempdir.path().join("cache");
     let cold_debug = tempdir.path().join("cold-debug");
     let replay_debug = tempdir.path().join("replay-debug");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let inference = CountingRevInference {
         calls: AtomicUsize::new(0),
     };
@@ -171,7 +171,7 @@ async fn replay_output(tokens: Vec<AsrToken>) -> Result<TranscribeOutput, Server
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let live = test_transcribe_options(None);
     let pair = crate::api::LanguageSpec::try_from("eng,spa").expect("a pair");
     let opts = TranscribeOptions {
@@ -348,7 +348,7 @@ async fn legacy_replay_runs_current_speaker_projection_without_live_inference() 
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let opts = test_transcribe_options_in(
         Some(SpeakerBackendV2::PyannoteAi),
         LanguageCode3::fra().into(),

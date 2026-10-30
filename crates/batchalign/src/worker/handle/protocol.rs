@@ -345,9 +345,8 @@ pub(super) fn dump_failed_ipc_request(
     error: &WorkerError,
     response_fragment: Option<&str>,
 ) {
-    let fallback_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".batchalign3")
+    let fallback_dir = crate::config::RuntimeLayout::from_env()
+        .state_dir()
         .join("debug");
     if std::fs::create_dir_all(&fallback_dir).is_err() {
         return;

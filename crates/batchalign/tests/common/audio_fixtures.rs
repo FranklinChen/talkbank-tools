@@ -24,19 +24,18 @@ pub struct AudioFixtures {
 
 /// Locate the committed audio fixtures and copy them into `session_dir`.
 ///
-/// Returns `None` if source fixtures are missing (tests should skip).
-pub fn prepare_audio_fixtures(session_dir: &Path) -> Option<AudioFixtures> {
-    let repo_root = super::find_repo_root()?;
+/// Fails the test when the committed fixtures are missing.
+pub fn prepare_audio_fixtures(session_dir: &Path) -> AudioFixtures {
+    let repo_root = crate::prerequisite::repo_root();
     let source_mp3 = repo_root.join("batchalign/tests/support/test.mp3");
     let source_cha = repo_root.join("batchalign/tests/formats/chat/support/test.cha");
 
     if !source_mp3.exists() || !source_cha.exists() {
-        eprintln!(
-            "SKIP: audio fixtures not found (expected {}, {})",
+        panic!(
+            "committed test fixture missing: audio fixtures not found (expected {}, {})",
             source_mp3.display(),
             source_cha.display()
-        );
-        return None;
+        )
     }
 
     let dest_cha = session_dir.join("test.cha");
@@ -55,11 +54,11 @@ pub fn prepare_audio_fixtures(session_dir: &Path) -> Option<AudioFixtures> {
     let transcribe_mp3 = session_dir.join("test.mp3");
     std::fs::copy(&source_mp3, &transcribe_mp3).expect("copy test.mp3 for transcribe");
 
-    Some(AudioFixtures {
+    AudioFixtures {
         audio: transcribe_mp3,
         chat: dest_cha,
         stripped_chat: dest_stripped,
-    })
+    }
 }
 
 /// Strip %mor, %gra, and %wor dependent tiers from CHAT text.
@@ -76,18 +75,17 @@ pub fn strip_dependent_tiers(chat: &str) -> String {
 }
 
 /// Prepare multi-speaker audio fixtures (eng_multi_speaker.mp3).
-pub fn prepare_multi_speaker_audio(session_dir: &Path) -> Option<AudioFixtures> {
-    let repo_root = super::find_repo_root()?;
+pub fn prepare_multi_speaker_audio(session_dir: &Path) -> AudioFixtures {
+    let repo_root = crate::prerequisite::repo_root();
     let source_mp3 = repo_root.join("batchalign/tests/support/eng_multi_speaker.mp3");
     let source_cha = repo_root.join("batchalign/tests/support/parity/eng_multi_speaker.cha");
 
     if !source_mp3.exists() || !source_cha.exists() {
-        eprintln!(
-            "SKIP: multi-speaker fixtures not found ({}, {})",
+        panic!(
+            "committed test fixture missing: multi-speaker fixtures not found ({}, {})",
             source_mp3.display(),
             source_cha.display()
-        );
-        return None;
+        )
     }
 
     let dest_mp3 = session_dir.join("eng_multi_speaker.mp3");
@@ -102,11 +100,11 @@ pub fn prepare_multi_speaker_audio(session_dir: &Path) -> Option<AudioFixtures> 
     );
     std::fs::write(&dest_stripped, &stripped).expect("write stripped eng_multi_speaker.cha");
 
-    Some(AudioFixtures {
+    AudioFixtures {
         audio: dest_mp3,
         chat: dest_cha,
         stripped_chat: dest_stripped,
-    })
+    }
 }
 
 /// Prepare a named audio clip from `batchalign/tests/support/{name}.mp3`.
@@ -114,13 +112,15 @@ pub fn prepare_named_audio(
     session_dir: &Path,
     audio_name: &str,
     chat_name: Option<&str>,
-) -> Option<AudioFixtures> {
-    let repo_root = super::find_repo_root()?;
+) -> AudioFixtures {
+    let repo_root = crate::prerequisite::repo_root();
     let source_mp3 = repo_root.join(format!("batchalign/tests/support/{audio_name}.mp3"));
 
     if !source_mp3.exists() {
-        eprintln!("SKIP: audio fixture not found: {}", source_mp3.display());
-        return None;
+        panic!(
+            "committed test fixture missing: audio fixture not found: {}",
+            source_mp3.display()
+        )
     }
 
     let transcribe_mp3 = session_dir.join(format!("{audio_name}.mp3"));
@@ -129,8 +129,10 @@ pub fn prepare_named_audio(
     let (dest_cha, dest_stripped) = if let Some(cn) = chat_name {
         let source_cha = repo_root.join(format!("batchalign/tests/support/parity/{cn}.cha"));
         if !source_cha.exists() {
-            eprintln!("SKIP: CHAT fixture not found: {}", source_cha.display());
-            return None;
+            panic!(
+                "committed test fixture missing: CHAT fixture not found: {}",
+                source_cha.display()
+            )
         }
 
         let chat_content = std::fs::read_to_string(&source_cha).expect("read chat");
@@ -164,9 +166,9 @@ pub fn prepare_named_audio(
         (dummy.clone(), dummy)
     };
 
-    Some(AudioFixtures {
+    AudioFixtures {
         audio: transcribe_mp3,
         chat: dest_cha,
         stripped_chat: dest_stripped,
-    })
+    }
 }

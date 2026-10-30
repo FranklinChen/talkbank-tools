@@ -21,16 +21,13 @@ fn morphotag_options(retokenize: bool, override_media_cache: bool) -> CommandOpt
 
 #[tokio::test]
 async fn option_morphotag_retokenize_changes_tokens() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info_a, results_a) = submit_and_complete_direct(
         &session,
@@ -66,16 +63,13 @@ async fn option_morphotag_retokenize_changes_tokens() {
 
 #[tokio::test]
 async fn option_morphotag_retokenize_cantonese_collapses_character_tokens() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "yue",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info_a, results_a) = submit_and_complete_direct(
         &session,
@@ -101,8 +95,7 @@ async fn option_morphotag_retokenize_cantonese_collapses_character_tokens() {
     .await;
 
     if info_a.status == JobStatus::Failed || info_b.status == JobStatus::Failed {
-        eprintln!("SKIP: Cantonese retokenize test needs the yue morphotag backend");
-        return;
+        panic!("PREREQUISITE MISSING: Cantonese retokenize test needs the yue morphotag backend")
     }
 
     assert_completed_without_errors("yue_retokenize_false", &info_a, &results_a);
@@ -117,16 +110,13 @@ async fn option_morphotag_retokenize_cantonese_collapses_character_tokens() {
 
 #[tokio::test]
 async fn option_morphotag_retokenize_mandarin_collapses_common_compounds() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "zho",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info_a, results_a) = submit_and_complete_direct(
         &session,
@@ -152,8 +142,7 @@ async fn option_morphotag_retokenize_mandarin_collapses_common_compounds() {
     .await;
 
     if info_a.status == JobStatus::Failed || info_b.status == JobStatus::Failed {
-        eprintln!("SKIP: Mandarin retokenize test needs the zho morphotag backend");
-        return;
+        panic!("PREREQUISITE MISSING: Mandarin retokenize test needs the zho morphotag backend")
     }
 
     assert_completed_without_errors("zho_retokenize_false", &info_a, &results_a);
@@ -168,16 +157,13 @@ async fn option_morphotag_retokenize_mandarin_collapses_common_compounds() {
 
 #[tokio::test]
 async fn option_morphotag_retokenize_without_mwt_stays_reliable() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "nld",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = submit_and_complete_direct(
         &session,
@@ -192,8 +178,9 @@ async fn option_morphotag_retokenize_without_mwt_stays_reliable() {
     .await;
 
     if info.status == JobStatus::Failed {
-        eprintln!("SKIP: Dutch retokenize morphotag failed (model likely not downloaded)");
-        return;
+        panic!(
+            "PREREQUISITE MISSING: Dutch retokenize morphotag failed (model likely not downloaded)"
+        )
     }
 
     assert_completed_without_errors("nld_retokenize", &info, &results);

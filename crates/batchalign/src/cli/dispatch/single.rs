@@ -67,10 +67,13 @@ impl ServerTarget {
 
         Ok(parsed.host_str().is_some_and(|host| {
             let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+            // `to_canonical` first: an IPv4-mapped IPv6 address
+            // (`::ffff:127.0.0.1`) is IPv4 loopback, but `Ipv6Addr::is_loopback`
+            // recognizes only `::1`, so the mapped form read as remote.
             unbracketed.eq_ignore_ascii_case("localhost")
                 || unbracketed
                     .parse::<std::net::IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
+                    .is_ok_and(|address| address.to_canonical().is_loopback())
         }))
     }
 
@@ -122,8 +125,8 @@ impl ServerTarget {
 /// caller PID, plus the in-flight filename the TUI snapshot recorded at
 /// the moment the user confirmed cancel ('y' after 'c').
 ///
-/// Hostname falls back to `"unknown"` when the OS does not report one
-/// (rare; tests, containers without `/etc/hostname`).
+/// The host is absent (`None`) when the OS does not report a name,
+/// rather than recorded as a made-up `"unknown"` machine.
 fn build_tui_cancel_provenance(
     signal: crate::cli::tui::TuiCancelSignal,
 ) -> crate::api::CancellationRequest {
@@ -131,11 +134,11 @@ fn build_tui_cancel_provenance(
         CallerHost, CallerPid, CancelReason, CancelSource, CancellationRequest, DisplayPath,
     };
 
-    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_string());
+    let host = sysinfo::System::host_name().ok().map(CallerHost::from);
 
     CancellationRequest {
         source: Some(CancelSource::Tui),
-        host: Some(CallerHost::from(host)),
+        host,
         pid: Some(CallerPid(std::process::id())),
         reason: Some(CancelReason::from("user-pressed-cancel")),
         correlation_id: None,
@@ -443,6 +446,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Every spelling of this machine's loopback is local, including the
+    /// IPv4-mapped IPv6 form, which `Ipv6Addr::is_loopback` alone misses.
+    #[test]
+    fn every_loopback_spelling_is_local() {
+        for origin in [
+            "http://localhost:8002",
+            "http://127.0.0.1:8002",
+            "http://[::1]:8002",
+            "http://[::ffff:127.0.0.1]:8002",
+        ] {
+            assert_eq!(
+                ServerTarget::parse_explicit(origin, ReleasedCommand::Transcribe)
+                    .unwrap_or_else(|error| panic!("{origin} is loopback: {error}"))
+                    .transport,
+                ServerTransport::SharedFilesystem,
+                "{origin}"
+            );
+        }
     }
 
     #[test]

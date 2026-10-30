@@ -10,14 +10,11 @@ use batchalign::worker::InferTask;
 /// The fixture should run a second infer-only command family when that backend is available.
 #[tokio::test]
 async fn live_fixture_runs_utseg_job_when_available() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Utseg,
         "live fixture does not support utseg infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let files = vec![FilePayload {
         filename: "fixture-utseg.cha".into(),
@@ -53,14 +50,11 @@ async fn live_fixture_runs_utseg_job_when_available() {
 /// The fixture should run translate jobs when that backend is available.
 #[tokio::test]
 async fn live_fixture_runs_translate_job_when_available() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Translate,
         "live fixture does not support translate infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let files = vec![FilePayload {
         filename: "fixture-translate.cha".into(),
@@ -100,14 +94,11 @@ async fn live_fixture_runs_translate_job_when_available() {
 /// The fixture should run coref jobs when that backend is available.
 #[tokio::test]
 async fn live_fixture_runs_coref_job_when_available() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Coref,
         "live fixture does not support coref infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let files = vec![FilePayload {
         filename: "fixture-coref.cha".into(),
@@ -138,7 +129,7 @@ async fn live_fixture_runs_coref_job_when_available() {
             .as_text()
             .expect("text command result")
             .contains("@Begin")
-            && results[0]
+            & results[0]
                 .content
                 .as_text()
                 .expect("text command result")

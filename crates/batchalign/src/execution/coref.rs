@@ -228,7 +228,7 @@ mod tests {
 
     fn host() -> DispatchHostContext {
         let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        DispatchHostContext::from_store(Arc::new(crate::store::JobStore::new(
+        DispatchHostContext::from_store(Arc::new(crate::store::JobStore::for_tests(
             crate::config::ServerConfig::default(),
             None,
             tx,

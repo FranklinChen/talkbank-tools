@@ -9,18 +9,19 @@ use batchalign::worker::InferTask;
 /// Opportunistic live check for the language-group failure isolation path.
 ///
 /// We probe a small set of supported Stanza languages that are plausible to be
-/// absent from a given local model cache. If none fail at dispatch time on this
-/// machine, the test skips instead of becoming flaky.
+/// absent from a given local model cache. The failure it needs exists only on
+/// a machine missing one of them, so the test is `#[ignore]`d (reported as
+/// ignored, never as a pass) and an explicit `--ignored` run fails when no
+/// candidate fails. Inducing the failure deterministically would let it run
+/// by default.
 #[tokio::test]
+#[ignore = "opportunistic: needs a candidate Stanza language absent from this machine's model cache; run with --ignored"]
 async fn morphotag_server_missing_language_group_only_fails_affected_file() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let candidates = [
@@ -108,8 +109,8 @@ async fn morphotag_server_missing_language_group_only_fails_affected_file() {
         }
     }
 
-    eprintln!(
-        "SKIP: no candidate language produced an isolated dispatch-time failure on this machine"
+    panic!(
+        "PREREQUISITE MISSING: no candidate language produced an isolated dispatch-time failure on this machine"
     );
 }
 
@@ -117,15 +118,13 @@ async fn morphotag_server_missing_language_group_only_fails_affected_file() {
 /// should preserve successful file results while re-queuing only the failed
 /// file work.
 #[tokio::test]
+#[ignore = "opportunistic: needs a candidate Stanza language absent from this machine's model cache; run with --ignored"]
 async fn morphotag_server_restart_preserves_successful_neighbors_after_language_group_failure() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphotag infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let candidates = [
@@ -286,7 +285,7 @@ async fn morphotag_server_restart_preserves_successful_neighbors_after_language_
         return;
     }
 
-    eprintln!(
-        "SKIP: no candidate language produced a restartable isolated language-group failure on this machine"
+    panic!(
+        "PREREQUISITE MISSING: no candidate language produced a restartable isolated language-group failure on this machine"
     );
 }

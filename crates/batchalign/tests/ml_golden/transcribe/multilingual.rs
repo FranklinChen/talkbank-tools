@@ -95,17 +95,11 @@ async fn transcribe_audio_clip_server(
     label: &str,
     allow_stanza_fallback: bool,
 ) {
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_named_transcribe_fixture_job(server.state_dir(), label, audio_name)
-    else {
-        return;
-    };
+    let fixture = prepare_named_transcribe_fixture_job(server.state_dir(), label, audio_name);
 
     let (info, outputs) = jobs
         .submit_paths_job(

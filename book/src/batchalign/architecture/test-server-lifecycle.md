@@ -127,7 +127,7 @@ sequenceDiagram
     alt BackendState::Uninitialized (first test)
         FT->>BS: ensure_backend()
         BS->>PW: prepare_workers()
-        Note over PW: resolve_python()<br/>spawn workers<br/>load models<br/>(Stanza, Whisper, etc.)
+        Note over PW: PythonWorker::establish_shared()<br/>(fails the test if missing)<br/>spawn workers<br/>load models<br/>(Stanza, Whisper, etc.)
         PW-->>BS: PreparedWorkers
         BS-->>FT: BackendState::Ready
     end

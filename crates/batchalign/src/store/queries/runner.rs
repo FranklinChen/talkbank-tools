@@ -26,7 +26,7 @@ mod tests {
     #[tokio::test]
     async fn runner_snapshot_filters_terminal_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,

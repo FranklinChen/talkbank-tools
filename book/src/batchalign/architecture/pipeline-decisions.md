@@ -110,10 +110,9 @@ classDiagram
     }
     class MisalignmentClass {
         <<enumeration>>
-        RealignmentSkipped
-        MwtReassemblyBug
-        TerminatorFilterBug
-        LanguageDispatchIssue
+        MorGraCountMismatch
+        MergeCrossesContent
+        TokensDivergeFromWords
         Unknown
     }
     MorOutcome *-- MorOutcomeKind
@@ -545,10 +544,12 @@ Deep-dive pages:
 When logs report `module=morphosyntax strategy=misalignment_bug`, use this
 flow:
 
-1. **Read the `suspected_class` field** in the `reason`. Five values
-   (`RealignmentSkipped`, `MwtReassemblyBug`, `TerminatorFilterBug`,
-   `LanguageDispatchIssue`, `Unknown`) each point at a different
-   stage.
+1. **Read the `suspected_class` field** in the `reason`. It is set by
+   the code that observed the misalignment, never guessed:
+   `mor_gra_count_mismatch`, `merge_crosses_content` (retokenize: a token
+   joins words a retrace, pause or bracket separates),
+   `tokens_diverge_from_words` (the model's tokens do not spell the
+   transcript's words) or `unknown`.
 2. **Compare `chat_words` and `stanza_tokens_after_mapping`** also in
    the `reason`. The word/token sequences usually show where they
    diverged, e.g. a comma dropped, an MWT split wrongly reassembled.

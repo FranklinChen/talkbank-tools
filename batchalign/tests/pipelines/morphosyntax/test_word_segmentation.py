@@ -50,7 +50,7 @@ def test_segment_cantonese_basic():
     """Characters should be grouped into words by PyCantonese."""
     from batchalign.inference.morphosyntax import _segment_cantonese
 
-    result = _segment_cantonese(["故", "事", "係", "好"])
+    result = _segment_cantonese([["故", "事", "係", "好"]])
     # PyCantonese should group some characters into words
     assert len(result) <= 4  # At minimum shouldn't get more than input
     assert "".join(result) == "故事係好"  # All characters preserved
@@ -67,7 +67,7 @@ def test_segment_cantonese_single_char():
     """Single character input passes through."""
     from batchalign.inference.morphosyntax import _segment_cantonese
 
-    result = _segment_cantonese(["好"])
+    result = _segment_cantonese([["好"]])
     assert result == ["好"]
 
 
@@ -85,7 +85,7 @@ def test_segment_cantonese_preserves_existing_multichar():
 
     # Input after MOR extraction (retrace skipped): existing multi-char 食飯
     words = ["呢", "度", "食飯", "啦", "飯", "啦"]
-    result = _segment_cantonese(words)
+    result = _segment_cantonese([words])
 
     # 食飯 must remain as one token, not merged with neighbors
     assert "食飯" in result, f"食飯 should be preserved as one token, got {result}"
@@ -109,7 +109,63 @@ def test_segment_cantonese_mixed_single_and_multi():
     from batchalign.inference.morphosyntax import _segment_cantonese
 
     words = ["我", "想", "去", "買", "故事", "書"]
-    result = _segment_cantonese(words)
+    result = _segment_cantonese([words])
 
     assert "故事" in result, f"故事 should be preserved, got {result}"
     assert "".join(result) == "".join(words), "All characters preserved"
+
+
+# ---------------------------------------------------------------------------
+# Who owns the boundaries: segmentation and mode resolve from one owner
+# ---------------------------------------------------------------------------
+
+
+def test_cantonese_retokenize_boundaries_are_ours_and_realigned():
+    """Cantonese retokenize segments with PyCantonese and holds Stanza to it.
+
+    Treated as Stanza-owned, the terminator cue came back as an ordinary
+    token, the PyCantonese POS override relabelled `+...`, and the terminator
+    was written into the transcript as a word. Realigned, the cue is taken
+    back out by position, whatever tag it was given.
+    """
+    from batchalign.inference._tokenizer_realign import TokenizerContext
+    from batchalign.inference.morphosyntax import (
+        Realigned,
+        StanzaInput,
+        Terminator,
+        TokenizationOwner,
+        _realignment_mode,
+    )
+
+    owner = TokenizationOwner.of(retokenize=True, lang="yue")
+    assert owner is TokenizationOwner.PYCANTONESE
+    inputs = [
+        StanzaInput(
+            item_index=0,
+            chat_words=("我哋", "今日", "去", "街"),
+            terminator=Terminator("+..."),
+        )
+    ]
+    mode = _realignment_mode(
+        context=TokenizerContext("zh"), owner=owner, inputs=inputs, lang_code="yue"
+    )
+    assert isinstance(mode, Realigned)
+    # The cue is the last boundary by construction, which is what lets
+    # `project_cue` remove it by position.
+    assert mode.inputs[0].boundaries[-1] == "+..."
+
+
+def test_other_retokenize_is_stanza_owned_and_plain_morphotag_is_chat():
+    from batchalign.inference.morphosyntax import (
+        StanzaOwnsTokenization,
+        TokenizationOwner,
+        _realignment_mode,
+    )
+
+    assert TokenizationOwner.of(retokenize=True, lang="eng") is TokenizationOwner.STANZA
+    assert TokenizationOwner.of(retokenize=True, lang="zho") is TokenizationOwner.STANZA
+    assert TokenizationOwner.of(retokenize=False, lang="yue") is TokenizationOwner.CHAT
+    mode = _realignment_mode(
+        context=None, owner=TokenizationOwner.STANZA, inputs=[], lang_code="eng"
+    )
+    assert isinstance(mode, StanzaOwnsTokenization)

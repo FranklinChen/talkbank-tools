@@ -26,16 +26,13 @@ fn morphotag_options(override_media_cache: bool, retokenize: bool) -> CommandOpt
 
 #[tokio::test]
 async fn golden_morphotag_eng_simple() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -48,7 +45,7 @@ async fn golden_morphotag_eng_simple() {
         .await;
 
     assert_completed_without_errors("morphotag_eng_simple", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_eng_simple");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
@@ -57,16 +54,13 @@ async fn golden_morphotag_eng_simple() {
 
 #[tokio::test]
 async fn golden_morphotag_eng_multi_utt() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -81,22 +75,19 @@ async fn golden_morphotag_eng_multi_utt() {
     assert_completed_without_errors("morphotag_eng_multi_utt", &info, &results);
     assert_golden_snapshot!(
         "morphotag_eng_multi_utt",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }
 
 #[tokio::test]
 async fn golden_morphotag_with_cache() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info1, results1) = jobs
         .submit_content_job(
@@ -123,23 +114,20 @@ async fn golden_morphotag_with_cache() {
     // The two runs may stamp different seconds; everything else, the stamp's
     // fields included, must be identical.
     assert_eq!(
-        pin_provenance_timestamps(&results1[0].content.as_text().expect("text command result")),
-        pin_provenance_timestamps(&results2[0].content.as_text().expect("text command result"))
+        pin_provenance_timestamps(results1[0].content.as_text().expect("text command result")),
+        pin_provenance_timestamps(results2[0].content.as_text().expect("text command result"))
     );
 }
 
 #[tokio::test]
 async fn golden_morphotag_spa_simple() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "spa",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -152,33 +140,29 @@ async fn golden_morphotag_spa_simple() {
         .await;
 
     if info.status == batchalign::api::JobStatus::Failed {
-        eprintln!("SKIP: Spanish morphotag failed (model likely not downloaded)");
-        return;
+        panic!("PREREQUISITE MISSING: Spanish morphotag failed (model likely not downloaded)")
     }
 
     assert_completed_without_errors("morphotag_spa_simple", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_spa_simple");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
     assert_golden_snapshot!(
         "morphotag_spa_simple",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }
 
 #[tokio::test]
 async fn golden_morphotag_retokenize_eng() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -191,28 +175,25 @@ async fn golden_morphotag_retokenize_eng() {
         .await;
 
     assert_completed_without_errors("morphotag_retokenize_eng", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_retokenize_eng");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
     assert_golden_snapshot!(
         "morphotag_retokenize_eng",
-        &results[0].content.as_text().expect("text command result")
+        results[0].content.as_text().expect("text command result")
     );
 }
 
 #[tokio::test]
 async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -232,7 +213,7 @@ async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
     assert_eq!(results.len(), 1);
 
     let mmhmm_mor = find_mor_line_for(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "mm-hmm that's right",
     )
     .expect("expected %mor line for mm-hmm that's right");
@@ -248,16 +229,13 @@ async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
 
 #[tokio::test]
 async fn golden_morphotag_cache_is_faster() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let start1 = std::time::Instant::now();
     let (info1, results1) = jobs
@@ -336,16 +314,13 @@ async fn golden_morphotag_cache_is_faster() {
 /// are here.
 #[tokio::test]
 async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "ita",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -358,7 +333,7 @@ async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
         .await;
 
     assert_completed_without_errors("morphotag_ita_single_word", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     let file = parse_output(output, "morphotag_ita_single_word");
     assert!(has_mor_tier(&file), "no %mor tier in:\n{output}");
     assert!(has_gra_tier(&file), "no %gra tier in:\n{output}");
@@ -417,16 +392,13 @@ async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
 /// normal spoken form and the context where a mis-analysis is most likely.
 #[tokio::test]
 async fn golden_morphotag_ita_multi_word_keeps_genuine_mwts() {
-    let Some(jobs) = require_direct_session_warmed(
+    let jobs = require_direct_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "ita",
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = jobs
         .submit_content_job(
@@ -439,7 +411,7 @@ async fn golden_morphotag_ita_multi_word_keeps_genuine_mwts() {
         .await;
 
     assert_completed_without_errors("morphotag_ita_multi_word", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     // Parsed for its side effect: parse_output asserts the output is valid CHAT.
     let _file = parse_output(output, "morphotag_ita_multi_word");
 

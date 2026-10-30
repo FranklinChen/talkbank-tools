@@ -21,17 +21,14 @@ use crate::live_deadline::CliRunBudget;
 
 use predicates::prelude::*;
 
-use cli_common::{CliHarness, resolve_python};
+use cli_common::CliHarness;
 
 /// Start a server in the background, check its status, then stop it.
 ///
 /// Uses a fresh HOME tempdir and random port for isolation.
 #[test]
 fn daemon_lifecycle_start_status_stop() {
-    let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let harness = CliHarness::new();
 
@@ -59,16 +56,12 @@ fn daemon_lifecycle_start_status_stop() {
         .timeout(CliRunBudget::DaemonStart.as_duration())
         .ok();
 
-    // The start command might fail if the port is taken, skip gracefully
+    // A server that does not start is this test's failure, not a skip.
     match start_result {
         Ok(output) if !output.status.success() => {
-            eprintln!("SKIP: serve start failed (port conflict?): {:?}", output);
-            return;
+            panic!("serve start failed: {output:?}")
         }
-        Err(e) => {
-            eprintln!("SKIP: serve start errored: {e}");
-            return;
-        }
+        Err(e) => panic!("serve start errored: {e}"),
         _ => {}
     }
 
@@ -84,7 +77,7 @@ fn daemon_lifecycle_start_status_stop() {
             "--server",
             &format!("http://127.0.0.1:{port}"),
         ])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .assert()
         .success()
         .stderr(predicate::str::contains("Status:").or(predicate::str::contains("cannot reach")));
@@ -93,12 +86,12 @@ fn daemon_lifecycle_start_status_stop() {
     harness
         .cmd()
         .args(["serve", "stop"])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServeStop.as_duration())
         .assert()
         .success();
 
-    // Verify status shows unreachable after stop
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Verify status shows unreachable after stop. No sleep: `serve stop`
+    // returns only after the server process has exited.
     harness
         .cmd()
         .args([
@@ -107,7 +100,7 @@ fn daemon_lifecycle_start_status_stop() {
             "--server",
             &format!("http://127.0.0.1:{port}"),
         ])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .assert()
         .success()
         .stderr(predicate::str::contains("cannot reach"));

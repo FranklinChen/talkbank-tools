@@ -537,7 +537,7 @@ mod tests {
     use talkbank_model::Terminator;
 
     fn batch_item(lang: &str) -> MorphosyntaxBatchItem {
-        MorphosyntaxBatchItem::new(
+        MorphosyntaxBatchItem::unmergeable(
             Vec::new(),
             Terminator::Period {
                 location: Location::Unlocated,
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn dispatch_plan_binds_supported_groups_to_their_exact_payloads() {
         let items = vec![batch_item("eng"), batch_item("cym"), batch_item("eng")];
-        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
+        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::for_tests());
         let plan = DispatchPlan::admit(&pool, &items, &english_file(&["eng", "cym"])).unwrap();
         assert!(std::ptr::eq(plan.pool, &pool));
         assert!(std::ptr::eq(plan.items, items.as_slice()));
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn unsupported_effective_language_cannot_receive_a_dispatch_plan() {
         let items = vec![batch_item("eng"), batch_item("que")];
-        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
+        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::for_tests());
         let Err(ServerError::AnalysisUnavailable(error)) =
             DispatchPlan::admit(&pool, &items, &english_file(&["eng"]))
         else {

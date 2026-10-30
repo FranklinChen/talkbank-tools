@@ -46,23 +46,40 @@ pub struct MisalignmentDiagnostic {
     pub suspected_class: MisalignmentClass,
 }
 
-/// Best-effort classification of which pipeline stage caused a morphotag
-/// misalignment bug.
+impl MisalignmentDiagnostic {
+    /// The model's tokens could not be placed on the transcript's words: no
+    /// word owns them, so the words and the tokens are reported side by side.
+    pub fn unplaced(words: &[crate::extract::ExtractedWord], tokens: Vec<String>) -> Self {
+        Self {
+            chat_words: words
+                .iter()
+                .map(|word| word.text.as_str().to_owned())
+                .collect(),
+            expected: MorAlignableWordCount::new(words.len()),
+            actual: MorItemCount::new(tokens.len()),
+            stanza_tokens_after_mapping: tokens,
+            suspected_class: MisalignmentClass::TokensDivergeFromWords,
+        }
+    }
+}
+
+/// Which stage a morphotag misalignment came from, set by the code that
+/// observed it. Only classes some producer sets exist: a class reached by
+/// guessing named the wrong stage (every retokenize refusal was once
+/// "mwt_reassembly_bug").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MisalignmentClass {
-    /// Stanza realignment context was not applied.
-    RealignmentSkipped,
-    /// MWT Range reassembly consumed the wrong number of tokens.
-    MwtReassemblyBug,
-    /// Terminator filtering dropped too many or too few punctuation tokens.
-    TerminatorFilterBug,
-    /// Code-switched dispatch disagreed with CHAT main-tier counts.
-    LanguageDispatchIssue,
     /// `%mor` chunk count and `%gra` relation count disagreed at injection
     /// time. Upstream sentence-mapping likely failed to append a terminator
     /// PUNCT relation (or appended one for an utterance that doesn't have a
     /// terminator chunk). dona@s bug class.
     MorGraCountMismatch,
+    /// Retokenization: a model token joins words that other main-tier
+    /// content (a retrace, a pause, a bracket edge) separates.
+    MergeCrossesContent,
+    /// The model's tokens do not spell the transcript's words, so no word
+    /// can be said to own any token.
+    TokensDivergeFromWords,
     /// Diagnostic data is insufficient to classify more precisely.
     Unknown,
 }
@@ -71,11 +88,9 @@ impl MisalignmentClass {
     /// Stable label for tracing and structured decision evidence.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::RealignmentSkipped => "realignment_skipped",
-            Self::MwtReassemblyBug => "mwt_reassembly_bug",
-            Self::TerminatorFilterBug => "terminator_filter_bug",
-            Self::LanguageDispatchIssue => "language_dispatch_issue",
             Self::MorGraCountMismatch => "mor_gra_count_mismatch",
+            Self::MergeCrossesContent => "merge_crosses_content",
+            Self::TokensDivergeFromWords => "tokens_diverge_from_words",
             Self::Unknown => "unknown",
         }
     }

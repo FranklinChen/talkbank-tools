@@ -55,6 +55,9 @@ pub(super) enum AdmissionRejection {
     /// by the host itself freeing memory (other processes exiting,
     /// caches reclaiming, etc.).
     MemoryConstrained,
+    /// The host would not report its memory. Not counted as a capacity
+    /// rejection and not waited on: the spawn fails with this error.
+    HostUnreadable(crate::host_memory::HostUnreadable),
 }
 
 impl From<PermitRejected> for AdmissionRejection {
@@ -186,17 +189,18 @@ impl WorkerPool {
         // Layer 0: live CPU-loadavg gate. Refusing here before any
         // permit work means a saturated host doesn't churn the
         // global-permit semaphore. Threshold is the host's logical
-        // CPU count, polled fresh each call. Tests exercising the
-        // permit / per-key-cap / metrics paths set the override to a
-        // value far above any realistic load so the gate does not
-        // reject before reaching the test logic; the dedicated
-        // cpu_gate unit tests cover both branches.
-        let cpu_threshold = self
-            .config
-            .cpu_gate_threshold_override
-            .unwrap_or_else(cpu_gate::host_cpu_count_as_threshold);
-        if let Err(saturated) = cpu_gate::check_cpu_saturation_with_state(pool_state, cpu_threshold)
-        {
+        // CPU count, polled fresh each call. Test pools run with the
+        // gate disabled (`PoolConfig::for_tests`), so their spawn
+        // counts never depend on the machine's load; the cpu_gate unit
+        // tests cover the gate itself.
+        let saturation = match self.config.cpu_gate {
+            super::CpuGatePolicy::HostLoad => cpu_gate::check_cpu_saturation_with_state(
+                pool_state,
+                cpu_gate::host_cpu_count_as_threshold(),
+            ),
+            super::CpuGatePolicy::Disabled => Ok(()),
+        };
+        if let Err(saturated) = saturation {
             let count = self
                 .rejection_counters
                 .record(WorkerRejectionKind::CpuSaturation);
@@ -248,30 +252,38 @@ impl WorkerPool {
                 Some(observed) => (observed, rss_observer::EstimateSource::ObservedAvgIdle),
                 None => (reservation_mb, rss_observer::EstimateSource::Reservation),
             };
-        if let Err(constrained) =
-            memory_gate::check_memory_saturation_with_state(pool_state, mem_threshold, estimate_mb)
-        {
-            let count = self
-                .rejection_counters
-                .record(WorkerRejectionKind::MemoryConstrained);
-            if should_log_saturation(count) {
-                let estimate_source_label = match estimate_source {
-                    rss_observer::EstimateSource::Reservation => "reservation",
-                    rss_observer::EstimateSource::ObservedAvgIdle => "observed_avg_idle",
-                };
-                warn!(
-                    available_mb = constrained.available_mb,
-                    estimate_mb = constrained.reservation_mb,
-                    estimate_source = estimate_source_label,
-                    threshold_mb = constrained.threshold_mb,
-                    projected_after_spawn_mb = constrained
-                        .available_mb
-                        .saturating_sub(constrained.reservation_mb),
-                    rejection_count = count,
-                    "Projected post-spawn memory below floor, rejecting worker spawn"
-                );
+        match memory_gate::check_memory_saturation_with_state(
+            pool_state,
+            mem_threshold,
+            estimate_mb,
+        ) {
+            Ok(()) => {}
+            Err(memory_gate::GateRefusal::Unreadable(error)) => {
+                return Err(AdmissionRejection::HostUnreadable(error));
             }
-            return Err(AdmissionRejection::MemoryConstrained);
+            Err(memory_gate::GateRefusal::Constrained(constrained)) => {
+                let count = self
+                    .rejection_counters
+                    .record(WorkerRejectionKind::MemoryConstrained);
+                if should_log_saturation(count) {
+                    let estimate_source_label = match estimate_source {
+                        rss_observer::EstimateSource::Reservation => "reservation",
+                        rss_observer::EstimateSource::ObservedAvgIdle => "observed_avg_idle",
+                    };
+                    warn!(
+                        available_mb = constrained.available_mb,
+                        estimate_mb = constrained.reservation_mb,
+                        estimate_source = estimate_source_label,
+                        threshold_mb = constrained.threshold_mb,
+                        projected_after_spawn_mb = constrained
+                            .available_mb
+                            .saturating_sub(constrained.reservation_mb),
+                        rejection_count = count,
+                        "Projected post-spawn memory below floor, rejecting worker spawn"
+                    );
+                }
+                return Err(AdmissionRejection::MemoryConstrained);
+            }
         }
 
         // Layer 1: acquire a global-cap permit. Failure here means
@@ -334,7 +346,15 @@ impl WorkerPool {
     ) -> Result<bool, WorkerError> {
         let guard = match self.try_claim_spawn_slot(group) {
             Ok((_, g)) => g,
-            Err(_) => return Ok(false), // At capacity
+            Err(AdmissionRejection::HostUnreadable(error)) => return Err(error.into()),
+            // At capacity: a worker returning or the host freeing CPU or
+            // memory unblocks it.
+            Err(
+                AdmissionRejection::GlobalCap
+                | AdmissionRejection::PerKeyCap
+                | AdmissionRejection::CpuSaturated
+                | AdmissionRejection::MemoryConstrained,
+            ) => return Ok(false),
         };
         // The claimed slot is counted in `total` from here until the worker
         // is in the idle queue (or the claim is released): a spawn can take
@@ -781,7 +801,14 @@ pub(super) async fn run_health_check(
 /// request and the next eviction round will reconsider it if
 /// pressure persists.
 async fn pressure_evict_idle_workers_if_needed(groups_ref: &GroupsMap) {
-    let available_mb = crate::worker::memory_guard::available_memory_mb();
+    // Pressure is measured, never assumed: an unreadable host evicts nothing.
+    let available_mb = match crate::host_memory::read_system_memory() {
+        Ok(memory) => memory.available_mb.0,
+        Err(error) => {
+            tracing::warn!(%error, "host memory unreadable; skipping pressure eviction");
+            return;
+        }
+    };
     if available_mb >= idle_eviction::EVICTION_PRESSURE_THRESHOLD_MB {
         return;
     }

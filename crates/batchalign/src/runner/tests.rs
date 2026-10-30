@@ -121,7 +121,7 @@ async fn preflight_media_failure_records_setup_attempt() {
     let missing_path = tempdir.path().join("missing.wav");
     let db = Arc::new(JobDB::open(Some(tempdir.path())).await.expect("open db"));
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::new(
+    let store = Arc::new(JobStore::for_tests(
         crate::config::ServerConfig::default(),
         Some(db.clone()),
         tx,

@@ -33,13 +33,12 @@ use crate::common;
 
 use std::collections::BTreeMap;
 
-use crate::live_deadline::HarnessBudget;
+use crate::live_deadline::WaitSubject;
 use batchalign::api::LanguageCode3;
 use batchalign::host_facts::PerProfile;
 use batchalign::worker::pool::WorkerPool;
 use batchalign::worker::{BatchInferRequest, InferTask};
 use common::pool_dispatch::{count_successes, echo_pool_config, launch_oversubscribed_dispatches};
-use common::resolve_python;
 use serde_json::json;
 
 const MAX_TOTAL: usize = 4;
@@ -60,10 +59,7 @@ const TEST_DELAY_MS: u64 = 100;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
     common::test_server_fixture::isolate_host_memory_ledger();
-    let Some(python) = resolve_python() else {
-        eprintln!("SKIP: Python 3 with batchalign not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require().interpreter();
 
     let pool = std::sync::Arc::new(WorkerPool::new(echo_pool_config(
         python,
@@ -84,7 +80,7 @@ async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
     let outcomes = launch_oversubscribed_dispatches(
         &pool,
         MAX_TOTAL + EXTRA,
-        HarnessBudget::OversubscribedEchoDispatch.as_duration(),
+        WaitSubject::oversubscribed_echo_dispatches(MAX_TOTAL + EXTRA),
         |i| langs[i % langs.len()].clone(),
         |lang, _| BatchInferRequest {
             task: InferTask::Morphosyntax,
@@ -97,14 +93,17 @@ async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
 
     let completed = count_successes(&outcomes);
     for outcome in &outcomes {
-        if !matches!(outcome, Ok(Ok(Ok(_)))) {
+        if !matches!(outcome, Ok(Ok(_))) {
             eprintln!("dispatch outcome: {outcome:?}");
         }
     }
-    assert!(
-        completed >= MAX_TOTAL + EXTRA - 4,
-        "expected most dispatches to complete; got {completed}/{}",
-        MAX_TOTAL + EXTRA
+    // Every dispatch returns: a slow machine only slows the queue (the
+    // progress deadline above waits for it), so a dispatch that fails is a
+    // real failure, not a timing artifact to allow for.
+    assert_eq!(
+        completed,
+        MAX_TOTAL + EXTRA,
+        "every oversubscribed dispatch must complete"
     );
 
     let metrics = pool.metrics_snapshot();

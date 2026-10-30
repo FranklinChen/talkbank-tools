@@ -13,8 +13,9 @@
 //! These tests spin up a real HTTP server with test-echo workers
 //! (no ML models), submit jobs, and verify responses.
 //!
-//! Requirements: Python 3 with batchalign installed.
-//! Tests skip gracefully if unavailable.
+//! Requirements: the checkout's Python development environment
+//! (`make batchalign-develop`); a test fails, never skips, without it (see
+//! `tests/prerequisite.rs`).
 
 use crate::common;
 
@@ -28,27 +29,10 @@ use batchalign::create_test_app;
 use batchalign::host_facts::PerProfile;
 use batchalign::options::{CommandOptions, CommonOptions, TranscribeOptions};
 use batchalign::worker::pool::PoolConfig;
-use common::resolve_python;
 use common::test_server_fixture::{
     acquire_test_server_session, acquire_test_server_session_with_config,
     isolate_host_memory_ledger,
 };
-
-/// Skip a real-worker test (test_echo=false) when Python is unavailable.
-/// The shared test-echo fixture handles SKIP for the test-echo path; this
-/// macro covers the one capability-gate test that intentionally bypasses
-/// the shared fixture to exercise the non-test-echo capability probe.
-macro_rules! require_python {
-    () => {
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    };
-}
 
 fn test_submission(files: Vec<FilePayload>) -> JobSubmission {
     JobSubmission {
@@ -85,9 +69,7 @@ fn test_submission(files: Vec<FilePayload>) -> JobSubmission {
 
 #[tokio::test]
 async fn health_endpoint() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let resp = reqwest::get(format!("{base_url}/health"))
@@ -105,9 +87,7 @@ async fn health_endpoint() {
 
 #[tokio::test]
 async fn submit_and_get_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -147,9 +127,7 @@ async fn submit_and_get_job() {
 
 #[tokio::test]
 async fn submit_job_echoes_request_id_header() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -177,9 +155,7 @@ async fn submit_job_echoes_request_id_header() {
 
 #[tokio::test]
 async fn submit_job_sets_request_id_header_when_missing() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -213,9 +189,7 @@ async fn submit_job_sets_request_id_header_when_missing() {
 
 #[tokio::test]
 async fn submit_and_get_results() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -259,9 +233,7 @@ async fn submit_and_get_results() {
 
 #[tokio::test]
 async fn get_single_result() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -301,9 +273,7 @@ async fn get_single_result() {
 /// 404.
 #[tokio::test]
 async fn get_single_result_with_slashes_in_filename() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -345,9 +315,7 @@ async fn get_single_result_with_slashes_in_filename() {
 
 #[tokio::test]
 async fn list_jobs() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -379,9 +347,7 @@ async fn list_jobs() {
 
 #[tokio::test]
 async fn cancel_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -436,9 +402,7 @@ async fn cancel_job() {
 ///   - `JobInfo` exposes the `last_cancelled_*` fields.
 #[tokio::test]
 async fn cancel_records_provenance() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -504,13 +468,14 @@ async fn cancel_records_provenance() {
         Some("user-pressed-cancel"),
         "jobs.last_cancelled_reason must reflect the cancel-body reason field"
     );
-    assert!(
-        raw_job
-            .get("last_cancelled_at")
-            .and_then(|v| v.as_f64())
-            .is_some(),
-        "jobs.last_cancelled_at must be populated"
-    );
+    // An RFC 3339 instant on the wire (`MachineTime`), so it is checked by
+    // parsing it as one, not by probing for a JSON number.
+    let cancelled_at = raw_job
+        .get("last_cancelled_at")
+        .cloned()
+        .unwrap_or_else(|| panic!("jobs.last_cancelled_at must be populated; got {raw_job:?}"));
+    serde_json::from_value::<batchalign::api::MachineTime>(cancelled_at)
+        .expect("jobs.last_cancelled_at must be a machine time");
 
     // Assertion 2: cancellations audit endpoint returns the recorded row.
     let resp = client
@@ -560,9 +525,7 @@ async fn cancel_twice_records_two_audit_rows() {
     // no evidence trail at all. Install one so the next failure explains itself.
     common::init_test_tracing(tracing::Level::WARN);
 
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -677,9 +640,7 @@ async fn cancel_twice_records_two_audit_rows() {
 /// audit row out, deserializes into the same type the CLI uses.
 #[tokio::test]
 async fn cancellations_endpoint_returns_typed_records() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -734,9 +695,7 @@ async fn cancellations_endpoint_returns_typed_records() {
 
 #[tokio::test]
 async fn delete_completed_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -777,9 +736,7 @@ async fn delete_completed_job() {
 
 #[tokio::test]
 async fn unknown_command_returns_422() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -810,9 +767,7 @@ async fn unknown_command_returns_422() {
 
 #[tokio::test]
 async fn no_files_returns_400() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -829,9 +784,7 @@ async fn no_files_returns_400() {
 
 #[tokio::test]
 async fn delete_running_job_returns_409() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -874,9 +827,7 @@ async fn delete_running_job_returns_409() {
 
 #[tokio::test]
 async fn job_not_found_returns_404() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let resp = reqwest::get(format!("{base_url}/jobs/nonexistent"))
@@ -887,9 +838,7 @@ async fn job_not_found_returns_404() {
 
 #[tokio::test]
 async fn results_before_completion_returns_409() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -932,9 +881,7 @@ async fn results_before_completion_returns_409() {
 
 #[tokio::test]
 async fn restart_failed_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -1011,9 +958,7 @@ async fn restart_failed_job() {
 
 #[tokio::test]
 async fn restart_completed_job_returns_409() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -1045,9 +990,7 @@ async fn restart_completed_job_returns_409() {
 
 #[tokio::test]
 async fn paths_mode_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -1125,9 +1068,7 @@ async fn paths_mode_job() {
 
 #[tokio::test]
 async fn multiple_files_in_one_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -1167,9 +1108,7 @@ async fn multi_file_job_uses_parallel_workers() {
         memory_gate_mb: Some(MemoryMb(0)),
         ..Default::default()
     };
-    let Some(session) = acquire_test_server_session_with_config(config).await else {
-        return;
-    };
+    let session = acquire_test_server_session_with_config(config).await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();
@@ -1236,7 +1175,7 @@ async fn multi_file_job_uses_parallel_workers() {
 /// this would crash with "worker capability gate failed".
 #[tokio::test]
 async fn server_starts_with_real_worker_capability_gate() {
-    let python_path = require_python!();
+    let python_path = crate::prerequisite::PythonWorker::require().interpreter();
     // This test bypasses the shared fixture (test_echo=false), so opt
     // into the same per-process ledger override the fixture uses.
     isolate_host_memory_ledger();
@@ -1263,8 +1202,10 @@ async fn server_starts_with_real_worker_capability_gate() {
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     };
 
     let result = create_test_app(
@@ -1371,9 +1312,7 @@ async fn poll_job_done(client: &reqwest::Client, base_url: &str, job_id: &str) -
 /// Submit 3 jobs simultaneously, all should complete successfully.
 #[tokio::test]
 async fn concurrent_jobs_complete() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
 
     let client = reqwest::Client::new();

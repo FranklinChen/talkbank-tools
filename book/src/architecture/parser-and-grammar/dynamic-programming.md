@@ -38,8 +38,8 @@ that no new runtime DP appears outside the allowlisted call sites.
 
 - **FA word/token remapping.** Removed; indexed or deterministic
   stitching only.
-- **Retokenize char-level DP.** Removed; deterministic span-join
-  with length-aware monotonic fallback.
+- **Retokenize char-level DP.** Removed; deterministic span-join, and
+  diverged text is refused rather than placed by a fallback.
 
 ### Correctness-critical: DP retained on purpose
 

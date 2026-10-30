@@ -443,7 +443,7 @@ async fn reserve_job_execution(
         command,
         job.pending_files.len(),
         host.effective_config(),
-        host.config(),
+        host.memory_tier(),
     );
     let coordinator = HostMemoryCoordinator::from_server_config(host.config());
     let job_label = format!(
@@ -616,7 +616,7 @@ mod tests {
             memory_gate_mb: None,
             ..ServerConfig::default()
         };
-        let store = Arc::new(JobStore::new(
+        let store = Arc::new(JobStore::for_tests(
             config,
             Some(db),
             ws_tx,
@@ -624,7 +624,7 @@ mod tests {
         ));
         let pool = Arc::new(WorkerPool::new(PoolConfig {
             test_echo: true,
-            ..Default::default()
+            ..PoolConfig::for_tests()
         }));
         let _ = pool.start_background_tasks();
         let cache = Arc::new(

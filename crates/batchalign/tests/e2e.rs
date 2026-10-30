@@ -3,8 +3,9 @@
 //! These tests verify the full pipeline: CLI → server → test-echo worker → results.
 //! All tests use test-echo workers (no ML models required).
 //!
-//! Requirements: Python 3 with batchalign installed.
-//! Tests skip gracefully if unavailable.
+//! Requirements: the checkout's Python development environment
+//! (`make batchalign-develop`); a test fails, never skips, without it (see
+//! `tests/prerequisite.rs`).
 // Integration tests are exempt from the crate's deny-level panic lints,
 // matching the src/lib.rs `#![cfg_attr(test, allow(...))]` pattern
 // (see docs/panic-audit/).
@@ -36,9 +37,7 @@ use common::test_server_fixture::acquire_test_server_session;
 /// Single file round-trips through the server and comes back.
 #[tokio::test]
 async fn e2e_single_file_roundtrip() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -70,9 +69,7 @@ async fn e2e_single_file_roundtrip() {
 /// Multiple files are all processed and returned with correct filenames.
 #[tokio::test]
 async fn e2e_multiple_files() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -105,9 +102,7 @@ async fn e2e_multiple_files() {
 /// Nested path in filename is preserved through the round-trip.
 #[tokio::test]
 async fn e2e_nested_path_preserved() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -134,9 +129,7 @@ async fn e2e_nested_path_preserved() {
 /// Empty file list is accepted (returns 0 results).
 #[tokio::test]
 async fn e2e_empty_input() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -181,9 +174,7 @@ async fn e2e_empty_input() {
 /// Test-echo output is still parseable CHAT (content returned unchanged).
 #[tokio::test]
 async fn e2e_output_is_valid_chat() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -220,9 +211,7 @@ async fn e2e_output_is_valid_chat() {
 /// Dummy file is returned unchanged by the server (test-echo pass-through).
 #[tokio::test]
 async fn e2e_dummy_file_passthrough() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -257,9 +246,7 @@ async fn e2e_dummy_file_passthrough() {
 /// NoAlign file is returned unchanged for transcribe command.
 #[tokio::test]
 async fn e2e_noalign_file_passthrough() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -297,9 +284,7 @@ async fn e2e_noalign_file_passthrough() {
 /// override_media_cache option is accepted in the submission.
 #[tokio::test]
 async fn e2e_override_media_cache_option() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -338,9 +323,7 @@ async fn e2e_override_media_cache_option() {
 /// retokenize option is accepted in the submission.
 #[tokio::test]
 async fn e2e_retokenize_option() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -380,9 +363,7 @@ async fn e2e_retokenize_option() {
 /// Transcribe command completes via the server-side test-echo harness.
 #[tokio::test]
 async fn e2e_transcribe_command() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -408,9 +389,7 @@ async fn e2e_transcribe_command() {
 /// Transcribe_s command completes via the server-side test-echo harness.
 #[tokio::test]
 async fn e2e_transcribe_s_command() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -442,9 +421,7 @@ async fn e2e_transcribe_s_command() {
 /// Unknown command is rejected by the server.
 #[tokio::test]
 async fn e2e_invalid_command_rejected() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -479,9 +456,7 @@ async fn e2e_invalid_command_rejected() {
 /// Malformed CHAT content still completes (test-echo returns it unchanged).
 #[tokio::test]
 async fn e2e_malformed_chat_still_completes() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -519,9 +494,7 @@ async fn e2e_malformed_chat_still_completes() {
 /// Language parameter propagates through the job lifecycle.
 #[tokio::test]
 async fn e2e_lang_propagates() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -530,13 +503,26 @@ async fn e2e_lang_propagates() {
         content: MINIMAL_CHAT.into(),
     }];
 
+    // Spanish has no TalkBank utterance-boundary model, so transcribe needs
+    // the Stanza fallback authorized explicitly; without it the server
+    // refuses the job (400), which is the rule, not this test's subject.
+    let options = CommandOptions::Transcribe(TranscribeOptions {
+        auto_speakers: false,
+        common: CommonOptions::default(),
+        asr_engine: batchalign::options::AsrEngineName::RevAi,
+        diarize: false,
+        wor: false.into(),
+        merge_abbrev: false.into(),
+        batch_size: 8,
+        utseg_fallback: true.into(),
+    });
     let (info, _results) = run_job_to_completion(
         client,
         base_url,
         ReleasedCommand::Transcribe,
         "spa",
         files,
-        default_options_for("transcribe"),
+        options,
     )
     .await;
 
@@ -555,9 +541,7 @@ async fn e2e_lang_propagates() {
 /// Test-echo preserves exact content (byte-for-byte round-trip).
 #[tokio::test]
 async fn e2e_content_fidelity() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -588,9 +572,7 @@ async fn e2e_content_fidelity() {
 /// Multiple files mixed: some with dummy headers, some normal.
 #[tokio::test]
 async fn e2e_mixed_dummy_and_normal() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -641,9 +623,7 @@ async fn e2e_mixed_dummy_and_normal() {
 /// Job with many files verifies parallel processing capability.
 #[tokio::test]
 async fn e2e_parallel_processing() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -672,9 +652,7 @@ async fn e2e_parallel_processing() {
 /// Cancel a running job.
 #[tokio::test]
 async fn e2e_cancel_job() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 
@@ -746,9 +724,7 @@ async fn e2e_cancel_job() {
 /// Verify job status transitions: Queued → Running → Completed.
 #[tokio::test]
 async fn e2e_job_status_lifecycle() {
-    let Some(session) = acquire_test_server_session().await else {
-        return;
-    };
+    let session = acquire_test_server_session().await;
     let base_url = session.base_url();
     let client = session.client();
 

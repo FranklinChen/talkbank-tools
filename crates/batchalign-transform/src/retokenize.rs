@@ -14,18 +14,24 @@ use crate::inject::MisalignmentDiagnostic;
 
 mod parse_helpers;
 mod rebuild;
-pub use parse_helpers::{
-    handle_ending_punct_skip, is_ending_punct, is_tag_marker_text, resolve_token_text,
+mod refusal;
+mod runs;
+pub use parse_helpers::{is_ending_punct, is_tag_marker_text, resolve_token_text};
+pub(crate) use parse_helpers::{
     try_parse_token_as_bracketed_item, try_parse_token_as_utterance_content,
     try_parse_token_as_word,
 };
 use rebuild::{RetokenizeContext, rebuild_content};
+pub use runs::{RunsDisagree, WordRuns};
 
 /// Maps each CHAT word (by index) to one or more NLP token indices.
 ///
-/// Invariant: `word_count() == original_word_count` passed at construction.
-/// Each entry is non-empty for successfully mapped words, though fallback
-/// strategies may leave gaps when the two tokenizations diverge too much.
+/// Invariant: `word_count() == original_word_count` passed at construction,
+/// and the words and the tokens spell the same text: a mapping exists only by
+/// [`build_word_token_mapping`], which refuses tokens that diverge
+/// ([`TextDiverged`]). The main tier is rebuilt from these tokens, so a
+/// mapping that paired words with tokens by position alone would write one
+/// word's text over another's.
 ///
 /// # Arena-style optimizations
 ///
@@ -33,29 +39,27 @@ use rebuild::{RetokenizeContext, rebuild_content};
 /// `HashMap<usize, Vec<usize>>`, eliminating hashing overhead and providing
 /// O(1) lookup. Most words map to 1-2 tokens, so `SmallVec<[usize; 4]>`
 /// keeps them inline without heap allocation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordTokenMapping {
     inner: Vec<SmallVec<[usize; 4]>>,
-    basis: MappingBasis,
 }
 
-/// What a [`WordTokenMapping`] was built from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MappingBasis {
-    /// Source words match model surface-token text. A producer-admitted
-    /// expansion can carry that ownership to differently spelled components.
-    Text,
-    /// The texts diverged; words were spread over tokens by position and
-    /// length alone, so a word's tokens may hold another word's text.
-    Length,
-}
+/// The model's tokens do not spell the transcript's words, so no word can be
+/// said to own any token.
+///
+/// There used to be a fallback here that spread the words over the tokens by
+/// position and length. Rebuilding the main tier from it wrote a neighbouring
+/// token's text into a word: in a real Cantonese transcript whose tokens ended
+/// in a stray terminator token, a word was replaced by its neighbour, so one
+/// word appeared twice and another vanished (synthetic shape: `a b c +...`
+/// with tokens `ab c +...` came out as `ab c c`). Only the
+/// special-form and scoped-word paths refused it; plain words took it. A
+/// divergence is now this refusal, and the utterance is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the model's tokens do not spell the transcript's words")]
+pub struct TextDiverged;
 
 impl WordTokenMapping {
-    /// What the mapping was built from.
-    pub fn basis(&self) -> MappingBasis {
-        self.basis
-    }
-
     /// Number of original words this mapping covers.
     pub fn word_count(&self) -> usize {
         self.inner.len()
@@ -98,38 +102,7 @@ impl WordTokenMapping {
                 Some(expanded)
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(Self {
-            inner,
-            basis: self.basis,
-        })
-    }
-}
-
-/// Build a mapping from original word index to NLP token indices.
-///
-/// First tries deterministic span-join mapping when normalized concatenated text
-/// is identical on both sides. When text diverges, uses a conservative
-/// length-aware monotonic fallback (no DP).
-pub fn build_word_token_mapping(
-    original_words: &[ExtractedWord],
-    stanza_tokens: &[String],
-) -> WordTokenMapping {
-    if let Some(mapping) = try_deterministic_word_token_mapping(original_words, stanza_tokens) {
-        return WordTokenMapping {
-            inner: mapping,
-            basis: MappingBasis::Text,
-        };
-    }
-
-    tracing::warn!(
-        original_word_count = original_words.len(),
-        stanza_token_count = stanza_tokens.len(),
-        "retokenize text diverged; using length-aware monotonic fallback without DP"
-    );
-
-    WordTokenMapping {
-        inner: build_length_fallback_mapping(original_words.len(), stanza_tokens.len()),
-        basis: MappingBasis::Length,
+        Some(Self { inner })
     }
 }
 
@@ -138,17 +111,34 @@ pub fn normalize_alignment_unit(text: &str) -> String {
     text.chars().flat_map(|ch| ch.to_lowercase()).collect()
 }
 
-/// Try to build a deterministic span-join mapping.
+/// Build a mapping from original word index to NLP token indices.
 ///
-/// Returns `None` if normalized text does not match and fallback should be used.
-pub fn try_deterministic_word_token_mapping(
+/// A span join over the normalized concatenated text, which must be identical
+/// on both sides; otherwise [`TextDiverged`]. Every word must own at least one
+/// token, so one empty side against a non-empty other is a divergence too;
+/// two empty sides map trivially.
+pub fn build_word_token_mapping(
+    original_words: &[ExtractedWord],
+    stanza_tokens: &[String],
+) -> Result<WordTokenMapping, TextDiverged> {
+    let mapping = span_join(original_words, stanza_tokens);
+    if mapping.is_none() {
+        tracing::warn!(
+            original_word_count = original_words.len(),
+            stanza_token_count = stanza_tokens.len(),
+            "retokenize text diverged; refusing the utterance"
+        );
+    }
+    mapping
+        .map(|inner| WordTokenMapping { inner })
+        .ok_or(TextDiverged)
+}
+
+/// The span join itself: `None` exactly when the texts diverge.
+fn span_join(
     original_words: &[ExtractedWord],
     stanza_tokens: &[String],
 ) -> Option<Vec<SmallVec<[usize; 4]>>> {
-    if original_words.is_empty() || stanza_tokens.is_empty() {
-        return Some(vec![SmallVec::new(); original_words.len()]);
-    }
-
     let mut original_ranges: Vec<(usize, usize)> = Vec::with_capacity(original_words.len());
     let mut token_ranges: Vec<(usize, usize)> = Vec::with_capacity(stanza_tokens.len());
     let mut original_concat = String::new();
@@ -210,37 +200,6 @@ pub fn try_deterministic_word_token_mapping(
     Some(mapping)
 }
 
-fn build_length_fallback_mapping(
-    original_word_count: usize,
-    stanza_token_count: usize,
-) -> Vec<SmallVec<[usize; 4]>> {
-    let mut mapping: Vec<SmallVec<[usize; 4]>> = vec![SmallVec::new(); original_word_count];
-
-    if original_word_count == 0 || stanza_token_count == 0 {
-        return mapping;
-    }
-
-    if original_word_count == stanza_token_count {
-        for (idx, slot) in mapping.iter_mut().enumerate() {
-            slot.push(idx);
-        }
-        return mapping;
-    }
-
-    for (word_idx, slot) in mapping.iter_mut().enumerate() {
-        let start = word_idx * stanza_token_count / original_word_count;
-        let mut end = (word_idx + 1) * stanza_token_count / original_word_count;
-        if end <= start {
-            end = (start + 1).min(stanza_token_count);
-        }
-        for token_idx in start..end {
-            slot.push(token_idx);
-        }
-    }
-
-    mapping
-}
-
 /// Retokenize an utterance to match NLP tokenization, then inject morphosyntax.
 ///
 /// `mapping` is the caller's mapping of `original_words` to `stanza_tokens`
@@ -289,7 +248,10 @@ pub fn retokenize_utterance(
     // intermediate, or certify completion merely because counts still match.
     rebuild_content(old_content.clone(), &mut ctx, &mut new_content);
 
-    if !ctx.diagnostics.is_empty() {
+    if let Some(first) = ctx.diagnostics.first() {
+        // The utterance reports as the first refusal's kind; every refusal
+        // is logged.
+        let suspected_class = first.class();
         for warning in &ctx.diagnostics {
             tracing::warn!("retokenize: {warning}");
         }
@@ -304,7 +266,7 @@ pub fn retokenize_utterance(
             ),
             actual: talkbank_model::alignment::helpers::MorItemCount::new(mors.len()),
             stanza_tokens_after_mapping: stanza_tokens.to_vec(),
-            suspected_class: crate::inject::MisalignmentClass::Unknown,
+            suspected_class,
         });
     }
 
@@ -390,12 +352,12 @@ mod tests {
         let original_words = extracted_words(&["i", "eat"]);
         let stanza_tokens = vec!["i".to_string(), "eat".to_string()];
 
-        let mapping = try_deterministic_word_token_mapping(&original_words, &stanza_tokens)
+        let mapping = build_word_token_mapping(&original_words, &stanza_tokens)
             .expect("deterministic mapping should succeed");
 
-        assert_eq!(mapping.len(), 2);
-        assert_eq!(mapping[0].as_slice(), &[0]);
-        assert_eq!(mapping[1].as_slice(), &[1]);
+        assert_eq!(mapping.word_count(), 2);
+        assert_eq!(mapping.tokens_for_word(0), &[0]);
+        assert_eq!(mapping.tokens_for_word(1), &[1]);
     }
 
     #[test]
@@ -403,13 +365,13 @@ mod tests {
         let original_words = extracted_words(&["gon", "na", "eat"]);
         let stanza_tokens = vec!["gonna".to_string(), "eat".to_string()];
 
-        let mapping = try_deterministic_word_token_mapping(&original_words, &stanza_tokens)
+        let mapping = build_word_token_mapping(&original_words, &stanza_tokens)
             .expect("deterministic mapping should succeed");
 
-        assert_eq!(mapping.len(), 3);
-        assert_eq!(mapping[0].as_slice(), &[0]);
-        assert_eq!(mapping[1].as_slice(), &[0]);
-        assert_eq!(mapping[2].as_slice(), &[1]);
+        assert_eq!(mapping.word_count(), 3);
+        assert_eq!(mapping.tokens_for_word(0), &[0]);
+        assert_eq!(mapping.tokens_for_word(1), &[0]);
+        assert_eq!(mapping.tokens_for_word(2), &[1]);
     }
 
     #[test]
@@ -417,7 +379,24 @@ mod tests {
         let original_words = extracted_words(&["i", "eat"]);
         let stanza_tokens = vec!["you".to_string(), "eat".to_string()];
 
-        assert!(try_deterministic_word_token_mapping(&original_words, &stanza_tokens).is_none());
+        assert_eq!(
+            build_word_token_mapping(&original_words, &stanza_tokens),
+            Err(TextDiverged)
+        );
+    }
+
+    /// Every word must own a token: words against no tokens, or tokens
+    /// against no words, is a divergence and never a mapping of empties.
+    #[test]
+    fn one_empty_side_is_a_divergence() {
+        let words = extracted_words(&["i", "eat"]);
+        assert_eq!(build_word_token_mapping(&words, &[]), Err(TextDiverged));
+        assert_eq!(
+            build_word_token_mapping(&[], &["i".to_string()]),
+            Err(TextDiverged)
+        );
+        let empty = build_word_token_mapping(&[], &[]).expect("nothing maps to nothing");
+        assert_eq!(empty.word_count(), 0);
     }
 
     #[test]
@@ -425,15 +404,16 @@ mod tests {
         let words = extracted_words(&["decírmelo", "hoy"]);
         let surface = vec!["decírmelo".into(), "hoy".into()];
         let mapping = build_word_token_mapping(&words, &surface)
+            .expect("surface spells the words")
             .expanded(&[0..3, 3..4])
             .expect("complete producer expansion");
-        assert_eq!(mapping.basis(), MappingBasis::Text);
         assert_eq!(mapping.tokens_for_word(0), &[0, 1, 2]);
         assert_eq!(mapping.tokens_for_word(1), &[3]);
+        // The components alone do not spell the source, so they own nothing.
         let components = vec!["decir".into(), "me".into(), "lo".into(), "hoy".into()];
         assert_eq!(
-            build_word_token_mapping(&words, &components).basis(),
-            MappingBasis::Length
+            build_word_token_mapping(&words, &components).err(),
+            Some(TextDiverged)
         );
         for ranges in [
             vec![0..0, 0..1],
@@ -443,38 +423,39 @@ mod tests {
         ] {
             assert!(
                 build_word_token_mapping(&words, &surface)
+                    .expect("surface spells the words")
                     .expanded(&ranges)
                     .is_none()
             );
         }
-        let guessed = build_word_token_mapping(&words, &["otro".into(), "hoy".into()])
-            .expanded(&[0..3, 3..4])
-            .expect("ordered expansion retains its basis");
-        assert_eq!(guessed.basis(), MappingBasis::Length);
     }
 
+    /// Diverged tokens are refused, never spread over the words by position.
+    ///
+    /// The positional fallback this replaces mapped equal counts one to one and
+    /// unequal counts by proportional bins, so `gonna eat` against
+    /// `going eat` "succeeded" and the rebuild wrote `going` into the
+    /// transcript. The Cantonese case that found it: a stray terminator token
+    /// made the words and tokens differ in number, and the bins handed a word
+    /// its neighbour's token. The third case is a synthetic utterance of that
+    /// shape.
     #[test]
-    fn fallback_mapping_uses_positions_for_equal_lengths() {
-        let original_words = extracted_words(&["gonna", "eat"]);
-        let stanza_tokens = vec!["going".to_string(), "eat".to_string()];
-
-        let mapping = build_word_token_mapping(&original_words, &stanza_tokens);
-
-        assert_eq!(mapping.word_count(), 2);
-        assert_eq!(mapping.tokens_for_word(0), &[0]);
-        assert_eq!(mapping.tokens_for_word(1), &[1]);
-    }
-
-    #[test]
-    fn fallback_mapping_uses_monotonic_bins_for_length_mismatch() {
-        let original_words = extracted_words(&["i", "don't", "know"]);
-        let stanza_tokens = vec!["alpha".to_string(), "beta".to_string()];
-
-        let mapping = build_word_token_mapping(&original_words, &stanza_tokens);
-
-        assert_eq!(mapping.word_count(), 3);
-        assert_eq!(mapping.tokens_for_word(0), &[0]);
-        assert_eq!(mapping.tokens_for_word(1), &[0]);
-        assert_eq!(mapping.tokens_for_word(2), &[1]);
+    fn diverged_tokens_are_refused_not_spread_by_position() {
+        for (words, tokens) in [
+            (vec!["gonna", "eat"], vec!["going", "eat"]),
+            (vec!["i", "don't", "know"], vec!["alpha", "beta"]),
+            (
+                vec!["我", "哋", "今", "日", "去", "街"],
+                vec!["我哋", "今日", "去", "街", "+..."],
+            ),
+        ] {
+            let original = extracted_words(&words);
+            let tokens: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                build_word_token_mapping(&original, &tokens).err(),
+                Some(TextDiverged),
+                "{words:?} against {tokens:?}"
+            );
+        }
     }
 }

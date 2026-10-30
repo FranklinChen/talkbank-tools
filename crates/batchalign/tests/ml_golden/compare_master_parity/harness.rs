@@ -19,21 +19,14 @@ fn compare_opts() -> CommandOptions {
 }
 
 pub async fn run_compare_master_parity(fixture_name: &str) {
-    let Some(session) = require_live_direct(
+    let session = require_live_direct(
         InferTask::Morphosyntax,
         "Direct session does not support morphosyntax infer (required for compare parity)",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
-    let Some((main_text, gold_text)) = load_compare_fixture_pair(fixture_name) else {
-        return;
-    };
-    let Some((golden_chat, golden_csv)) = load_ba2_compare_master_golden(fixture_name) else {
-        return;
-    };
+    let (main_text, gold_text) = load_compare_fixture_pair(fixture_name);
+    let (golden_chat, golden_csv) = load_ba2_compare_master_golden(fixture_name);
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let input_dir = tempdir.path().join("in");

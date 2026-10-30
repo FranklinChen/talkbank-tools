@@ -426,7 +426,7 @@ mod tests {
         let cache_dir = tempdir.path().join("cache");
         let db = Arc::new(JobDB::open(Some(tempdir.path())).await.expect("open db"));
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = Arc::new(JobStore::new(
+        let store = Arc::new(JobStore::for_tests(
             crate::config::ServerConfig::default(),
             Some(db.clone()),
             tx,
@@ -450,7 +450,7 @@ mod tests {
             .first()
             .cloned()
             .expect("pending file");
-        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::default());
+        let pool = WorkerPool::new(crate::worker::pool::PoolConfig::for_tests());
         let cache = UtteranceCache::sqlite(Some(cache_dir))
             .await
             .expect("open cache");

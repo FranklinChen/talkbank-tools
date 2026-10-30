@@ -119,7 +119,7 @@ mod tests {
     #[tokio::test]
     async fn requeue_job_after_memory_gate_sets_retry_deadline() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_job_recounts_terminal_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -202,7 +202,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(JobDB::open(Some(dir.path())).await.unwrap());
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             Some(db.clone()),
             tx,
@@ -263,7 +263,7 @@ mod tests {
         // (2) The `jobs.db` `error` column must persist it: a fresh store
         //     reloaded purely from the DB still sees the reason.
         let (tx2, _rx2) = broadcast::channel(BROADCAST_CAPACITY);
-        let store2 = JobStore::new(
+        let store2 = JobStore::for_tests(
             test_config(),
             Some(db.clone()),
             tx2,

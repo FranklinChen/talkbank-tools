@@ -18,17 +18,14 @@ pub(super) fn opensmile_options(feature_set: &str) -> CommandOptions {
     })
 }
 
-pub(super) fn prepare_opensmile_fixture_job(
-    state_dir: &Path,
-    label: &str,
-) -> Option<OpensmileFixtureJob> {
-    let fixtures = prepare_audio_fixtures(state_dir)?;
-    Some(OpensmileFixtureJob {
+pub(super) fn prepare_opensmile_fixture_job(state_dir: &Path, label: &str) -> OpensmileFixtureJob {
+    let fixtures = prepare_audio_fixtures(state_dir);
+    OpensmileFixtureJob {
         source_path: fixtures.audio.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, "test.csv")
             .to_string_lossy()
             .into_owned(),
-    })
+    }
 }
 
 fn standard_output_path(state_dir: &Path, label: &str, filename: &str) -> PathBuf {

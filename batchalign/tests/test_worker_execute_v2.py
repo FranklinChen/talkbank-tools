@@ -647,6 +647,7 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
                     "words": ["I", "saw", "it"],
                     "terminator": ".",
                     "special_forms": [[None, None], [None, None], [None, None]],
+                    "runs": [3],
                     "lang": "eng",
                 }
             ],
@@ -754,6 +755,7 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
                         [None, None],
                         [None, None],
                     ],
+                    "runs": [4],
                     "lang": "yue",
                 }
             ],
@@ -859,6 +861,7 @@ def test_invalid_morphosyntax_host_item_fails_only_that_item(
                     "words": ["hello"],
                     "terminator": ".",
                     "special_forms": [[None, None]],
+                    "runs": [1],
                     "lang": "eng",
                 }
             ],
@@ -915,6 +918,7 @@ def test_morphosyntax_item_count_mismatch_is_invalid_payload(tmp_path: Path) -> 
         "words": ["hi"],
         "terminator": ".",
         "special_forms": [[None, None]],
+        "runs": [1],
         "lang": "eng",
     }
     _write_json_payload(payload_path, {"items": [item, item], "mwt": {}})

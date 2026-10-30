@@ -18,12 +18,12 @@ jobs:
 
       - name: Install Python for PyO3 linking
         id: python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -78,7 +78,7 @@ jobs:
 
       - name: Install Python for PyO3 linking
         id: python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
@@ -98,3 +98,54 @@ jobs:
         env:
           PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: make batchalign-build-pyo3
+
+  batchalign-worker-integration:
+    # The worker suite spawns real Python workers (test-echo, no models), so
+    # it needs the checkout's development environment with a current
+    # extension. Its tests fail rather than skip without one, so this job is
+    # the only place CI proves them; see the Makefile target's note.
+    name: Batchalign worker integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install pinned ffmpeg
+        # worker_v2_fa_roundtrip stages audio through ffmpeg.
+        uses: ./.github/actions/pinned-ffmpeg
+
+      - name: Cache cargo artifacts
+        # Job-scoped like the others: this job builds the extension and one
+        # test target, a different artifact set from the gate job's.
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build dashboard assets
+        # The batchalign crate embeds frontend/dist at compile time.
+        run: make batchalign-dashboard-build
+
+      - name: Build the development environment and extension
+        # Records the build evidence the tests' freshness check reads.
+        run: make batchalign-develop
+
+      - name: Run the worker integration suite
+        run: make batchalign-test-worker-integration

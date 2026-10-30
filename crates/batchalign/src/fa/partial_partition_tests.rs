@@ -118,7 +118,7 @@ async fn request_context_preserves_partial_partition_output() {
             audio_identity: &identity,
             audio_duration: None,
         };
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let cache = UtteranceCache::sqlite(Some(dir.path().join("cache")))
             .await
             .expect("cache");

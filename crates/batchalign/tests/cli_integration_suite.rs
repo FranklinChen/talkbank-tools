@@ -14,6 +14,7 @@ mod cache_admission;
 mod cli_common;
 mod common;
 mod live_deadline;
+mod prerequisite;
 
 #[path = "cli.rs"]
 mod cli;

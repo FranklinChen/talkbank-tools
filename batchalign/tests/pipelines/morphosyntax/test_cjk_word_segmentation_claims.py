@@ -212,7 +212,8 @@ class TestClaim3_PyCantonese_Segmentation:
         # Input: per-character tokens (as FunASR would produce)
         per_char_input = ["佢", "哋", "好", "鍾", "意", "食", "嘢"]
 
-        result = _segment_cantonese(per_char_input)
+        # One run: nothing on the main tier separates these characters.
+        result = _segment_cantonese([per_char_input])
 
         # Should produce fewer tokens than input (some chars grouped into words)
         assert len(result) < len(per_char_input), (
@@ -224,6 +225,23 @@ class TestClaim3_PyCantonese_Segmentation:
         # Multi-char words should appear
         assert "佢哋" in result, "'佢哋' should be grouped as one word"
         assert "鍾意" in result, "'鍾意' should be grouped as one word"
+
+    def test_segmentation_never_joins_characters_from_different_runs(self) -> None:
+        """A segmented word joins only characters with nothing between them.
+
+        Joined as one string, `鍾 意 食` segments as `鍾意 食`. When a retrace
+        or untranscribed material separates `鍾` from `意` on the main tier,
+        they arrive as two runs, and no word may span the boundary.
+        """
+        from batchalign.inference.morphosyntax import _segment_cantonese
+
+        joined = _segment_cantonese([["鍾", "意", "食"]])
+        assert "鍾意" in joined, "control: one run lets PyCantonese join 鍾意"
+
+        split = _segment_cantonese([["鍾"], ["意", "食"]])
+        assert split[0] == "鍾", f"the first run stands alone: {split}"
+        assert "鍾意" not in split
+        assert "".join(split) == "鍾意食"
 
 
 # =============================================================================

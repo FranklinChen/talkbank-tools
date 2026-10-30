@@ -43,14 +43,18 @@ mod tests {
     use crate::host_facts::EffectiveConfig;
     use crate::runtime;
 
-    /// Resolve an [`EffectiveConfig`] for a test against the live
-    /// host's detected facts, same wiring as production
-    /// `DispatchHostContext::from_store`. Tests on Apple Silicon vs
-    /// CUDA hosts will see different `gpu_thread_pool_size`
-    /// recommendations, so the `compute_workers_*` assertions use
-    /// inequality bounds (`<=`) where the cap matters.
+    /// The [`EffectiveConfig`] `config` resolves to on the declared test host
+    /// ([`crate::host_facts::HostSnapshot::for_tests`]), so no assertion
+    /// depends on the machine running it.
     fn effective_for_test(config: &ServerConfig) -> EffectiveConfig {
-        EffectiveConfig::resolve_from_server_config(config)
+        crate::host_facts::HostSnapshot::for_tests(config)
+            .effective()
+            .clone()
+    }
+
+    /// The tier `config` resolves to on the declared test host.
+    fn tier_for_test(config: &ServerConfig) -> crate::types::runtime::MemoryTier {
+        crate::host_facts::HostSnapshot::for_tests(config).tier()
     }
     use crate::scheduling::FailureCategory;
     use crate::store::PendingJobFile;
@@ -108,7 +112,12 @@ mod tests {
         let config = ServerConfig::default();
         let effective = effective_for_test(&config);
         assert_eq!(
-            compute_job_workers(ReleasedCommand::Morphotag, 1, &effective, &config),
+            compute_job_workers(
+                ReleasedCommand::Morphotag,
+                1,
+                &effective,
+                tier_for_test(&config)
+            ),
             NumWorkers(1)
         );
     }
@@ -127,7 +136,12 @@ mod tests {
             ..Default::default()
         };
         let effective = effective_for_test(&config);
-        let result = compute_job_workers(ReleasedCommand::Morphotag, 10, &effective, &config);
+        let result = compute_job_workers(
+            ReleasedCommand::Morphotag,
+            10,
+            &effective,
+            tier_for_test(&config),
+        );
         assert!(*result >= 1 && *result <= 3, "got {result:?}");
     }
 
@@ -141,7 +155,12 @@ mod tests {
             ..Default::default()
         };
         let effective = effective_for_test(&config);
-        let result = compute_job_workers(ReleasedCommand::Morphotag, 2, &effective, &config);
+        let result = compute_job_workers(
+            ReleasedCommand::Morphotag,
+            2,
+            &effective,
+            tier_for_test(&config),
+        );
         assert!(*result >= 1 && *result <= 2, "got {result:?}");
     }
 
@@ -150,7 +169,12 @@ mod tests {
         let config = ServerConfig::default();
         let effective = effective_for_test(&config);
         // Auto-tune should never exceed runtime::max_thread_workers()
-        let result = compute_job_workers(ReleasedCommand::Opensmile, 100, &effective, &config);
+        let result = compute_job_workers(
+            ReleasedCommand::Opensmile,
+            100,
+            &effective,
+            tier_for_test(&config),
+        );
         assert!(*result <= runtime::max_thread_workers());
         assert!(*result >= 1);
     }
@@ -162,7 +186,12 @@ mod tests {
             ..Default::default()
         };
         let effective = effective_for_test(&config);
-        let result = compute_job_workers(ReleasedCommand::Transcribe, 47, &effective, &config);
+        let result = compute_job_workers(
+            ReleasedCommand::Transcribe,
+            47,
+            &effective,
+            tier_for_test(&config),
+        );
         assert!(
             *result <= 2,
             "GPU worker count must respect gpu_thread_pool_size, got {result}"
@@ -205,13 +234,13 @@ mod tests {
             ReleasedCommand::Transcribe,
             6,
             &effective_for_test(&small_pool),
-            &small_pool,
+            tier_for_test(&small_pool),
         );
         let large = compute_job_workers(
             ReleasedCommand::Transcribe,
             6,
             &effective_for_test(&large_pool),
-            &large_pool,
+            tier_for_test(&large_pool),
         );
         assert_eq!(
             small, large,
@@ -228,7 +257,12 @@ mod tests {
             ..Default::default()
         };
         let effective = effective_for_test(&config);
-        let result = compute_job_workers(ReleasedCommand::Align, 7, &effective, &config);
+        let result = compute_job_workers(
+            ReleasedCommand::Align,
+            7,
+            &effective,
+            tier_for_test(&config),
+        );
         assert_eq!(
             result,
             NumWorkers(1),
@@ -243,7 +277,12 @@ mod tests {
             ..Default::default()
         };
         let effective = effective_for_test(&config);
-        let result = compute_job_workers(ReleasedCommand::Opensmile, 100, &effective, &config);
+        let result = compute_job_workers(
+            ReleasedCommand::Opensmile,
+            100,
+            &effective,
+            tier_for_test(&config),
+        );
         assert_eq!(
             result,
             NumWorkers(1),

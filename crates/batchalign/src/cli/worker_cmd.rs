@@ -82,14 +82,15 @@ fn start(
     // adopts it: the same host-resolved device policy, the same decision.
     let server_config =
         crate::config::load_config_from_layout(&crate::config::RuntimeLayout::from_env(), None)?;
-    let effective = crate::host_facts::EffectiveConfig::resolve_from_server_config(&server_config);
+    let host = crate::host_facts::HostSnapshot::read(&server_config)?;
+    let effective = host.effective();
     if effective.force_cpu {
         cmd.arg("--force-cpu");
     }
     let runtime = crate::worker::handle::WorkerRuntimeConfig {
         force_cpu: effective.force_cpu,
         gpu_thread_pool_size: effective.gpu_thread_pool_size,
-        ..crate::worker::handle::WorkerRuntimeConfig::default()
+        ..crate::worker::handle::WorkerRuntimeConfig::local(host.tier())
     };
     cmd.args(crate::worker::serving::WorkerServing::decide(profile, &runtime).worker_args());
 

@@ -42,7 +42,8 @@ fn inject_language_case(
         talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(&language))
             .expect("nonempty fixture languages"),
         MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
     let result = inject_results(
         &parser,
         &mut chat,

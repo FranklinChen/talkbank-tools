@@ -81,12 +81,8 @@ pub struct ServerHealth {
     pub live_workers: i64,
     /// Active worker keys (`profile:lang` or `infer:task:lang`).
     pub live_worker_keys: Vec<String>,
-    /// Total physical memory in MB.
-    pub system_memory_total_mb: MemoryMb,
-    /// Available memory in MB (free + reclaimable).
-    pub system_memory_available_mb: MemoryMb,
-    /// Used memory in MB (`total - available`).
-    pub system_memory_used_mb: MemoryMb,
+    /// The server host's memory, absent when it would not report it.
+    pub system_memory: Option<crate::types::response::SystemMemoryReading>,
     /// Memory gate threshold in MB from server config (0 = disabled).
     pub memory_gate_threshold_mb: MemoryMb,
     /// Host-wide memory pressure classification (healthy/guarded/constrained/critical).
@@ -707,9 +703,11 @@ mod tests {
         state.apply_update(TuiUpdate::HealthSnapshot(ServerHealth {
             live_workers: 3,
             live_worker_keys: vec!["infer:morphosyntax:eng".into()],
-            system_memory_total_mb: MemoryMb(262144),
-            system_memory_available_mb: MemoryMb(100000),
-            system_memory_used_mb: MemoryMb(162144),
+            system_memory: Some(crate::types::response::SystemMemoryReading {
+                total_mb: MemoryMb(262144),
+                available_mb: MemoryMb(100000),
+                used_mb: MemoryMb(162144),
+            }),
             memory_gate_threshold_mb: MemoryMb(2048),
             host_memory_pressure: "healthy".into(),
             worker_crashes: 0,
@@ -718,7 +716,10 @@ mod tests {
 
         let h = state.health.as_ref().unwrap();
         assert_eq!(h.live_workers, 3);
-        assert_eq!(h.system_memory_total_mb, MemoryMb(262144));
+        assert_eq!(
+            h.system_memory.map(|reading| reading.total_mb),
+            Some(MemoryMb(262144))
+        );
     }
 
     #[test]

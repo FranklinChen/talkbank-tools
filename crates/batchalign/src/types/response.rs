@@ -1490,6 +1490,23 @@ impl JobListItem {
     }
 }
 
+/// The host's memory as the operating system reported it for one response.
+///
+/// One reading, so the three figures are always from the same moment and are
+/// present or absent together: an unreadable host is an absent reading, never
+/// a zero total the dashboard would draw.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct SystemMemoryReading {
+    /// Total physical memory in MB.
+    pub total_mb: MemoryMb,
+    /// Available memory in MB (free + reclaimable).  On macOS this is
+    /// `free + purgeable` which can undercount; see `sysinfo` docs.
+    pub available_mb: MemoryMb,
+    /// Used memory in MB (`total - available`).
+    pub used_mb: MemoryMb,
+}
+
 /// `GET /health` response.
 ///
 /// Provides a snapshot of server liveness, capacity, and operational
@@ -1605,16 +1622,10 @@ pub struct HealthResponse {
     #[serde(default)]
     pub build_hash: String,
     // ── System memory snapshot ──────────────────────────────────────────
-    /// Total physical memory in MB.
-    #[serde(default)]
-    pub system_memory_total_mb: MemoryMb,
-    /// Available memory in MB (free + reclaimable).  On macOS this is
-    /// `free + purgeable` which can undercount; see `sysinfo` docs.
-    #[serde(default)]
-    pub system_memory_available_mb: MemoryMb,
-    /// Used memory in MB (`total - available`).
-    #[serde(default)]
-    pub system_memory_used_mb: MemoryMb,
+    /// The host's memory, absent when the operating system would not report
+    /// it (the reason is in `host_memory_error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_memory: Option<SystemMemoryReading>,
     /// Host-memory reserve threshold in MB from server config.  0 means the
     /// coordinator will not keep explicit free-memory headroom.
     #[serde(default)]

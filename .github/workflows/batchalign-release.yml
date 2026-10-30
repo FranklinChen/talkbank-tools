@@ -147,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: batchalign-release-${{ matrix.target }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
@@ -157,7 +157,7 @@ jobs:
       # the host before the CLI binary. For the Linux target the manylinux
       # container sees these files through the mounted workspace, so the
       # before-script-linux cargo build picks them up too.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -255,7 +255,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           python-version: "3.14"

@@ -26,29 +26,10 @@ use crate::common;
 use batchalign::api::{LanguageCode3, NumSpeakers, WorkerLanguage};
 use batchalign::worker::WorkerProfile;
 use batchalign::worker::handle::WorkerConfig;
-use common::resolve_python;
 use common::test_worker_pool::shared_test_worker_pool;
 
 /// Skip when Python is unavailable or memory is tight, matching the rest of
 /// the python-workers test binaries.
-macro_rules! require_python {
-    () => {{
-        common::test_server_fixture::isolate_host_memory_ledger();
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!("SKIP: insufficient memory ({available_mb} MB available, 4096 MB required).");
-            return;
-        }
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    }};
-}
-
 fn echo_config(python: String) -> WorkerConfig {
     WorkerConfig {
         python_path: python,
@@ -57,13 +38,13 @@ fn echo_config(python: String) -> WorkerConfig {
         num_speakers: NumSpeakers(1),
         test_echo: true,
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     }
 }
 
 #[tokio::test]
 async fn checkout_same_config_returns_same_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = shared_test_worker_pool();
 
     let pid_a = {
@@ -90,7 +71,7 @@ async fn checkout_same_config_returns_same_worker() {
 
 #[tokio::test]
 async fn checkout_distinct_python_observed_field_spawns_distinct_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = shared_test_worker_pool();
 
     let cfg_a = echo_config(python.clone());
@@ -116,7 +97,7 @@ async fn checkout_distinct_python_observed_field_spawns_distinct_worker() {
 
 #[tokio::test]
 async fn checkout_distinct_rust_only_field_still_shares_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = shared_test_worker_pool();
 
     // `ready_timeout_s` is consumed Rust-side in `tokio::time::timeout` and

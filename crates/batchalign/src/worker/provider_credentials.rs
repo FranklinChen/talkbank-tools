@@ -83,6 +83,7 @@ impl HkAsrCredentialSources {
     /// Resolve ambient worker-launch credential sources from the current process
     /// environment plus the default legacy config location.
     pub(crate) fn from_env() -> Self {
+        let home = crate::runtime_paths::BatchalignHome::from_env();
         Self::from_sources(
             std::env::var(BATCHALIGN_TENCENT_ID).ok().as_deref(),
             std::env::var(BATCHALIGN_TENCENT_KEY).ok().as_deref(),
@@ -91,7 +92,7 @@ impl HkAsrCredentialSources {
             std::env::var(BATCHALIGN_ALIYUN_AK_ID).ok().as_deref(),
             std::env::var(BATCHALIGN_ALIYUN_AK_SECRET).ok().as_deref(),
             std::env::var(BATCHALIGN_ALIYUN_AK_APPKEY).ok().as_deref(),
-            std::env::var("HOME").ok().as_deref(),
+            home.base().to_str(),
         )
     }
 

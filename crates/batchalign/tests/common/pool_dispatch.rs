@@ -14,12 +14,13 @@
 //! audit.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use batchalign::api::LanguageCode3;
 use batchalign::host_facts::PerProfile;
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, BatchInferResponse};
+
+use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
 /// Build a `--test-echo` `PoolConfig` with conservative timeouts so a
 /// slow Python startup does not trip readiness on a busy host.
@@ -41,31 +42,32 @@ pub fn echo_pool_config(
         test_delay_ms,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..PoolConfig::for_tests()
     }
 }
 
-/// Outcome of one oversubscribed dispatch: the inner-most result is
-/// the worker pool's own `Result<BatchInferResponse, _>`, the middle
-/// result is the timeout, and the outer is the tokio join. Tests
-/// usually flatten with `Ok(Ok(Ok(_)))` and count successes.
+/// Outcome of one oversubscribed dispatch: the inner result is the worker
+/// pool's own `Result<BatchInferResponse, _>`, the outer is the tokio join.
+/// Tests usually flatten with `Ok(Ok(_))` and count successes.
 pub type DispatchTaskOutcome = Result<
-    Result<
-        Result<BatchInferResponse, batchalign::worker::error::WorkerError>,
-        tokio::time::error::Elapsed,
-    >,
+    Result<BatchInferResponse, batchalign::worker::error::WorkerError>,
     tokio::task::JoinError,
 >;
 
-/// Spawn `count` dispatch tasks against `pool`, each using the lang
-/// chosen by `lang_for(i)` and the request returned by
-/// `build_request(lang, i)`. Each dispatch is wrapped in
-/// `timeout(per_request)`. Returns one outcome per task in submission
-/// order.
+/// Spawn `count` dispatch tasks against `pool`, each using the lang chosen by
+/// `lang_for(i)` and the request returned by `build_request(lang, i)`, and
+/// wait for all of them under `subject`'s progress deadline. Returns one
+/// outcome per task in submission order.
+///
+/// No dispatch carries its own timeout. A per-dispatch wall clock cannot tell
+/// a queue that is draining slowly on a busy machine from one that stopped,
+/// and failed the former; the deadline here watches dispatches returning and
+/// workers starting, and fails only when neither moves for its idle window
+/// (or the burst outlives its ceiling).
 pub async fn launch_oversubscribed_dispatches<L, B>(
     pool: &Arc<WorkerPool>,
     count: usize,
-    per_request: Duration,
+    subject: WaitSubject,
     lang_for: L,
     build_request: B,
 ) -> Vec<DispatchTaskOutcome>
@@ -81,8 +83,21 @@ where
         let build = Arc::clone(&build_request);
         handles.push(tokio::spawn(async move {
             let request = build(lang.clone(), i);
-            tokio::time::timeout(per_request, pool.dispatch_batch_infer(&lang, &request)).await
+            pool.dispatch_batch_infer(&lang, &request).await
         }));
+    }
+    let mut deadline = ServerTestDeadline::new(subject);
+    loop {
+        let returned = handles.iter().filter(|handle| handle.is_finished()).count();
+        if returned == count {
+            break;
+        }
+        deadline
+            .keep_waiting(ProgressSnapshot::dispatch_burst(
+                returned,
+                pool.worker_count().await,
+            ))
+            .await;
     }
     let mut outcomes = Vec::with_capacity(count);
     for h in handles {
@@ -97,6 +112,6 @@ where
 pub fn count_successes(outcomes: &[DispatchTaskOutcome]) -> usize {
     outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, Ok(Ok(Ok(_)))))
+        .filter(|outcome| matches!(outcome, Ok(Ok(_))))
         .count()
 }

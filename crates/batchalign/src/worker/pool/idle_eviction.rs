@@ -105,7 +105,15 @@ pub(super) fn snapshot_idle_workers_with_rss(groups: &GroupsMap) -> Vec<IdleWork
     }
 
     let pids: Vec<WorkerPid> = entries.iter().map(|(_, _, pid)| *pid).collect();
-    let rss_by_pid = refresh_rss_mb_for_pids(&pids);
+    // An unreadable process table evicts nothing this pass: choosing victims
+    // by RSS with no RSS would be a guess, and the next pass reads again.
+    let rss_by_pid = match refresh_rss_mb_for_pids(&pids) {
+        Ok(rss_by_pid) => rss_by_pid,
+        Err(error) => {
+            tracing::warn!(%error, "worker RSS unreadable; skipping idle eviction");
+            return Vec::new();
+        }
+    };
 
     entries
         .into_iter()

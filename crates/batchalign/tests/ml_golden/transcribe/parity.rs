@@ -7,16 +7,11 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn parity_transcribe_disfluency_markup() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_audio_fixtures(jobs.state_dir()) else {
-        return;
-    };
+    let fixtures = prepare_audio_fixtures(jobs.state_dir());
 
     let out_dir = jobs.state_dir().join("out_disfluency");
     std::fs::create_dir_all(&out_dir).expect("mkdir");
@@ -47,8 +42,7 @@ async fn parity_transcribe_disfluency_markup() {
         .await;
 
     if info.status != JobStatus::Completed {
-        eprintln!("SKIP: transcribe failed");
-        return;
+        panic!("PREREQUISITE MISSING: transcribe failed")
     }
 
     assert!(
@@ -60,16 +54,11 @@ async fn parity_transcribe_disfluency_markup() {
 
 #[tokio::test]
 async fn parity_transcribe_retrace_markup() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_audio_fixtures(jobs.state_dir()) else {
-        return;
-    };
+    let fixtures = prepare_audio_fixtures(jobs.state_dir());
 
     let out_dir = jobs.state_dir().join("out_retrace");
     std::fs::create_dir_all(&out_dir).expect("mkdir");
@@ -100,8 +89,7 @@ async fn parity_transcribe_retrace_markup() {
         .await;
 
     if info.status != JobStatus::Completed {
-        eprintln!("SKIP: transcribe failed");
-        return;
+        panic!("PREREQUISITE MISSING: transcribe failed")
     }
 
     assert!(

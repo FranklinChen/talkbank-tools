@@ -219,19 +219,19 @@ records in a per-file evidence sidecar. See
 matrix and the [Review Tiers guide](../user-guide/review-tiers-guide.md) for the
 CHAT policy.
 
-The `MisalignmentClass` classifier (best-effort) points developers at
-the most likely failing stage:
+`MisalignmentClass` names the stage that observed the misalignment. The
+code that observes it sets it; nothing infers it afterwards, and a class
+no producer sets does not exist:
 
-- `RealignmentSkipped`: Stanza's tokenizer-realignment context was
-  `None` for the dispatch language; Stanza ran without boundary hints.
-- `MwtReassemblyBug`: the UD→Mor projection consumed the wrong number
-  of tokens during MWT Range expansion.
-- `TerminatorFilterBug`: `is_terminator_punct` dropped too many or too
-  few PUNCT tokens, e.g. dropping mid-utterance `cm|cm` separators
-  that CHAT counts as alignable.
-- `LanguageDispatchIssue`: per-language chunk of a code-switched
-  utterance disagreed with the CHAT main-tier count.
-- `Unknown`: diagnostic alone is insufficient; developer must inspect.
+- `MorGraCountMismatch`: `%mor` chunks and `%gra` relations disagree in
+  number at injection.
+- `MergeCrossesContent`: retokenization produced a token joining words
+  that other main-tier content (a retrace, a pause, a bracket edge)
+  separates. The request carries the utterance's word runs so the
+  Cantonese segmenter cannot produce one; this is the rebuild's guard.
+- `TokensDivergeFromWords`: the model's tokens do not spell the
+  transcript's words.
+- `Unknown`: no class names the cause; a developer must inspect.
 
 ## What this architecture explicitly does **not** do
 

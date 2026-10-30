@@ -14,16 +14,11 @@ fn first_main_line(chat: &str, label: &str) -> String {
 
 #[tokio::test]
 async fn direct_align_produces_timed_output() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_align_fixture_job(jobs.state_dir(), "direct_align_verify") else {
-        return;
-    };
+    let fixture = prepare_align_fixture_job(jobs.state_dir(), "direct_align_verify");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -43,19 +38,14 @@ async fn direct_align_produces_timed_output() {
 
 #[tokio::test]
 async fn direct_align_before_preserves_existing_first_bullet() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_align_fixture_job(
+    let fixture = prepare_align_fixture_job(
         jobs.state_dir(),
         "direct_align_before_preserves_first_bullet",
-    ) else {
-        return;
-    };
+    );
 
     let expected_first = first_main_line(
         &std::fs::read_to_string(&fixture.before_path).expect("read before CHAT"),

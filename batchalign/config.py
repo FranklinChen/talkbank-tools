@@ -7,10 +7,24 @@ CLI command ``batchalign3 setup``; Python runtime code only reads config.
 from __future__ import annotations
 
 import configparser
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from batchalign.errors import ConfigNotFoundError
+
+
+def batchalign_home() -> Path:
+    """The one root of everything Batchalign owns.
+
+    ``BATCHALIGN_HOME`` when set, else the user's home. The Rust side's
+    ``runtime_paths::BatchalignHome`` applies the same rule, and a worker
+    inherits the variable from the server that spawned it, so both resolve
+    ``.batchalign.ini`` and ``.batchalign3`` under the same root. Model
+    library caches are not under it: they follow the real ``HOME``.
+    """
+    root = os.environ.get("BATCHALIGN_HOME", "").strip()
+    return Path(root) if root else Path.home()
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +46,7 @@ class LegacyConfigRuntime:
         if home_dir is not None and str(home_dir).strip():
             home_path = Path(home_dir).expanduser()
         else:
-            home_path = Path.home()
+            home_path = batchalign_home()
         return cls(config_path=home_path / ".batchalign.ini")
 
 

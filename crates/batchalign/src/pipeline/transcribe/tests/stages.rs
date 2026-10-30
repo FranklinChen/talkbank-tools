@@ -42,7 +42,7 @@ async fn speaker_diarization_stage_skips_when_backend_is_unavailable() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
     let opts = test_transcribe_options(None);
@@ -89,7 +89,7 @@ async fn no_utseg_bypasses_the_pre_chat_worker_for_a_supported_language() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
     let mut opts = test_transcribe_options(None);
@@ -143,7 +143,7 @@ async fn diarization_boundary_splits_timed_asr_words_before_chat_build() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
     let opts = test_transcribe_options_in(
@@ -236,7 +236,7 @@ async fn transcribe_speaker_projection_refuses_unwritable_requested_evidence() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let opts = test_transcribe_options(Some(SpeakerBackendV2::Pyannote));
     let mut ctx = TranscribePipelineContext::new_with_rev_inference(
         &audio,
@@ -348,7 +348,7 @@ async fn build_chat_stage_resolves_auto_to_detected_language() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
 
@@ -410,7 +410,7 @@ async fn postprocess_stage_resolves_auto_before_chat_build() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
 
@@ -466,7 +466,7 @@ async fn an_asr_response_with_no_tokens_is_refused_naming_the_asr_stage() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
 

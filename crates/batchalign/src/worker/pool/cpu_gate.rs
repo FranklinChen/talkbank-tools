@@ -49,12 +49,11 @@ pub(super) struct CpuSaturated {
 /// instance state) that calls `getloadavg(3)` on Unix. The value is
 /// the kernel's exponentially-weighted moving average of runnable
 /// task count over the last minute. On Apple Silicon and Linux the
-/// signal is faithful; on Windows `sysinfo` returns zero (the OS
-/// has no equivalent), in which case the gate is effectively
-/// disabled: acceptable because the Windows fleet doesn't run the
-/// daemon today.
-fn current_loadavg_1m() -> f64 {
-    sysinfo::System::load_average().one
+/// signal is faithful. Where the OS has no load average (Windows) or
+/// the read fails, `sysinfo` reports an error rather than the zero it
+/// used to return.
+fn current_loadavg_1m() -> Result<f64, sysinfo::Error> {
+    Ok(sysinfo::System::load_average()?.one)
 }
 
 /// Loadavg threshold: the host's logical CPU count, full stop.
@@ -82,8 +81,20 @@ pub(super) fn host_cpu_count_as_threshold() -> f64 {
 /// The threshold is passed in (rather than computed inside) so unit
 /// tests can drive both branches deterministically without env-var
 /// contention between parallel test cases.
+///
+/// An unreadable load average admits, logged. This gate is back-pressure,
+/// not safety (see [`check_cpu_saturation_with_state`]); memory safety is
+/// the memory gate's, which fails closed on an unreadable host. Refusing
+/// here instead would wedge the pool for good on a host without a load
+/// average, which is the case the old silent zero already admitted.
 pub(super) fn check_cpu_saturation(threshold: f64) -> Result<(), CpuSaturated> {
-    let loadavg_1m = current_loadavg_1m();
+    let loadavg_1m = match current_loadavg_1m() {
+        Ok(loadavg_1m) => loadavg_1m,
+        Err(error) => {
+            tracing::warn!(%error, "load average unreadable; CPU back-pressure not applied");
+            return Ok(());
+        }
+    };
     if loadavg_1m >= threshold {
         Err(CpuSaturated {
             loadavg_1m,

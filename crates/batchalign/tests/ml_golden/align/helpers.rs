@@ -65,22 +65,19 @@ pub(super) fn align_options_with_media_dir_and_utr(
     })
 }
 
-pub(super) fn prepare_align_fixture_job(state_dir: &Path, label: &str) -> Option<AlignFixtureJob> {
-    let fixtures = prepare_audio_fixtures(state_dir)?;
-    Some(AlignFixtureJob {
+pub(super) fn prepare_align_fixture_job(state_dir: &Path, label: &str) -> AlignFixtureJob {
+    let fixtures = prepare_audio_fixtures(state_dir);
+    AlignFixtureJob {
         source_path: fixtures.stripped_chat.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, "test.cha")
             .to_string_lossy()
             .into_owned(),
         before_path: fixtures.chat.to_string_lossy().into_owned(),
-    })
+    }
 }
 
-pub(super) fn prepare_align_media_dir_job(
-    state_dir: &Path,
-    label: &str,
-) -> Option<AlignMediaDirJob> {
-    let fixtures = prepare_audio_fixtures(state_dir)?;
+pub(super) fn prepare_align_media_dir_job(state_dir: &Path, label: &str) -> AlignMediaDirJob {
+    let fixtures = prepare_audio_fixtures(state_dir);
     let source_path = fixtures.stripped_chat.clone();
     let source_dir = source_path
         .parent()
@@ -98,13 +95,13 @@ pub(super) fn prepare_align_media_dir_job(
     std::fs::copy(&adjacent_media, &relocated_media).expect("copy relocated media");
     std::fs::remove_file(&adjacent_media).expect("remove adjacent media");
 
-    Some(AlignMediaDirJob {
+    AlignMediaDirJob {
         source_path: source_path.to_string_lossy().into_owned(),
         output_path: standard_output_path(state_dir, label, "test.cha")
             .to_string_lossy()
             .into_owned(),
         media_dir: media_dir.to_string_lossy().into_owned(),
-    })
+    }
 }
 
 fn standard_output_path(state_dir: &Path, label: &str, filename: &str) -> PathBuf {

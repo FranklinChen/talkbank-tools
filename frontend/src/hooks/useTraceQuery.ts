@@ -12,10 +12,7 @@ export interface RetokenizationTrace {
   utterance_index: number;
   original_words: string[];
   stanza_tokens: string[];
-  normalized_original: string;
-  normalized_tokens: string;
   mapping: number[][];
-  used_fallback: boolean;
 }
 
 export interface AlignStepTrace {

@@ -152,7 +152,7 @@ fn to_decision_record_misalignment_has_diagnostic() {
             stanza_tokens_after_mapping: vec!["hello".into()],
             expected: MorAlignableWordCount::new(2),
             actual: MorItemCount::new(1),
-            suspected_class: MisalignmentClass::TerminatorFilterBug,
+            suspected_class: MisalignmentClass::MergeCrossesContent,
         }),
     };
     let d = outcome.to_decision_record().unwrap();
@@ -163,7 +163,7 @@ fn to_decision_record_misalignment_has_diagnostic() {
         )
     ));
     assert!(d.needs_review);
-    assert!(d.reason.contains("class=terminator_filter_bug"));
+    assert!(d.reason.contains("class=merge_crosses_content"));
     assert!(d.reason.contains("expected=2"));
     assert!(d.reason.contains("actual=1"));
 }
@@ -350,6 +350,7 @@ fn ca_arrow_terminator_must_normalize_to_period_in_morphotag_payload() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
+    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(
@@ -395,6 +396,7 @@ fn collect_payloads_resolves_at_s_against_file_languages_not_batch_default() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
+    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -454,7 +456,8 @@ fn a_batch_word_carries_its_role_and_the_text_it_implies() {
         talkbank_model::DeclaredLanguagesRef::new(&[eng.clone(), spa])
             .expect("nonempty fixture language context"),
         types::MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
     let item = payloads.batch_items[0].item();
     let roles: Vec<(&str, &str)> = item
         .words()
@@ -515,7 +518,8 @@ fn inject_one(
         &codes[0],
         talkbank_model::DeclaredLanguagesRef::new(&codes).expect("nonempty fixture languages"),
         types::MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
     let parser = TreeSitterParser::new().expect("parser");
     let injection = inject_results(
         &parser,
@@ -597,7 +601,8 @@ fn morphosyntax_placeholder_spelling_does_not_choose_a_word_role() {
                 talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(&eng))
                     .expect("nonempty fixture languages"),
                 types::MultilingualPolicy::ProcessAll,
-            );
+            )
+            .expect("the run walk agrees with extraction");
             assert_eq!(collection.batch_items.len(), 1, "{main}");
             let result = inject_results(
                 &parser,

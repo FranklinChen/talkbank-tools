@@ -45,7 +45,7 @@ async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_
     let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
         .await
         .unwrap();
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
     let mut params = test_params(&mwt);
     params.tokenization_mode = TokenizationMode::Preserve;
@@ -107,7 +107,7 @@ async fn an_unsupported_secondary_language_is_excluded() {
         .await
         .unwrap();
     // The pool holds no registry; the file's proof does.
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
     let mut params = test_params(&mwt);
     params.tokenization_mode = TokenizationMode::Preserve;
@@ -240,7 +240,7 @@ async fn admitted_ca_pass_through_preserves_ordinary_comment_tiers() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
     let output = run_morphosyntax_pipeline(&chat, services, &test_params(&mwt))
@@ -787,7 +787,7 @@ async fn noalign_files_get_morphotagged_with_provenance() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
     let mwt = MwtDict::default();
@@ -860,7 +860,7 @@ async fn morphotag_provenance_names_the_worker_reported_model() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
     let mwt = MwtDict::default();
@@ -918,7 +918,7 @@ fn worker_response_count_failure_cannot_admit_inference_or_blame_valid_chat() {
     )
     .expect("fully valid source control");
     let cache = UtteranceCache::noop();
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
     let params = test_params(&mwt);
     let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);
@@ -967,7 +967,7 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
                 @ID:\teng|test|CHI|||||Target_Child|||\n\
                 *CHI:\thello good world .\n@End\n";
     let cache = UtteranceCache::noop();
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
     let cases = [
@@ -1046,7 +1046,7 @@ async fn ca_pass_through_strips_legacy_decision_tiers() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
     let mwt = MwtDict::default();
@@ -1077,7 +1077,7 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
     let mwt = MwtDict::default();
@@ -1151,7 +1151,7 @@ async fn pos_hint_evidence_survives_retokenization() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
     let mwt = MwtDict::default();
@@ -1223,7 +1223,7 @@ async fn morphosyntax_pos_hints_follow_admitted_mor_positions() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
     for (main, model) in mains {
@@ -1362,7 +1362,7 @@ async fn a_diagnosed_transcript_is_tagged_outside_its_faulty_utterance() {
     let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
         .await
         .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::default());
+    let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
     let params = test_params(&mwt);
     let options = RunOptions::new(PipelineServices::new(&pool, &cache), &params);

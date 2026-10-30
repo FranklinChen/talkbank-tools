@@ -9,14 +9,11 @@ use batchalign::worker::InferTask;
 /// reruns rather than mixing language-group results or changing file assembly.
 #[tokio::test]
 async fn morphotag_server_multilingual_warm_cache_preserves_per_language_outputs() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let files = vec![
@@ -61,10 +58,9 @@ async fn morphotag_server_multilingual_warm_cache_preserves_per_language_outputs
     let warm_results = jobs.job_results(&warm.job_id).await;
 
     if cold_info.status == JobStatus::Failed || warm_info.status == JobStatus::Failed {
-        eprintln!(
-            "SKIP: server multilingual cache test needs both English and Spanish morphotag backends"
-        );
-        return;
+        panic!(
+            "PREREQUISITE MISSING: server multilingual cache test needs both English and Spanish morphotag backends"
+        )
     }
 
     assert_eq!(
@@ -130,14 +126,11 @@ async fn morphotag_server_multilingual_warm_cache_preserves_per_language_outputs
 /// entries on the server path, not just in direct execution.
 #[tokio::test]
 async fn morphotag_server_cantonese_retokenize_cache_isolated_from_preserve_mode() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let disabled = CommandOptions::Morphotag(MorphotagOptions {
@@ -199,8 +192,9 @@ async fn morphotag_server_cantonese_retokenize_cache_isolated_from_preserve_mode
         || second_info.status == JobStatus::Failed
         || third_info.status == JobStatus::Failed
     {
-        eprintln!("SKIP: server Cantonese cache isolation test needs the yue morphotag backend");
-        return;
+        panic!(
+            "PREREQUISITE MISSING: server Cantonese cache isolation test needs the yue morphotag backend"
+        )
     }
 
     assert_eq!(

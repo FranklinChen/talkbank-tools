@@ -674,6 +674,17 @@ impl std::fmt::Display for AsrProviderDisposition {
 /// a structured `conflicts` array.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// A job was routed to a remote fleet target, but this host would not
+    /// report its name, which names the job's remote scratch directory.
+    #[error(
+        "this host would not report its name, which names a staged job's remote \
+         scratch directory; run the job locally or fix the host name"
+    )]
+    RemoteStagingWithoutHostName,
+    /// The operating system would not report this host's memory or
+    /// processes. The server does not start, or admit work, on a guess.
+    #[error(transparent)]
+    HostUnreadable(#[from] crate::host_memory::HostUnreadable),
     /// The server could not derive a consistent work or output plan.
     ///
     /// **HTTP 500.** Preserve the typed planning cause; this is not a
@@ -733,6 +744,14 @@ pub enum ServerError {
          this transcript; no output was written"
     )]
     AdmissionDisagreement,
+
+    /// The retokenize run walk and Chatter's extractor counted one
+    /// utterance's `%mor` words differently.
+    ///
+    /// **HTTP 500.** Both walk the same main tier, so a disagreement is a
+    /// tool fault, never the transcript's.
+    #[error("internal fault: {0}; no output was written")]
+    WordRunsDisagree(#[from] batchalign_transform::retokenize::RunsDisagree),
 
     /// A consumer configured to receive no morphology reports received
     /// analysis or provenance outcomes. This is an internal policy mismatch,
@@ -1264,13 +1283,16 @@ impl ServerError {
                 }
             }
             Self::Database(_) | Self::Migration(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Persistence(_) | Self::StoredLease(_) | Self::Planning(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::Persistence(_)
+            | Self::StoredLease(_)
+            | Self::Planning(_)
+            | Self::HostUnreadable(_)
+            | Self::RemoteStagingWithoutHostName => StatusCode::INTERNAL_SERVER_ERROR,
             Self::AlignmentMedia(_) | Self::KeptOffRecordBulletConflict { .. } => {
                 StatusCode::BAD_REQUEST
             }
             Self::AdmissionDisagreement
+            | Self::WordRunsDisagree(_)
             | Self::UnexpectedMorphologyReport
             | Self::UtrTask(_)
             | Self::ReplacementPlanContradicted { .. } => StatusCode::INTERNAL_SERVER_ERROR,

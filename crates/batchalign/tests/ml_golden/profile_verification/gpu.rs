@@ -15,14 +15,9 @@ use batchalign::worker::InferTask;
 /// copies, consuming N× memory.
 #[tokio::test]
 async fn gpu_profile_uses_single_worker_for_multi_file_align() {
-    let Some(server) = require_live_server(InferTask::Fa, "Server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "Server does not support FA infer").await;
 
-    let Some(fixtures) = prepare_audio_fixtures(server.state_dir()) else {
-        return;
-    };
+    let fixtures = prepare_audio_fixtures(server.state_dir());
 
     let chat_content =
         std::fs::read_to_string(&fixtures.stripped_chat).expect("read stripped fixture");

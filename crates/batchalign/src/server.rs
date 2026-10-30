@@ -14,7 +14,6 @@ use crate::clock::{Clock, SystemClock};
 use crate::config::{RuntimeLayout, ServerConfig};
 use crate::db::JobDB;
 use crate::error;
-use crate::host_facts::HostFactsSource;
 use crate::media::MediaResolver;
 use crate::server_backend::{ServerBackendBootstrap, bootstrap_local_server_backend};
 use crate::server_handshake::{BoundPort, HandshakeSlot, Removal, ServerHandshake};
@@ -81,6 +80,7 @@ async fn open_jobs_and_recover(
 /// isolated DB.
 pub async fn create_app(
     config: ServerConfig,
+    host: Arc<crate::host_facts::HostSnapshot>,
     pool_config: PoolConfig,
     jobs_dir: Option<String>,
     db_dir: Option<std::path::PathBuf>,
@@ -90,10 +90,14 @@ pub async fn create_app(
     let layout = RuntimeLayout::from_env();
     create_app_with_runtime(
         config,
+        host,
         pool_config,
         layout,
-        jobs_dir,
-        db_dir,
+        AppStorageOverrides {
+            jobs_dir,
+            db_dir,
+            cache_dir: None,
+        },
         build_hash,
         clock,
     )
@@ -106,27 +110,16 @@ pub async fn create_app(
 /// No worker is spawned here, so the HTTP port binds immediately.
 pub async fn create_app_with_runtime(
     config: ServerConfig,
+    host: Arc<crate::host_facts::HostSnapshot>,
     pool_config: PoolConfig,
     layout: RuntimeLayout,
-    jobs_dir: Option<String>,
-    db_dir: Option<std::path::PathBuf>,
+    storage: AppStorageOverrides,
     build_hash: Option<String>,
     clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
     let workers = prepare_workers(pool_config, RegistryDiscovery::Adopt).await?;
-    create_app_with_prepared_workers(
-        config,
-        layout,
-        AppStorageOverrides {
-            jobs_dir,
-            db_dir,
-            cache_dir: None,
-        },
-        build_hash,
-        workers,
-        clock,
-    )
-    .await
+    create_app_with_prepared_workers(config, host, layout, storage, build_hash, workers, clock)
+        .await
 }
 
 /// Create the application with test-echo workers and the lightweight
@@ -183,6 +176,7 @@ pub struct AppStorageOverrides {
 /// cache directory.
 pub async fn create_app_with_prepared_workers(
     config: ServerConfig,
+    host: Arc<crate::host_facts::HostSnapshot>,
     layout: RuntimeLayout,
     storage: AppStorageOverrides,
     build_hash: Option<String>,
@@ -209,6 +203,7 @@ pub async fn create_app_with_prepared_workers(
     info!("Backend: local");
     let backend_bootstrap: ServerBackendBootstrap = bootstrap_local_server_backend(
         config.clone(),
+        host,
         db,
         execution_runtime.engine,
         jobs_dir.clone(),
@@ -289,6 +284,8 @@ pub async fn create_test_app_with_prepared_workers(
     let execution_runtime = workers.resolve_execution_runtime(cache.clone());
     let backend_bootstrap: ServerBackendBootstrap = bootstrap_local_server_backend(
         config.clone(),
+        // Test apps run against a declared host, never this machine.
+        Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
         db,
         execution_runtime.engine,
         jobs_dir.clone(),
@@ -345,11 +342,20 @@ pub async fn create_test_app_with_prepared_workers(
 /// 3. Shuts down the worker pool (SIGTERM → wait → SIGKILL)
 pub async fn serve(
     config: ServerConfig,
+    host: Arc<crate::host_facts::HostSnapshot>,
     pool_config: PoolConfig,
     build_hash: Option<String>,
 ) -> Result<(), error::ServerError> {
     let layout = RuntimeLayout::from_env();
-    serve_with_runtime(config, pool_config, layout, HandshakeSlot::Main, build_hash).await
+    serve_with_runtime(
+        config,
+        host,
+        pool_config,
+        layout,
+        HandshakeSlot::Main,
+        build_hash,
+    )
+    .await
 }
 
 /// Start serving with an explicit runtime layout for state-owned paths.
@@ -359,22 +365,21 @@ pub async fn serve(
 /// shutdown). This is the single lifecycle owner for foreground servers.
 pub async fn serve_with_runtime(
     config: ServerConfig,
+    host: Arc<crate::host_facts::HostSnapshot>,
     pool_config: PoolConfig,
     layout: RuntimeLayout,
     slot: HandshakeSlot,
     build_hash: Option<String>,
 ) -> Result<(), error::ServerError> {
-    let host = config.host.clone();
+    let bind_host = config.host.clone();
     let port = config.port;
 
-    // Run config-vs-host-facts validation against the same live
-    // facts the runtime resolved overrides against. Warnings surface
-    // as `tracing::warn!` lines so operators see them in startup
-    // logs; errors abort startup with a message that includes the
-    // recommendation. The detect call is millisecond-scale and
-    // happens once per startup.
-    let host_facts = crate::host_facts::RealHostFactsSource.detect();
-    let validation = crate::host_facts::validate(&config, &host_facts);
+    // Run config-vs-host-facts validation against the same facts the
+    // runtime resolved overrides against: the caller's one reading of the
+    // host. Warnings surface as `tracing::warn!` lines so operators see them
+    // in startup logs; errors abort startup with a message that includes the
+    // recommendation.
+    let validation = crate::host_facts::validate(&config, host.facts());
     for warning in &validation.warnings {
         warn!(
             target: "batchalign::host_facts::validate",
@@ -395,17 +400,17 @@ pub async fn serve_with_runtime(
 
     let (router, state) = create_app_with_runtime(
         config,
+        host,
         pool_config,
         layout.clone(),
-        None,
-        None,
+        AppStorageOverrides::default(),
         build_hash,
         // The server's one clock, created here where it is composed.
         Arc::new(SystemClock),
     )
     .await?;
 
-    let addr = format!("{host}:{}", port.bind_value());
+    let addr = format!("{bind_host}:{}", port.bind_value());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(error::ServerError::Io)?;

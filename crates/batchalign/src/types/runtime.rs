@@ -257,7 +257,12 @@ mod tests {
 
     #[test]
     fn tier_detect_returns_valid_tier() {
-        let tier = MemoryTier::detect();
+        let tier = MemoryTier::from_total_mb(
+            crate::host_memory::read_system_memory()
+                .expect("the test host reports its memory")
+                .total_mb
+                .0,
+        );
         assert!(tier.total_mb > 0);
         assert!(tier.headroom_mb.0 > 0);
         assert!(tier.gpu_startup_mb.0 > tier.stanza_startup_mb.0);

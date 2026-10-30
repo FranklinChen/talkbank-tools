@@ -17,19 +17,13 @@ fn first_main_line(chat: &str, label: &str) -> String {
 
 #[tokio::test]
 async fn align_server_wor_policy_controls_tier_presence() {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_align_fixture_job(
+    let fixture = prepare_align_fixture_job(
         server.state_dir(),
         "align_server_wor_policy_controls_tier_presence",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -71,19 +65,13 @@ async fn align_server_wor_policy_controls_tier_presence() {
 
 #[tokio::test]
 async fn align_server_before_preserves_existing_first_bullet() {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_align_fixture_job(
+    let fixture = prepare_align_fixture_job(
         server.state_dir(),
         "align_server_before_preserves_first_bullet",
-    ) else {
-        return;
-    };
+    );
 
     let expected_first = first_main_line(
         &std::fs::read_to_string(&fixture.before_path).expect("read before CHAT"),
@@ -112,18 +100,11 @@ async fn align_server_before_preserves_existing_first_bullet() {
 
 #[tokio::test]
 async fn align_server_media_dir_recovers_audio_outside_adjacency() {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) =
-        prepare_align_media_dir_job(server.state_dir(), "align_server_media_dir_recovers_audio")
-    else {
-        return;
-    };
+    let fixture =
+        prepare_align_media_dir_job(server.state_dir(), "align_server_media_dir_recovers_audio");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -146,18 +127,11 @@ async fn align_server_media_dir_recovers_audio_outside_adjacency() {
 
 #[tokio::test]
 async fn align_server_without_media_dir_fails_when_audio_is_relocated() {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) =
-        prepare_align_media_dir_job(server.state_dir(), "align_server_without_media_dir_fails")
-    else {
-        return;
-    };
+    let fixture =
+        prepare_align_media_dir_job(server.state_dir(), "align_server_without_media_dir_fails");
 
     let (info, _outputs) = jobs
         .submit_paths_job(

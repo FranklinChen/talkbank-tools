@@ -97,16 +97,23 @@
 //! ```rust,no_run
 //! use batchalign::{create_app, serve};
 //! use batchalign::config::ServerConfig;
+//! use batchalign::host_facts::HostSnapshot;
+//! use batchalign::worker::handle::WorkerRuntimeConfig;
 //! use batchalign::worker::pool::PoolConfig;
+//! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<(), batchalign::error::ServerError> {
 //! // Load or construct a server config
 //! let config = ServerConfig::default();
-//! let pool_config = PoolConfig::default();
+//! // Read the host once; everything downstream takes this reading and
+//! // cannot fail on the host.
+//! let host = Arc::new(HostSnapshot::read(&config)?);
+//! let pool_config = PoolConfig::with_runtime(WorkerRuntimeConfig::local(host.tier()));
 //!
 //! // Option A: get the router for custom binding / testing
 //! let (router, state) = create_app(
 //!     config.clone(),
+//!     host.clone(),
 //!     pool_config.clone(),
 //!     None,  // jobs_dir (default: ~/.batchalign3/jobs/)
 //!     None,  // db_dir   (default: ~/.batchalign3/)
@@ -116,7 +123,7 @@
 //! ).await?;
 //!
 //! // Option B: serve on the configured host:port with graceful shutdown
-//! serve(config, pool_config, None).await?;
+//! serve(config, host, pool_config, None).await?;
 //! # Ok(())
 //! # }
 //! ```

@@ -673,7 +673,7 @@ mod tests {
         let corrupt_mor = VALID.replace("@End", "%mor:\tnoun| .\n@End");
         let dummy_bad_header = "@UTF8\n@Begin\n@Options:\tdummy\n*CHI:\thello .\n@End\n";
         let sources = [retrace.as_str(), corrupt_mor.as_str(), dummy_bad_header];
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let files: Vec<_> = sources
             .iter()
             .enumerate()
@@ -736,7 +736,7 @@ mod tests {
 
     #[tokio::test]
     async fn fully_valid_no_work_file_preserves_its_original_bytes() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let files = [TextBatchFileInput::new(
             DisplayPath::from("valid.cha"),
             VALID.to_owned(),
@@ -790,7 +790,7 @@ mod tests {
     async fn run_with(
         apply: TextBatchApply<(), ()>,
     ) -> Result<PostValidated, crate::text_batch::TextWorkflowFileError> {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let files = vec![TextBatchFileInput::new(
             DisplayPath::from("a.cha"),
             VALID.to_owned(),
@@ -848,7 +848,7 @@ mod tests {
 
     #[tokio::test]
     async fn per_file_application_refusal_precedes_output_admission() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let cache = crate::cache::UtteranceCache::noop();
         let error = run_text_pipeline(
             VALID,
@@ -904,7 +904,7 @@ mod tests {
     /// error in a SECOND vector nothing here read.
     #[tokio::test]
     async fn a_batch_failure_still_refuses_a_file_that_failed_pre_validation() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let files = vec![
             TextBatchFileInput::new(DisplayPath::from("good.cha"), VALID.to_owned()),
             TextBatchFileInput::new(
@@ -1038,7 +1038,7 @@ mod tests {
     /// new finding alone, never the held-out one.
     #[tokio::test]
     async fn segmentation_that_adds_a_finding_outside_the_held_out_utterance_is_refused() {
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let cache = crate::cache::UtteranceCache::noop();
         let infer = async |_pool: &WorkerPool,
                            items: &[(usize, batchalign_transform::utseg::UtsegBatchItem)],
@@ -1127,7 +1127,7 @@ mod tests {
     async fn a_diagnosed_transcript_is_segmented_outside_its_faulty_utterance() {
         let localized = localized_b2();
 
-        let pool = WorkerPool::new(PoolConfig::default());
+        let pool = WorkerPool::new(PoolConfig::for_tests());
         let cache = crate::cache::UtteranceCache::noop();
         let inferred = std::sync::Mutex::new(Vec::new());
         let infer = async |_pool: &WorkerPool,

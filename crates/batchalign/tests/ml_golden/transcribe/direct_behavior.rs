@@ -19,18 +19,11 @@ fn media_header(chat: &str, label: &str) -> String {
 
 #[tokio::test]
 async fn direct_transcribe_produces_valid_chat() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) =
-        prepare_transcribe_fixture_job(jobs.state_dir(), "direct_transcribe_verify")
-    else {
-        return;
-    };
+    let fixture = prepare_transcribe_fixture_job(jobs.state_dir(), "direct_transcribe_verify");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -60,19 +53,14 @@ async fn direct_transcribe_produces_valid_chat() {
 
 #[tokio::test]
 async fn direct_transcribe_wor_policy_controls_tier_presence() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(
+    let fixture = prepare_transcribe_fixture_job(
         jobs.state_dir(),
         "direct_transcribe_wor_policy_controls_tier_presence",
-    ) else {
-        return;
-    };
+    );
 
     let (info_include, outputs_include) = jobs
         .submit_paths_job(
@@ -112,18 +100,12 @@ async fn direct_transcribe_wor_policy_controls_tier_presence() {
 
 #[tokio::test]
 async fn direct_transcribe_preserves_source_media_basename() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) =
-        prepare_transcribe_fixture_job(jobs.state_dir(), "direct_transcribe_preserves_media_name")
-    else {
-        return;
-    };
+    let fixture =
+        prepare_transcribe_fixture_job(jobs.state_dir(), "direct_transcribe_preserves_media_name");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -146,23 +128,17 @@ async fn direct_transcribe_preserves_source_media_basename() {
 
 #[tokio::test]
 async fn direct_transcribe_diarize_surfaces_multiple_speakers_when_available() {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     if !session.has_infer_task(InferTask::Speaker) {
-        eprintln!("SKIP: direct session does not support speaker diarization");
-        return;
+        panic!("PREREQUISITE MISSING: direct session does not support speaker diarization")
     }
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) = prepare_multi_speaker_transcribe_fixture_job(
+    let fixture = prepare_multi_speaker_transcribe_fixture_job(
         jobs.state_dir(),
         "direct_transcribe_diarize_surfaces_multiple_speakers_when_available",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job_with_speakers(

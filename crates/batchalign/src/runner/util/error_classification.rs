@@ -5,8 +5,10 @@
 //! that help users understand what happened and what to do about it.
 
 use crate::error::{AsrProviderDisposition, RecordingDurationFault, ServerError};
+use crate::host_memory::HostMemoryError;
 use crate::scheduling::FailureCategory;
 use crate::worker::error::WorkerError;
+use crate::worker::memory_guard::MemoryGuardError;
 
 /// Truncate a string to keep only the last `max_chars` characters.
 ///
@@ -69,7 +71,7 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         // The generic code does not establish a cause or determinism.
         // Keep that uncertainty distinct from typed permanent refusals.
         WorkerError::ModelRuntime(_) => FailureCategory::LocalRuntime,
-        WorkerError::MemoryGuard(_) => FailureCategory::MemoryPressure,
+        WorkerError::MemoryGuard(guard) => memory_guard_category(guard),
         // Deliberately NOT `Cancelled`, which means "cancelled intentionally"
         // by an operator and is a TERMINAL user-intent state. The server
         // shutting down is infrastructure: the work was not repudiated, and a
@@ -83,12 +85,35 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         // wait on the same count.
         WorkerError::PoolAccountingBroken { .. } => FailureCategory::System,
         WorkerError::SpawnFailed(_)
+        | WorkerError::HostUnreadable(_)
         | WorkerError::ReadyParseFailed(_)
         | WorkerError::NativeCommand { .. }
         | WorkerError::UnroutedGpuRequest { .. }
         | WorkerError::PlanMismatch(_)
         | WorkerError::UndeclaredGpuTask(_)
         | WorkerError::NoWorker { .. } => FailureCategory::System,
+    }
+}
+
+/// A spawn the memory guard blocked: memory pressure only when memory was
+/// the cause. A host that will not report its memory, a ledger the guard
+/// cannot read or write, and a server shutting down are not pressure, and
+/// retrying after a backoff would meet each of them again.
+fn memory_guard_category(guard: &MemoryGuardError) -> FailureCategory {
+    match guard {
+        MemoryGuardError::InsufficientMemory { .. } => FailureCategory::MemoryPressure,
+        MemoryGuardError::HostReservation(reservation) => match reservation {
+            HostMemoryError::CapacityRejected { .. }
+            | HostMemoryError::StartupSlotsBusy { .. }
+            | HostMemoryError::MlTestLockBusy { .. }
+            | HostMemoryError::TimedOut { .. } => FailureCategory::MemoryPressure,
+            HostMemoryError::Unreadable(_)
+            | HostMemoryError::Io { .. }
+            | HostMemoryError::CorruptLedger { .. } => FailureCategory::System,
+        },
+        MemoryGuardError::SemaphoreClosed
+        | MemoryGuardError::ReservationTaskFailed(_)
+        | MemoryGuardError::HostUnreadable(_) => FailureCategory::System,
     }
 }
 
@@ -189,6 +214,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // every declaration its transition refuses (`AlignmentMedia`, above),
         // so only an alignment that changed the header can reach it.
         ServerError::AdmissionDisagreement
+        | ServerError::WordRunsDisagree(_)
         | ServerError::UnexpectedMorphologyReport
         | ServerError::UtrTask(_)
         | ServerError::ReplacementPlanContradicted { .. }
@@ -196,6 +222,8 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         | ServerError::Migration(_)
         | ServerError::Persistence(_)
         | ServerError::Planning(_)
+        | ServerError::HostUnreadable(_)
+        | ServerError::RemoteStagingWithoutHostName
         | ServerError::StoredLease(_)
         | ServerError::MediaTiming(_)
         | ServerError::MorphosyntaxInjection(_)
@@ -380,6 +408,39 @@ pub(crate) fn user_facing_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blocked spawn is memory pressure (retried after a backoff) only
+    /// when memory blocked it; a ledger the guard cannot use is ours to fix,
+    /// and retrying would meet it again.
+    #[test]
+    fn a_blocked_spawn_is_pressure_only_when_memory_blocked_it() {
+        let classify =
+            |guard| classify_server_error(&ServerError::Worker(WorkerError::MemoryGuard(guard)));
+        let capacity = HostMemoryError::CapacityRejected {
+            label: "stanza".into(),
+            available_mb: 1_000,
+            pending_reserved_mb: 0,
+            requested_mb: 4_000,
+            reserve_mb: 2_000,
+            total_mb: 64_000,
+        };
+        assert_eq!(
+            classify(MemoryGuardError::HostReservation(capacity)),
+            FailureCategory::MemoryPressure
+        );
+        let ledger = HostMemoryError::Io {
+            path: "ledger.json".into(),
+            source: std::io::Error::other("read-only file system"),
+        };
+        assert_eq!(
+            classify(MemoryGuardError::HostReservation(ledger)),
+            FailureCategory::System
+        );
+        assert_eq!(
+            classify(MemoryGuardError::SemaphoreClosed),
+            FailureCategory::System
+        );
+    }
 
     #[test]
     fn invalid_model_output_is_final_and_keeps_the_failing_boundary() {

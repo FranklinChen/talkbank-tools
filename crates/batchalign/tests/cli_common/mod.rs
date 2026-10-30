@@ -15,7 +15,6 @@
 )]
 #![allow(dead_code)]
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,10 +113,15 @@ impl CliHarness {
         }
     }
 
-    /// Create a command bound to this harness's isolated home directory.
+    /// Create a command bound to this harness's isolated Batchalign home.
+    ///
+    /// `BATCHALIGN_HOME`, never `HOME`: it isolates what Batchalign owns
+    /// (config, state, its caches) and nothing else, so model libraries keep
+    /// their real caches. Faking `HOME` relocated those too, and every live
+    /// test re-downloaded its models into a temporary directory.
     pub fn cmd(&self) -> assert_cmd::Command {
         let mut command = cli_cmd();
-        command.env("HOME", &self.home_dir);
+        command.env(batchalign::runtime_paths::HOME_ENV, &self.home_dir);
         command
     }
 
@@ -160,67 +164,6 @@ impl CliHarness {
     /// is one owner now.
     pub fn disable_auto_daemon(&self) {
         self.write_server_config(ISOLATED_SERVER_YAML);
-    }
-}
-
-/// Resolve the Python path for tests. Prefers the project venv
-/// (which has all dependencies) over a bare PATH lookup.
-pub fn resolve_python_for_module(module: &str) -> Option<String> {
-    if let Ok(d) = std::env::current_dir() {
-        let mut dir = d;
-        loop {
-            for venv in preferred_venv_pythons(&dir) {
-                if venv.exists() && python_imports_module(&venv, module) {
-                    return Some(venv.to_string_lossy().to_string());
-                }
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-
-    for candidate in preferred_path_pythons() {
-        if python_imports_module(candidate, module) {
-            return Some((*candidate).to_string());
-        }
-    }
-
-    None
-}
-
-pub fn resolve_python() -> Option<String> {
-    resolve_python_for_module("batchalign.worker")
-}
-
-fn python_imports_module(command: impl AsRef<OsStr>, module: &str) -> bool {
-    let snippet = format!("import {module}");
-    std::process::Command::new(command)
-        .args(["-c", &snippet])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn preferred_venv_pythons(root: &Path) -> Vec<PathBuf> {
-    if cfg!(windows) {
-        vec![root.join(".venv").join("Scripts").join("python.exe")]
-    } else {
-        let bin = root.join(".venv").join("bin");
-        vec![
-            bin.join("python3.14"),
-            bin.join("python3"),
-            bin.join("python"),
-        ]
-    }
-}
-
-fn preferred_path_pythons() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &["python"]
-    } else {
-        &["python3.14", "python3"]
     }
 }
 
@@ -299,22 +242,6 @@ pub fn transcode_audio_to_mp4(input: &Path, output: &Path) {
     );
 }
 
-#[allow(unused_macros)]
-macro_rules! require_python {
-    () => {
-        match $crate::cli_common::resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    };
-}
-
-#[allow(unused_imports)]
-pub(crate) use require_python;
-
 pub struct LiveTestServer {
     base_url: String,
     infer_tasks: Vec<InferTask>,
@@ -390,12 +317,16 @@ pub async fn start_live_server(
         ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     };
 
+    let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(&config));
     let (router, state) = create_app(
         config,
+        host,
         pool_config,
         Some(jobs_dir.to_string_lossy().into()),
         Some(db_dir),
@@ -741,7 +672,15 @@ pub async fn run_job_to_completion_with_speakers(
         .send()
         .await
         .expect("POST /jobs");
-    assert_eq!(resp.status(), 200, "Job submission should succeed");
+    let status = resp.status();
+    if status != 200 {
+        // The server's refusal says why; a bare status code does not.
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("<unreadable body: {error}>"));
+        panic!("job submission refused with {status}: {body}");
+    }
     let info: JobInfo = resp.json().await.expect("parse initial JobInfo");
 
     let final_info = poll_job_done(client, base_url, &info.job_id).await;

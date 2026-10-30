@@ -20,9 +20,7 @@
 //!   the configured local server URL.
 
 use crate::config::{self, RuntimeLayout};
-use crate::host_facts::EffectiveConfig;
 use crate::host_memory::HostMemoryRuntimeConfig;
-use crate::host_policy::HostExecutionPolicy;
 use crate::server_handshake::{HandshakeSlot, ServerHandshake};
 use crate::worker::handle::WorkerRuntimeConfig;
 use crate::worker::pool::PoolConfig;
@@ -75,8 +73,15 @@ pub async fn start(
     }
 
     if args.foreground {
-        let tier = cfg.resolved_memory_tier();
-        let host_policy = HostExecutionPolicy::from_server_config(&cfg);
+        // The CLI's device switches become explicit overrides
+        // (`ServerConfig::with_device_flags`), then the host is read once:
+        // the tier, policy and resolved knobs printed and used below, and the
+        // server's validation and every job's dispatch, all come from this
+        // reading. The server does not start on a host it cannot read.
+        let cfg = cfg.with_device_flags(force_cpu, allow_mps);
+        let host = std::sync::Arc::new(crate::host_facts::HostSnapshot::read(&cfg)?);
+        let tier = host.tier();
+        let host_policy = host.policy();
         eprintln!(
             "\nStarting server on {}:{}...",
             cfg.host,
@@ -98,33 +103,18 @@ pub async fn start(
             host_policy.bootstrap_mode,
         );
 
-        // CLI `--force-cpu` is a presence-only switch; convert to
-        // `Some(true)` so the host-facts pipeline treats it as an
-        // explicit override. Absent CLI flag leaves the
-        // `cfg.force_cpu` field at whatever server.yaml provides
-        // (default `None`, which falls through to the
-        // recommendation).
-        if force_cpu {
-            cfg.force_cpu = Some(true);
-        }
-        if allow_mps {
-            cfg.allow_mps = Some(true);
-        }
-        // Resolve operator overrides against the live host-facts
-        // snapshot. The runtime forms below remain concrete `u32` /
-        // `usize` values because every downstream consumer (worker
-        // spawn args, dispatch_semaphore permit counts,
-        // TcpWorkerInfo) already expects a single value, not an
-        // override+recommendation pair.
-        let effective = EffectiveConfig::resolve_from_server_config(&cfg);
+        // The runtime forms below remain concrete `u32` / `usize` values
+        // because every downstream consumer (worker spawn args,
+        // dispatch_semaphore permit counts, TcpWorkerInfo) already expects a
+        // single value, not an override+recommendation pair.
+        let effective = host.effective();
         let worker_runtime = WorkerRuntimeConfig {
             force_cpu: effective.force_cpu,
             allow_mps: effective.allow_mps,
             gpu_thread_pool_size: effective.gpu_thread_pool_size,
             host_memory: HostMemoryRuntimeConfig::from_server_config(&cfg),
-            memory_tier: tier,
             bootstrap_mode: host_policy.bootstrap_mode,
-            ..WorkerRuntimeConfig::default()
+            ..WorkerRuntimeConfig::local(tier)
         };
         let pool_config = PoolConfig {
             python_path: worker_python.clone(),
@@ -153,11 +143,11 @@ pub async fn start(
             ensure_task_timeout: cfg.ensure_task_timeout_s,
             worker_registry_path: cfg.worker_registry_path.clone(),
             test_delay_ms: 0,
-            // Production: live host CPU loadavg gate, not a test override.
-            cpu_gate_threshold_override: None,
+            cpu_gate: crate::worker::pool::CpuGatePolicy::HostLoad,
         };
         crate::serve_with_runtime(
             cfg,
+            host,
             pool_config,
             layout,
             args.handshake_slot,
@@ -305,6 +295,16 @@ pub async fn start(
     Ok(())
 }
 
+/// How many recorded processes `serve stop` stops, one after another.
+const STOPPED_RECORDS: u32 = 3;
+
+/// The longest `serve stop` can take: each recorded process in turn may use
+/// its whole stop budget. The floor for a harness that kills the command on
+/// a timeout (`tests/live_deadline`, `CliRunBudget::ServeStop`).
+pub fn stop_budget() -> std::time::Duration {
+    daemon::stop_budget_per_process() * STOPPED_RECORDS
+}
+
 /// `serve stop`: stop the server and daemon.
 pub async fn stop() -> Result<(), CliError> {
     let layout = RuntimeLayout::from_env();
@@ -312,7 +312,7 @@ pub async fn stop() -> Result<(), CliError> {
     // Daemons first, then the manually started server. Each outcome is
     // reported as what it was; a record that cannot be read is named and left
     // in place, and makes the command fail once everything else was tried.
-    let outcomes = [
+    let outcomes: [_; STOPPED_RECORDS as usize] = [
         ("Local daemon", daemon::stop_daemon().await?),
         ("Sidecar daemon", daemon::stop_sidecar_daemon().await?),
         ("Server", daemon::stop_manual_server(&layout).await?),

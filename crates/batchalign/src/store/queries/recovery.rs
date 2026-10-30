@@ -631,7 +631,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(JobDB::open(Some(dir.path())).await.unwrap());
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             ServerConfig::default(),
             Some(db.clone()),
             tx,
@@ -646,7 +646,7 @@ mod tests {
         for paths_mode in [false, true] {
             let db = Arc::new(JobDB::in_memory_for_test().await.unwrap());
             let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-            let store = JobStore::new(
+            let store = JobStore::for_tests(
                 ServerConfig::default(),
                 Some(db.clone()),
                 tx,

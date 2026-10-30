@@ -14,8 +14,9 @@
 //! (no ML models) and verify the Rust side can communicate over the infer-only
 //! worker protocol.
 //!
-//! Requirements: Python 3 with batchalign installed.
-//! Skip gracefully if unavailable.
+//! Requirements: the checkout's Python development environment
+//! (`make batchalign-develop`); a test fails, never skips, without it (see
+//! `tests/prerequisite.rs`).
 
 use crate::common;
 
@@ -30,38 +31,11 @@ use batchalign::worker::registry::{RegistryOwnership, read_registry};
 use batchalign::worker::{
     BatchInferRequest, InferRequest, InferTask, WorkerBootstrapMode, WorkerProfile,
 };
-use common::resolve_python;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
-
-macro_rules! require_python {
-    () => {{
-        // Tests in this binary spawn workers that touch the host-memory
-        // ledger via the spawn memory guard. Isolate the ledger to a
-        // per-process file so we don't race against other test binaries.
-        common::test_server_fixture::isolate_host_memory_ledger();
-        // Memory guard: skip test entirely if insufficient RAM to safely spawn workers.
-        // This prevents kernel OOM panics that have crashed contributor machines repeatedly.
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!(
-                "SKIP: insufficient memory ({available_mb} MB available, 4096 MB required). \
-                 Worker tests need at least 4 GB free RAM."
-            );
-            return;
-        }
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    }};
-}
 
 #[cfg(unix)]
 fn synthetic_runtime_ready(pid: u32) -> String {
@@ -126,8 +100,9 @@ fn test_echo_tcp_config(python_path: String, state_dir: &tempfile::TempDir) -> W
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        runtime: WorkerRuntimeConfig::default().with_state_dir(state_dir.path().to_path_buf()),
-        ..Default::default()
+        runtime: WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            .with_state_dir(state_dir.path().to_path_buf()),
+        ..WorkerConfig::for_tests()
     }
 }
 
@@ -150,14 +125,14 @@ fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
 
 #[tokio::test]
 async fn spawn_test_echo_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let pool = common::test_worker_pool::shared_test_worker_pool();
@@ -173,14 +148,14 @@ async fn spawn_test_echo_worker() {
 
 #[tokio::test]
 async fn health_check_works() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -196,7 +171,7 @@ async fn health_check_works() {
 
 #[tokio::test]
 async fn spawn_test_echo_worker_task_bootstrap() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
@@ -204,7 +179,7 @@ async fn spawn_test_echo_worker_task_bootstrap() {
         task: Some(InferTask::Morphosyntax),
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -228,11 +203,10 @@ async fn spawn_test_echo_worker_task_bootstrap() {
 #[ignore = "Real Stanza worker and catalog; opt-in via --ignored"]
 async fn a_real_workers_catalog_report_admits_kazakh() {
     use batchalign::stanza_registry::StanzaRequirement;
-    let _ = require_python!();
-    let Some(python) = common::resolve_python_for_module("stanza") else {
-        eprintln!("SKIP: Python with Stanza not available");
-        return;
-    };
+    let _ = crate::prerequisite::worker_test_python();
+    let python = crate::prerequisite::PythonWorker::require()
+        .require_module("stanza")
+        .interpreter();
     let config = WorkerConfig {
         python_path: python,
         test_echo: false,
@@ -240,7 +214,7 @@ async fn a_real_workers_catalog_report_admits_kazakh() {
         task: Some(InferTask::Morphosyntax),
         lang: WorkerLanguage::PerFile,
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<120>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
         .checkout(&config)
@@ -277,14 +251,14 @@ async fn a_real_workers_catalog_report_admits_kazakh() {
 
 #[tokio::test]
 async fn capabilities_test_echo() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -324,14 +298,14 @@ async fn capabilities_test_echo() {
 
 #[tokio::test]
 async fn infer_echo_returns_payload() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -349,14 +323,14 @@ async fn infer_echo_returns_payload() {
 
 #[tokio::test]
 async fn batch_infer_echo_returns_items() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -384,7 +358,7 @@ async fn batch_infer_echo_returns_items() {
 
 #[tokio::test]
 async fn pool_dispatch_batch_infer_spawns_and_processes() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -392,8 +366,10 @@ async fn pool_dispatch_batch_infer_spawns_and_processes() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     let item = json!({"words": ["hello", "pool"], "lang": "eng"});
@@ -421,7 +397,7 @@ async fn pool_dispatch_batch_infer_spawns_and_processes() {
 
 #[tokio::test]
 async fn pool_reuses_existing_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -429,8 +405,10 @@ async fn pool_reuses_existing_worker() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     for i in 0..3 {
@@ -451,7 +429,7 @@ async fn pool_reuses_existing_worker() {
 
 #[tokio::test]
 async fn pool_multiple_task_groups() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -459,8 +437,10 @@ async fn pool_multiple_task_groups() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     let morph_item = json!({"task": "morph"});
@@ -488,7 +468,7 @@ async fn pool_multiple_task_groups() {
 
 #[tokio::test]
 async fn pool_task_bootstrap_separates_same_profile_tasks() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -496,8 +476,9 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: WorkerRuntimeConfig::default().with_bootstrap_mode(WorkerBootstrapMode::Task),
-        ..Default::default()
+        runtime: WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            .with_bootstrap_mode(WorkerBootstrapMode::Task),
+        ..PoolConfig::for_tests()
     });
 
     let morph_item = json!({"task": "morph"});
@@ -538,7 +519,7 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
 
 #[tokio::test]
 async fn pool_pre_scale_uses_infer_targets() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -546,8 +527,10 @@ async fn pool_pre_scale_uses_infer_targets() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     pool.pre_scale(
@@ -585,7 +568,7 @@ async fn pool_pre_scale_uses_infer_targets() {
 #[cfg(unix)]
 #[tokio::test]
 async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let state_dir = tempfile::TempDir::new().expect("tempdir");
     // State dir threaded via config, not the environment: see
     // `WorkerRuntimeConfig::state_dir`.
@@ -603,9 +586,11 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
         worker_registry_path: Some(registry_path.clone()),
-        ..Default::default()
+        ..PoolConfig::for_tests()
     });
 
     let discovered = pool.discover_from_registry().await;
@@ -625,7 +610,7 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
 #[cfg(unix)]
 #[tokio::test]
 async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let state_dir = tempfile::TempDir::new().expect("tempdir");
     // State dir threaded via config, not the environment: see
     // `WorkerRuntimeConfig::state_dir`.
@@ -648,10 +633,10 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
         runtime: WorkerRuntimeConfig {
             server_instance_id: Some("current-server-instance".to_string()),
             server_process_id: Some(std::process::id()),
-            ..Default::default()
+            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
         },
         worker_registry_path: Some(registry_path.clone()),
-        ..Default::default()
+        ..PoolConfig::for_tests()
     });
 
     let discovered = pool.discover_from_registry().await;
@@ -673,7 +658,7 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_only_kills_current_server_owned_daemons() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let state_dir = tempfile::TempDir::new().expect("tempdir");
     // State dir threaded via config, not the environment: see
     // `WorkerRuntimeConfig::state_dir`.
@@ -701,7 +686,7 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
         verbose: 0,
         runtime: owned_runtime,
         worker_registry_path: Some(registry_path.clone()),
-        ..Default::default()
+        ..PoolConfig::for_tests()
     });
 
     pool.shutdown().await;
@@ -726,7 +711,7 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
 
 #[tokio::test]
 async fn pool_pre_scale_respects_max_workers_per_key() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -734,8 +719,10 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     pool.pre_scale(
@@ -756,7 +743,7 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
 #[cfg(unix)]
 #[tokio::test]
 async fn pool_serializes_worker_bootstrap_per_key() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let wrapped_python = dir.path().join("wrapped-python");
     std::fs::write(
@@ -780,8 +767,10 @@ async fn pool_serializes_worker_bootstrap_per_key() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(3),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     let item1 = json!({"request": 1});
@@ -839,7 +828,7 @@ async fn spawn_failure_bad_python_path() {
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let err = match WorkerHandle::spawn(config).await {
@@ -879,7 +868,7 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let handle = WorkerHandle::spawn(config).await.expect("spawn failed");
@@ -911,7 +900,7 @@ async fn spawn_failure_includes_worker_startup_stderr() {
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let err = match WorkerHandle::spawn(config).await {
@@ -960,7 +949,7 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut handle = WorkerHandle::spawn(config).await.expect("spawn failed");
@@ -975,7 +964,7 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
 /// Two different InferTasks within the same profile share one worker.
 #[tokio::test]
 async fn profile_groups_related_tasks_into_single_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -983,8 +972,10 @@ async fn profile_groups_related_tasks_into_single_worker() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     // Dispatch morphosyntax and utseg, both Stanza profile.
@@ -1016,7 +1007,7 @@ async fn profile_groups_related_tasks_into_single_worker() {
 /// Three different profiles produce exactly three workers.
 #[tokio::test]
 async fn each_profile_gets_its_own_worker() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
@@ -1024,8 +1015,10 @@ async fn each_profile_gets_its_own_worker() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     // Dispatch one task from each profile via batch_infer.

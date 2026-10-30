@@ -22,7 +22,7 @@ fn morphotag_options(no_l2_morphotag: bool) -> CommandOptions {
 
 #[tokio::test]
 async fn option_morphotag_no_l2_switch_controls_code_switched_words() {
-    let Some(session) = require_live_direct_warmed_many(
+    let session = require_live_direct_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
@@ -30,10 +30,7 @@ async fn option_morphotag_no_l2_switch_controls_code_switched_words() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info_enabled, results_enabled) = submit_and_complete_direct(
         &session,
@@ -59,10 +56,9 @@ async fn option_morphotag_no_l2_switch_controls_code_switched_words() {
     .await;
 
     if info_enabled.status == JobStatus::Failed || info_disabled.status == JobStatus::Failed {
-        eprintln!(
-            "SKIP: bilingual L2 morphotag failed (secondary language model likely unavailable)"
-        );
-        return;
+        panic!(
+            "PREREQUISITE MISSING: bilingual L2 morphotag failed (secondary language model likely unavailable)"
+        )
     }
 
     assert_completed_without_errors("l2_enabled", &info_enabled, &results_enabled);
@@ -101,15 +97,12 @@ async fn option_morphotag_no_l2_switch_controls_code_switched_words() {
 
 #[tokio::test]
 async fn option_morphotag_unsupported_inline_language_falls_back_to_l2_xxx() {
-    let Some(session) = require_live_direct_warmed_many(
+    let session = require_live_direct_warmed_many(
         InferTask::Morphosyntax,
         vec![(ReleasedCommand::Morphotag, "eng")],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = submit_and_complete_direct(
         &session,
@@ -125,7 +118,7 @@ async fn option_morphotag_unsupported_inline_language_falls_back_to_l2_xxx() {
 
     assert_completed_without_errors("unsupported_inline_l2", &info, &results);
     let blorx_mor = find_mor_line_for(
-        &results[0].content.as_text().expect("text command result"),
+        results[0].content.as_text().expect("text command result"),
         "blorx@s:xyz",
     )
     .expect("should have MOR for unsupported inline word");
@@ -134,15 +127,12 @@ async fn option_morphotag_unsupported_inline_language_falls_back_to_l2_xxx() {
 
 #[tokio::test]
 async fn option_morphotag_unsupported_inline_language_does_not_poison_neighbor_file() {
-    let Some(session) = require_live_direct_warmed_many(
+    let session = require_live_direct_warmed_many(
         InferTask::Morphosyntax,
         vec![(ReleasedCommand::Morphotag, "eng")],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let (info, results) = submit_and_complete_direct(
         &session,

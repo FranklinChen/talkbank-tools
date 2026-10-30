@@ -32,6 +32,7 @@
 
 mod common;
 mod live_deadline;
+mod prerequisite;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -53,26 +54,14 @@ use batchalign::worker::pool::{GpuModelPlan, PoolConfig, WorkerPool};
 static GPU_PLAN: std::sync::LazyLock<GpuModelPlan> =
     std::sync::LazyLock::new(GpuModelPlan::local_whisper_for_test);
 use batchalign::worker::{BatchInferRequest, InferTask};
-use common::resolve_python;
 use serde_json::json;
 
-macro_rules! require_python {
-    () => {{
-        common::init_test_tracing(tracing::Level::ERROR);
-        common::test_server_fixture::isolate_host_memory_ledger();
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!("SKIP: insufficient memory ({available_mb} MB available, 4096 MB required)");
-            return;
-        }
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    }};
+/// The interpreter for a test in this binary: quiet tracing, this binary's
+/// host-memory ledger, the memory a worker needs and the Python worker
+/// environment. Fails, never skips, when any is missing.
+fn worker_python() -> String {
+    common::init_test_tracing(tracing::Level::ERROR);
+    crate::prerequisite::worker_test_python()
 }
 
 /// Build a GPU execute_v2 request with a unique request_id, for English.
@@ -140,9 +129,9 @@ fn test_pool(python: String) -> WorkerPool {
         worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(test_state_dir().to_path_buf()),
-            ..Default::default()
+            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
         },
-        ..Default::default()
+        ..PoolConfig::for_tests()
     })
 }
 
@@ -193,7 +182,7 @@ async fn wait_for_process_exit(pid: u32) {
 /// exercises the adoption path rather than a spawner only tests could reach.
 #[tokio::test]
 async fn dropping_pool_reaps_owned_tcp_daemons() {
-    let python = require_python!();
+    let python = worker_python();
     use batchalign::worker::WorkerProfile;
     use batchalign::worker::handle::{WorkerConfig, spawn_tcp_daemon};
     use batchalign::worker::pool::status::WorkerTransport;
@@ -223,9 +212,9 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
                 state_dir: Some(test_state_dir().to_path_buf()),
                 server_instance_id: Some(pool.current_server_instance_id().to_string()),
                 server_process_id: Some(std::process::id()),
-                ..Default::default()
+                ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
             },
-            ..Default::default()
+            ..WorkerConfig::for_tests()
         };
         spawn_tcp_daemon(&daemon_config, 0)
             .await
@@ -266,7 +255,7 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
 /// All N responses must arrive with the correct request_id.
 #[tokio::test]
 async fn gpu_concurrent_dispatch_all_responses_arrive() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     // Pre-scale to create the SharedGpuWorker.
@@ -332,7 +321,7 @@ async fn gpu_concurrent_dispatch_all_responses_arrive() {
 /// This proves model sharing: one process, multiple threads, shared weights.
 #[tokio::test]
 async fn gpu_concurrent_dispatch_shares_same_pid() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     pool.pre_scale_gpu_for_test(
@@ -399,7 +388,7 @@ async fn gpu_concurrent_dispatch_shares_same_pid() {
 /// a batch of concurrent requests completes.
 #[tokio::test]
 async fn gpu_sequential_after_concurrent_works() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     pool.pre_scale_gpu_for_test(
@@ -450,7 +439,7 @@ async fn gpu_sequential_after_concurrent_works() {
 /// is not corrupted by concurrent request traffic.
 #[tokio::test]
 async fn gpu_health_check_works_after_concurrent_dispatch() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     pool.pre_scale_gpu_for_test(
@@ -496,7 +485,7 @@ async fn gpu_health_check_works_after_concurrent_dispatch() {
 #[cfg(unix)]
 #[tokio::test]
 async fn gpu_stdio_shared_worker_drop_reaps_process() {
-    let python = require_python!();
+    let python = worker_python();
 
     let pid = {
         use batchalign::worker::pool::status::WorkerTransport;
@@ -536,7 +525,7 @@ async fn gpu_stdio_shared_worker_drop_reaps_process() {
 /// dispatch_execute_v2 → SharedGpuTcpWorker → Python execute_v2 → echo chain.
 #[tokio::test]
 async fn gpu_single_execute_v2_through_pool() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     pool.pre_scale_gpu_for_test(
@@ -566,7 +555,7 @@ async fn gpu_single_execute_v2_through_pool() {
 /// This proves the worker doesn't become corrupted after handling a request.
 #[tokio::test]
 async fn gpu_repeated_execute_v2_through_pool() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     pool.pre_scale_gpu_for_test(
@@ -623,7 +612,7 @@ const POST_SHUTDOWN_LIVENESS_BOUND: Duration = Duration::from_secs(180);
 /// a clear error.
 #[tokio::test]
 async fn gpu_dispatch_after_pre_scale_shutdown_spawns_fallback() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     // Pre-scale creates the shared GPU worker.
@@ -672,7 +661,7 @@ async fn gpu_dispatch_after_pre_scale_shutdown_spawns_fallback() {
 /// Regression test: proves worker state is not corrupted between requests.
 #[tokio::test]
 async fn stanza_worker_survives_many_sequential_requests() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     for i in 0..10 {
@@ -713,7 +702,7 @@ async fn stanza_worker_survives_many_sequential_requests() {
 /// that timeouts are detected rather than hanging forever.
 #[tokio::test]
 async fn gpu_request_with_short_timeout_fails_cleanly() {
-    let python = require_python!();
+    let python = worker_python();
 
     // Create a pool where audio task timeout is very short (2s) but the
     // worker has a 5-second delay. This should trigger a timeout.
@@ -724,12 +713,14 @@ async fn gpu_request_with_short_timeout_fails_cleanly() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
         task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
             audio: Some(batchalign::api::PositiveSeconds::literal::<2>()),
             analysis: None,
         }, // 2-second timeout
-        ..Default::default()
+        ..PoolConfig::for_tests()
     });
 
     // Pre-scale with delay: worker will sleep 5s before each response.
@@ -771,7 +762,7 @@ async fn gpu_request_with_short_timeout_fails_cleanly() {
 async fn worker_with_delay_responds_when_timeout_is_generous() {
     use batchalign::worker::handle::{WorkerConfig, WorkerHandle};
 
-    let python = require_python!();
+    let python = worker_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
@@ -779,7 +770,7 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
         profile: batchalign::worker::WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut handle = WorkerHandle::spawn(config).await.expect("spawn failed");
@@ -818,7 +809,7 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
 /// This is the baseline: sequential dispatch doesn't use SharedGpuWorker.
 #[tokio::test]
 async fn stanza_sequential_dispatch_reuses_worker() {
-    let python = require_python!();
+    let python = worker_python();
     let pool = test_pool(python);
 
     for i in 0..5 {
@@ -868,7 +859,7 @@ async fn stanza_sequential_dispatch_reuses_worker() {
 /// is a typed `WorkerError::Timeout` naming `execute_v2`.
 #[tokio::test]
 async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_timeout() {
-    let python = require_python!();
+    let python = worker_python();
 
     // A shared worker serving two requests at a time, and a generous-by-itself,
     // tight-when-summed per-request timeout. With 2 threads × 200 ms ×
@@ -889,14 +880,14 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
         verbose: 0,
         runtime: WorkerRuntimeConfig {
             gpu_thread_pool_size: 2,
-            ..Default::default()
+            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
         },
         task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
             audio: Some(batchalign::api::PositiveSeconds::literal::<1>()),
             analysis: None,
         },
         test_delay_ms: 200,
-        ..Default::default()
+        ..PoolConfig::for_tests()
     });
 
     pool.pre_scale_gpu_for_test(
@@ -999,7 +990,7 @@ const CANCEL_UNWIND_BOUND: Duration = Duration::from_secs(30);
 async fn cancel_kills_in_flight_worker_under_dispatch() {
     use batchalign::api::JobId;
 
-    let python = require_python!();
+    let python = worker_python();
 
     // 60-second per-response delay so "kill interrupted the call" and
     // "natural completion" are separated by a margin no amount of machine
@@ -1023,13 +1014,13 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
         verbose: 0,
         runtime: WorkerRuntimeConfig {
             gpu_thread_pool_size: 1,
-            ..Default::default()
+            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
         },
         task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
             audio: Some(batchalign::api::PositiveSeconds::literal::<30>()),
             analysis: None,
         },
-        ..Default::default()
+        ..PoolConfig::for_tests()
     }));
 
     pool.pre_scale_gpu_for_test(
@@ -1344,7 +1335,7 @@ fn hang_for_one_language_interpreter(
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
-    let python = require_python!();
+    let python = worker_python();
 
     let shim_dir = tempfile::tempdir().expect("interpreter shim dir");
     let cold_lang = LanguageCode3::spa();
@@ -1361,9 +1352,9 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
         worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(test_state_dir().to_path_buf()),
-            ..Default::default()
+            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
         },
-        ..Default::default()
+        ..PoolConfig::for_tests()
     }));
 
     // Warm the English key by using it. The shim is the real interpreter for
@@ -1456,7 +1447,7 @@ fn worker_children_for_lang(lang: &LanguageCode3) -> usize {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_callers_at_a_cold_key_spawn_exactly_one_worker() {
-    let python = require_python!();
+    let python = worker_python();
 
     // A language no other test in this binary uses, so the process count below
     // sees only this test's workers.

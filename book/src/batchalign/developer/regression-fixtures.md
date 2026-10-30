@@ -39,7 +39,8 @@ that maintainers clone locally and expose to the runner via the
 below the per-command README level specifically so private material
 cannot land in this public repo by accident. Contributors without
 access to the private fixture repository will see the regression
-tests skip gracefully rather than fail.
+tests reported as ignored (`#[ignore]`); running them with `--ignored`
+without the fixtures fails, naming the variable to set.
 
 ## Directory layout
 
@@ -230,7 +231,9 @@ assertions operate on the parsed `ChatFile` directly and do not.
 
    The helper `run_fixture` does discovery, staging, dispatch, and
    assertion checking. If the fixture directory is not present locally
-   the test skips cleanly.
+   the test fails, naming `BATCHALIGN3_PRIVATE_FIXTURES_DIR`. Mark the new
+   test `#[ignore = "private regression fixture: ..."]` like its
+   neighbours, so a default run reports it as ignored.
 
 7. **Run the test, confirm RED:**
 
@@ -263,11 +266,11 @@ cargo test -p batchalign --features ml-golden --test ml_golden \
 
 # Run a single fixture
 cargo test -p batchalign --features ml-golden --test ml_golden \
-    -E 'test(transcribe::regressions::transcribe_regression_001)'
+    -- --ignored transcribe::regressions::transcribe_regression_001
 ```
 
-Tests skip cleanly when the corresponding fixture directory is missing
-locally.
+A default run reports these tests as ignored; with `--ignored` they fail
+when the fixture directory is missing locally.
 
 ## How the runner works
 
@@ -286,9 +289,9 @@ The command-local `tests/ml_golden/<command>/regressions.rs` modules call
       material cannot land here by accident.
 2. Loads `source.json` into the typed `FixtureManifest`. If neither
    location has a `source.json` for the requested `(command, bug)`
-   pair, the test reports `SKIP` rather than `FAIL`.
+   pair, the test fails.
 3. Acquires a `LiveDirectSession` from the shared `ml_golden` worker
-   pool. Skips cleanly if the relevant `InferTask` is unavailable.
+   pool. Fails if the relevant `InferTask` is unavailable.
 4. Stages the command's primary input into the session's state directory:
    `input.cha` for CHAT-first commands, the audio file for audio-first
    commands like `transcribe`. When a staged CHAT also has sidecar audio,

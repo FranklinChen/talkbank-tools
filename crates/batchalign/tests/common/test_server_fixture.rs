@@ -48,7 +48,6 @@ use batchalign::{
 };
 use tokio::sync::oneshot;
 
-use super::resolve_python;
 use batchalign::host_facts::PerProfile;
 
 /// Opaque per-acquire session identifier. Used by the fixture thread to
@@ -80,8 +79,8 @@ struct TestEchoBackend {
 
 impl TestEchoBackend {
     /// Prepare the shared worker pool. Resolves Python lazily so the
-    /// fixture thread can return a clean SKIP message instead of
-    /// panicking when Python is unavailable.
+    /// fixture thread reports what is missing to the acquiring test, which
+    /// fails with it.
     async fn initialize() -> Result<Self, String> {
         // Point the host-memory coordinator at a per-process ledger so
         // concurrent test sessions in one binary do not race against each
@@ -92,8 +91,9 @@ impl TestEchoBackend {
         // binary is a single process with a fresh fixture per run.
         isolate_host_memory_ledger();
 
-        let python_path = resolve_python()
-            .ok_or_else(|| "Python 3 with batchalign is not available".to_string())?;
+        let python_path = crate::prerequisite::PythonWorker::establish_shared()
+            .map_err(|missing| missing.to_string())?
+            .interpreter();
         let session_config = test_echo_server_config();
         let prepared_workers = prepare_workers(
             test_echo_pool_config(&python_path),
@@ -115,7 +115,7 @@ pub use batchalign::host_memory::isolate_host_memory_ledger_for_test as isolate_
 
 /// Three-state init slot. Matches the live fixture pattern so a one-time
 /// initialization failure (no Python in env, etc.) is cached and every
-/// subsequent caller sees the same SKIP message.
+/// subsequent caller fails with the same message.
 enum BackendState {
     Uninitialized,
     Ready(Box<TestEchoBackend>),
@@ -231,59 +231,48 @@ impl Drop for TestServerSession {
 }
 
 /// Acquire one isolated test-echo server session over the shared warm
-/// worker pool. Returns `None` and prints `SKIP:` to stderr when the
-/// shared backend cannot be prepared (typically: no Python in env).
-pub async fn acquire_test_server_session() -> Option<TestServerSession> {
+/// worker pool. Fails the test when the shared backend cannot be prepared
+/// (see `crate::prerequisite`): a test that returned instead would report a
+/// pass it never earned.
+pub async fn acquire_test_server_session() -> TestServerSession {
     acquire_session_inner(None).await
 }
 
 /// Acquire one isolated session with a custom [`ServerConfig`]. The
 /// shared warm worker pool is still reused; only the per-session
 /// server config (e.g. `max_workers_per_job`, `media_roots`) differs.
-pub async fn acquire_test_server_session_with_config(
-    config: ServerConfig,
-) -> Option<TestServerSession> {
+pub async fn acquire_test_server_session_with_config(config: ServerConfig) -> TestServerSession {
     acquire_session_inner(Some(config)).await
 }
 
-async fn acquire_session_inner(config_override: Option<ServerConfig>) -> Option<TestServerSession> {
-    let admission = SESSION_ADMISSION.clone().acquire_owned().await.ok()?;
+async fn acquire_session_inner(config_override: Option<ServerConfig>) -> TestServerSession {
+    let admission = SESSION_ADMISSION
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("the test-echo session admission semaphore is never closed");
     let bridge = FIXTURE.clone();
     let (reply_tx, reply_rx) = oneshot::channel();
-    if bridge
+    bridge
         .commands
         .send(FixtureCommand::Acquire {
             config_override: Box::new(config_override),
             reply: reply_tx,
         })
-        .is_err()
-    {
-        eprintln!("SKIP: test-echo fixture command channel closed");
-        return None;
-    }
-    let outcome = match reply_rx.await {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            eprintln!("SKIP: test-echo fixture dropped acquire reply");
-            return None;
-        }
-    };
-    let (id, snapshot) = match outcome {
-        Ok(pair) => pair,
-        Err(message) => {
-            eprintln!("SKIP: {message}");
-            return None;
-        }
-    };
+        .unwrap_or_else(|_| panic!("the test-echo fixture thread has exited"));
+    let (id, snapshot) = reply_rx
+        .await
+        .unwrap_or_else(|_| panic!("the test-echo fixture dropped its acquire reply"))
+        .unwrap_or_else(|message| panic!("test-echo fixture unavailable: {message}"));
 
-    Some(TestServerSession {
+    TestServerSession {
         base_url: snapshot.base_url,
         state_dir: snapshot.state_dir,
         client: reqwest::Client::new(),
         bridge,
         admission: Some(admission),
         release: Some(id),
-    })
+    }
 }
 
 /// Drop-time release path: runs from a plain `std::thread` so it must
@@ -497,7 +486,9 @@ fn test_echo_pool_config(python_path: &str) -> PoolConfig {
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     }
 }

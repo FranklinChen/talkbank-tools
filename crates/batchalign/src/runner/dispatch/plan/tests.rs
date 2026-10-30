@@ -4,8 +4,15 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+
+/// The host policy plans are built against in these tests: declared, so a
+/// plan is the same on every machine that runs them.
+fn test_policy() -> crate::host_policy::HostExecutionPolicy {
+    crate::host_policy::HostExecutionPolicy::from_memory_tier(
+        crate::worker::handle::test_memory_tier(),
+    )
+}
 use crate::api::{JobId, LanguageCode3, NumSpeakers, ReleasedCommand};
-use crate::config::ServerConfig;
 use crate::options::{
     AlignOptions, AsrEngineName, BenchmarkOptions, CommandOptions, CommonOptions, DiarizeOptions,
     MorphotagOptions, OpensmileOptions, SpeakerEngineName, TranscribeOptions as TranscribeCommand,
@@ -35,8 +42,7 @@ fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
         BTreeMap::new(),
     );
     job.dispatch.num_speakers = NumSpeakers(2);
-    let plan =
-        TranscribeDispatchPlan::from_job(&job, &ServerConfig::default()).expect("dispatch plan");
+    let plan = TranscribeDispatchPlan::from_job(&job, &test_policy()).expect("dispatch plan");
     assert_eq!(
         plan.base_options.plan.asr().backend(),
         AsrBackend::RustRevAi
@@ -50,7 +56,7 @@ fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
     }))
     .unwrap();
     assert!(matches!(
-        TranscribeDispatchPlan::from_job(&invalid, &ServerConfig::default()),
+        TranscribeDispatchPlan::from_job(&invalid, &test_policy()),
         Err(DispatchPlanRefusal::AsrPolicy(
             crate::transcribe::TranscribeAsrPlanError::UnsupportedAutomaticCount
         ))
@@ -158,8 +164,8 @@ fn transcribe_plan_reads_runtime_flags_and_speaker_override() {
         runtime_state,
     );
 
-    let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("transcribe plan");
+    let plan =
+        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
 
     assert!(matches!(
         plan.base_options.plan.asr().backend(),
@@ -201,8 +207,8 @@ fn transcribe_s_plan_defaults_to_pyannote_ai_precision_2() {
         BTreeMap::new(),
     );
 
-    let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("transcribe_s plan");
+    let plan =
+        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe_s plan");
 
     assert!(matches!(
         plan.base_options.plan.asr().backend(),
@@ -248,7 +254,7 @@ fn transcribe_plan_propagates_an_unimplemented_engine_refusal() {
         BTreeMap::new(),
     );
 
-    let refusal = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
+    let refusal = TranscribeDispatchPlan::from_job(&snapshot, &test_policy())
         .err()
         .expect("an unimplemented engine must refuse the plan, not drop it");
     assert!(
@@ -283,7 +289,7 @@ fn fa_plan_refuses_options_it_cannot_read_instead_of_dropping_the_job() {
 
     // `let ... else` rather than `expect_err`, which would demand `Debug`
     // on the plan itself just to report a case that cannot happen here.
-    let Err(refusal) = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()) else {
+    let Err(refusal) = FaDispatchPlan::from_job(&snapshot, &test_policy()) else {
         panic!("unreadable align options must refuse the plan, not drop it");
     };
     assert!(
@@ -301,7 +307,7 @@ fn media_root_plan_admits_absolute_and_refuses_historical_relative_metadata() {
         .expect("historical options remain readable");
         let snapshot = make_snapshot(ReleasedCommand::Align, options, BTreeMap::new());
         assert!(matches!(
-            FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()),
+            FaDispatchPlan::from_job(&snapshot, &test_policy()),
             Err(DispatchPlanRefusal::MediaRoot(_))
         ));
     }
@@ -315,7 +321,7 @@ fn media_root_plan_admits_absolute_and_refuses_historical_relative_metadata() {
         ..Default::default()
     });
     let snapshot = make_snapshot(ReleasedCommand::Align, options, BTreeMap::new());
-    let plan = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()).unwrap();
+    let plan = FaDispatchPlan::from_job(&snapshot, &test_policy()).unwrap();
     assert_eq!(plan.media_dir.unwrap().as_path(), temp.path());
 }
 
@@ -339,8 +345,7 @@ fn media_analysis_plan_refuses_options_it_cannot_read() {
         BTreeMap::new(),
     );
 
-    let Err(refusal) = MediaAnalysisDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-    else {
+    let Err(refusal) = MediaAnalysisDispatchPlan::from_job(&snapshot, &test_policy()) else {
         panic!("a corrupt diarize options row must refuse the plan, not drop it");
     };
     assert!(
@@ -369,8 +374,8 @@ fn transcribe_plan_preserves_required_cache_policy() {
         BTreeMap::new(),
     );
 
-    let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("transcribe plan");
+    let plan =
+        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
 
     assert_eq!(
         plan.base_options.cache_policies,
@@ -398,8 +403,8 @@ fn transcribe_plan_can_refresh_rev_without_refreshing_speaker_evidence() {
         BTreeMap::new(),
     );
 
-    let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("transcribe plan");
+    let plan =
+        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
 
     assert_eq!(
         plan.base_options.cache_policies.rev_asr,
@@ -431,8 +436,8 @@ fn transcribe_plan_can_refresh_speaker_without_refreshing_rev_evidence() {
         BTreeMap::new(),
     );
 
-    let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("transcribe plan");
+    let plan =
+        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
 
     assert_eq!(
         plan.base_options.cache_policies.rev_asr,
@@ -458,7 +463,7 @@ fn align_plan_keeps_fa_and_utr_cache_policies_distinct() {
         BTreeMap::new(),
     );
 
-    let plan = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()).expect("align plan");
+    let plan = FaDispatchPlan::from_job(&snapshot, &test_policy()).expect("align plan");
 
     assert_eq!(
         plan.options.fa_params.cache_policy,
@@ -484,7 +489,7 @@ fn required_asr_http_policy_reaches_utr_without_forbidding_fresh_fa() {
         }),
         BTreeMap::new(),
     );
-    let plan = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()).unwrap();
+    let plan = FaDispatchPlan::from_job(&snapshot, &test_policy()).unwrap();
     assert_eq!(plan.utr_cache_policy.response(), CachePolicy::RequireCache);
     assert_eq!(
         plan.utr_cache_policy.rev_evidence(),
@@ -496,7 +501,7 @@ fn required_asr_http_policy_reaches_utr_without_forbidding_fresh_fa() {
     };
     options.common.override_media_cache_tasks = vec!["utr_asr".into()];
     assert!(matches!(
-        FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()),
+        FaDispatchPlan::from_job(&snapshot, &test_policy()),
         Err(DispatchPlanRefusal::CachePolicy(_))
     ));
 }
@@ -520,8 +525,8 @@ fn transcribe_s_plan_honors_explicit_local_pyannote_override() {
         BTreeMap::new(),
     );
 
-    let plan = TranscribeDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("transcribe_s plan");
+    let plan =
+        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe_s plan");
 
     assert_eq!(
         plan.base_options.speaker_backend,
@@ -545,8 +550,7 @@ fn benchmark_plan_builds_rust_owned_transcribe_options() {
         BTreeMap::new(),
     );
 
-    let plan = BenchmarkDispatchPlan::from_job(&snapshot, &ServerConfig::default())
-        .expect("benchmark plan");
+    let plan = BenchmarkDispatchPlan::from_job(&snapshot, &test_policy()).expect("benchmark plan");
 
     assert!(matches!(
         plan.base_options.plan.asr().backend(),
@@ -578,7 +582,7 @@ fn benchmark_plan_refuses_anything_but_one_language() {
         );
         snapshot.dispatch.lang = crate::api::LanguageSpec::try_from(lang).expect("a spec");
         assert!(matches!(
-            BenchmarkDispatchPlan::from_job(&snapshot, &ServerConfig::default()),
+            BenchmarkDispatchPlan::from_job(&snapshot, &test_policy()),
             Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(_))
         ));
     }
@@ -595,18 +599,13 @@ fn media_analysis_plan_reads_opensmile_feature_set() {
         BTreeMap::new(),
     );
 
-    // Pin memory_tier so resolved_memory_tier() does not call
-    // MemoryTier::detect() (which reads live host RAM and is not
-    // mockable). The plan's `worker_bootstrap` is derived from
-    // the resolved tier; without pinning, this assertion shifts
-    // between dev machines (Large/Fleet → Profile) and small CI
-    // runners (Small → Task). The expected kernel plan derives from this
-    // same explicit configuration.
-    let cfg = ServerConfig {
-        memory_tier: Some(crate::types::runtime::MemoryTierKind::Large),
-        ..Default::default()
-    };
-    let plan = MediaAnalysisDispatchPlan::from_job(&snapshot, &cfg).expect("media analysis plan");
+    // The plan's `worker_bootstrap` is derived from the host policy, which
+    // the plan takes as an argument rather than reading from the machine, so
+    // the assertion is the same on every host. The expected kernel plan
+    // derives from this same policy.
+    let policy = test_policy();
+    let plan =
+        MediaAnalysisDispatchPlan::from_job(&snapshot, &policy).expect("media analysis plan");
 
     assert_eq!(
         plan,
@@ -614,7 +613,7 @@ fn media_analysis_plan_reads_opensmile_feature_set() {
             kernel_plan: CommandKernelPlan::for_command_with_policy(
                 ReleasedCommand::Opensmile,
                 1,
-                &crate::host_policy::HostExecutionPolicy::from_server_config(&cfg),
+                &policy,
             ),
             feature_set: "ComParE_2016".into(),
         }
@@ -637,7 +636,7 @@ fn standalone_diarize_plan_carries_backend_and_required_cache_policy() {
         BTreeMap::new(),
     );
 
-    let plan = MediaAnalysisDispatchPlan::from_job(&snapshot, &ServerConfig::default())
+    let plan = MediaAnalysisDispatchPlan::from_job(&snapshot, &test_policy())
         .expect("standalone diarize plan");
     let MediaAnalysisDispatchPlan::Diarize {
         backend,
@@ -666,10 +665,10 @@ async fn an_align_job_with_whisper_utr_plans_one_gpu_worker() {
         CommandOptions::Align(options),
         BTreeMap::new(),
     );
-    let plan = FaDispatchPlan::from_job(&snapshot, &ServerConfig::default()).expect("align plan");
+    let plan = FaDispatchPlan::from_job(&snapshot, &test_policy()).expect("align plan");
     let gpu = plan.gpu_models();
 
-    let mut config = crate::worker::pool::PoolConfig::default();
+    let mut config = crate::worker::pool::PoolConfig::for_tests();
     config.runtime.bootstrap_mode = crate::worker::WorkerBootstrapMode::Profile;
     let pool = crate::worker::pool::WorkerPool::new(config);
     let english = crate::api::WorkerLanguage::from(LanguageCode3::eng());

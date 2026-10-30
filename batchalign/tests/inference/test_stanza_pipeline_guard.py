@@ -76,7 +76,13 @@ def _request() -> BatchInferRequest:
         task="morphosyntax",
         lang="eng",
         items=[
-            {"words": ["hello"], "terminator": ".", "special_forms": [], "lang": "eng"}
+            {
+                "words": ["hello"],
+                "terminator": ".",
+                "special_forms": [],
+                "runs": [1],
+                "lang": "eng",
+            }
         ],
     )
 

@@ -14,16 +14,11 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn option_align_wor_controls_tier_presence() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_audio_fixtures(jobs.state_dir()) else {
-        return;
-    };
+    let fixtures = prepare_audio_fixtures(jobs.state_dir());
 
     let out_include = jobs.state_dir().join("wor_include_out.cha");
     let (info_a, outputs_a) = jobs
@@ -83,16 +78,11 @@ async fn option_align_wor_controls_tier_presence() {
 
 #[tokio::test]
 async fn option_align_fa_engine_produces_different_timing() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_audio_fixtures(jobs.state_dir()) else {
-        return;
-    };
+    let fixtures = prepare_audio_fixtures(jobs.state_dir());
 
     let out_w2v = jobs.state_dir().join("fa_w2v_out.cha");
     let (info_a, outputs_a) = jobs
@@ -142,18 +132,11 @@ async fn option_align_fa_engine_produces_different_timing() {
 
 #[tokio::test]
 async fn option_align_media_dir_recovers_audio_outside_adjacency() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) =
-        prepare_align_media_dir_job(jobs.state_dir(), "align_media_dir_recovers_audio")
-    else {
-        return;
-    };
+    let fixture = prepare_align_media_dir_job(jobs.state_dir(), "align_media_dir_recovers_audio");
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -177,18 +160,11 @@ async fn option_align_media_dir_recovers_audio_outside_adjacency() {
 
 #[tokio::test]
 async fn option_align_without_media_dir_fails_when_audio_is_relocated() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixture) =
-        prepare_align_media_dir_job(jobs.state_dir(), "align_without_media_dir_fails")
-    else {
-        return;
-    };
+    let fixture = prepare_align_media_dir_job(jobs.state_dir(), "align_without_media_dir_fails");
 
     let (info, _outputs) = jobs
         .submit_paths_job(

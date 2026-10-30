@@ -12,18 +12,14 @@ use batchalign::worker::InferTask;
 /// separate workers for each task.
 #[tokio::test]
 async fn stanza_profile_groups_morphotag_and_utseg() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     if !server.has_infer_task(InferTask::Utseg) {
-        eprintln!("SKIP: Server does not support utseg infer");
-        return;
+        panic!("PREREQUISITE MISSING: Server does not support utseg infer")
     }
 
     let input_dir = server.state_dir().join("profile_stanza_inputs");

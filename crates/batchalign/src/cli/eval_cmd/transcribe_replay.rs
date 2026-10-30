@@ -87,8 +87,9 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
 
     let layout = RuntimeLayout::from_env();
     let config = load_config_from_layout(&layout, None)?;
+    let host = crate::host_facts::HostSnapshot::read(&config)?;
     let workers = prepare_workers(
-        build_direct_pool_config(&config, false, false, layout.state_dir()),
+        build_direct_pool_config(&config, &host, layout.state_dir()),
         RegistryDiscovery::Ignore,
     )
     .await

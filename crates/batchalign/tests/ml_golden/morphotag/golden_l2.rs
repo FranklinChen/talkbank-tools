@@ -77,7 +77,7 @@ fn assert_no_placeholder(output: &str) {
 
 #[tokio::test]
 async fn golden_l2_morphotag_eng_spa() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
@@ -85,10 +85,7 @@ async fn golden_l2_morphotag_eng_spa() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -99,7 +96,7 @@ async fn golden_l2_morphotag_eng_spa() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_eng_spa", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_has(output, "tienda@s:spa", "noun|tienda");
     assert_mor_has(output, "muy@s:spa", "adv|");
@@ -109,7 +106,7 @@ async fn golden_l2_morphotag_eng_spa() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_deu_eng() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "deu"),
@@ -117,10 +114,7 @@ async fn golden_l2_morphotag_deu_eng() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -131,7 +125,7 @@ async fn golden_l2_morphotag_deu_eng() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_deu_eng", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_has(output, "film@s", "noun|film");
     assert_mor_has(output, "drug@s", "noun|drug");
@@ -140,7 +134,7 @@ async fn golden_l2_morphotag_deu_eng() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_eng_contractions() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "deu"),
@@ -148,10 +142,7 @@ async fn golden_l2_morphotag_eng_contractions() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -162,7 +153,7 @@ async fn golden_l2_morphotag_eng_contractions() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_eng_contractions", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_mor_has(output, "it's@s:eng", "~");
     assert_mor_lacks(output, "it's@s:eng", "L2|xxx");
     assert_mor_has(output, "don't@s:eng", "~");
@@ -174,7 +165,7 @@ async fn golden_l2_morphotag_eng_contractions() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_phrasal_verbs() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "deu"),
@@ -182,10 +173,7 @@ async fn golden_l2_morphotag_phrasal_verbs() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -196,7 +184,7 @@ async fn golden_l2_morphotag_phrasal_verbs() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_phrasal_verbs", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     for (surface, verb) in [
         ("wake@s up@s", "verb|wake"),
@@ -214,7 +202,7 @@ async fn golden_l2_morphotag_phrasal_verbs() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_off_produces_l2_xxx() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
@@ -222,10 +210,7 @@ async fn golden_l2_morphotag_off_produces_l2_xxx() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -236,7 +221,7 @@ async fn golden_l2_morphotag_off_produces_l2_xxx() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_off", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert!(
         output.contains("L2|xxx"),
         "with L2 morphotag off every @s word keeps L2|xxx; the output is:\n{output}"
@@ -246,7 +231,7 @@ async fn golden_l2_morphotag_off_produces_l2_xxx() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_cat_spa() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "cat"),
@@ -254,10 +239,7 @@ async fn golden_l2_morphotag_cat_spa() {
         ],
         "Direct session does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -268,7 +250,7 @@ async fn golden_l2_morphotag_cat_spa() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_cat_spa", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_lacks(output, "cole@s", "L2|xxx");
     assert_mor_lacks(output, "bonita@s", "L2|xxx");
@@ -277,7 +259,7 @@ async fn golden_l2_morphotag_cat_spa() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_dan_eng() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "dan"),
@@ -285,10 +267,7 @@ async fn golden_l2_morphotag_dan_eng() {
         ],
         "Direct session does not support morphotag infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -299,7 +278,7 @@ async fn golden_l2_morphotag_dan_eng() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_dan_eng", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_lacks(output, "computer@s", "L2|xxx");
     assert_mor_lacks(output, "happy@s", "L2|xxx");
@@ -308,7 +287,7 @@ async fn golden_l2_morphotag_dan_eng() {
 
 #[tokio::test]
 async fn golden_l2_morphotag_fra_nld() {
-    let Some(jobs) = require_direct_session_warmed_many(
+    let jobs = require_direct_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "fra"),
@@ -316,10 +295,7 @@ async fn golden_l2_morphotag_fra_nld() {
         ],
         "Direct session does not support morphotag infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let (info, results) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
@@ -330,7 +306,7 @@ async fn golden_l2_morphotag_fra_nld() {
         )
         .await;
     assert_completed_without_errors("l2_morphotag_fra_nld", &info, &results);
-    let output = &results[0].content.as_text().expect("text command result");
+    let output = results[0].content.as_text().expect("text command result");
     assert_no_placeholder(output);
     assert_mor_lacks(output, "opa@s", "L2|xxx");
     assert_mor_lacks(output, "ja@s:nld", "L2|xxx");

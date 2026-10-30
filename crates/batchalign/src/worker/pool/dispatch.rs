@@ -763,7 +763,7 @@ mod tcp_checkout_tests {
     /// A pool holding one TCP handle for morphotag's key, as registry
     /// discovery integrates one, plus that key and command options.
     async fn pool_with_one_tcp_handle(port: u16) -> (WorkerPool, WorkerKey, CommandOptions) {
-        let mut config = super::super::PoolConfig::default();
+        let mut config = super::super::PoolConfig::for_tests();
         config.runtime.bootstrap_mode = WorkerBootstrapMode::Profile;
         config.ensure_task_timeout = Some(crate::api::PositiveSeconds::literal::<5>());
         let pool = WorkerPool::new(config);
@@ -954,7 +954,7 @@ mod tests {
             max_workers_per_key: crate::host_facts::PerProfile::uniform(1),
             max_total_workers: 1,
             checkout_wait_report_interval: Some(crate::api::PositiveSeconds::literal::<1>()),
-            ..Default::default()
+            ..super::super::PoolConfig::for_tests()
         }));
         let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
         let lang = WorkerLanguage::from(LanguageCode3::eng());
@@ -1081,12 +1081,7 @@ mod tests {
                 io: 1,
             },
             max_total_workers: 64, // not the binding constraint here
-            // Disable the CPU-loadavg gate so this test isolates
-            // per-profile-cap behavior. CI runners are CPU-saturated
-            // by parallel cargo-test workers and would otherwise
-            // reject every claim with CpuSaturated.
-            cpu_gate_threshold_override: Some(f64::INFINITY),
-            ..Default::default()
+            ..super::super::PoolConfig::for_tests()
         });
         let lang = WorkerLanguage::from(LanguageCode3::eng());
 

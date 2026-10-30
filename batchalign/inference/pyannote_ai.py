@@ -103,7 +103,9 @@ def resolve_pyannote_ai_api_key(
         if value:
             return value
 
-    path = config_path or Path.home() / ".batchalign.ini"
+    from batchalign.config import batchalign_home
+
+    path = config_path or batchalign_home() / ".batchalign.ini"
     parser = configparser.ConfigParser()
     try:
         loaded = parser.read(path)

@@ -74,7 +74,7 @@ impl SqliteBackend {
 fn default_cache_dir() -> Result<PathBuf, CacheError> {
     default_cache_dir_from(
         crate::runtime_paths::analysis_cache_dir_override_from_env(),
-        dirs::cache_dir(),
+        crate::runtime_paths::BatchalignHome::from_env().cache_base(),
     )
 }
 

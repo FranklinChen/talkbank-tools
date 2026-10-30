@@ -249,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn mark_file_done_records_result() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,
@@ -287,7 +287,7 @@ mod tests {
     #[tokio::test]
     async fn mark_file_retry_pending_sets_deadline() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::new(
+        let store = JobStore::for_tests(
             test_config(),
             None,
             tx,

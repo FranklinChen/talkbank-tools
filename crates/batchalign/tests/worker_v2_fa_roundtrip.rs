@@ -19,8 +19,6 @@
 //!
 //! That proves the seam is already coherent before any live dispatch wiring.
 
-use crate::common;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,7 +33,6 @@ use batchalign::worker::fa_result_v2::read_fa_payload;
 use batchalign::worker::request_builder_v2::{
     ForcedAlignmentBuildInputV2, PreparedFaRequestIdsV2, build_forced_alignment_request_v2,
 };
-use common::resolve_python_for_module;
 use tokio::process::Command;
 
 /// Return the repo root for cross-language staged roundtrip fixtures.
@@ -83,10 +80,9 @@ fn make_words(texts: &[&str]) -> Vec<FaWord> {
 
 #[tokio::test]
 async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
-    let Some(python) = resolve_python_for_module("batchalign.worker._fa_v2") else {
-        eprintln!("SKIP: Python with batchalign.worker._fa_v2 not available");
-        return;
-    };
+    let python = crate::prerequisite::PythonWorker::require()
+        .require_module("batchalign.worker._fa_v2")
+        .interpreter();
     MediaTool::require_pinned_release().expect("the pinned ffmpeg release is on PATH");
 
     let repo_root = repo_root();

@@ -2,8 +2,9 @@
 //!
 //! Responsibilities of this module, deliberately narrow:
 //!
-//! - Resolve `BATCHALIGN3_DRIFT_CORPUS_DIR` to a staging root (or return
-//!   `None` for SKIP).
+//! - Resolve `BATCHALIGN3_DRIFT_CORPUS_DIR` to a staging root, failing the
+//!   test when it is unset or missing (the tests are `#[ignore]`d, so only
+//!   an explicit `--ignored` run asks for it).
 //! - Walk one subdirectory (`micase/`, `samtale/`, `biling/`, `rhd/`) and
 //!   collect its `.cha` files together with any adjacent media file.
 //! - Wrap CHAT filenames in a [`CorpusFileName`] newtype so downstream
@@ -47,24 +48,24 @@ impl fmt::Display for CorpusFileName {
     }
 }
 
-/// Return the drift-corpus staging directory if `BATCHALIGN3_DRIFT_CORPUS_DIR`
-/// is set and the directory exists. Returns `None` (for SKIP) otherwise.
-pub fn require_drift_corpus_dir() -> Option<PathBuf> {
-    let raw = std::env::var("BATCHALIGN3_DRIFT_CORPUS_DIR").ok()?;
+/// The drift-corpus staging directory `BATCHALIGN3_DRIFT_CORPUS_DIR` names;
+/// fails the test when it is unset or not a directory.
+pub fn require_drift_corpus_dir() -> PathBuf {
+    let raw = std::env::var("BATCHALIGN3_DRIFT_CORPUS_DIR").unwrap_or_else(|_| {
+        panic!("PREREQUISITE MISSING: set BATCHALIGN3_DRIFT_CORPUS_DIR to the private drift corpus")
+    });
     let dir = PathBuf::from(raw);
-    if !dir.is_dir() {
-        eprintln!(
-            "SKIP: BATCHALIGN3_DRIFT_CORPUS_DIR={} does not point to an existing directory",
-            dir.display()
-        );
-        return None;
-    }
-    Some(dir)
+    assert!(
+        dir.is_dir(),
+        "PREREQUISITE MISSING: BATCHALIGN3_DRIFT_CORPUS_DIR={} is not a directory",
+        dir.display()
+    );
+    dir
 }
 
 /// One staged file in the drift corpus. `cha_path` always exists; `media_path`
 /// may be absent if the contributor could not stage it, in which case the
-/// test logs a one-line SKIP for that file and moves on.
+/// test fails naming the file (`drift_runner::run_one_file`).
 pub struct StagedDriftFile {
     pub cha_path: PathBuf,
     pub media_path: Option<PathBuf>,

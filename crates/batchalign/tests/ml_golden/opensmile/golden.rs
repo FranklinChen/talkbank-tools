@@ -5,20 +5,14 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn golden_opensmile_eng() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Opensmile,
         ReleasedCommand::Opensmile,
         "eng",
         "Direct session does not support OpenSMILE infer",
     )
-    .await
-    else {
-        return;
-    };
-    let Some(fixture) = prepare_opensmile_fixture_job(session.state_dir(), "opensmile_direct_eng")
-    else {
-        return;
-    };
+    .await;
+    let fixture = prepare_opensmile_fixture_job(session.state_dir(), "opensmile_direct_eng");
 
     let submission = JobSubmission {
         command: ReleasedCommand::Opensmile,

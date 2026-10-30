@@ -565,21 +565,18 @@ fn resolve_device_flags_for_daemon(
     config: &ServerConfig,
     cli_force_cpu: bool,
     cli_allow_mps: bool,
-) -> DaemonDeviceFlags {
-    let mut cfg = config.clone();
-    if cli_force_cpu {
-        cfg.force_cpu = Some(true);
-    }
-    if cli_allow_mps {
-        cfg.allow_mps = Some(true);
-    }
-    let effective = crate::host_facts::EffectiveConfig::resolve_from_server_config(&cfg);
-    DaemonDeviceFlags {
+) -> Result<DaemonDeviceFlags, crate::host_memory::HostUnreadable> {
+    let cfg = config
+        .clone()
+        .with_device_flags(cli_force_cpu, cli_allow_mps);
+    let host = crate::host_facts::HostSnapshot::read(&cfg)?;
+    let effective = host.effective();
+    Ok(DaemonDeviceFlags {
         cli_force_cpu,
         cli_allow_mps,
         resolved_force_cpu: effective.force_cpu,
         resolved_allow_mps: effective.allow_mps,
-    }
+    })
 }
 
 async fn ensure_daemon_locked(
@@ -601,7 +598,7 @@ async fn ensure_daemon_locked(
     // when start_daemon writes a new DaemonInfo. Resolving here keeps
     // both consistent.
     let device_flags =
-        resolve_device_flags_for_daemon(config, request.force_cpu, request.allow_mps);
+        resolve_device_flags_for_daemon(config, request.force_cpu, request.allow_mps)?;
     let start = DaemonStart {
         port: config.port,
         verbose: config.verbose,
@@ -1421,6 +1418,22 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 /// when a job was running, skipping that teardown.
 pub(crate) const GRACEFUL_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long a stop waits for SIGKILL to take effect after the graceful
+/// deadline passed.
+const KILL_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The longest stopping one server process can take: its graceful deadline,
+/// then the kill and its settle.
+///
+/// Public for the same reason as [`startup_budget`]: it is the floor for a
+/// harness that runs `serve stop` as a subprocess and kills it on a timeout.
+/// The test suite's 10 s `serve stop` budget was below this deadline, so a
+/// server that took eleven seconds to retire its workers on a busy machine
+/// was killed by the harness mid-shutdown and the test failed.
+pub fn stop_budget_per_process() -> Duration {
+    GRACEFUL_STOP_DEADLINE + KILL_SETTLE
+}
+
 /// How long a stop waits silently before saying it is still waiting.
 const QUIET_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -1461,7 +1474,7 @@ pub(crate) fn stop_server_process(pid: u32) -> bool {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
         // Brief wait for SIGKILL to take effect.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(KILL_SETTLE);
         true
     }
     #[cfg(not(unix))]
@@ -1750,7 +1763,8 @@ mod tests {
     fn resolve_force_cpu_for_daemon_cli_override_always_resolves_true() {
         // The default config has force_cpu = None. The CLI flag = true should
         // still resolve to true on every host.
-        let resolved = resolve_device_flags_for_daemon(&ServerConfig::default(), true, false);
+        let resolved = resolve_device_flags_for_daemon(&ServerConfig::default(), true, false)
+            .expect("the test host reports its memory");
         assert!(
             resolved.resolved_force_cpu,
             "CLI --force-cpu must resolve to true regardless of host facts"

@@ -61,7 +61,7 @@ def _no_hub_access(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         asr_loading,
         "resolve_pinned_snapshot",
-        lambda model_id, commit: ResolvedSnapshot(
+        lambda model_id, commit, files: ResolvedSnapshot(
             path=_FAKE_SNAPSHOT_PATH, commit=commit or _FAKE_SNAPSHOT_COMMIT
         ),
     )

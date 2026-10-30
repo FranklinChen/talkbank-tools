@@ -48,6 +48,7 @@ use super::{
 };
 
 mod scoped;
+pub(super) use scoped::ExpansionRefusal;
 use scoped::{rebuild_annotated_word, rebuild_replaced_word};
 
 /// Mutable state threaded through the retokenize AST walk.
@@ -69,9 +70,50 @@ pub(super) struct RetokenizeContext<'a> {
     /// Current position in the MOR list.
     pub mor_cursor: usize,
     /// Warnings accumulated during retokenization.
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<super::refusal::RebuildRefusal>,
     /// Tracks which token indices have already produced a word node.
     pub emitted_tokens: HashSet<usize>,
+}
+
+impl RetokenizeContext<'_> {
+    /// The token that merges the word before the walk's position into the
+    /// word after it, if one does: the previous word's last token is the next
+    /// word's first.
+    ///
+    /// Derived from the mapping and `word_counter` rather than stored beside
+    /// them, so it cannot drift from either.
+    fn open_merge(&self) -> Option<usize> {
+        let next = self.word_counter;
+        let previous = next.checked_sub(1)?;
+        let last = *self.mapping.tokens_for_word(previous).last()?;
+        (self.mapping.tokens_for_word(next).first() == Some(&last)).then_some(last)
+    }
+
+    /// The walk is at content that is not one of the words being retokenized:
+    /// a retraced group, a pause, an event, a bracket opening or closing.
+    ///
+    /// A merged token is written where its first word stood and its later
+    /// words are dropped, so a token open across this content would move the
+    /// content after the merged word. That reordered speech in a real Cantonese
+    /// transcript (synthetic shape: `a <b c> [/] b c d` with one token over
+    /// `abcd` came out as `abcd <b c> [/]`), the retraced words now after their
+    /// own correction, and where that left the retrace last, E370. The rewrite is
+    /// refused instead, and the utterance keeps its transcript.
+    ///
+    /// Two edges can meet at one position (a container closing where the next
+    /// opens, or nested containers opening together); the crossing there is
+    /// reported once.
+    fn at_boundary(&mut self) {
+        if let Some(token) = self.open_merge() {
+            let crossing = super::refusal::RebuildRefusal::MergeCrossesContent {
+                token,
+                first_word: self.word_counter - 1,
+            };
+            if self.diagnostics.last() != Some(&crossing) {
+                self.diagnostics.push(crossing);
+            }
+        }
+    }
 }
 
 /// Whether `[e]`-annotated material is dropped from the `%mor` word list.
@@ -88,11 +130,11 @@ pub(super) struct RetokenizeContext<'a> {
 /// rebuilt 2; `<dog bone> [e] cat .` extracted 1 and rebuilt 3. Every `%mor`
 /// entry after the divergence landed on the wrong word. Pinned by
 /// `word_counter_matches_the_extractor_on_an_excluded_word` below.
-fn excluded_from_mor(annotations: &[ContentAnnotation]) -> bool {
+pub(super) fn excluded_from_mor(annotations: &[ContentAnnotation]) -> bool {
     annotations_have_alignment_ignore(annotations)
 }
 
-fn should_retokenize(word: &Word) -> bool {
+pub(super) fn should_retokenize(word: &Word) -> bool {
     counts_for_tier(word, TierDomain::Mor)
 }
 
@@ -103,6 +145,9 @@ pub(super) fn rebuild_content(
     new_content: &mut Vec<UtteranceContent>,
 ) {
     for item in old_content {
+        if !matches!(&item, UtteranceContent::Word(word) if should_retokenize(word)) {
+            ctx.at_boundary();
+        }
         match item {
             UtteranceContent::Word(word) => {
                 if should_retokenize(&word) {
@@ -120,10 +165,7 @@ pub(super) fn rebuild_content(
                 )));
             }
             UtteranceContent::Group(mut group) => {
-                let old_bracketed = group.content.content.take();
-                let mut new_bracketed = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed, ctx, &mut new_bracketed);
-                group.content.content = BracketedItems::new(new_bracketed);
+                rebuild_nested(&mut group.content.content, ctx);
                 new_content.push(UtteranceContent::Group(group));
             }
             UtteranceContent::AnnotatedGroup(mut annotated) => {
@@ -132,32 +174,20 @@ pub(super) fn rebuild_content(
                 // there. chatter's `descent` returns `Excluded` for exactly
                 // this case.
                 if !excluded_from_mor(&annotated.scoped_annotations) {
-                    let old_bracketed = annotated.inner.content.content.take();
-                    let mut new_bracketed = Vec::with_capacity(old_bracketed.len());
-                    rebuild_bracketed_content(old_bracketed, ctx, &mut new_bracketed);
-                    annotated.inner.content.content = BracketedItems::new(new_bracketed);
+                    rebuild_nested(&mut annotated.inner.content.content, ctx);
                 }
                 new_content.push(UtteranceContent::AnnotatedGroup(annotated));
             }
             UtteranceContent::PhoGroup(mut pho) => {
-                let old_bracketed = pho.content.content.take();
-                let mut new_bracketed = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed, ctx, &mut new_bracketed);
-                pho.content.content = BracketedItems::new(new_bracketed);
+                rebuild_nested(&mut pho.content.content, ctx);
                 new_content.push(UtteranceContent::PhoGroup(pho));
             }
             UtteranceContent::SinGroup(mut sin) => {
-                let old_bracketed = sin.content.content.take();
-                let mut new_bracketed = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed, ctx, &mut new_bracketed);
-                sin.content.content = BracketedItems::new(new_bracketed);
+                rebuild_nested(&mut sin.content.content, ctx);
                 new_content.push(UtteranceContent::SinGroup(sin));
             }
             UtteranceContent::Quotation(mut quot) => {
-                let old_bracketed = quot.content.content.take();
-                let mut new_bracketed = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed, ctx, &mut new_bracketed);
-                quot.content.content = BracketedItems::new(new_bracketed);
+                rebuild_nested(&mut quot.content.content, ctx);
                 new_content.push(UtteranceContent::Quotation(quot));
             }
             // A CONTAINER, not a passthrough, and the distinction is
@@ -173,10 +203,7 @@ pub(super) fn rebuild_content(
                 // there. chatter's `descent` returns `Excluded` for exactly
                 // this case.
                 if !excluded_from_mor(&annotated.scoped_annotations) {
-                    let old_bracketed = annotated.inner.content.content.take();
-                    let mut new_bracketed = Vec::with_capacity(old_bracketed.len());
-                    rebuild_bracketed_content(old_bracketed, ctx, &mut new_bracketed);
-                    annotated.inner.content.content = BracketedItems::new(new_bracketed);
+                    rebuild_nested(&mut annotated.inner.content.content, ctx);
                 }
                 new_content.push(UtteranceContent::AnnotatedQuotation(annotated));
             }
@@ -228,9 +255,8 @@ fn handle_word_retokenize(
     let token_indices = match ctx.mapping.get_nonempty(orig_idx) {
         Some(indices) => indices.to_vec(),
         None => {
-            ctx.diagnostics.push(format!(
-                "word {orig_idx} has no character-level match in Stanza tokens; keeping original"
-            ));
+            ctx.diagnostics
+                .push(super::refusal::RebuildRefusal::WordUnmapped { word: orig_idx });
             if ctx.mor_cursor < ctx.mors.len() {
                 ctx.mor_cursor += 1;
             }
@@ -285,12 +311,29 @@ fn handle_word_retokenize(
     }
 }
 
+/// Rebuild one container's items in place.
+///
+/// The container's edges are other main-tier content. Its opening edge was
+/// checked before descending (the container is not a retokenized word); this
+/// checks its closing edge, so every container on either walk checks both
+/// edges and none can forget the second.
+fn rebuild_nested(items: &mut BracketedItems, ctx: &mut RetokenizeContext<'_>) {
+    let old_items = items.take();
+    let mut new_items = Vec::with_capacity(old_items.len());
+    rebuild_bracketed_content(old_items, ctx, &mut new_items);
+    *items = BracketedItems::new(new_items);
+    ctx.at_boundary();
+}
+
 fn rebuild_bracketed_content(
     old_items: Vec<BracketedItem>,
     ctx: &mut RetokenizeContext<'_>,
     new_items: &mut Vec<BracketedItem>,
 ) {
     for item in old_items {
+        if !matches!(&item, BracketedItem::Word(word) if should_retokenize(word)) {
+            ctx.at_boundary();
+        }
         match item {
             BracketedItem::Word(word) => {
                 if should_retokenize(&word) {
@@ -308,41 +351,26 @@ fn rebuild_bracketed_content(
                 )));
             }
             BracketedItem::Group(mut group) => {
-                let old_bracketed = BracketedItems::new(group.content.content.take());
-                let mut sub_items = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed.into_vec(), ctx, &mut sub_items);
-                group.content.content = BracketedItems::new(sub_items);
+                rebuild_nested(&mut group.content.content, ctx);
                 new_items.push(BracketedItem::Group(group));
             }
             BracketedItem::AnnotatedGroup(mut annotated) => {
                 // Excluded: see the utterance-level twin above.
                 if !excluded_from_mor(&annotated.scoped_annotations) {
-                    let old_bracketed = annotated.inner.content.content.take();
-                    let mut sub_items = Vec::with_capacity(old_bracketed.len());
-                    rebuild_bracketed_content(old_bracketed, ctx, &mut sub_items);
-                    annotated.inner.content.content = BracketedItems::new(sub_items);
+                    rebuild_nested(&mut annotated.inner.content.content, ctx);
                 }
                 new_items.push(BracketedItem::AnnotatedGroup(annotated));
             }
             BracketedItem::PhoGroup(mut pho) => {
-                let old_bracketed = BracketedItems::new(pho.content.content.take());
-                let mut sub_items = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed.into_vec(), ctx, &mut sub_items);
-                pho.content.content = BracketedItems::new(sub_items);
+                rebuild_nested(&mut pho.content.content, ctx);
                 new_items.push(BracketedItem::PhoGroup(pho));
             }
             BracketedItem::SinGroup(mut sin) => {
-                let old_bracketed = BracketedItems::new(sin.content.content.take());
-                let mut sub_items = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed.into_vec(), ctx, &mut sub_items);
-                sin.content.content = BracketedItems::new(sub_items);
+                rebuild_nested(&mut sin.content.content, ctx);
                 new_items.push(BracketedItem::SinGroup(sin));
             }
             BracketedItem::Quotation(mut quot) => {
-                let old_bracketed = BracketedItems::new(quot.content.content.take());
-                let mut sub_items = Vec::with_capacity(old_bracketed.len());
-                rebuild_bracketed_content(old_bracketed.into_vec(), ctx, &mut sub_items);
-                quot.content.content = BracketedItems::new(sub_items);
+                rebuild_nested(&mut quot.content.content, ctx);
                 new_items.push(BracketedItem::Quotation(quot));
             }
             // Containers, both of them, for the same reason the utterance-level
@@ -353,10 +381,7 @@ fn rebuild_bracketed_content(
             BracketedItem::AnnotatedQuotation(mut annotated) => {
                 // Excluded: see the utterance-level twin above.
                 if !excluded_from_mor(&annotated.scoped_annotations) {
-                    let old_bracketed = annotated.inner.content.content.take();
-                    let mut sub_items = Vec::with_capacity(old_bracketed.len());
-                    rebuild_bracketed_content(old_bracketed, ctx, &mut sub_items);
-                    annotated.inner.content.content = BracketedItems::new(sub_items);
+                    rebuild_nested(&mut annotated.inner.content.content, ctx);
                 }
                 new_items.push(BracketedItem::AnnotatedQuotation(annotated));
             }
@@ -400,9 +425,8 @@ fn handle_bracketed_word_retokenize(
     let token_indices = match ctx.mapping.get_nonempty(orig_idx) {
         Some(indices) => indices.to_vec(),
         None => {
-            ctx.diagnostics.push(format!(
-                "word {orig_idx} has no character-level match in Stanza tokens; keeping original"
-            ));
+            ctx.diagnostics
+                .push(super::refusal::RebuildRefusal::WordUnmapped { word: orig_idx });
             if ctx.mor_cursor < ctx.mors.len() {
                 ctx.mor_cursor += 1;
             }
@@ -507,7 +531,8 @@ mod tests {
             })
             .expect("one utterance");
 
-        let mapping = crate::retokenize::build_word_token_mapping(&[], &[]);
+        let mapping = crate::retokenize::build_word_token_mapping(&[], &[])
+            .expect("no words map onto no tokens");
         let mut ctx = RetokenizeContext {
             parser: &parser,
             mapping: &mapping,
@@ -531,6 +556,95 @@ mod tests {
              wrong word.",
             ctx.word_counter
         );
+    }
+
+    /// Rebuild `body` against `tokens` through the real extractor, mapping
+    /// and walk, and return what the walk refused.
+    fn rebuild_diagnostics(
+        body: &str,
+        tokens: &[&str],
+    ) -> Vec<super::super::refusal::RebuildRefusal> {
+        let source = format!("{HEADER}*CHI:\t{body}\n@End\n");
+        let parser = talkbank_parser::TreeSitterParser::new().expect("parser");
+        let chat_file = crate::parse_and_validate_with_parser(
+            &parser,
+            &source,
+            talkbank_model::ParseValidateOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("fixture {body:?} must parse: {e:?}"));
+        let words = extract_words(&chat_file, PositionalDomain::Mor)
+            .remove(0)
+            .words;
+        let tokens: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
+        let mapping = crate::retokenize::build_word_token_mapping(&words, &tokens)
+            .unwrap_or_else(|e| panic!("{tokens:?} must spell {body:?}: {e}"));
+        let mut utterance = chat_file
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                talkbank_model::model::Line::Utterance(u) => Some(u.clone()),
+                _ => None,
+            })
+            .expect("one utterance");
+        let mut ctx = RetokenizeContext {
+            parser: &parser,
+            mapping: &mapping,
+            stanza_tokens: &tokens,
+            original_words: &words,
+            mors: &[],
+            expected_terminator: Some("."),
+            word_counter: 0,
+            mor_cursor: 0,
+            diagnostics: Vec::new(),
+            emitted_tokens: std::collections::HashSet::new(),
+        };
+        let old = utterance.main.content.content.take();
+        let mut new = Vec::with_capacity(old.len());
+        rebuild_content(old, &mut ctx, &mut new);
+        ctx.diagnostics
+    }
+
+    /// A merged token may join only words with nothing between them.
+    ///
+    /// The retraced group is not in the word list sent to the model, so the
+    /// model sees `b` and the corrected `c` as neighbours and can join them.
+    /// Writing that token where `b` stood would put the retrace after its own
+    /// correction. Each crossing shape is refused; merges of true neighbours,
+    /// on either side of the same retrace, are not.
+    #[test]
+    fn a_merged_token_never_crosses_other_main_tier_content() {
+        for (body, tokens) in [
+            // Across a retraced group: the Cantonese report's shape.
+            ("a b <c d> [/] c d e .", &["a", "bc", "d", "e"][..]),
+            // Across a single retraced word, a pause, an event.
+            ("a b [/] b c .", &["ab", "c"][..]),
+            ("a (.) b .", &["ab"][..]),
+            ("a &=laughs b .", &["ab"][..]),
+            // Into and out of a group's brackets.
+            ("a <b c> [!] d .", &["ab", "c", "d"][..]),
+            ("a <b c> [!] d .", &["a", "b", "cd"][..]),
+        ] {
+            let refused = rebuild_diagnostics(body, tokens);
+            assert!(
+                refused.iter().any(|d| matches!(
+                    d,
+                    super::super::refusal::RebuildRefusal::MergeCrossesContent { .. }
+                )),
+                "{body:?} with {tokens:?} must be refused, got {refused:?}"
+            );
+        }
+        for (body, tokens) in [
+            ("a b <c d> [/] c d e .", &["ab", "cd", "e"][..]),
+            ("a b (.) c d .", &["ab", "cd"][..]),
+            // The corrected word and its neighbour, after a one-word retrace.
+            ("a b [/] b c .", &["a", "bc"][..]),
+        ] {
+            assert_eq!(
+                rebuild_diagnostics(body, tokens),
+                Vec::new(),
+                "{body:?} with {tokens:?} merges only neighbours"
+            );
+        }
     }
 
     #[test]

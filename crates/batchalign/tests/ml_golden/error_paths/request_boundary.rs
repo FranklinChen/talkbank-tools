@@ -7,14 +7,11 @@ use batchalign::worker::InferTask;
 /// deserialization and validation at the `/jobs` boundary, not command execution.
 #[tokio::test]
 async fn error_invalid_command_name() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let body = serde_json::json!({

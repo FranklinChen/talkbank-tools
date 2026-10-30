@@ -85,7 +85,9 @@ For migration purposes, separate:
 ### Narrowed or removed from runtime remap paths
 
 - Retokenize char-level DP fallback mapping path was removed, replaced by
-  deterministic interval/index mapping with length-aware monotonic fallback.
+  a deterministic span join over the normalized text; when the texts
+  diverge the utterance is refused and keeps its transcript (no positional
+  fallback).
 - FA response handling uses indexed word timings or deterministic token
   stitching in `fa/alignment.rs`: no DP.
 
@@ -456,11 +458,11 @@ Algorithmic migrations are now defended by:
   which fingerprints every `dp_align::align(...)` call site against an
   explicit allowlist so unintended DP-on-runtime regressions are caught
   in CI,
-- tracing instrumentation for mapping-mode divergence: the `warn!` at
-  `crates/batchalign-transform/src/retokenize.rs:75` (`"retokenize text
-  diverged; using length-aware monotonic fallback without DP"`) fires
-  whenever `build_word_token_mapping()` cannot use a deterministic
-  word-token mapping and falls back to length-aware monotonic.
+- tracing instrumentation for mapping divergence: the `warn!` in
+  `build_word_token_mapping()` (`crates/batchalign-transform/src/retokenize.rs`,
+  `"retokenize text diverged; refusing the utterance"`) fires whenever the
+  model's tokens do not spell the transcript's words, and the utterance is
+  reported rather than placed.
 
 That governance change is itself part of the migration: the codebase is less
 willing to accept "looks plausible on a few files" as evidence that an

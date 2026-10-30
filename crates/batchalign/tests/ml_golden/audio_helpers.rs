@@ -92,16 +92,11 @@ pub(crate) async fn transcribe_audio_clip(
     label: &str,
     allow_stanza_fallback: bool,
 ) {
-    let Some(session) =
-        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Asr, "Direct session does not support ASR infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_named_audio(jobs.state_dir(), audio_name, None) else {
-        return;
-    };
+    let fixtures = prepare_named_audio(jobs.state_dir(), audio_name, None);
 
     let out_dir = jobs.state_dir().join(format!("out_{label}"));
     std::fs::create_dir_all(&out_dir).expect("mkdir output dir");
@@ -141,16 +136,11 @@ pub(crate) async fn transcribe_audio_clip(
 }
 
 pub(crate) async fn align_audio_clip(audio_name: &str, chat_name: &str, lang: &str, label: &str) {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
 
-    let Some(fixtures) = prepare_named_audio(jobs.state_dir(), audio_name, Some(chat_name)) else {
-        return;
-    };
+    let fixtures = prepare_named_audio(jobs.state_dir(), audio_name, Some(chat_name));
 
     let out_dir = jobs.state_dir().join(format!("out_{label}"));
     std::fs::create_dir_all(&out_dir).expect("mkdir output dir");
@@ -193,10 +183,11 @@ pub(crate) async fn align_audio_clip(audio_name: &str, chat_name: &str, lang: &s
     assert_all_utterances_timed(output, label);
 }
 
-pub(crate) fn revai_available() -> bool {
-    if require_revai_key().is_none() {
-        eprintln!("SKIP: Rev.AI credentials not configured in env or ~/.batchalign.ini");
-        return false;
-    }
-    true
+/// Require Rev.AI credentials (env or `~/.batchalign.ini`): the suite is
+/// opt-in and needs them, so their absence fails the test.
+pub(crate) fn require_revai() {
+    assert!(
+        require_revai_key().is_some(),
+        "PREREQUISITE MISSING: Rev.AI credentials not configured in env or ~/.batchalign.ini"
+    );
 }

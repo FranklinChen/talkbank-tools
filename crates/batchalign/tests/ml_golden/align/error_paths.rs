@@ -53,11 +53,8 @@ fn write_missing_audio_chat(path: &std::path::Path) {
 
 #[tokio::test]
 async fn align_direct_missing_audio_fails_cleanly() {
-    let Some(session) =
-        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await
-    else {
-        return;
-    };
+    let session =
+        require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
 
     let input_path = session.state_dir().join("align_missing_audio.cha");
     let output_path = session.state_dir().join("align_missing_audio_out.cha");
@@ -75,11 +72,7 @@ async fn align_direct_missing_audio_fails_cleanly() {
 
 #[tokio::test]
 async fn align_server_missing_audio_fails_cleanly() {
-    let Some(server) =
-        require_live_server(InferTask::Fa, "live server does not support FA infer").await
-    else {
-        return;
-    };
+    let server = require_live_server(InferTask::Fa, "live server does not support FA infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let input_path = server.state_dir().join("align_server_missing_audio.cha");

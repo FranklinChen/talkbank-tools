@@ -5,19 +5,14 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn golden_avqi_eng_pair() {
-    let Some(session) = require_live_direct_warmed(
+    let session = require_live_direct_warmed(
         InferTask::Avqi,
         ReleasedCommand::Avqi,
         "eng",
         "Direct session does not support AVQI infer",
     )
-    .await
-    else {
-        return;
-    };
-    let Some(fixture) = prepare_avqi_fixture_job(session.state_dir(), "avqi_direct_eng") else {
-        return;
-    };
+    .await;
+    let fixture = prepare_avqi_fixture_job(session.state_dir(), "avqi_direct_eng");
 
     let submission = JobSubmission {
         command: ReleasedCommand::Avqi,

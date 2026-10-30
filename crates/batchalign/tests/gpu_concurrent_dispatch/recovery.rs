@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn next_dispatches_replace_a_dead_shared_worker_once() {
-    let python = require_python!();
+    let python = super::worker_python();
     let pool = Arc::new(test_pool(python));
     pool.dispatch_gpu_for_test(
         &GPU_PLAN,

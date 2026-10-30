@@ -22,8 +22,7 @@ fn invalid_input(msg: &str) -> CliError {
 /// is used as the gate for first-run setup: if missing, the CLI triggers
 /// interactive setup before processing commands (matching batchalign2 behavior).
 pub fn default_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".batchalign.ini")
+    crate::runtime_paths::BatchalignHome::from_env().config_ini()
 }
 
 /// True if `~/.batchalign.ini` exists on disk.

@@ -458,10 +458,10 @@ async fn plan_or_fail_files<Plan>(
     host: &DispatchHostContext,
     from_job: impl FnOnce(
         &RunnerJobSnapshot,
-        &crate::config::ServerConfig,
+        &crate::host_policy::HostExecutionPolicy,
     ) -> Result<Plan, super::dispatch::DispatchPlanRefusal>,
 ) -> Option<Plan> {
-    match from_job(job, host.config()) {
+    match from_job(job, &host.host_policy()) {
         Ok(plan) => Some(plan),
         Err(refusal) => {
             fail_files_for_refused_plan(job, host, &refusal).await;

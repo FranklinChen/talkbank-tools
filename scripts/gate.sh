@@ -13,6 +13,11 @@ make batchalign-ci-rust
 make batchalign-lint-python-source
 make batchalign-typecheck-python-source
 make batchalign-dev-workflow-test
+# The worker suite needs the development environment with a current
+# extension (its tests fail rather than skip without one), exactly as the
+# batchalign-worker-integration CI job builds it.
+make batchalign-develop
+make batchalign-test-worker-integration
 make batchalign-ipc-schema-check
 # Reuse the exact binary whose currency the preceding target established.
 BATCHALIGN_BIN="$PWD/target/debug/batchalign3" make batchalign-dashboard-schema-check

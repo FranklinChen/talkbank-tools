@@ -139,7 +139,8 @@ fn bug_009_level_pitch_separator_no_space_must_not_leak_into_stanza_payload() ->
         &primary,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
 
     // The utterance has alignable content (`Yes`), so it must produce
     // exactly one batch item.
@@ -205,7 +206,8 @@ fn bug_009_level_pitch_separator_in_long_utterance_with_bullet_must_not_leak() -
         &primary,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
 
     assert_eq!(
         collected.batch_items.len(),
@@ -667,7 +669,8 @@ fn a_code_switch_span_reaches_the_stanza_payload_as_its_own_language() -> TestRe
         &primary,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    );
+    )
+    .expect("the run walk agrees with extraction");
     assert_eq!(collected.batch_items.len(), 1, "one utterance, one item");
 
     let batch_item = collected.batch_items[0].item();
@@ -722,6 +725,7 @@ fn injection_rejects_response_cardinality_without_mutating_chat() -> TestResult 
             languages.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
+        .expect("the run walk agrees with extraction")
         .batch_items;
         assert_eq!(items.len(), 1);
         let responses = (0..count)
@@ -766,6 +770,7 @@ fn injection_rejects_stale_position_without_panicking() -> TestResult {
         languages.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
+    .expect("the run walk agrees with extraction")
     .batch_items;
     // The file changes after collection: its one utterance is gone, so the
     // collected position names a header or the end.

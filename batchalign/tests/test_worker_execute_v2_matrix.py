@@ -385,6 +385,7 @@ def _make_text_request(tmp_path: Path, task_name: TextTaskName) -> ExecuteReques
                         "words": ["I", "saw", "it"],
                         "terminator": ".",
                         "special_forms": [[None, None], [None, None], [None, None]],
+                        "runs": [3],
                         "lang": "eng",
                     }
                 ],

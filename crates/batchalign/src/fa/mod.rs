@@ -1183,7 +1183,7 @@ mod tests {
                 .join("inference-is-forbidden")
                 .to_string_lossy()
                 .into_owned(),
-            ..PoolConfig::default()
+            ..PoolConfig::for_tests()
         });
         let cache = UtteranceCache::sqlite(Some(dir.path().join("cache")))
             .await

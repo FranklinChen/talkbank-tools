@@ -9,7 +9,7 @@
 //!   the shared helpers in [`crate::common::drift_assertions`].
 //! - Aggregate per-file outcomes into a single readable panic message (via
 //!   [`assert_all_files_pass`]), prepending a 1-line summary header.
-//! - Enforce the "empty outcomes → SKIP" contract via [`skip_if_empty`] so
+//! - Fail on a file staged without media, so
 //!   missing-media runs never pass vacuously.
 //!
 //! Pure filesystem staging lives one layer down in
@@ -81,22 +81,21 @@ impl FileOutcome {
 }
 
 /// Run `batchalign3 align` on one staged file and evaluate the structural
-/// timing assertion against the output. Returns `None` when the file had to be
-/// skipped (missing media): caller logs the skip and moves on.
+/// timing assertion against the output. A file staged without its media
+/// fails the test: an empty or partial run would pass vacuously.
 pub async fn run_one_file(
     jobs: &LiveDirectJobClient<'_>,
     staged: &StagedDriftFile,
     lang: &str,
-) -> Option<FileOutcome> {
+) -> FileOutcome {
     let cha_name = staged.cha_name();
 
     if staged.media_path.is_none() {
-        eprintln!(
-            "SKIP: {}: no adjacent media file found next to {}",
+        panic!(
+            "PREREQUISITE MISSING: {}: no adjacent media file found next to {}",
             cha_name,
             staged.cha_path.display()
-        );
-        return None;
+        )
     }
 
     // Direct the align output to a temp location under the session state
@@ -119,57 +118,44 @@ pub async fn run_one_file(
         .await;
 
     if info.status != JobStatus::Completed {
-        return Some(FileOutcome::PipelineFailure {
+        return FileOutcome::PipelineFailure {
             cha_name,
             message: format!(
                 "align pipeline returned non-Completed status {:?} (crash, InvalidAudioWindow, etc.)",
                 info.status
             ),
-        });
+        };
     }
 
     if outputs.len() != 1 {
-        return Some(FileOutcome::PipelineFailure {
+        return FileOutcome::PipelineFailure {
             cha_name,
             message: format!("expected exactly one output CHAT, got {}", outputs.len()),
-        });
+        };
     }
 
     let parser = match TreeSitterParser::new() {
         Ok(p) => p,
         Err(e) => {
-            return Some(FileOutcome::ParseFailure {
+            return FileOutcome::ParseFailure {
                 cha_name,
                 message: format!("tree-sitter construct: {e:?}"),
-            });
+            };
         }
     };
     let (parsed, parse_errors) = parse_lenient(&parser, &outputs[0]);
     if !parse_errors.is_empty() {
-        return Some(FileOutcome::ParseFailure {
+        return FileOutcome::ParseFailure {
             cha_name,
             message: format!("output CHAT failed to parse: {parse_errors:?}"),
-        });
+        };
     }
 
     let assertion_failures = evaluate_all_drift_assertions(&parsed);
-    Some(FileOutcome::Evaluated {
+    FileOutcome::Evaluated {
         cha_name,
         assertion_failures,
-    })
-}
-
-/// Unified SKIP tail: if no file in the test had adjacent media, the whole
-/// test SKIPs cleanly rather than passing vacuously via an empty outcome
-/// vector. Returns `true` when the caller should `return` (the test was
-/// skipped). Enforces I-2 (the missing-media vacuous-pass contract) by
-/// construction across all four tests.
-pub fn skip_if_empty(test_name: &str, outcomes: &[FileOutcome]) -> bool {
-    if outcomes.is_empty() {
-        eprintln!("SKIP: {test_name}: no stageable files had adjacent media");
-        return true;
     }
-    false
 }
 
 /// Format a readable report across all files for one convention, and panic if

@@ -1,5 +1,6 @@
 ---
-source: crates/batchalign-chat-ops/src/morphosyntax.rs
+source: crates/batchalign/src/chat_ops/morphosyntax_ops/tests.rs
+assertion_line: 292
 expression: batch_item
 ---
 {
@@ -22,6 +23,9 @@ expression: batch_item
       null,
       null
     ]
+  ],
+  "runs": [
+    3
   ],
   "lang": "eng"
 }

@@ -11,14 +11,11 @@ use batchalign::worker::InferTask;
 /// on the `L2|xxx` fallback path depending on the flag.
 #[tokio::test]
 async fn morphotag_server_no_l2_switch_controls_code_switched_words() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let enabled = jobs
@@ -65,8 +62,9 @@ async fn morphotag_server_no_l2_switch_controls_code_switched_words() {
     let disabled_results = jobs.job_results(&disabled.job_id).await;
 
     if enabled_info.status == JobStatus::Failed || disabled_info.status == JobStatus::Failed {
-        eprintln!("SKIP: server bilingual L2 morphotag test needs both English and Spanish models");
-        return;
+        panic!(
+            "PREREQUISITE MISSING: server bilingual L2 morphotag test needs both English and Spanish models"
+        )
     }
 
     assert_eq!(
@@ -124,14 +122,11 @@ async fn morphotag_server_no_l2_switch_controls_code_switched_words() {
 /// file on the server path, instead of poisoning neighboring file results.
 #[tokio::test]
 async fn morphotag_server_unsupported_inline_language_does_not_poison_neighbor_file() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let initial = jobs
@@ -224,14 +219,11 @@ async fn morphotag_server_unsupported_inline_language_does_not_poison_neighbor_f
 /// granularity rather than suppressing whole neighboring files.
 #[tokio::test]
 async fn morphotag_server_skipmultilang_only_skips_non_primary_utterances() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     let jobs = LiveServerJobClient::from_session(&server);
 
     let initial = jobs
@@ -262,10 +254,9 @@ async fn morphotag_server_skipmultilang_only_skips_non_primary_utterances() {
 
     let final_info = jobs.poll_done(&initial.job_id).await;
     if final_info.status == JobStatus::Failed {
-        eprintln!(
-            "SKIP: server skipmultilang differential test needs both English and Spanish models"
-        );
-        return;
+        panic!(
+            "PREREQUISITE MISSING: server skipmultilang differential test needs both English and Spanish models"
+        )
     }
     assert_eq!(
         final_info.status,

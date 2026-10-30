@@ -28,6 +28,7 @@ def morphosyntax_item(
         "words": list(chat_words),
         "terminator": terminator,
         "special_forms": [[None, None]] * len(chat_words),
+        "runs": [len(list(chat_words))] if list(chat_words) else [],
         "lang": lang,
     }
 

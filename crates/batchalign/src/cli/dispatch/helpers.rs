@@ -773,11 +773,13 @@ pub(super) fn print_failure_summary(
 
     eprintln!("{bar}");
     // Point users to where they can find more diagnostic detail.
-    if let Some(home) = dirs::home_dir() {
-        let daemon_log = home.join(".batchalign3").join("daemon.log");
-        if daemon_log.exists() {
-            eprintln!("  hint: server logs at {}", daemon_log.display());
-        }
+    // The state directory the daemon actually wrote to; reading `~` here
+    // ignored `BATCHALIGN_STATE_DIR` and pointed at a log that was not it.
+    let daemon_log = crate::config::RuntimeLayout::from_env()
+        .state_dir()
+        .join("daemon.log");
+    if daemon_log.exists() {
+        eprintln!("  hint: server logs at {}", daemon_log.display());
     }
     eprintln!();
 }

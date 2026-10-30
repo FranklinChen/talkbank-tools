@@ -13,14 +13,11 @@ use batchalign::worker::InferTask;
 /// profile system and spawns per-task workers, this test will catch it.
 #[tokio::test]
 async fn profile_worker_keys_use_profile_labels() {
-    let Some(server) = require_live_server(
+    let server = require_live_server(
         InferTask::Morphosyntax,
         "Server does not support morphosyntax infer",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let input_dir = server.state_dir().join("profile_labels_inputs");
     std::fs::create_dir_all(&input_dir).expect("mkdir input dir");

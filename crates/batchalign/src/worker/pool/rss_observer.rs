@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
 
 use crate::worker::{WorkerPid, WorkerProfile};
 
@@ -119,12 +119,14 @@ fn collect_idle_pids_for_profile(groups: &GroupsMap, profile: WorkerProfile) -> 
 /// per-PID process lookup` triple; consolidating here keeps the
 /// sysinfo refresh shape (use_kind = `with_memory()`,
 /// remove_dead = `true`) in one place.
-pub(super) fn refresh_rss_mb_for_pids(pids: &[WorkerPid]) -> HashMap<WorkerPid, u64> {
+pub(super) fn refresh_rss_mb_for_pids(
+    pids: &[WorkerPid],
+) -> Result<HashMap<WorkerPid, u64>, crate::host_memory::HostUnreadable> {
     if pids.is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
     let sysinfo_pids: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(p.0)).collect();
-    let mut sys = System::new();
+    let mut sys = crate::host_memory::open_system()?;
     sys.refresh_processes_specifics(
         ProcessesToUpdate::Some(&sysinfo_pids),
         true,
@@ -137,12 +139,22 @@ pub(super) fn refresh_rss_mb_for_pids(pids: &[WorkerPid]) -> HashMap<WorkerPid, 
             out.insert(*pid, process.memory() / (1024 * 1024));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Average RSS (MB) across live PIDs, or `None` when none are live.
+///
+/// An unreadable process table is no observation, so the caller uses the
+/// static reservation estimate it uses when no peer is live; the memory gate's
+/// own reading of the host then refuses the spawn if that is unreadable too.
 fn sample_avg_rss_mb_for_pids(pids: &[WorkerPid]) -> Option<u64> {
-    let rss_by_pid = refresh_rss_mb_for_pids(pids);
+    let rss_by_pid = match refresh_rss_mb_for_pids(pids) {
+        Ok(rss_by_pid) => rss_by_pid,
+        Err(error) => {
+            tracing::warn!(%error, "worker RSS unreadable; using the reservation estimate");
+            return None;
+        }
+    };
     if rss_by_pid.is_empty() {
         return None;
     }
@@ -197,7 +209,7 @@ mod tests {
     #[test]
     fn refresh_returns_self_pid_keyed_to_positive_rss() {
         let our_pid = WorkerPid(std::process::id());
-        let map = refresh_rss_mb_for_pids(&[our_pid]);
+        let map = refresh_rss_mb_for_pids(&[our_pid]).expect("the test host reports processes");
         let rss_mb = map
             .get(&our_pid)
             .copied()

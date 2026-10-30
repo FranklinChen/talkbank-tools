@@ -172,7 +172,7 @@ fn collect(root: &Path, out: &Path, files: &[String]) -> Result<(), Error> {
             &primary,
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
-        );
+        )?;
         for utterance in payloads.batch_items {
             let key = ItemKey {
                 file: file.clone(),
@@ -210,7 +210,7 @@ fn render_file(
         &primary,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    );
+    )?;
 
     let mut responses: Vec<UdResponse> = Vec::with_capacity(payloads.batch_items.len());
     for utterance in &payloads.batch_items {

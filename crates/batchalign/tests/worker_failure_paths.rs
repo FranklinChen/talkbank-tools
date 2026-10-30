@@ -30,26 +30,7 @@ use batchalign::worker::error::WorkerError;
 use batchalign::worker::handle::{WorkerConfig, WorkerHandle};
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask, WorkerProfile};
-use common::resolve_python;
 use serde_json::{Value, json};
-
-macro_rules! require_python {
-    () => {{
-        common::test_server_fixture::isolate_host_memory_ledger();
-        let available_mb = batchalign::worker::memory_guard::available_memory_mb();
-        if available_mb < 4096 {
-            eprintln!("SKIP: insufficient memory ({available_mb} MB available, 4096 MB required)");
-            return;
-        }
-        match resolve_python() {
-            Some(path) => path,
-            None => {
-                eprintln!("SKIP: Python 3 with batchalign not available");
-                return;
-            }
-        }
-    }};
-}
 
 fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
     BatchInferRequest {
@@ -73,8 +54,10 @@ fn test_pool(python: String) -> WorkerPool {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     })
 }
 
@@ -87,7 +70,7 @@ fn test_pool(python: String) -> WorkerPool {
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_killed_mid_batch_infer_returns_error() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python.clone(),
         test_echo: true,
@@ -96,7 +79,7 @@ async fn worker_killed_mid_batch_infer_returns_error() {
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         // Add a delay so we have time to kill the worker mid-request
         test_delay_ms: 5000,
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let mut handle = WorkerHandle::spawn(config).await.expect("spawn failed");
@@ -129,7 +112,7 @@ async fn worker_killed_mid_batch_infer_returns_error() {
 #[cfg(unix)]
 #[tokio::test]
 async fn pool_recovers_after_worker_crash() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     // First dispatch to warm up the pool with one worker.
@@ -177,7 +160,7 @@ async fn pool_recovers_after_worker_crash() {
 #[cfg(unix)]
 #[tokio::test]
 async fn crash_in_one_group_does_not_affect_other_groups() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = test_pool(python);
 
     // Dispatch to Morphosyntax (Stanza profile).
@@ -266,7 +249,7 @@ async fn worker_death_before_ready_surfaces_stderr() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     let err = match WorkerHandle::spawn(config).await {
@@ -288,7 +271,7 @@ async fn worker_death_before_ready_surfaces_stderr() {
 /// a `ReadyTimeout` error.
 #[tokio::test]
 async fn worker_ready_timeout_fires() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
         test_echo: true,
@@ -298,7 +281,7 @@ async fn worker_ready_timeout_fires() {
         // ... except test-echo workers start very fast. Instead, use a bad python path
         // to ensure the worker never sends a ready signal.
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<1>(),
-        ..Default::default()
+        ..WorkerConfig::for_tests()
     };
 
     // We can't easily make a test-echo worker start slowly. Instead, test the
@@ -327,7 +310,7 @@ async fn worker_ready_timeout_fires() {
 /// pressure (no longer fires on idle timer).
 #[tokio::test]
 async fn fast_health_check_interval_does_not_break_dispatch() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<1>(), // fast health checks
@@ -335,8 +318,10 @@ async fn fast_health_check_interval_does_not_break_dispatch() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     });
 
     // Dispatch should succeed immediately.
@@ -366,7 +351,7 @@ async fn fast_health_check_interval_does_not_break_dispatch() {
 /// layer where partial results are assembled.
 #[tokio::test]
 async fn multi_file_job_produces_per_file_results() {
-    let python = require_python!();
+    let python = crate::prerequisite::worker_test_python();
 
     use batchalign::api::{
         FilePayload, JobInfo, JobResultResponse, JobStatus, JobSubmission, LanguageSpec, MemoryMb,
@@ -404,8 +389,10 @@ async fn multi_file_job_produces_per_file_results() {
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: Default::default(),
-        ..Default::default()
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
+            batchalign::worker::handle::test_memory_tier(),
+        ),
+        ..PoolConfig::for_tests()
     };
 
     let (router, _state) = create_test_app(

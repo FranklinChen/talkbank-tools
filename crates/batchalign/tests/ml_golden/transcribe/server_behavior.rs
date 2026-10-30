@@ -19,19 +19,14 @@ fn media_header(chat: &str, label: &str) -> String {
 
 #[tokio::test]
 async fn transcribe_server_wor_policy_controls_tier_presence() {
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(
+    let fixture = prepare_transcribe_fixture_job(
         server.state_dir(),
         "transcribe_server_wor_policy_controls_tier_presence",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(
@@ -71,23 +66,17 @@ async fn transcribe_server_wor_policy_controls_tier_presence() {
 
 #[tokio::test]
 async fn transcribe_server_diarize_surfaces_multiple_speakers_when_available() {
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
     if !server.has_infer_task(InferTask::Speaker) {
-        eprintln!("SKIP: live server does not support speaker diarization");
-        return;
+        panic!("PREREQUISITE MISSING: live server does not support speaker diarization")
     }
 
-    let Some(fixture) = prepare_multi_speaker_transcribe_fixture_job(
+    let fixture = prepare_multi_speaker_transcribe_fixture_job(
         server.state_dir(),
         "transcribe_server_diarize_surfaces_multiple_speakers_when_available",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job_with_speakers(
@@ -119,19 +108,14 @@ async fn transcribe_server_diarize_surfaces_multiple_speakers_when_available() {
 
 #[tokio::test]
 async fn transcribe_server_preserves_source_media_basename() {
-    let Some(server) =
-        require_live_server(InferTask::Asr, "live server does not support ASR infer").await
-    else {
-        return;
-    };
+    let server =
+        require_live_server(InferTask::Asr, "live server does not support ASR infer").await;
     let jobs = LiveServerJobClient::from_session(&server);
 
-    let Some(fixture) = prepare_transcribe_fixture_job(
+    let fixture = prepare_transcribe_fixture_job(
         server.state_dir(),
         "transcribe_server_preserves_source_media_basename",
-    ) else {
-        return;
-    };
+    );
 
     let (info, outputs) = jobs
         .submit_paths_job(

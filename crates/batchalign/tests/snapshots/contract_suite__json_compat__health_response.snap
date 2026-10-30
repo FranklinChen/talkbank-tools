@@ -1,5 +1,5 @@
 ---
-source: crates/batchalign-app/tests/json_compat.rs
+source: crates/batchalign/tests/json_compat.rs
 expression: health
 ---
 {
@@ -60,9 +60,11 @@ expression: health
   "forced_terminal_errors": 0,
   "memory_gate_aborts": 0,
   "build_hash": "0.10.0-abc1234-1700000000",
-  "system_memory_total_mb": 65536,
-  "system_memory_available_mb": 32768,
-  "system_memory_used_mb": 32768,
+  "system_memory": {
+    "total_mb": 65536,
+    "available_mb": 32768,
+    "used_mb": 32768
+  },
   "memory_gate_threshold_mb": 8192,
   "host_memory_pressure": "guarded",
   "host_memory_reserved_mb": 12000,

@@ -14,7 +14,7 @@ use axum::{Json, Router};
 
 use crate::AppState;
 use crate::host_memory::HostMemoryCoordinator;
-use crate::types::response::HostMemoryPressureLevel;
+use crate::types::response::{HostMemoryPressureLevel, SystemMemoryReading};
 
 /// Build the health-check router (`GET /health`).
 pub fn router() -> Router<Arc<AppState>> {
@@ -42,12 +42,6 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<HealthRes
     let live_worker_keys = state.workers.pool.worker_keys().await;
     let worker_summary = state.workers.pool.worker_summary().await;
 
-    // System memory snapshot for the dashboard memory panel.
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    let total_mb = MemoryMb(sys.total_memory() / (1024 * 1024));
-    let available_mb = MemoryMb(sys.available_memory() / (1024 * 1024));
-    let used_mb = MemoryMb(total_mb.0.saturating_sub(available_mb.0));
     // `resolved_memory_gate_mb` applies the tier-derived fallback
     // when the operator has not set an explicit `Some(MemoryMb(_))`.
     let gate_mb = state.environment.config.resolved_memory_gate_mb();
@@ -59,6 +53,13 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<HealthRes
                 (None, Some(error.to_string()))
             }
         };
+    // The memory panel's figures are the coordinator snapshot's own reading
+    // of the host, not a second one taken a moment apart.
+    let system_memory = host_memory.as_ref().map(|snapshot| SystemMemoryReading {
+        total_mb: snapshot.total_mb,
+        available_mb: snapshot.available_mb,
+        used_mb: MemoryMb(snapshot.total_mb.0.saturating_sub(snapshot.available_mb.0)),
+    });
 
     Json(HealthResponse {
         status: HealthStatus::Ok,
@@ -97,9 +98,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<HealthRes
         forced_terminal_errors: control_plane.forced_terminal_errors,
         memory_gate_aborts: control_plane.memory_gate_aborts,
         build_hash: state.build.build_hash.clone(),
-        system_memory_total_mb: total_mb,
-        system_memory_available_mb: available_mb,
-        system_memory_used_mb: used_mb,
+        system_memory,
         memory_gate_threshold_mb: gate_mb,
         host_memory_pressure: host_memory
             .as_ref()

@@ -135,6 +135,9 @@ impl BatchWord {
 #[derive(Clone)]
 pub struct MorphosyntaxBatchItem {
     words: Vec<BatchWord>,
+    /// Where a tokenizer may merge the words: runs with nothing between
+    /// them (`retokenize::WordRuns`). Partitions `words` exactly.
+    runs: crate::retokenize::WordRuns,
     /// Utterance terminator. Serializes to its CHAT surface form (`.`, `?`,
     /// `!`, etc.) over the IPC boundary.
     pub terminator: talkbank_model::Terminator,
@@ -143,13 +146,38 @@ pub struct MorphosyntaxBatchItem {
 }
 
 impl MorphosyntaxBatchItem {
-    /// An utterance's words, terminator and language.
-    pub fn new(
+    /// An utterance's words with the runs its main tier puts them in, its
+    /// terminator and language. Refused when the runs do not partition
+    /// exactly these words.
+    pub fn with_runs(
+        words: Vec<BatchWord>,
+        runs: crate::retokenize::WordRuns,
+        terminator: talkbank_model::Terminator,
+        lang: talkbank_model::model::LanguageCode,
+    ) -> Result<Self, crate::retokenize::RunsDisagree> {
+        if runs.word_count() != words.len() {
+            return Err(crate::retokenize::RunsDisagree {
+                walked: runs.word_count(),
+                extracted: words.len(),
+            });
+        }
+        Ok(Self {
+            words,
+            runs,
+            terminator,
+            lang,
+        })
+    }
+
+    /// Words no tokenizer may merge (each its own run): an item with no
+    /// authority to retokenize, such as a secondary-language span.
+    pub fn unmergeable(
         words: Vec<BatchWord>,
         terminator: talkbank_model::Terminator,
         lang: talkbank_model::model::LanguageCode,
     ) -> Self {
         Self {
+            runs: crate::retokenize::WordRuns::unmergeable(words.len()),
             words,
             terminator,
             lang,
@@ -183,6 +211,11 @@ struct MorphosyntaxBatchItemWire<'a> {
     /// Special form and language per word: (form_type, resolved_language).
     #[schemars(with = "Vec<(Option<String>, Option<String>)>")]
     special_forms: Vec<(Option<String>, Option<String>)>,
+    /// Run lengths partitioning `words`: a tokenizer may merge words only
+    /// within one run, since something (a retrace, a pause, a bracket)
+    /// stands between runs on the main tier.
+    #[schemars(with = "Vec<u32>")]
+    runs: Vec<usize>,
     /// Language code for this utterance (ISO 639-3).
     #[schemars(with = "String")]
     lang: &'a talkbank_model::model::LanguageCode,
@@ -198,6 +231,7 @@ impl<'a> MorphosyntaxBatchItemWire<'a> {
                 .iter()
                 .map(|word| wire_role(&word.role))
                 .collect(),
+            runs: item.runs.lengths().collect(),
             lang: &item.lang,
         }
     }
@@ -376,10 +410,13 @@ pub struct MorphologyInput<'source> {
 
 impl<'source> MorphologyInput<'source> {
     /// Prepare one analyzable utterance, irrespective of its existing tiers.
+    ///
+    /// `Ok(None)` when the utterance has no `%mor` words; an error when the
+    /// run walk and the extractor disagree about how many it has.
     pub fn from_utterance(
         utterance: &'source talkbank_model::model::Utterance,
         declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, crate::retokenize::RunsDisagree> {
         let lang = match &utterance.main.content.language_code {
             Some(precode) => precode.code.clone(),
             None => declared_languages.primary().clone(),
@@ -391,8 +428,9 @@ impl<'source> MorphologyInput<'source> {
             &mut words,
         );
         if words.is_empty() {
-            return None;
+            return Ok(None);
         }
+        let runs = crate::retokenize::WordRuns::of(&utterance.main.content.content, words.len())?;
         let batch_words = words
             .iter()
             .map(|word| {
@@ -415,11 +453,17 @@ impl<'source> MorphologyInput<'source> {
                 )
             })
             .collect();
-        Some(Self {
+        let item = MorphosyntaxBatchItem::with_runs(
+            batch_words,
+            runs,
+            stanza_input_terminator(utterance),
+            lang,
+        )?;
+        Ok(Some(Self {
             utterance,
             words,
-            item: MorphosyntaxBatchItem::new(batch_words, stanza_input_terminator(utterance), lang),
-        })
+            item,
+        }))
     }
 
     /// Compare semantic inputs, not source offsets, speaker identity or timing.
@@ -439,6 +483,9 @@ impl<'source> MorphologyInput<'source> {
                 .iter()
                 .zip(&other.item.words)
                 .all(|(left, right)| left.text() == right.text() && left.role() == right.role())
+            // The runs decide what retokenization may merge, so a changed
+            // pause or retrace makes a prior analysis not reusable.
+            && self.item.runs == other.item.runs
             && super::pos_hints::utterance_pos_hints(self.utterance)
                 == super::pos_hints::utterance_pos_hints(other.utterance)
             && super::evidence::UtteranceEvidence::from_utterance(
@@ -458,7 +505,7 @@ pub fn collect_payloads(
     primary_lang: &talkbank_model::model::LanguageCode,
     declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
     multilingual_policy: MultilingualPolicy,
-) -> PayloadCollection {
+) -> Result<PayloadCollection, crate::retokenize::RunsDisagree> {
     let total_utts = chat_file
         .lines
         .iter()
@@ -491,32 +538,34 @@ pub fn collect_payloads(
         });
 
         if !skip && !has_mor {
-            if let Some(input) = MorphologyInput::from_utterance(utt, declared_languages) {
-                batch_items.push(CollectedUtterance {
+            // A run-walk disagreement is a tool fault and fails the whole
+            // collection: production does not read `not_applicable`, so an
+            // outcome recorded there would vanish.
+            match MorphologyInput::from_utterance(utt, declared_languages)? {
+                Some(input) => batch_items.push(CollectedUtterance {
                     line: LineIdx::new(line_idx),
                     utt_ordinal: utt_idx,
                     item: input.item,
                     words: input.words,
-                });
-            } else {
-                not_applicable.push(MorOutcome {
+                }),
+                None => not_applicable.push(MorOutcome {
                     line_idx,
                     speaker: SpeakerCode::new(utt.main.speaker.as_str()),
                     kind: MorOutcomeKind::NotApplicable {
                         reason: classify_not_applicable(utt),
                     },
-                });
+                }),
             }
         }
 
         utt_idx += 1;
     }
 
-    PayloadCollection {
+    Ok(PayloadCollection {
         batch_items,
         not_applicable,
         total_utterances: total_utts,
-    }
+    })
 }
 
 /// Why the morphology input language set is available.

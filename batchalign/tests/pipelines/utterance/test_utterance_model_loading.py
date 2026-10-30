@@ -73,10 +73,14 @@ def captured(monkeypatch) -> list[dict[str, Any]]:
             self.model_revision = model_revision
             self.lang = lang
 
-    def fake_snapshot(model_id: str, commit: str | None):
-        from batchalign.worker._model_loading.pinned_hub import ResolvedSnapshot
+    def fake_snapshot(model_id: str, commit: str | None, files):
+        from batchalign.worker._model_loading.pinned_hub import (
+            HubFiles,
+            ResolvedSnapshot,
+        )
 
         assert commit is not None, "a pinned load must ask for an exact commit"
+        assert files is HubFiles.TRANSFORMERS, "a BERT loader reads Transformers files"
         return ResolvedSnapshot(
             path=f"/cache/{model_id}/snapshots/{commit}", commit=commit
         )
