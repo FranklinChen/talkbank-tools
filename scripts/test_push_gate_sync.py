@@ -168,6 +168,12 @@ class CoverageEvidenceTests(unittest.TestCase):
             ('curl -fsSL "https://x/shellcheck.tar.xz" -o shellcheck.tar.xz', False),
             ('sudo install "shellcheck-1/shellcheck" /usr/local/bin/shellcheck', False),
             ("SERVER=1 ./target/debug/batchalign3 serve start", False),
+            ("batchalign3 version", True),
+            ("bash scripts/run_react_dashboard_smoke.sh", True),
+            ("./scripts/server_startup_smoke.sh", True),
+            ("uv run --no-sync python -m scripts.verify_hub_selection_loads", True),
+            ("bash -c 'echo scripts/x'", False),
+            ("cp installers/install-batchalign3.sh dist/", False),
         ]:
             with self.subTest(command=command):
                 self.assertEqual(checker.is_verifier(command), verifies)

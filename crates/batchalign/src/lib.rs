@@ -108,7 +108,7 @@
 //! // Read the host once; everything downstream takes this reading and
 //! // cannot fail on the host.
 //! let host = Arc::new(HostSnapshot::read(&config)?);
-//! let pool_config = PoolConfig::with_runtime(WorkerRuntimeConfig::local(host.tier()));
+//! let pool_config = PoolConfig::with_runtime(WorkerRuntimeConfig::local(&host));
 //!
 //! // Option A: get the router for custom binding / testing
 //! let (router, state) = create_app(

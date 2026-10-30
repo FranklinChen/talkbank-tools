@@ -20,7 +20,6 @@
 //!   the configured local server URL.
 
 use crate::config::{self, RuntimeLayout};
-use crate::host_memory::HostMemoryRuntimeConfig;
 use crate::server_handshake::{HandshakeSlot, ServerHandshake};
 use crate::worker::handle::WorkerRuntimeConfig;
 use crate::worker::pool::PoolConfig;
@@ -112,9 +111,8 @@ pub async fn start(
             force_cpu: effective.force_cpu,
             allow_mps: effective.allow_mps,
             gpu_thread_pool_size: effective.gpu_thread_pool_size,
-            host_memory: HostMemoryRuntimeConfig::from_server_config(&cfg),
             bootstrap_mode: host_policy.bootstrap_mode,
-            ..WorkerRuntimeConfig::local(tier)
+            ..WorkerRuntimeConfig::local(&host)
         };
         let pool_config = PoolConfig {
             python_path: worker_python.clone(),
@@ -143,7 +141,6 @@ pub async fn start(
             ensure_task_timeout: cfg.ensure_task_timeout_s,
             worker_registry_path: cfg.worker_registry_path.clone(),
             test_delay_ms: 0,
-            pressure_gates: crate::worker::pool::HostPressureGates::Live,
         };
         crate::serve_with_runtime(
             cfg,

@@ -137,6 +137,29 @@ Each consumer has its own policy when one is unreadable: admission and
 spawn refuse, pressure eviction and the RSS observer skip that pass
 with a warning, and the CPU gate admits with a warning.
 
+What the snapshot does fix is where those live figures come from:
+`HostSnapshot::readings()` is `HostReadings::Live` for a snapshot
+`HostSnapshot::read` took, and `HostReadings::Declared` (the declared
+facts' memory and CPU count, idle) for one `HostSnapshot::for_tests`
+made. The admission gates, spawn guard, ledger, pressure eviction, job
+planner and `/health` take memory and load through those readings rather
+than calling `read_system_memory` themselves.
+
+```mermaid
+flowchart LR
+    read["HostSnapshot::read<br/>(live facts)"] --> snap["HostSnapshot<br/>tier, readings, ledger"]
+    tests["HostSnapshot::for_tests<br/>(laptop_16gb)"] --> snap
+    snap -->|runtime_host| rh["RuntimeHost<br/>in WorkerRuntimeConfig"]
+    snap -->|memory_coordinator| planner["job planner, /health"]
+    rh --> gates["CPU and memory gates,<br/>spawn guard, eviction, ledger"]
+```
+
+A worker launch carries the snapshot's `RuntimeHost` (tier, readings,
+ledger), made only by `HostSnapshot::runtime_host`, so a launch can never
+be sized for one machine while deciding on another's figures. Tests
+therefore never depend on the machine running them (see
+[Testing](testing.md#a-tests-outcome-must-not-depend-on-how-busy-the-machine-is)).
+
 The merge rule per knob is uniform: `override.unwrap_or(recommendation)`.
 Per-profile and per-command merges follow the same rule, applied per
 field/command.

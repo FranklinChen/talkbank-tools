@@ -90,7 +90,7 @@ fn start(
     let runtime = crate::worker::handle::WorkerRuntimeConfig {
         force_cpu: effective.force_cpu,
         gpu_thread_pool_size: effective.gpu_thread_pool_size,
-        ..crate::worker::handle::WorkerRuntimeConfig::local(host.tier())
+        ..crate::worker::handle::WorkerRuntimeConfig::local(&host)
     };
     cmd.args(crate::worker::serving::WorkerServing::decide(profile, &runtime).worker_args());
 

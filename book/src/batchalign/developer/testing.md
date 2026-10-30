@@ -747,13 +747,25 @@ environment first; locally, `make batchalign-test-worker-integration`.
 Most flaky tests here have had one cause: an outcome that changes with host
 load. The rules that remove it:
 
-- **No live host gate in a test pool.** `PoolConfig::for_tests()` sets
-  `HostPressureGates::Disabled`, so a test's spawn count never depends on
-  the machine's load average or free memory; each gate's own behavior is
-  unit-tested in `worker/pool/cpu_gate.rs` and `memory_gate.rs`. Test
-  fixtures declare the Small memory tier (`test_memory_tier()`), the
-  smallest machine BA3 supports, because a real worker spawn reserves the
-  tier's startup memory through the live spawn guard.
+- **Tests run on a declared host, never the live one.** Every decision
+  that reads memory or load (the CPU and memory admission gates, the spawn
+  guard, the host-memory ledger, pressure eviction, the job planner,
+  `/health`) reads it through `HostReadings`, which the host snapshot
+  owns. `HostSnapshot::read` gives `Live`; `HostSnapshot::for_tests`
+  declares `laptop_16gb` (`host_facts/test_helpers.rs`): an idle,
+  runner-shaped 16 GB machine with 14 GB available and 4 CPUs, the
+  smallest BA3 supports, at its Small tier. Every test config
+  (`PoolConfig::for_tests()`, `WorkerRuntimeConfig::for_tests()`,
+  `WorkerConfig::for_tests()`, test servers) is built from that one
+  snapshot, so the gates run in tests and decide the same way on every
+  machine, and a boundary can be tested exactly (see
+  `a_lease_is_admitted_exactly_up_to_the_reserve_on_a_declared_host`). A
+  worker launch carries a `RuntimeHost` (tier, readings, ledger) that only
+  `HostSnapshot::runtime_host` makes, so the three always describe one
+  machine; a test that needs its own ledger path or reserve swaps the
+  ledger alone with `RuntimeHost::with_ledger`. Only `MachineMlTestLock`,
+  `doctor`, memory-tier detection and the test prerequisites read the live
+  host on purpose: ML tests load real models on the real machine.
 - **Wait on progress, not a wall clock.** A wait that can be slow on a busy
   machine uses a `ServerTestDeadline` (`tests/live_deadline`): it fails
   only when nothing it watches changes for its idle window, or when it
@@ -772,6 +784,87 @@ the 1-minute load average is above the CPU count (confirm it before
 starting; a load generator that silently failed proves nothing). A test
 that passes idle and fails loaded is flaky, and its cause is one of the
 above.
+
+## Why CI can go red after a green gate
+
+`make gate` (`scripts/gate.sh`) answers one question: does every check CI
+runs pass on this tree *on this machine*? `scripts/check_push_gate_sync.py`
+keeps the first half honest: every make target a workflow runs must be
+reached from the gate or listed in its `EXEMPT` table with a reason, so a
+check CI runs and the gate forgot is itself a gate failure. Nothing keeps
+the second half honest. The gate has **command parity** with CI, not
+**environment parity**, and every way a green gate is followed by a red CI
+falls into one of three classes:
+
+```mermaid
+flowchart TD
+    red["CI red after a green gate"] --> cmd{"Did the gate run<br/>the failing command?"}
+    cmd -- no --> gap["Command gap:<br/>reach it from scripts/gate.sh,<br/>or make the sync checker see it"]
+    cmd -- yes --> env{"Does the outcome depend<br/>on the host?"}
+    env -- yes --> host["Environment gap:<br/>make the test host-independent<br/>(rules below)"]
+    env -- no --> exempt["Exempt area:<br/>listed in EXEMPT, so only CI checks it"]
+```
+
+### The runner is not the development machine
+
+The Linux runners (`ubuntu-latest`) have about 16 GB of RAM, no model
+caches, and only the toolchains the workflow itself installs. A development
+machine typically has far more memory, warm caches and a system Python. A
+test that silently uses any of that passes locally and fails in CI. The
+rules:
+
+- **A fixture never assumes more host than the smallest supported
+  machine.** Test configs run on the declared runner-shaped host (above),
+  so what the ledger grants a test is the same everywhere. Before it, a
+  fixture that declared a 64 GB tier made each worker spawn reserve
+  12 GB: granted on a 256 GB workstation, refused on the runner
+  ("host-memory reserve would be exceeded"). A test that builds its own
+  coordinator takes its readings from `HostSnapshot::for_tests`;
+  reaching for `HostReadings::Live` in a test reintroduces the dependence
+  on the machine.
+- **Every toolchain a job links against is provisioned by the workflow.**
+  The Rust jobs build the PyO3 library, so they install a supported Python
+  and bind `PYO3_PYTHON` to the setup action's output. Never rely on what
+  the runner image happens to contain; it changes without notice.
+- **A failure-path test provokes its failure with input the program must
+  reject, never with something missing from the environment.** "Declare a
+  language no model supports" passes only while no installed model supports
+  it, and a model or cache update turns the test red with no code change.
+  The dashboard's real-server failure test submits CHAT the server must
+  reject, which fails the same way everywhere.
+- **A wait names its outcome.** Real-server waits use `JobWait`
+  (`frontend/e2e/job-wait.ts`), whose closed targets (`running`,
+  `completed`, `failed`, `terminal`) report a job that ended the wrong way
+  at once, with its failure detail, instead of timing out.
+
+### What a green gate does not cover
+
+- The `EXEMPT` table in `scripts/check_push_gate_sync.py` lists targets
+  only CI runs (the wheel-installed Python suite, the dashboard bundle,
+  stubtest against the CI wheel). It is the honest list of what a green
+  gate does not prove; a change in one of those areas is checked only by
+  CI.
+- The sync checker treats a raw workflow command as a check when it runs a
+  known verifier (`pytest`, `mypy`, `cargo test` and so on), any script
+  under `scripts/`, or `batchalign3` itself (other than `serve`, which
+  starts a fixture). Such a command must be a make target the gate reaches,
+  or be declared in `RAW_VERIFIERS` with its reason. A check written inline
+  in a workflow as shell (a `curl` loop, a `test` line) is still invisible
+  to it: give it a script and a make target instead, as
+  `scripts/server_startup_smoke.sh` is.
+- The gate runs the server startup smoke and both dashboard suites, mock
+  and real server (`make batchalign-dashboard-e2e-real`, about a minute
+  with warm model caches). The runner downloads the real-server suite's
+  models each time; the gate does not, which is the cache difference
+  described above.
+
+### When CI does go red
+
+A red CI after a green gate is a defect in the gate, not bad luck. Classify
+it with the chart above, fix the code, and then close the class: a command
+gap goes into `scripts/gate.sh` or the sync checker, and an environment gap
+becomes a rule in this section (and, where a type can hold it, a type, as
+`HostReadings` and `RuntimeHost` do).
 
 ## Worker process safety
 
@@ -799,6 +892,17 @@ pool startup, stale files (dead workers) are cleaned up and orphans
 SIGTERM → 2s wait → SIGKILL.
 
 ## Dashboard Playwright tests
+
+```bash
+make batchalign-dashboard-e2e        # mock-server suite
+make batchalign-dashboard-e2e-real   # mock and real-server suites (the gate runs this)
+```
+
+Both install the frontend and e2e packages and Chromium themselves. The
+real-server suite starts `target/debug/batchalign3` (or `BATCHALIGN_BIN`)
+with the development environment's Python, under a temporary
+`BATCHALIGN_HOME`; `HOME` stays real so its real-model job uses the cached
+models. To iterate on the mock suite alone:
 
 ```bash
 cd frontend
@@ -847,6 +951,9 @@ Release-facing CI checks cover:
 cargo xtask lint-ci-hygiene
 make ci-local
 ```
+
+What the local gate can and cannot predict about CI is in
+[Why CI can go red after a green gate](#why-ci-can-go-red-after-a-green-gate).
 
 ## Coverage
 

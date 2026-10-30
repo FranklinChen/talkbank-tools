@@ -1,4 +1,4 @@
-.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-worker-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-typecheck-python-source batchalign-stubtest batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
+.PHONY: gate gate-receipts-test help hooks-check lint fmt-check lint-shell lint-actionlint test test-affected batchalign-check batchalign-test-rust batchalign-test-integration batchalign-test-worker-integration batchalign-test-ml-golden batchalign-test-python-golden batchalign-build-pyo3 batchalign-build-wheel batchalign-build-ci-wheel batchalign-python-prepare batchalign-test-python batchalign-typecheck-python batchalign-typecheck-python-source batchalign-stubtest batchalign-ci-python batchalign-runtime-check batchalign-dashboard-api-check batchalign-dashboard-schema-check batchalign-dashboard-build batchalign-dashboard-e2e batchalign-dashboard-e2e-real batchalign-server-smoke batchalign-ci-rust build clean check check-affected lint-affected verify book-check book book-serve smoke ci-local ci-full install-hooks _batchalign-test-python _batchalign-typecheck-python audit-status audit-streak audit-scan audit-flag-staleness audit-prose-references
 
 help:
 	@echo "talkbank-tools task index (batchalign3 workspace)"
@@ -360,11 +360,17 @@ batchalign-dashboard-e2e:
 	@echo "==> Running dashboard e2e tests (mock server)..."
 	bash scripts/run_react_dashboard_smoke.sh
 
+# The mock suite plus the real-server suite: the same script, with the real
+# server enabled. It installs the frontend and e2e packages and the browser
+# itself. Delegating keeps one recipe, and lets the gate-sync checker see that
+# running this target also runs the mock target CI's smoke job calls.
 batchalign-dashboard-e2e-real:
 	@echo "==> Running dashboard e2e tests (real server)..."
-	cd frontend && npm ci
-	cd frontend/e2e && npm ci && npm run install:browsers
-	BATCHALIGN_REAL_SERVER_E2E=1 bash scripts/run_react_dashboard_smoke.sh
+	BATCHALIGN_REAL_SERVER_E2E=1 $(MAKE) batchalign-dashboard-e2e
+
+batchalign-server-smoke:
+	@echo "==> Server startup smoke (test-echo runtime)..."
+	bash scripts/server_startup_smoke.sh
 
 # The structural lints: the checks that state properties no compiler can.
 #

@@ -516,14 +516,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         reason: "worker configuration boundary for runtime startup and tuning",
     },
     WideStructAllowance {
-        path: "crates/batchalign/src/worker/handle/config.rs",
-        struct_name: "WorkerRuntimeConfig",
-        max_fields: 10,
-        max_bool_fields: 2,
-        disposition: WideStructDisposition::BoundaryShim,
-        reason: "the host-and-process half of WorkerConfig above, same boundary, same verdict",
-    },
-    WideStructAllowance {
         path: "crates/batchalign/src/worker/pool/mod.rs",
         struct_name: "PoolConfig",
         max_fields: 16,

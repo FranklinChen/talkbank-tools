@@ -81,11 +81,12 @@ make batchalign-dashboard-api-check  # Verify API types are in sync
 make batchalign-dashboard-e2e        # Quick mock-server e2e tests
 ```
 
-For a comprehensive confidence check before a dashboard PR, also run:
+`make gate` runs `make batchalign-dashboard-e2e-real` (the mock and the
+real-server suites, about a minute) and the server startup smoke. To check
+the production bundle on its own:
 
 ```bash
 make batchalign-dashboard-build      # Verify build completes
-make batchalign-dashboard-e2e-real   # Integration tests with real server
 ```
 
 If you need broader confidence for cross-cutting changes, also run:

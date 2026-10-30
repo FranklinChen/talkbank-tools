@@ -186,20 +186,18 @@ impl WorkerPool {
             memory_gate::PoolGateState::Warm
         };
 
-        // Layer 0: live CPU-loadavg gate. Refusing here before any
-        // permit work means a saturated host doesn't churn the
-        // global-permit semaphore. Threshold is the host's logical
-        // CPU count, polled fresh each call. Test pools run with the
-        // gate disabled (`PoolConfig::for_tests`), so their spawn
-        // counts never depend on the machine's load; the cpu_gate unit
-        // tests cover the gate itself.
-        let saturation = match self.config.pressure_gates {
-            super::HostPressureGates::Live => cpu_gate::check_cpu_saturation_with_state(
-                pool_state,
-                cpu_gate::host_cpu_count_as_threshold(),
-            ),
-            super::HostPressureGates::Disabled => Ok(()),
-        };
+        // Layer 0: CPU-loadavg gate. Refusing here before any permit
+        // work means a saturated host doesn't churn the global-permit
+        // semaphore. Threshold is the host's logical CPU count, polled
+        // fresh each call. The load comes from the runtime's host
+        // readings: live in production, the declared (idle) host in test
+        // pools, so their spawn counts never depend on the machine's load.
+        let readings = self.config.runtime.host.readings();
+        let saturation = cpu_gate::check_cpu_saturation_with_state(
+            pool_state,
+            readings,
+            cpu_gate::cpu_count_threshold(readings),
+        );
         if let Err(saturated) = saturation {
             let count = self
                 .rejection_counters
@@ -238,13 +236,13 @@ impl WorkerPool {
         // was right for Medium workstations and wrong on every other
         // tier. See `host_min_free_mb_threshold_for_tier`.
         let mem_threshold =
-            memory_gate::host_min_free_mb_threshold_for_tier(&self.config.runtime.memory_tier);
+            memory_gate::host_min_free_mb_threshold_for_tier(&self.config.runtime.host.tier());
         // Engine-aware: lifts the reservation above the profile baseline
         // when the engine selection carries a heavy local model.
         let reservation_mb = memory_gate::engine_aware_startup_reservation_mb(
             group.profile,
             group.engine_selection.overrides(),
-            &self.config.runtime.memory_tier,
+            &self.config.runtime.host.tier(),
         )
         .0;
         let (estimate_mb, estimate_source) =
@@ -252,14 +250,12 @@ impl WorkerPool {
                 Some(observed) => (observed, rss_observer::EstimateSource::ObservedAvgIdle),
                 None => (reservation_mb, rss_observer::EstimateSource::Reservation),
             };
-        let memory = match self.config.pressure_gates {
-            super::HostPressureGates::Live => memory_gate::check_memory_saturation_with_state(
-                pool_state,
-                mem_threshold,
-                estimate_mb,
-            ),
-            super::HostPressureGates::Disabled => Ok(()),
-        };
+        let memory = memory_gate::check_memory_saturation_with_state(
+            pool_state,
+            readings,
+            mem_threshold,
+            estimate_mb,
+        );
         match memory {
             Ok(()) => {}
             Err(memory_gate::GateRefusal::Unreadable(error)) => {
@@ -628,7 +624,7 @@ pub(super) async fn run_health_check(
     observed_worker_runtimes: &crate::worker::runtime_identity::ObservedWorkerRuntimes,
     spawn_runtime: &PoolSpawnRuntime,
 ) {
-    pressure_evict_idle_workers_if_needed(groups_ref).await;
+    pressure_evict_idle_workers_if_needed(groups_ref, pool_config.runtime.host.readings()).await;
 
     // Snapshot group Arcs so we don't hold the groups lock across awaits.
     let group_snapshot: Vec<(WorkerKey, Arc<WorkerGroup>)> = {
@@ -804,9 +800,12 @@ pub(super) async fn run_health_check(
 /// just a TOCTOU race where the worker is now busy serving a
 /// request and the next eviction round will reconsider it if
 /// pressure persists.
-async fn pressure_evict_idle_workers_if_needed(groups_ref: &GroupsMap) {
+async fn pressure_evict_idle_workers_if_needed(
+    groups_ref: &GroupsMap,
+    readings: &crate::host_memory::HostReadings,
+) {
     // Pressure is measured, never assumed: an unreadable host evicts nothing.
-    let available_mb = match crate::host_memory::read_system_memory() {
+    let available_mb = match readings.memory() {
         Ok(memory) => memory.available_mb.0,
         Err(error) => {
             tracing::warn!(%error, "host memory unreadable; skipping pressure eviction");

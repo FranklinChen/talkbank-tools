@@ -13,7 +13,6 @@ mod single;
 use std::time::Duration;
 
 use crate::config::{RuntimeLayout, load_config_from_layout};
-use crate::host_memory::HostMemoryRuntimeConfig;
 use crate::options::CommandOptions;
 use crate::worker::handle::WorkerRuntimeConfig;
 use crate::worker::pool::PoolConfig;
@@ -485,9 +484,8 @@ pub(crate) fn build_direct_pool_config(
         force_cpu: effective.force_cpu,
         allow_mps: effective.allow_mps,
         gpu_thread_pool_size: effective.gpu_thread_pool_size,
-        host_memory: HostMemoryRuntimeConfig::from_server_config(cfg),
         bootstrap_mode: host.policy().bootstrap_mode,
-        ..WorkerRuntimeConfig::local(host.tier())
+        ..WorkerRuntimeConfig::local(host)
     };
     PoolConfig {
         python_path: resolve_python_executable(),
@@ -508,7 +506,6 @@ pub(crate) fn build_direct_pool_config(
         ensure_task_timeout: cfg.ensure_task_timeout_s,
         worker_registry_path: cfg.worker_registry_path.clone(),
         test_delay_ms: 0,
-        pressure_gates: crate::worker::pool::HostPressureGates::Live,
     }
 }
 

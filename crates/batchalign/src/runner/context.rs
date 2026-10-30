@@ -114,6 +114,12 @@ impl DispatchHostContext {
         self.host.tier()
     }
 
+    /// The host-memory ledger coordinator, deciding on the store's host:
+    /// the live machine in a server, the declared one in a test.
+    pub(crate) fn memory_coordinator(&self) -> crate::host_memory::HostMemoryCoordinator {
+        self.host.memory_coordinator()
+    }
+
     /// The host's execution policy, from the store's snapshot.
     pub(crate) fn host_policy(&self) -> crate::host_policy::HostExecutionPolicy {
         self.host.policy()

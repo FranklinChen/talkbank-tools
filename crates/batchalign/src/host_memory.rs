@@ -27,7 +27,84 @@ const DEFAULT_TEST_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub use crate::types::response::HostMemoryPressureLevel;
 
+/// Where the memory and load figures behind a spawn decision come from.
+///
+/// Every admission, spawn, ledger and eviction decision reads the host
+/// through this value, never through [`read_system_memory`] directly. It is
+/// fixed where the host is composed ([`HostSnapshot`]): `read` takes the live
+/// machine, `for_tests` declares one. A test that read the real machine had
+/// an outcome that depended on it: a fixture that fit a 256 GB workstation
+/// was refused on a 16 GB CI runner, and the gates that guarded against that
+/// were switched off in tests rather than made deterministic.
+///
+/// [`HostSnapshot`]: crate::host_facts::HostSnapshot
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostReadings {
+    /// The machine this process runs on, read at each decision.
+    Live,
+    /// A fixed machine, so the same decisions are made on every machine that
+    /// runs them.
+    Declared(DeclaredHost),
+}
+
+impl HostReadings {
+    /// Total and available RAM, as this source reports them now.
+    pub fn memory(&self) -> Result<SystemMemory, HostUnreadable> {
+        match self {
+            Self::Live => read_system_memory(),
+            Self::Declared(host) => Ok(host.memory),
+        }
+    }
+
+    /// The 1-minute load average. A declared host is idle.
+    pub fn load_average_1m(&self) -> Result<f64, sysinfo::Error> {
+        match self {
+            Self::Live => Ok(System::load_average()?.one),
+            Self::Declared(_) => Ok(0.0),
+        }
+    }
+
+    /// Logical CPUs: the CPU gate's saturation threshold.
+    pub fn logical_cpus(&self) -> u32 {
+        match self {
+            // One CPU when the count is unreadable: a daemon that cannot
+            // read it has larger problems, and one keeps the gate meaningful.
+            Self::Live => std::thread::available_parallelism()
+                .map(|count| u32::try_from(count.get()).unwrap_or(u32::MAX))
+                .unwrap_or(1),
+            Self::Declared(host) => host.logical_cpus,
+        }
+    }
+}
+
+/// A machine stated rather than measured: the memory and CPU count of a
+/// declared [`HostFacts`], idle.
+///
+/// [`HostFacts`]: crate::host_facts::HostFacts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredHost {
+    memory: SystemMemory,
+    logical_cpus: u32,
+}
+
+impl DeclaredHost {
+    /// The host the facts describe.
+    pub fn from_facts(facts: &crate::host_facts::HostFacts) -> Self {
+        Self {
+            memory: SystemMemory {
+                total_mb: MemoryMb(facts.ram_total_mb),
+                available_mb: MemoryMb(facts.ram_available_mb),
+            },
+            logical_cpus: facts.cpu_logical_count,
+        }
+    }
+}
+
 /// Runtime-owned configuration for the machine-local memory ledger.
+///
+/// Which host the ledger's decisions read is not here: it is the
+/// [`HostReadings`] the coordinator is built with, from the same host
+/// snapshot as everything else a runtime decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostMemoryRuntimeConfig {
     /// Shared ledger path used by local batchalign3 processes on this host.
@@ -59,19 +136,6 @@ impl HostMemoryRuntimeConfig {
             coordinator_path,
             reserve_mb,
             max_concurrent_worker_startups,
-        }
-    }
-}
-
-impl Default for HostMemoryRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            coordinator_path: default_host_memory_ledger_path(),
-            // `Default::default()` returns the post-resolution value
-            // so callers (mainly tests) get a sensible reserve without
-            // building a `ServerConfig` themselves.
-            reserve_mb: ServerConfig::default().resolved_memory_gate_mb(),
-            max_concurrent_worker_startups: ServerConfig::default().max_concurrent_worker_startups,
         }
     }
 }
@@ -221,7 +285,12 @@ impl MachineMlTestLock {
     /// Acquire the machine-wide ML test lock, waiting until other local test
     /// binaries release it.
     pub fn acquire(label: &str) -> Result<Self, HostMemoryError> {
-        let coordinator = HostMemoryCoordinator::new(HostMemoryRuntimeConfig::default());
+        // Live: ML tests load real models, so the lock is taken on the
+        // machine that has to hold them.
+        let coordinator = HostMemoryCoordinator::new(
+            HostMemoryRuntimeConfig::from_server_config(&ServerConfig::default()),
+            HostReadings::Live,
+        );
         let lease = coordinator.acquire_ml_test_lock(
             label,
             DEFAULT_TEST_LOCK_TIMEOUT,
@@ -534,17 +603,17 @@ impl SystemMemory {
 #[derive(Debug, Clone)]
 pub struct HostMemoryCoordinator {
     config: HostMemoryRuntimeConfig,
+    readings: HostReadings,
 }
 
 impl HostMemoryCoordinator {
-    /// Create one host-memory coordinator from runtime config.
-    pub fn new(config: HostMemoryRuntimeConfig) -> Self {
-        Self { config }
-    }
-
-    /// Build one coordinator from server settings.
-    pub fn from_server_config(config: &ServerConfig) -> Self {
-        Self::new(HostMemoryRuntimeConfig::from_server_config(config))
+    /// A coordinator for the ledger `config` names, deciding on `readings`.
+    ///
+    /// A server builds it from its host snapshot
+    /// (`HostSnapshot::memory_coordinator`), so the ledger reads the same
+    /// host its tier and admission gates describe.
+    pub fn new(config: HostMemoryRuntimeConfig, readings: HostReadings) -> Self {
+        Self { config, readings }
     }
 
     /// Return the shared ledger path backing this coordinator.
@@ -555,7 +624,7 @@ impl HostMemoryCoordinator {
     /// Return the current host-memory snapshot for health/status reporting.
     pub fn snapshot(&self) -> Result<HostMemorySnapshot, HostMemoryError> {
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
-            let system = read_system_memory()?;
+            let system = self.readings.memory()?;
             let active_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             let startup_leases = ledger
@@ -677,7 +746,7 @@ impl HostMemoryCoordinator {
         label: &str,
     ) -> Result<JobExecutionPlan, HostMemoryError> {
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
-            let system = read_system_memory()?;
+            let system = self.readings.memory()?;
             // Tier-aware envelope: clamp the fleet-conservative
             // worst-case to this host's per-profile startup
             // reservation. Without the clamp, a 16 GB host that
@@ -808,7 +877,7 @@ impl HostMemoryCoordinator {
                 }
             }
 
-            let system = read_system_memory()?;
+            let system = self.readings.memory()?;
             let pending_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             // What `effective_reserved_mb` would be AFTER admitting the
@@ -1170,8 +1239,9 @@ fn host_ledger_suffix() -> String {
 mod tests {
     use super::{
         HostMemoryCoordinator, HostMemoryError, HostMemoryLease, HostMemoryPressureLevel,
-        HostMemoryRuntimeConfig, MemoryLeaseKind, MemoryLeaseRecord, MemoryLedger,
-        plan_job_reservation, pressure_level_for, retryable_error, with_locked_ledger,
+        HostMemoryRuntimeConfig, HostReadings, MemoryLeaseKind, MemoryLeaseRecord,
+        MemoryLeaseRequest, MemoryLedger, plan_job_reservation, pressure_level_for,
+        retryable_error, with_locked_ledger,
     };
     use crate::api::MachineTime;
 
@@ -1220,6 +1290,13 @@ mod tests {
 
     /// Build a runtime config pointing at a fresh tmp coordinator file.
     /// Returns the TempDir so the caller can keep it alive for the test.
+    /// The declared test host's readings, so no ledger test depends on the
+    /// machine running it.
+    fn test_readings() -> HostReadings {
+        crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
+            .readings()
+    }
+
     fn test_runtime_config() -> (TempDir, HostMemoryRuntimeConfig) {
         let dir = TempDir::new().expect("tmp dir for host-memory test");
         let coordinator_path: PathBuf = dir.path().join("ledger.json");
@@ -1269,7 +1346,7 @@ mod tests {
     #[test]
     fn lease_for_dead_worker_pid_is_pruned_on_next_ledger_access() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
 
         // PID 4_000_000 is a known-dead PID per the reaper test convention.
         let dead_worker_pid: u32 = 4_000_000;
@@ -1311,7 +1388,7 @@ mod tests {
     #[test]
     fn set_worker_pid_makes_subsequent_prune_target_the_worker() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
 
         // 1. Acquire a synthetic lease the way the daemon would
         //    owner_pid = daemon (this process), worker_pid = None.
@@ -1363,6 +1440,45 @@ mod tests {
     // contract is wrong (correct it) or the system violates it (bug).
     // ============================================================
 
+    /// The coordinator reads the declared host, so its capacity boundary is
+    /// exact on every machine: 14,000 MB available less an 8,000 MB reserve
+    /// admits a 6,000 MB lease and refuses 6,001 MB, with the declared
+    /// figures in the refusal.
+    #[test]
+    fn a_lease_is_admitted_exactly_up_to_the_reserve_on_a_declared_host() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let request = |reserved_mb| MemoryLeaseRequest {
+            kind: MemoryLeaseKind::WorkerStartup,
+            reserved_mb: MemoryMb(reserved_mb),
+            label: "boundary".to_owned(),
+        };
+
+        // `HostMemoryLease` is not `Debug`, so no `expect_err`.
+        let Err(refused) = coordinator.try_acquire_lease(request(6_001)) else {
+            panic!("one megabyte past the reserve was admitted");
+        };
+        let HostMemoryError::CapacityRejected {
+            available_mb,
+            requested_mb,
+            reserve_mb,
+            total_mb,
+            ..
+        } = refused
+        else {
+            panic!("expected a capacity rejection, got {refused:?}");
+        };
+        assert_eq!(
+            (available_mb, requested_mb, reserve_mb, total_mb),
+            (14_000, 6_001, 8_000, 15_989)
+        );
+
+        let admitted = coordinator
+            .try_acquire_lease(request(6_000))
+            .expect("exactly at the reserve");
+        admitted.release();
+    }
+
     /// Contract A: Conservation:
     /// Σ(reserved across leases) must never exceed (total − headroom).
     /// The coordinator should refuse a request that would push the
@@ -1374,9 +1490,9 @@ mod tests {
     /// transiently exceed (total − headroom).
     #[test]
     fn contract_a_capacity_rejection_when_sum_would_exceed_budget() {
-        // For this test we exercise the planner directly because the
-        // system-memory snapshot reads real OS memory and we can't
-        // fake total RAM in a unit test without a deeper plumb.
+        // The planner's arithmetic, directly; the coordinator's own
+        // boundary on a declared host is
+        // `a_lease_is_admitted_exactly_up_to_the_reserve_on_a_declared_host`.
         //
         // The contract statement is enforced by `plan_job_reservation`:
         // when the worst-case requested allocation would push beyond
@@ -1412,7 +1528,7 @@ mod tests {
     #[test]
     fn contract_b_lease_reclaimed_when_bound_process_dies() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
         let dead_pid: u32 = 4_000_000;
         inject_lease(
             &config,
@@ -1446,7 +1562,7 @@ mod tests {
     #[test]
     fn contract_d_worker_startup_does_not_double_count_with_job_execution() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
 
         // Inject a JobExecution lease that already reserves 96 GB
         // (the worst-case 8-worker × 12 GB plan).
@@ -1501,7 +1617,7 @@ mod tests {
     #[test]
     fn contract_e_pre_spawn_reservation_without_worker_pid_must_have_deadline() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
 
         // Inject a "pending spawn" reservation: owner = daemon (alive),
         // worker_pid = None (no worker exists yet), age beyond any
@@ -1599,7 +1715,7 @@ mod tests {
     #[test]
     fn contract_f_dead_daemon_pid_leases_reclaimed_at_first_access() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
 
         let dead_daemon_pid: u32 = 4_000_001;
         inject_lease(
@@ -1626,7 +1742,7 @@ mod tests {
     #[test]
     fn lease_for_live_worker_pid_is_retained() {
         let (_dir, config) = test_runtime_config();
-        let coord = HostMemoryCoordinator::new(config.clone());
+        let coord = HostMemoryCoordinator::new(config.clone(), test_readings());
 
         // Use the test process's own PID, guaranteed alive.
         let live_pid = std::process::id();

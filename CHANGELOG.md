@@ -82,13 +82,27 @@ design; this file records how it changed.
 - Tests no longer flake under host load, each cause removed at the root
   and verified with every suite run while the load average sat above the
   CPU count:
-  - A test pool's spawn count depended on the live CPU-load and free-memory
-    admission gates; the CPU one was switched off by a hand-written
-    `f64::INFINITY` that one test forgot, the memory one not at all. Both
-    are now `HostPressureGates::{Live, Disabled}` and test pools start
-    disabled. Test fixtures declare the Small memory tier (the smallest
-    supported machine), so a real worker spawn in a test reserves memory a
-    16 GB CI runner can grant.
+  - A test's spawn decisions read the machine running it: the CPU-load
+    and free-memory admission gates (the CPU one switched off by a
+    hand-written `f64::INFINITY` that one test forgot, the memory one not
+    at all), the spawn guard, the host-memory ledger and pressure
+    eviction; and in a test server the job planner and `/health` read it
+    too. Every one of them now reads through `HostReadings`, which the host
+    snapshot owns: `HostSnapshot::read` gives `Live`, and
+    `HostSnapshot::for_tests` declares the 16 GB runner-shaped host
+    (`laptop_16gb`, Small tier). That is now the only test host: test
+    servers ran on a declared 64 GB host while their pools read the live
+    machine. The gates and the ledger therefore run in tests and decide
+    identically on a workstation and on the runner, which refused worker
+    spawns a 256 GB machine granted. A worker launch carries a
+    `RuntimeHost` (tier, readings and ledger) that only a snapshot makes,
+    so the three cannot describe different machines; the ledger config's
+    `Default`, which read the live host for whoever called it, is gone,
+    and replay and `worker` launches now use the operator's ledger reserve
+    rather than the default one. Test launches read no Rev.AI key.
+  - The runtime's Rev.AI key is a `RevAiApiKey` (trimmed and non-empty,
+    made only by `RevAiApiKey::parse`) instead of a string trimmed again
+    at each construction.
   - The oversubscription test gave each dispatch a fixed 60 s; a busy
     machine's slow queue timed out. Dispatch bursts now wait on a progress
     deadline (dispatches returning, workers starting) and every dispatch
@@ -114,6 +128,27 @@ design; this file records how it changed.
   `BATCHALIGN_STATE_DIR`.
 - Bumped `actions/setup-node` and `actions/setup-python` to v7 and
   `astral-sh/setup-uv` to v10.3.3.
+
+### The gate runs the dashboard suites and the server smoke CI runs
+
+- `make gate` now runs the server startup smoke and the dashboard Playwright
+  suites, mock and real server (`make batchalign-dashboard-e2e-real`, about
+  a minute). CI ran both, but as a raw script and an inline shell block that
+  the gate-sync checker could not see, so neither was in the gate nor
+  declared exempt, and a real-server dashboard failure reached main behind a
+  green gate.
+- The checker now counts any script under `scripts/`, and `batchalign3`
+  itself other than `serve`, as a check a workflow must reach through a make
+  target or declare in `RAW_VERIFIERS` with a reason. The server smoke moved
+  out of the workflow into `scripts/server_startup_smoke.sh`
+  (`make batchalign-server-smoke`), which runs under a throwaway
+  `BATCHALIGN_HOME` on a kernel-chosen port.
+- The real-server dashboard suite isolates the server with `BATCHALIGN_HOME`
+  instead of replacing `HOME`, so its real-model job uses the cached models
+  rather than downloading them on every run.
+- The testing chapter explains why CI can still go red after a green gate
+  (the gate shares CI's commands, not its environment) and the rules that
+  keep tests independent of the host.
 
 ### Chatter 0.33 integration
 

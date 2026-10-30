@@ -12,8 +12,8 @@
 //! rely on this fixture rather than on a cap.
 //!
 //! Fields the Python child does NOT observe, `ready_timeout_s`,
-//! `audio_task_timeout_s`, `analysis_task_timeout_s`, `runtime.host_memory`,
-//! `runtime.memory_tier`, `runtime.server_instance_id`,
+//! `audio_task_timeout_s`, `analysis_task_timeout_s`, `runtime.host`,
+//! `runtime.server_instance_id`,
 //! `runtime.server_process_id`: are deliberately excluded from
 //! [`ConfigKey`], so tests that vary only those fields still share a worker.
 //! Source of truth for the observed/excluded split is
@@ -95,7 +95,11 @@ impl ConfigKey {
             force_cpu: config.runtime.force_cpu,
             gpu_thread_pool_size: config.runtime.gpu_thread_pool_size,
             bootstrap_mode: config.runtime.bootstrap_mode,
-            revai_api_key: config.runtime.revai_api_key.clone(),
+            revai_api_key: config
+                .runtime
+                .revai_api_key
+                .as_ref()
+                .map(|key| key.as_str().to_owned()),
             test_delay_ms: config.test_delay_ms,
             state_dir: config.runtime.state_dir.clone(),
         }

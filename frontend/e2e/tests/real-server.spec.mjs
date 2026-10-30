@@ -179,9 +179,11 @@ async function startRealServer() {
   const logs = { stdout: "", stderr: "" };
   const child = spawn(binaryPath, args, {
     cwd: repoRoot,
+    // BATCHALIGN_HOME isolates batchalign3's own state; HOME stays real so
+    // model libraries keep their caches and no run downloads a model.
     env: {
       ...process.env,
-      HOME: homeDir,
+      BATCHALIGN_HOME: homeDir,
       BATCHALIGN_DASHBOARD_DIR: dashboardDir,
     },
     stdio: ["ignore", "pipe", "pipe"],

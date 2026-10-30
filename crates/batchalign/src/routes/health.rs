@@ -13,7 +13,6 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::AppState;
-use crate::host_memory::HostMemoryCoordinator;
 use crate::types::response::{HostMemoryPressureLevel, SystemMemoryReading};
 
 /// Build the health-check router (`GET /health`).
@@ -45,14 +44,14 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<HealthRes
     // `resolved_memory_gate_mb` applies the tier-derived fallback
     // when the operator has not set an explicit `Some(MemoryMb(_))`.
     let gate_mb = state.environment.config.resolved_memory_gate_mb();
-    let (host_memory, host_memory_error) =
-        match HostMemoryCoordinator::from_server_config(&state.environment.config).snapshot() {
-            Ok(snapshot) => (Some(snapshot), None),
-            Err(error) => {
-                tracing::warn!(error = %error, "Failed to read host-memory snapshot");
-                (None, Some(error.to_string()))
-            }
-        };
+    let (host_memory, host_memory_error) = match state.workers.pool.memory_coordinator().snapshot()
+    {
+        Ok(snapshot) => (Some(snapshot), None),
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to read host-memory snapshot");
+            (None, Some(error.to_string()))
+        }
+    };
     // The memory panel's figures are the coordinator snapshot's own reading
     // of the host, not a second one taken a moment apart.
     let system_memory = host_memory.as_ref().map(|snapshot| SystemMemoryReading {

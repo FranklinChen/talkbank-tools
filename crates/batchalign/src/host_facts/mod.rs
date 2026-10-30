@@ -41,7 +41,7 @@ pub use gpu::{
     detect_gpu_presence,
 };
 pub use os::{CpuArch, OperatingSystem};
-pub use snapshot::HostSnapshot;
+pub use snapshot::{HostSnapshot, RuntimeHost};
 // `recommend_max_workers_per_job` is intentionally NOT re-exported.
 // External callers go through `EffectiveConfig::max_workers_per_job`,
 // which composes the operator override with the per-command

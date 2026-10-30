@@ -17,7 +17,7 @@ fn cpu_only_runtime() -> WorkerRuntimeConfig {
         force_cpu: true,
         gpu_thread_pool_size: 1,
         state_dir: Some(test_state_dir().to_path_buf()),
-        ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+        ..WorkerRuntimeConfig::for_tests()
     }
 }
 

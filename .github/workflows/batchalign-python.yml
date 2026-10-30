@@ -270,28 +270,12 @@ jobs:
           uv pip install --no-deps dist/*.whl
       - name: Server startup smoke test
         # Uses build-cli's development binary instead of rebuilding in-job.
-        # The release workflow separately proves the optimized binary.
-        #
-        # `--warmup off` was dropped when startup warmup was retired: the
-        # flag no longer exists and the server refuses to start with it.
+        # The release workflow separately proves the optimized binary. The
+        # local gate runs the same target.
         env:
           BATCHALIGN_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: |
-          ./target/debug/batchalign3 serve start \
-            --foreground --test-echo --port 18123 &
-          SERVER_PID=$!
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:18123/health | grep -q '"status":"ok"'; then
-              echo "Server healthy after ${i}s"
-              kill $SERVER_PID
-              wait $SERVER_PID 2>/dev/null || true
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Server failed to start within 30s"
-          kill $SERVER_PID 2>/dev/null || true
-          exit 1
+          BATCHALIGN_BIN: ${{ github.workspace }}/target/debug/batchalign3
+        run: make batchalign-server-smoke
 
   coverage:
     name: Coverage
@@ -378,7 +362,7 @@ jobs:
         env:
           BATCHALIGN_PLAYWRIGHT_WITH_DEPS: "1"
           BATCHALIGN_BIN: ${{ github.workspace }}/target/debug/batchalign3
-        run: bash scripts/run_react_dashboard_smoke.sh
+        run: make batchalign-dashboard-e2e
 
   dashboard-e2e:
     name: Dashboard E2E
@@ -421,7 +405,6 @@ jobs:
       - name: Run E2E suite
         env:
           BATCHALIGN_PLAYWRIGHT_WITH_DEPS: "1"
-          BATCHALIGN_REAL_SERVER_E2E: "1"
           # scripts/run_react_dashboard_smoke.sh checks BATCHALIGN_BIN
           # and skips its own cargo build if the binary is already
           # in place. Pointing at the artifact downloaded above is what
@@ -430,4 +413,4 @@ jobs:
         run: |
           BATCHALIGN_PYTHON="$(uv run --no-sync python -c 'import sys; print(sys.executable)')"
           export BATCHALIGN_PYTHON
-          bash scripts/run_react_dashboard_smoke.sh
+          make batchalign-dashboard-e2e-real

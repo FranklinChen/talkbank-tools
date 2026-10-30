@@ -129,7 +129,7 @@ fn test_pool(python: String) -> WorkerPool {
         worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(test_state_dir().to_path_buf()),
-            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            ..WorkerRuntimeConfig::for_tests()
         },
         ..PoolConfig::for_tests()
     })
@@ -212,7 +212,7 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
                 state_dir: Some(test_state_dir().to_path_buf()),
                 server_instance_id: Some(pool.current_server_instance_id().to_string()),
                 server_process_id: Some(std::process::id()),
-                ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+                ..WorkerRuntimeConfig::for_tests()
             },
             ..WorkerConfig::for_tests()
         };
@@ -713,9 +713,6 @@ async fn gpu_request_with_short_timeout_fails_cleanly() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
             audio: Some(batchalign::api::PositiveSeconds::literal::<2>()),
             analysis: None,
@@ -880,7 +877,7 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
         verbose: 0,
         runtime: WorkerRuntimeConfig {
             gpu_thread_pool_size: 2,
-            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            ..WorkerRuntimeConfig::for_tests()
         },
         task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
             audio: Some(batchalign::api::PositiveSeconds::literal::<1>()),
@@ -1014,7 +1011,7 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
         verbose: 0,
         runtime: WorkerRuntimeConfig {
             gpu_thread_pool_size: 1,
-            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            ..WorkerRuntimeConfig::for_tests()
         },
         task_timeouts: batchalign::types::worker_v2::TaskTimeoutOverrides {
             audio: Some(batchalign::api::PositiveSeconds::literal::<30>()),
@@ -1352,7 +1349,7 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
         worker_registry_path: Some(test_state_dir().join("workers.json")),
         runtime: WorkerRuntimeConfig {
             state_dir: Some(test_state_dir().to_path_buf()),
-            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            ..WorkerRuntimeConfig::for_tests()
         },
         ..PoolConfig::for_tests()
     }));

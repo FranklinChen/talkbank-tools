@@ -34,7 +34,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-use crate::host_memory::{HostMemoryCoordinator, HostMemoryLease};
+use crate::host_memory::HostMemoryLease;
 
 use super::handle::WorkerConfig;
 
@@ -168,7 +168,7 @@ pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, 
     let required_mb = startup_reservation.0.max(min_spawn_memory_mb());
     // Drops the permit on refusal (`?` returns before it is held), so other
     // spawns can proceed; an unreadable host is refused, never waved through.
-    let memory = crate::host_memory::read_system_memory()?;
+    let memory = config.runtime.host.readings().memory()?;
     let available = memory.available_mb.0;
     let total = memory.total_mb.0;
     let threshold = required_mb;
@@ -189,7 +189,7 @@ pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, 
         });
     }
 
-    let coordinator = HostMemoryCoordinator::new(config.runtime.host_memory.clone());
+    let coordinator = config.runtime.host.memory_coordinator();
     let profile = config.profile;
     let lang = config.lang.clone();
     let engine_overrides = config.engine_overrides.clone();
@@ -228,18 +228,16 @@ mod tests {
         let config = WorkerConfig {
             profile: WorkerProfile::Stanza,
             lang: WorkerLanguage::from(LanguageCode3::eng()),
-            runtime: crate::worker::handle::WorkerRuntimeConfig::from_sources(
-                false,
-                false,
-                None,
-                1,
-                HostMemoryRuntimeConfig::from_sources(
-                    temp.path().join("host-memory.json"),
-                    MemoryMb(1_000_000_000),
-                    crate::config::WorkerStartupLimit::literal::<1>(),
-                ),
-                crate::worker::handle::test_memory_tier(),
-            ),
+            runtime: crate::worker::handle::WorkerRuntimeConfig {
+                host: crate::worker::handle::WorkerRuntimeConfig::for_tests()
+                    .host
+                    .with_ledger(HostMemoryRuntimeConfig::from_sources(
+                        temp.path().join("host-memory.json"),
+                        MemoryMb(1_000_000_000),
+                        crate::config::WorkerStartupLimit::literal::<1>(),
+                    )),
+                ..crate::worker::handle::WorkerRuntimeConfig::for_tests()
+            },
             ..WorkerConfig::for_tests()
         };
         let result = acquire_spawn_permit(&config).await;

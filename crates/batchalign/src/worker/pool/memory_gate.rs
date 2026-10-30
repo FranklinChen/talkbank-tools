@@ -49,6 +49,8 @@
 //! consume permits; they refuse the spawn outright and let the
 //! caller retry once the host frees up.
 
+use crate::host_memory::HostReadings;
+
 /// Whether the worker pool currently has any workers for the
 /// (profile, lang, engine) class the admission check is for.
 ///
@@ -218,13 +220,15 @@ pub(super) fn engine_aware_startup_reservation_mb(
 /// exists. Cold-start by definition has no peers to observe.
 pub(super) fn check_memory_saturation_with_state(
     state: PoolGateState,
+    readings: &HostReadings,
     threshold_mb: u64,
     reservation_mb: u64,
 ) -> Result<(), GateRefusal> {
     if state == PoolGateState::ColdStart {
         return Ok(());
     }
-    let available_mb = crate::host_memory::read_system_memory()
+    let available_mb = readings
+        .memory()
         .map_err(GateRefusal::Unreadable)?
         .available_mb
         .0;
@@ -240,20 +244,17 @@ pub(super) fn check_memory_saturation_with_state(
     }
 }
 
-/// Legacy entry point for tests that pre-date the state-aware
-/// variant. Behaves as `check_memory_saturation_with_state(Warm,
-/// ...)` so the existing rejection-branch tests continue to fire
-/// without modification. Production callers must use the
-/// state-aware variant.
-#[cfg(test)]
-fn check_memory_saturation(threshold_mb: u64, reservation_mb: u64) -> Result<(), GateRefusal> {
-    check_memory_saturation_with_state(PoolGateState::Warm, threshold_mb, reservation_mb)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    /// The declared test host's readings: no gate test depends on the
+    /// machine running it.
+    fn declared() -> HostReadings {
+        crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
+            .readings()
+    }
 
     /// The Medium-tier floor must equal exactly 2048 MB, the
     /// rearch's original number, preserved for the workstation case
@@ -455,58 +456,6 @@ mod tests {
         assert_eq!(reservation, baseline);
     }
 
-    /// Threshold of `u64::MAX` makes the gate certain to refuse with
-    /// any reservation: any real machine has finite memory and the
-    /// post-spawn projection trivially falls at or below the floor.
-    /// Exercises the rejection branch deterministically.
-    #[test]
-    fn rejects_when_floor_alone_exceeds_available() {
-        let result = check_memory_saturation(u64::MAX, 0);
-        let Err(GateRefusal::Constrained(constrained)) = result else {
-            panic!("expected MemoryConstrained rejection at threshold=u64::MAX");
-        };
-        assert_eq!(constrained.threshold_mb, u64::MAX);
-        assert_eq!(constrained.reservation_mb, 0);
-    }
-
-    /// Reservation of `u64::MAX` with floor=0 also forces refusal:
-    /// the projected post-spawn memory saturates at 0, which is at
-    /// or below the floor. Pins the projection arithmetic.
-    #[test]
-    fn rejects_when_reservation_alone_exceeds_available() {
-        let result = check_memory_saturation(0, u64::MAX);
-        let Err(GateRefusal::Constrained(constrained)) = result else {
-            panic!("expected rejection when reservation > available");
-        };
-        assert_eq!(constrained.reservation_mb, u64::MAX);
-        assert_eq!(constrained.threshold_mb, 0);
-    }
-
-    /// Floor=0 and reservation=0 means the predicate reduces to
-    /// "is available > 0?", won't fire on a running machine.
-    /// Exercises the admit branch without depending on host
-    /// idleness.
-    #[test]
-    fn admits_when_floor_and_reservation_are_zero() {
-        let result = check_memory_saturation(0, 0);
-        assert!(
-            result.is_ok(),
-            "expected Ok at floor=0,reservation=0 on a running host, got {result:?}"
-        );
-    }
-
-    /// Confirms the projection arithmetic: with reservation 1 MB and
-    /// floor 0, the gate must admit (any real host has more than
-    /// 1 MB free).
-    #[test]
-    fn admits_when_projected_post_spawn_well_above_floor() {
-        let result = check_memory_saturation(0, 1);
-        assert!(
-            result.is_ok(),
-            "expected Ok at floor=0,reservation=1 on a running host, got {result:?}"
-        );
-    }
-
     // ---------------------------------------------------------------
     // Layer 2 (cold-start bootstrap rule + tier-scaled floor).
     //
@@ -542,7 +491,8 @@ mod tests {
     /// nothing to push back against.
     #[test]
     fn cold_start_pool_admits_first_worker_under_memory_pressure() {
-        let result = check_memory_saturation_with_state(PoolGateState::ColdStart, u64::MAX, 0);
+        let result =
+            check_memory_saturation_with_state(PoolGateState::ColdStart, &declared(), u64::MAX, 0);
         assert!(
             result.is_ok(),
             "cold-start admission must bypass the floor: a pool with no \
@@ -556,7 +506,8 @@ mod tests {
     /// path bypasses: memory_guard handles actual at-spawn OOM.
     #[test]
     fn cold_start_pool_admits_under_reservation_pressure_too() {
-        let result = check_memory_saturation_with_state(PoolGateState::ColdStart, 0, u64::MAX);
+        let result =
+            check_memory_saturation_with_state(PoolGateState::ColdStart, &declared(), 0, u64::MAX);
         assert!(
             result.is_ok(),
             "cold-start must admit regardless of reservation projection. \
@@ -570,7 +521,8 @@ mod tests {
     /// behavior for the legitimate saturation case.
     #[test]
     fn warm_pool_still_refuses_under_memory_pressure() {
-        let result = check_memory_saturation_with_state(PoolGateState::Warm, u64::MAX, 0);
+        let result =
+            check_memory_saturation_with_state(PoolGateState::Warm, &declared(), u64::MAX, 0);
         assert!(
             result.is_err(),
             "warm-pool admission must still refuse N+1 under memory \
@@ -584,7 +536,8 @@ mod tests {
     /// that pass a real reservation.
     #[test]
     fn warm_pool_refuses_when_reservation_alone_exceeds_available() {
-        let result = check_memory_saturation_with_state(PoolGateState::Warm, 0, u64::MAX);
+        let result =
+            check_memory_saturation_with_state(PoolGateState::Warm, &declared(), 0, u64::MAX);
         assert!(
             result.is_err(),
             "warm-pool admission must refuse when reservation exceeds \
@@ -592,11 +545,30 @@ mod tests {
         );
     }
 
+    /// On a declared host the projection is exact: 14,000 MB available,
+    /// the Small floor 1,024 MB, so a 12,975 MB estimate admits (1,025 MB
+    /// left) and 12,976 MB refuses (1,024 MB left is at the floor). A live
+    /// reading could only test the extremes.
+    #[test]
+    fn declared_host_admits_up_to_the_floor_and_refuses_at_it() {
+        let declared = declared();
+        assert!(
+            check_memory_saturation_with_state(PoolGateState::Warm, &declared, 1_024, 12_975)
+                .is_ok()
+        );
+        let Err(GateRefusal::Constrained(constrained)) =
+            check_memory_saturation_with_state(PoolGateState::Warm, &declared, 1_024, 12_976)
+        else {
+            panic!("expected a refusal at the floor");
+        };
+        assert_eq!(constrained.available_mb, 14_000);
+    }
+
     /// Warm pool with no pressure admits, the gate isn't there to
     /// refuse work that fits, only to hold back work that doesn't.
     #[test]
     fn warm_pool_admits_when_floor_and_reservation_are_zero() {
-        let result = check_memory_saturation_with_state(PoolGateState::Warm, 0, 0);
+        let result = check_memory_saturation_with_state(PoolGateState::Warm, &declared(), 0, 0);
         assert!(
             result.is_ok(),
             "warm-pool admission with no pressure must admit. got {result:?}"

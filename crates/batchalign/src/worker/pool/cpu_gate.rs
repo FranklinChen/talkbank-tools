@@ -29,6 +29,8 @@
 //! (per-job RSS observation, available-memory delta tracking) will
 //! plug in alongside it.
 
+use crate::host_memory::HostReadings;
+
 /// Information about the load reading that triggered an admission
 /// refusal. Carries both numbers so observability can report
 /// "rejected at loadavg=18.4 against threshold=16" rather than just
@@ -43,35 +45,16 @@ pub(super) struct CpuSaturated {
     pub(super) threshold: f64,
 }
 
-/// Read the 1-minute load average via `sysinfo`.
-///
-/// `sysinfo::System::load_average()` is an associated function (no
-/// instance state) that calls `getloadavg(3)` on Unix. The value is
-/// the kernel's exponentially-weighted moving average of runnable
-/// task count over the last minute. On Apple Silicon and Linux the
-/// signal is faithful. Where the OS has no load average (Windows) or
-/// the read fails, `sysinfo` reports an error rather than the zero it
-/// used to return.
-fn current_loadavg_1m() -> Result<f64, sysinfo::Error> {
-    Ok(sysinfo::System::load_average()?.one)
-}
-
 /// Loadavg threshold: the host's logical CPU count, full stop.
 ///
 /// No env var, no config field, no operator override. The
 /// rearch's premise is that resource policy must be mechanical
 /// because there is no human reading or tuning configuration on
-/// fleet hosts: "operator" is a fiction in this deployment.
-/// The threshold is derived once from
-/// `std::thread::available_parallelism()` at admission time; if
-/// that query fails (vanishingly rare; would also break much of
-/// the rest of the daemon), we fall back to the conservative
-/// `1.0` so the gate remains active rather than silently
-/// disabled.
-pub(super) fn host_cpu_count_as_threshold() -> f64 {
-    std::thread::available_parallelism()
-        .map(|n| n.get() as f64)
-        .unwrap_or(1.0)
+/// fleet hosts: "operator" is a fiction in this deployment. The
+/// count comes from `readings` ([`HostReadings::logical_cpus`]), so a
+/// declared host's threshold is its declared CPU count.
+pub(super) fn cpu_count_threshold(readings: &HostReadings) -> f64 {
+    f64::from(readings.logical_cpus())
 }
 
 /// Check whether the host is currently CPU-saturated against
@@ -87,8 +70,11 @@ pub(super) fn host_cpu_count_as_threshold() -> f64 {
 /// the memory gate's, which fails closed on an unreadable host. Refusing
 /// here instead would wedge the pool for good on a host without a load
 /// average, which is the case the old silent zero already admitted.
-pub(super) fn check_cpu_saturation(threshold: f64) -> Result<(), CpuSaturated> {
-    let loadavg_1m = match current_loadavg_1m() {
+pub(super) fn check_cpu_saturation(
+    readings: &HostReadings,
+    threshold: f64,
+) -> Result<(), CpuSaturated> {
+    let loadavg_1m = match readings.load_average_1m() {
         Ok(loadavg_1m) => loadavg_1m,
         Err(error) => {
             tracing::warn!(%error, "load average unreadable; CPU back-pressure not applied");
@@ -116,12 +102,13 @@ pub(super) fn check_cpu_saturation(threshold: f64) -> Result<(), CpuSaturated> {
 /// `PoolGateState::Warm` runs the loadavg check normally.
 pub(super) fn check_cpu_saturation_with_state(
     state: super::memory_gate::PoolGateState,
+    readings: &HostReadings,
     threshold: f64,
 ) -> Result<(), CpuSaturated> {
     if state == super::memory_gate::PoolGateState::ColdStart {
         return Ok(());
     }
-    check_cpu_saturation(threshold)
+    check_cpu_saturation(readings, threshold)
 }
 
 #[cfg(test)]
@@ -135,7 +122,7 @@ mod tests {
     /// we want: refuse to admit when the load equals the ceiling.)
     #[test]
     fn rejects_when_loadavg_meets_or_exceeds_threshold() {
-        let result = check_cpu_saturation(0.0);
+        let result = check_cpu_saturation(&HostReadings::Live, 0.0);
         let Err(saturated) = result else {
             panic!("expected CpuSaturated rejection at threshold=0.0");
         };
@@ -153,20 +140,36 @@ mod tests {
     /// without depending on host idleness.
     #[test]
     fn admits_when_threshold_far_above_load() {
-        let result = check_cpu_saturation(1.0e9);
+        let result = check_cpu_saturation(&HostReadings::Live, 1.0e9);
         assert!(
             result.is_ok(),
             "expected Ok at threshold=1e9, got {result:?}"
         );
     }
 
-    /// The host-derived threshold must be a positive number on any
-    /// machine the daemon runs on. The fallback (`1.0`) only fires
-    /// if `available_parallelism()` returns Err, which would break
-    /// most other things in the daemon long before this gate.
+    /// A declared host is idle: it admits at any positive threshold, and
+    /// refuses only at a zero threshold, where load equals the ceiling.
     #[test]
-    fn host_threshold_is_positive_on_any_real_machine() {
-        let t = host_cpu_count_as_threshold();
-        assert!(t >= 1.0, "expected threshold >= 1.0, got {t}");
+    fn a_declared_host_is_idle() {
+        let declared =
+            crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
+                .readings();
+        assert!(check_cpu_saturation(&declared, 1.0).is_ok());
+        let Err(saturated) = check_cpu_saturation(&declared, 0.0) else {
+            panic!("load 0 meets a threshold of 0");
+        };
+        assert_eq!(saturated.loadavg_1m, 0.0);
+    }
+
+    /// The live threshold is a positive number on any machine the daemon
+    /// runs on (the unreadable fallback is one CPU); a declared host's is
+    /// its declared count.
+    #[test]
+    fn the_threshold_is_the_hosts_cpu_count() {
+        assert!(cpu_count_threshold(&HostReadings::Live) >= 1.0);
+        let declared =
+            crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
+                .readings();
+        assert_eq!(cpu_count_threshold(&declared), 4.0);
     }
 }

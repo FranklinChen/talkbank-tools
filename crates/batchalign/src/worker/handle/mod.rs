@@ -15,7 +15,7 @@ mod protocol;
 pub mod spawn;
 
 pub(crate) use config::WorkerLaunch;
-pub use config::{WorkerConfig, WorkerRuntimeConfig, test_memory_tier};
+pub use config::{WorkerConfig, WorkerRuntimeConfig};
 pub use spawn::spawn_tcp_daemon;
 // The wire envelopes and the reported-failure mapping are shared by every
 // transport (`worker::tcp_handle` and the shared GPU reader read the same
@@ -126,7 +126,11 @@ impl WorkerHandle {
             force_cpu = config.runtime.force_cpu,
             python = %config.python_path,
             startup_reservation_mb = startup_reservation.0,
-            available_memory_mb = ?crate::host_memory::read_system_memory()
+            available_memory_mb = ?config
+                .runtime
+                .host
+                .readings()
+                .memory()
                 .ok()
                 .map(|memory| memory.available_mb.0),
             "Spawning worker (memory guard passed)"
@@ -349,7 +353,6 @@ mod tests {
     use super::spawn::build_worker_command;
     use super::{WorkerConfig, WorkerRuntimeConfig};
     use crate::api::{LanguageCode3, NumSpeakers, WorkerLanguage};
-    use crate::host_memory::HostMemoryRuntimeConfig;
     use crate::worker::provider_credentials::HkAsrCredentialSources;
     use crate::worker::{InferTask, WorkerProfile};
 
@@ -385,14 +388,10 @@ mod tests {
             test_echo: false,
             ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
-            runtime: WorkerRuntimeConfig::from_sources(
-                true,
-                false,
-                None,
-                4,
-                HostMemoryRuntimeConfig::default(),
-                crate::worker::handle::test_memory_tier(),
-            ),
+            runtime: WorkerRuntimeConfig {
+                force_cpu: true,
+                ..WorkerRuntimeConfig::for_tests()
+            },
             ..WorkerConfig::for_tests()
         });
 
@@ -410,14 +409,10 @@ mod tests {
             test_echo: false,
             ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
-            runtime: WorkerRuntimeConfig::from_sources(
-                false,
-                true,
-                None,
-                4,
-                HostMemoryRuntimeConfig::default(),
-                crate::worker::handle::test_memory_tier(),
-            ),
+            runtime: WorkerRuntimeConfig {
+                allow_mps: true,
+                ..WorkerRuntimeConfig::for_tests()
+            },
             ..WorkerConfig::for_tests()
         });
 
@@ -446,14 +441,10 @@ mod tests {
         let args = command_args(&WorkerConfig {
             python_path: "python3".to_string(),
             profile: WorkerProfile::Gpu,
-            runtime: WorkerRuntimeConfig::from_sources(
-                false,
-                false,
-                None,
-                7,
-                HostMemoryRuntimeConfig::default(),
-                crate::worker::handle::test_memory_tier(),
-            ),
+            runtime: WorkerRuntimeConfig {
+                gpu_thread_pool_size: 7,
+                ..WorkerRuntimeConfig::for_tests()
+            },
             ..WorkerConfig::for_tests()
         });
 
@@ -491,14 +482,11 @@ mod tests {
         let args = command_args(&WorkerConfig {
             python_path: "python3".to_string(),
             profile: WorkerProfile::Gpu,
-            runtime: WorkerRuntimeConfig::from_sources(
-                true,
-                false,
-                None,
-                7,
-                HostMemoryRuntimeConfig::default(),
-                crate::worker::handle::test_memory_tier(),
-            ),
+            runtime: WorkerRuntimeConfig {
+                force_cpu: true,
+                gpu_thread_pool_size: 7,
+                ..WorkerRuntimeConfig::for_tests()
+            },
             ..WorkerConfig::for_tests()
         });
 
@@ -523,14 +511,10 @@ mod tests {
             test_echo: false,
             ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
-            runtime: WorkerRuntimeConfig::from_sources(
-                false,
-                false,
-                Some("  injected-key  ".to_string()),
-                4,
-                HostMemoryRuntimeConfig::default(),
-                crate::worker::handle::test_memory_tier(),
-            ),
+            runtime: WorkerRuntimeConfig {
+                revai_api_key: crate::revai::RevAiApiKey::parse("  injected-key  "),
+                ..WorkerRuntimeConfig::for_tests()
+            },
             ..WorkerConfig::for_tests()
         });
 
@@ -552,14 +536,9 @@ mod tests {
                 test_echo: false,
                 ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
                 verbose: 0,
-                runtime: WorkerRuntimeConfig::from_sources(
-                    false,
-                    false,
-                    None,
-                    4,
-                    HostMemoryRuntimeConfig::default(),
-                    crate::worker::handle::test_memory_tier(),
-                ),
+                runtime: WorkerRuntimeConfig {
+                    ..WorkerRuntimeConfig::for_tests()
+                },
                 ..WorkerConfig::for_tests()
             },
             &HkAsrCredentialSources::from_sources(

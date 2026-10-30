@@ -11,7 +11,7 @@ use crate::cli::args::ReplayArgs;
 use crate::cli::error::CliError;
 use crate::cli::python::resolve_python_executable;
 use crate::types::worker_v2::ExecuteRequestV2;
-use crate::worker::handle::{WorkerHandle, WorkerLaunch};
+use crate::worker::handle::{WorkerHandle, WorkerLaunch, WorkerRuntimeConfig};
 
 /// Parsed dump file structure.
 #[derive(Debug, serde::Deserialize)]
@@ -96,8 +96,8 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
     // this host would, from the operator's config.
     let server_config =
         crate::config::load_config_from_layout(&crate::config::RuntimeLayout::from_env(), None)?;
-    let memory_tier = crate::host_facts::HostSnapshot::read(&server_config)?.tier();
-    let config = launch.into_config(python, memory_tier);
+    let host = crate::host_facts::HostSnapshot::read(&server_config)?;
+    let config = launch.into_config(python, WorkerRuntimeConfig::local(&host));
     let ensure_task_timeout = config.ready_timeout_s;
     let mut worker = WorkerHandle::spawn(config)
         .await
@@ -148,7 +148,7 @@ mod tests {
     /// replay rebuilds the very config the pool spawned.
     #[test]
     fn a_replay_rebuilds_the_worker_the_dump_records() {
-        let mut runtime = WorkerRuntimeConfig::local(crate::worker::handle::test_memory_tier())
+        let mut runtime = WorkerRuntimeConfig::for_tests()
             .with_bootstrap_mode(crate::worker::WorkerBootstrapMode::LazyProfile);
         runtime.force_cpu = true;
         let original = WorkerConfig {
@@ -163,10 +163,7 @@ mod tests {
 
         let replayed = replay_launch(&dump, None)
             .expect("the dump records its launch")
-            .into_config(
-                "python3".to_owned(),
-                crate::worker::handle::test_memory_tier(),
-            );
+            .into_config("python3".to_owned(), WorkerRuntimeConfig::for_tests());
         assert_eq!(WorkerLaunch::of(&replayed), WorkerLaunch::of(&original));
         assert!(WorkerLaunch::of(&original).loads_on_demand());
         assert_eq!(

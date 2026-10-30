@@ -77,6 +77,13 @@ impl WorkerPool {
         })
     }
 
+    /// The host-memory ledger coordinator, deciding on the host this pool's
+    /// workers launch on: the live machine in a server, the declared one in
+    /// a test.
+    pub(crate) fn memory_coordinator(&self) -> crate::host_memory::HostMemoryCoordinator {
+        self.config.runtime.host.memory_coordinator()
+    }
+
     /// Number of active workers (total across all keys, including checked-out).
     ///
     /// Counts sequential group workers, shared GPU workers, and TCP workers.

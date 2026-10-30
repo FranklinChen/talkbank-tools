@@ -9,13 +9,24 @@
 
 use std::path::PathBuf;
 
-/// Typed wrapper around a Rev.AI API key.
+/// A Rev.AI API key: trimmed and non-empty by construction.
+///
+/// Public because a worker launch carries one
+/// (`WorkerRuntimeConfig::revai_api_key`); it is only made here, from a
+/// credential source or by [`RevAiApiKey::parse`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RevAiApiKey(String);
+pub struct RevAiApiKey(String);
 
 impl RevAiApiKey {
+    /// A key from raw text: surrounding whitespace removed, and `None` when
+    /// nothing is left.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| Self(trimmed.to_owned()))
+    }
+
     /// Borrow the raw API key string for HTTP calls.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -42,8 +53,8 @@ pub(crate) enum RevAiCredentialError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RevAiCredentialSources {
     legacy_ini_path: PathBuf,
-    batchalign_rev_api_key: Option<String>,
-    revai_api_key: Option<String>,
+    batchalign_rev_api_key: Option<RevAiApiKey>,
+    revai_api_key: Option<RevAiApiKey>,
 }
 
 impl RevAiCredentialSources {
@@ -66,30 +77,27 @@ impl RevAiCredentialSources {
         let home = home_env.unwrap_or(".");
         Self {
             legacy_ini_path: PathBuf::from(home).join(".batchalign.ini"),
-            batchalign_rev_api_key: normalized_env_key(batchalign_rev_api_key),
-            revai_api_key: normalized_env_key(revai_api_key),
+            batchalign_rev_api_key: batchalign_rev_api_key.and_then(RevAiApiKey::parse),
+            revai_api_key: revai_api_key.and_then(RevAiApiKey::parse),
         }
     }
 
     /// Load the Rev.AI API key from the owned resolution chain.
     pub(crate) fn load_api_key(&self) -> Result<RevAiApiKey, RevAiCredentialError> {
         match self.read_legacy_ini_key() {
-            Ok(Some(key)) => Ok(RevAiApiKey(key)),
-            Ok(None) => self
-                .env_key()
-                .map(RevAiApiKey)
-                .ok_or(RevAiCredentialError::Missing),
+            Ok(Some(key)) => Ok(key),
+            Ok(None) => self.env_key().ok_or(RevAiCredentialError::Missing),
             Err(err) => Err(err),
         }
     }
 
-    fn env_key(&self) -> Option<String> {
+    fn env_key(&self) -> Option<RevAiApiKey> {
         self.batchalign_rev_api_key
             .clone()
             .or_else(|| self.revai_api_key.clone())
     }
 
-    fn read_legacy_ini_key(&self) -> Result<Option<String>, RevAiCredentialError> {
+    fn read_legacy_ini_key(&self) -> Result<Option<RevAiApiKey>, RevAiCredentialError> {
         let path = self.legacy_ini_path.clone();
         let contents = match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
@@ -108,14 +116,7 @@ pub(crate) fn load_revai_api_key() -> Result<RevAiApiKey, RevAiCredentialError> 
     RevAiCredentialSources::from_env().load_api_key()
 }
 
-fn normalized_env_key(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn parse_legacy_ini_revai_key(contents: &str) -> Option<String> {
+fn parse_legacy_ini_revai_key(contents: &str) -> Option<RevAiApiKey> {
     let mut current_section = String::new();
 
     for line in contents.lines() {
@@ -133,11 +134,11 @@ fn parse_legacy_ini_revai_key(contents: &str) -> Option<String> {
             continue;
         };
 
-        if current_section == "asr" && key.trim() == "engine.rev.key" {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
+        if current_section == "asr"
+            && key.trim() == "engine.rev.key"
+            && let Some(key) = RevAiApiKey::parse(value)
+        {
+            return Some(key);
         }
     }
 
@@ -152,7 +153,9 @@ mod tests {
     fn parser_reads_revai_key_from_asr_section() {
         let contents = "[asr]\nengine = rev\nengine.rev.key = secret\n";
         assert_eq!(
-            parse_legacy_ini_revai_key(contents).as_deref(),
+            parse_legacy_ini_revai_key(contents)
+                .as_ref()
+                .map(super::RevAiApiKey::as_str),
             Some("secret")
         );
     }

@@ -1,9 +1,9 @@
 //! Configuration types for spawning Python worker processes.
 
 use crate::api::{LanguageCode3, MemoryMb, NumSpeakers, WorkerLanguage};
-use crate::host_memory::HostMemoryRuntimeConfig;
-use crate::revai::load_revai_api_key;
-use crate::types::runtime::MemoryTier;
+use crate::config::ServerConfig;
+use crate::host_facts::{HostSnapshot, RuntimeHost};
+use crate::revai::{RevAiApiKey, load_revai_api_key};
 use crate::worker::python::resolve_python_executable;
 use crate::worker::{InferTask, WorkerBootstrapMode, WorkerProfile, WorkerTarget};
 
@@ -20,15 +20,14 @@ pub struct WorkerRuntimeConfig {
     /// wontfix).
     pub allow_mps: bool,
     /// Optional Rev.AI key already resolved by the Rust control plane.
-    pub revai_api_key: Option<String>,
+    pub revai_api_key: Option<RevAiApiKey>,
     /// Maximum concurrent requests served inside one GPU worker process
     /// when it serves concurrently; see `worker::serving::WorkerServing`.
     pub gpu_thread_pool_size: u32,
-    /// Host-memory coordination settings shared with the worker spawn path.
-    pub host_memory: HostMemoryRuntimeConfig,
-    /// Resolved memory tier used for startup reservations and other
-    /// tier-derived worker-launch decisions.
-    pub memory_tier: MemoryTier,
+    /// The host the launch is sized for and decides on (memory tier, live
+    /// readings, memory ledger), made only from a [`HostSnapshot`] so the
+    /// three describe one machine.
+    pub host: RuntimeHost,
     /// State directory the spawned child should use, when the caller wants
     /// one other than the ambient default.
     ///
@@ -55,67 +54,40 @@ pub struct WorkerRuntimeConfig {
     pub server_process_id: Option<u32>,
 }
 
-/// The memory tier test fixtures launch with: declared, never read from the
-/// machine running the tests, so a test's outcome cannot depend on how much
-/// RAM that machine has or on whether the operating system reports it.
-///
-/// The SMALL tier, the smallest machine BA3 supports, because a test pool
-/// that spawns real worker processes reserves the tier's startup memory with
-/// the live spawn guard. Declaring a 64 GB tier made each Stanza worker
-/// reserve 12 GB: fine on a 256 GB workstation, refused on a 16 GB CI
-/// runner. Every machine that can run BA3 can grant a Small-tier reservation.
-pub fn test_memory_tier() -> MemoryTier {
-    MemoryTier::from_total_mb(16_000)
-}
-
 impl WorkerRuntimeConfig {
-    /// Local launch inputs with the legacy defaults and the caller's tier.
+    /// Launch inputs for `host`, with the Rev.AI key from this process's
+    /// credential sources.
     ///
-    /// This was `Default`, and it read the host to find the tier: a `Default`
-    /// cannot fail, so an unreadable host became whatever zero total RAM
-    /// tiers to. The tier is now an argument, taken from the one reading of
-    /// the host ([`HostSnapshot::tier`], whose `read` reports an unreadable
-    /// host) or declared by a test ([`test_memory_tier`]).
-    ///
-    /// [`HostSnapshot::tier`]: crate::host_facts::HostSnapshot::tier
-    pub fn local(memory_tier: MemoryTier) -> Self {
+    /// The tier, readings and ledger all come from the snapshot. Taking the
+    /// tier alone let a caller pair a declared test tier with live readings
+    /// (every test pool did), or a live tier with declared ones.
+    pub fn local(host: &HostSnapshot) -> Self {
+        Self::launch(host.runtime_host(), load_revai_api_key().ok())
+    }
+
+    /// A test launch on the declared test host
+    /// ([`HostSnapshot::for_tests`]), with no Rev.AI key: a test reads no
+    /// credentials from the machine running it.
+    pub fn for_tests() -> Self {
+        Self::launch(
+            HostSnapshot::for_tests(&ServerConfig::default()).runtime_host(),
+            None,
+        )
+    }
+
+    /// The shared body of [`Self::local`] and [`Self::for_tests`].
+    fn launch(host: RuntimeHost, revai_api_key: Option<RevAiApiKey>) -> Self {
         // `gpu_thread_pool_size` is the in-process default for callers that
         // have not consulted the host-facts pipeline (`EffectiveConfig`
         // overrides it in production). `4` matches the pre-migration static
         // default; changing it would silently shift any test relying on it.
         const LEGACY_DEFAULT_GPU_THREAD_POOL_SIZE: u32 = 4;
-        Self::from_sources(
-            false,
-            false,
-            load_revai_api_key()
-                .ok()
-                .map(|key| key.as_str().to_string()),
-            LEGACY_DEFAULT_GPU_THREAD_POOL_SIZE,
-            HostMemoryRuntimeConfig::default(),
-            memory_tier,
-        )
-    }
-}
-
-impl WorkerRuntimeConfig {
-    /// Build worker runtime inputs from explicit sources.
-    pub fn from_sources(
-        force_cpu: bool,
-        allow_mps: bool,
-        revai_api_key: Option<String>,
-        gpu_thread_pool_size: u32,
-        host_memory: HostMemoryRuntimeConfig,
-        memory_tier: MemoryTier,
-    ) -> Self {
         Self {
-            force_cpu,
-            allow_mps,
-            revai_api_key: revai_api_key
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            gpu_thread_pool_size,
-            host_memory,
-            memory_tier,
+            force_cpu: false,
+            allow_mps: false,
+            revai_api_key,
+            gpu_thread_pool_size: LEGACY_DEFAULT_GPU_THREAD_POOL_SIZE,
+            host,
             bootstrap_mode: WorkerBootstrapMode::Profile,
             server_instance_id: None,
             server_process_id: None,
@@ -194,9 +166,9 @@ impl WorkerConfig {
         }
     }
 
-    /// A test worker launch at the declared [`test_memory_tier`].
+    /// A test worker launch on the declared test host.
     pub fn for_tests() -> Self {
-        Self::with_runtime(WorkerRuntimeConfig::local(test_memory_tier()))
+        Self::with_runtime(WorkerRuntimeConfig::for_tests())
     }
 }
 
@@ -218,7 +190,7 @@ impl WorkerConfig {
     /// runtime-owned memory tier rather than raw host auto-detection.
     pub fn startup_reservation_mb(&self) -> MemoryMb {
         self.profile
-            .startup_reservation_mb_for_tier(&self.runtime.memory_tier)
+            .startup_reservation_mb_for_tier(&self.runtime.host.tier())
     }
 }
 
@@ -291,12 +263,15 @@ impl WorkerLaunch {
         Self { lang, ..self }
     }
 
-    /// A worker config that spawns this worker again with `python_path`;
-    /// everything not recorded (timeouts, verbosity, credentials, and the
-    /// host's `memory_tier`) is this process's own.
-    pub(crate) fn into_config(self, python_path: String, memory_tier: MemoryTier) -> WorkerConfig {
-        let mut runtime =
-            WorkerRuntimeConfig::local(memory_tier).with_bootstrap_mode(self.bootstrap_mode);
+    /// A worker config that spawns this worker again with `python_path` from
+    /// `runtime`; everything not recorded (timeouts, verbosity, credentials,
+    /// and the host) comes from `runtime`.
+    pub(crate) fn into_config(
+        self,
+        python_path: String,
+        runtime: WorkerRuntimeConfig,
+    ) -> WorkerConfig {
+        let mut runtime = runtime.with_bootstrap_mode(self.bootstrap_mode);
         runtime.force_cpu = self.force_cpu;
         runtime.allow_mps = self.allow_mps;
         runtime.gpu_thread_pool_size = self.gpu_thread_pool_size;
@@ -343,26 +318,25 @@ mod worker_language_arg {
 #[cfg(test)]
 mod tests {
     use super::{WorkerConfig, WorkerRuntimeConfig};
-    use crate::host_memory::HostMemoryRuntimeConfig;
-    use crate::types::runtime::MemoryTier;
     use crate::worker::{InferTask, WorkerProfile};
 
     #[test]
     fn startup_reservation_uses_runtime_memory_tier() {
-        let runtime = WorkerRuntimeConfig::from_sources(
-            false,
-            false,
-            None,
-            4,
-            HostMemoryRuntimeConfig::default(),
-            MemoryTier::from_total_mb(16_000),
-        );
         let config = WorkerConfig {
             profile: WorkerProfile::Stanza,
-            runtime,
             ..WorkerConfig::for_tests()
         };
         assert_eq!(config.startup_reservation_mb().0, 3_000);
+    }
+
+    /// A test launch carries the declared test host and no credentials.
+    #[test]
+    fn a_test_launch_carries_the_declared_host_and_no_key() {
+        let host =
+            crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default());
+        let runtime = WorkerRuntimeConfig::for_tests();
+        assert_eq!(runtime.host, host.runtime_host());
+        assert_eq!(runtime.revai_api_key, None);
     }
 
     #[test]

@@ -100,8 +100,7 @@ fn test_echo_tcp_config(python_path: String, state_dir: &tempfile::TempDir) -> W
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
-        runtime: WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
-            .with_state_dir(state_dir.path().to_path_buf()),
+        runtime: WorkerRuntimeConfig::for_tests().with_state_dir(state_dir.path().to_path_buf()),
         ..WorkerConfig::for_tests()
     }
 }
@@ -366,9 +365,6 @@ async fn pool_dispatch_batch_infer_spawns_and_processes() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -405,9 +401,6 @@ async fn pool_reuses_existing_worker() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -437,9 +430,6 @@ async fn pool_multiple_task_groups() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -476,8 +466,7 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
-            .with_bootstrap_mode(WorkerBootstrapMode::Task),
+        runtime: WorkerRuntimeConfig::for_tests().with_bootstrap_mode(WorkerBootstrapMode::Task),
         ..PoolConfig::for_tests()
     });
 
@@ -527,9 +516,6 @@ async fn pool_pre_scale_uses_infer_targets() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -586,9 +572,6 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         worker_registry_path: Some(registry_path.clone()),
         ..PoolConfig::for_tests()
     });
@@ -633,7 +616,7 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
         runtime: WorkerRuntimeConfig {
             server_instance_id: Some("current-server-instance".to_string()),
             server_process_id: Some(std::process::id()),
-            ..WorkerRuntimeConfig::local(batchalign::worker::handle::test_memory_tier())
+            ..WorkerRuntimeConfig::for_tests()
         },
         worker_registry_path: Some(registry_path.clone()),
         ..PoolConfig::for_tests()
@@ -719,9 +702,6 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -767,9 +747,6 @@ async fn pool_serializes_worker_bootstrap_per_key() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(3),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -972,9 +949,6 @@ async fn profile_groups_related_tasks_into_single_worker() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 
@@ -1015,9 +989,6 @@ async fn each_profile_gets_its_own_worker() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     });
 

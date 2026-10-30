@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::api::{JobId, JobStatus};
-use crate::host_memory::{HostMemoryCoordinator, HostMemoryError, JobExecutionPlan};
+use crate::host_memory::{HostMemoryError, JobExecutionPlan};
 use crate::scheduling::FailureCategory;
 use crate::store::{JobCompletionSnapshot, JobStore, LeaseRenewalOutcome, RunnerJobSnapshot};
 
@@ -445,7 +445,7 @@ async fn reserve_job_execution(
         host.effective_config(),
         host.memory_tier(),
     );
-    let coordinator = HostMemoryCoordinator::from_server_config(host.config());
+    let coordinator = host.memory_coordinator();
     let job_label = format!(
         "job-execution:{}:{}:{}",
         job_id,

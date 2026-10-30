@@ -52,8 +52,11 @@ It enforces two rules, so neither depends on review:
 - **A workflow step that runs a verifier directly fails.** A verifier is found
   by the program a command invokes (mypy, stubtest, pytest, ruff, shellcheck,
   actionlint, lychee, unittest, `cargo test`/`clippy`/`fmt`/`llvm-cov`/`deny`,
-  `mdbook test`) or by a `--check` flag or a `scripts/check_*` script, looking
-  through `VAR=value`, `sudo`, `uv run` and `python -m`. Such a step must call a
+  `mdbook test`), by a `--check` flag, by running any script under `scripts/`
+  (directly or through `bash`, `sh`, `python` or `python -m scripts.*`), or
+  by running `batchalign3` itself other than `serve` (which starts a fixture
+  a later step checks), looking through `VAR=value`, `sudo`, `uv run` and
+  `python -m`. Such a step must call a
   make target instead, so the command has one owner the gate can be compared
   against, or be listed in `RAW_VERIFIERS` by exact text with its reason. An
   entry no workflow uses any more also fails.
@@ -61,7 +64,10 @@ It enforces two rules, so neither depends on review:
 The second rule exists because a raw step is invisible to the first. A raw
 `ruff` step let a formatting failure reach main on 2026-08-14, and a raw
 `uv run mypy` step let a stub missing a new PyO3 function reach main on
-2026-10-21; each time the gate was green.
+2026-10-21; each time the gate was green. Until 2026-10-30 only
+`scripts/check_*` scripts counted, so `bash scripts/run_react_dashboard_smoke.sh`,
+the whole Playwright dashboard suite, ran in CI with neither gate coverage nor
+an exemption, and a failure in it reached main on 2026-10-25.
 
 `make gate-receipts-test` exercises both the receipt protocol in temporary Git
 repositories and the coverage checker. These checks also run in CI without

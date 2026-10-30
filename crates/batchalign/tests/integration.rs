@@ -1202,9 +1202,6 @@ async fn server_starts_with_real_worker_capability_gate() {
         ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::local(
-            batchalign::worker::handle::test_memory_tier(),
-        ),
         ..PoolConfig::for_tests()
     };
 

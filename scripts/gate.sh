@@ -21,6 +21,11 @@ make batchalign-test-worker-integration
 make batchalign-ipc-schema-check
 # Reuse the exact binary whose currency the preceding target established.
 BATCHALIGN_BIN="$PWD/target/debug/batchalign3" make batchalign-dashboard-schema-check
+# The same binary, with the development environment batchalign-develop made:
+# the server smoke and the dashboard suites (mock and real server, about a
+# minute), as CI's Rust Integration and Dashboard jobs run them.
+BATCHALIGN_BIN="$PWD/target/debug/batchalign3" make batchalign-server-smoke
+BATCHALIGN_BIN="$PWD/target/debug/batchalign3" make batchalign-dashboard-e2e-real
 make book-check
 gate_finish
 printf '%s\n' 'Gate passed; matching committed trees may now be pushed.'

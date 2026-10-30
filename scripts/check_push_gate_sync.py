@@ -142,17 +142,16 @@ VERIFIER_SUBCOMMANDS = {
 }
 
 
-def invoked_program(command: str) -> tuple[str, str | None]:
-    """The program a command line runs, and its first argument.
+def launched_words(command: str) -> list[str]:
+    """A command line's words from the program it runs onward.
 
-    Looks through what only launches another program: leading `VAR=value`
-    assignments, `sudo`, `uv run` (with its options) and `python -m`. A word
-    inside an argument (a download URL, an install path) is not the program.
+    Drops what only launches another program: leading `VAR=value`
+    assignments, `sudo`, `uv run` (with its options) and `python -m`.
     """
     try:
         words = shlex.split(command, comments=True)
     except ValueError:
-        return ("", None)
+        return []
     while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
         words.pop(0)
     if words[:1] == ["sudo"]:
@@ -163,16 +162,59 @@ def invoked_program(command: str) -> tuple[str, str | None]:
             words.pop(0)
     if len(words) >= 3 and re.fullmatch(r"python3?", words[0]) and words[1] == "-m":
         words = words[2:]
+    return words
+
+
+def invoked_program(command: str) -> tuple[str, str | None]:
+    """The program a command line runs, and its first argument.
+
+    A word inside an argument (a download URL, an install path) is not the
+    program.
+    """
+    words = launched_words(command)
     if not words:
         return ("", None)
     program = words[0].rsplit("/", 1)[-1].split(".", 1)[0]
     return (program, words[1] if len(words) > 1 else None)
 
 
+#: Interpreters whose first argument is the program they run.
+SCRIPT_INTERPRETERS = frozenset({"bash", "sh", "python", "python3"})
+
+#: The product. Running it in CI checks it, except `serve`, which starts the
+#: fixture a later step checks.
+PRODUCT = "batchalign3"
+PRODUCT_FIXTURE_SUBCOMMANDS = frozenset({"serve"})
+
+
+def runs_repository_script(command: str) -> bool:
+    """Does this command line run a script that lives in this repository?
+
+    A repository script is code we own, so CI running it is a check unless
+    the script is declared otherwise. Only `scripts/check_*` used to count,
+    which let `bash scripts/run_react_dashboard_smoke.sh`, the whole
+    Playwright dashboard suite, sit outside both the gate and EXEMPT.
+    """
+    words = launched_words(command)
+    if not words:
+        return False
+    program = words[0]
+    if program.rsplit("/", 1)[-1] in SCRIPT_INTERPRETERS and len(words) > 1:
+        program = words[1]
+    # `python -m scripts.x` leaves the module name as the program.
+    return re.search(r"(^|/)scripts/", program) is not None or program.startswith(
+        "scripts."
+    )
+
+
 def is_verifier(command: str) -> bool:
     """Does this command line run a check, rather than set one up?"""
     program, first = invoked_program(command)
     if program in VERIFIER_PROGRAMS:
+        return True
+    if program == PRODUCT and first not in PRODUCT_FIXTURE_SUBCOMMANDS:
+        return True
+    if runs_repository_script(command):
         return True
     if first is not None and first in VERIFIER_SUBCOMMANDS.get(program, ()):
         return True
@@ -201,6 +243,14 @@ RAW_VERIFIERS: dict[str, HookExemption] = {
     ),
     "shellcheck --version": HookExemption(
         "prints the installed version; make lint-shell is the check"
+    ),
+    "batchalign3 --help": HookExemption(
+        "smoke of the tool installed from the CI or release wheel, which only "
+        "CI builds; the gate starts its own binary in batchalign-server-smoke"
+    ),
+    "batchalign3 version": HookExemption(
+        "smoke of the tool installed from the CI or release wheel, which only "
+        "CI builds; the gate starts its own binary in batchalign-server-smoke"
     ),
 }
 

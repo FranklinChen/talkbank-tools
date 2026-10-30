@@ -57,7 +57,8 @@ corpus-age fixers) were removed when this workspace became batchalign3-only.
 |---|---|---|
 | `pre-push.sh` | Runs CI's own target (`make batchalign-ci-rust`) plus the drift checks, then chains to an untracked `.git/hooks/pre-push.local` if one exists. | Install via `make install-hooks`; re-run it after anything else writes `.git/hooks/pre-push` |
 | `pre-commit-check.sh` | Manual fmt + clippy + build + unit-test pass before committing. | Direct script (overlaps `make ci-full`) |
-| `run_react_dashboard_smoke.sh` | Frontend/dashboard smoke and E2E flow. | Direct script |
+| `run_react_dashboard_smoke.sh` | Frontend/dashboard smoke and E2E flow. | `make batchalign-dashboard-e2e` (mock) or `make batchalign-dashboard-e2e-real` (the gate runs it) |
+| `server_startup_smoke.sh` | Starts the server with the test-echo runtime under a throwaway `BATCHALIGN_HOME` and waits for a healthy `/health`. | `make batchalign-server-smoke` (the gate and CI run it) |
 | `build_react_dashboard.sh` | Builds the dashboard bundle into the configured target directory. | Direct script |
 | `test-bg.sh` + `test-bg-status.sh` | Fire-and-forget background test runner plus status view. | Direct scripts for long local runs |
 | `test-affected.py` | Computes a test subset from changed files and `affects:` annotations. | Direct script for targeted local testing |

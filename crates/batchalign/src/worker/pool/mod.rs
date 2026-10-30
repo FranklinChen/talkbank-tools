@@ -564,29 +564,6 @@ pub struct PoolConfig {
     /// budget is not consumed by queue-wait when many callers contend for one
     /// shared GPU worker process.
     pub test_delay_ms: u64,
-    /// Whether spawn admission consults the host's live load and free memory.
-    pub pressure_gates: HostPressureGates,
-}
-
-/// Whether spawn admission consults the host's live pressure: the 1-minute
-/// load average (`cpu_gate`) and free memory (`memory_gate`).
-///
-/// Both are readings of the machine running the code, so a test whose
-/// outcome passes through them depends on that machine. The CPU gate was
-/// switched off in tests by an `f64::INFINITY` threshold written by hand,
-/// a sentinel one test forgot (it asserted three spawns and got one on a
-/// busy machine); the memory gate had no switch at all, and refused two
-/// admission unit tests on a 16 GB CI runner that passed on a 256 GB
-/// workstation. Test pools start [`Self::Disabled`] (`PoolConfig::for_tests`);
-/// each gate's own behavior is tested directly in its module. The spawn-time
-/// memory guard is not an admission gate and stays live everywhere: it is
-/// what keeps a real spawn from exhausting the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostPressureGates {
-    /// Refuse a spawn while the host is CPU-saturated or short of memory.
-    Live,
-    /// Never consult the live load or free memory at admission.
-    Disabled,
 }
 
 /// Built-in default for `ensure_task` timeout (seconds).
@@ -616,20 +593,15 @@ impl PoolConfig {
             ensure_task_timeout: None,
             worker_registry_path: None,
             test_delay_ms: 0,
-            pressure_gates: HostPressureGates::Live,
         }
     }
 
-    /// A test pool at the declared [`test_memory_tier`].
-    ///
-    /// [`test_memory_tier`]: crate::worker::handle::test_memory_tier
+    /// A test pool on the declared test host
+    /// ([`HostSnapshot::for_tests`](crate::host_facts::HostSnapshot::for_tests)):
+    /// its admission gates, spawn guard, ledger and eviction read that host,
+    /// so they run in tests and decide the same way on every machine.
     pub fn for_tests() -> Self {
-        Self {
-            pressure_gates: HostPressureGates::Disabled,
-            ..Self::with_runtime(WorkerRuntimeConfig::local(
-                crate::worker::handle::test_memory_tier(),
-            ))
-        }
+        Self::with_runtime(WorkerRuntimeConfig::for_tests())
     }
 }
 

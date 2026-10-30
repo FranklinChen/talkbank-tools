@@ -88,8 +88,8 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
             .arg(config.test_delay_ms.to_string());
     }
 
-    if let Some(api_key) = config.runtime.revai_api_key.as_deref() {
-        cmd.env("BATCHALIGN_REV_API_KEY", api_key);
+    if let Some(api_key) = &config.runtime.revai_api_key {
+        cmd.env("BATCHALIGN_REV_API_KEY", api_key.as_str());
     }
     // Hand the child its state directory explicitly, on the child's Command
     // and never on us. See `WorkerRuntimeConfig::state_dir`.
@@ -197,8 +197,8 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
             .arg(config.test_delay_ms.to_string());
     }
 
-    if let Some(api_key) = config.runtime.revai_api_key.as_deref() {
-        cmd.env("BATCHALIGN_REV_API_KEY", api_key);
+    if let Some(api_key) = &config.runtime.revai_api_key {
+        cmd.env("BATCHALIGN_REV_API_KEY", api_key.as_str());
     }
     // Same state-dir handoff as `build_worker_command`.
     if let Some(state_dir) = &config.runtime.state_dir {

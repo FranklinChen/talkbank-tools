@@ -34,7 +34,7 @@ All entry points ultimately route through the same Playwright test files under `
 | Context | Entry Point | Command | Dependencies | CI? | Notes |
 |---------|---|---|---|---|---|
 | **Local dev (quick)** | npm from frontend | `npm run test:e2e` | None | ❌ | Mock server mode, < 1min |
-| **Local dev (full)** | Makefile | `make batchalign-dashboard-e2e-real` | Rust bin, Python | ❌ | Real server, ~5-10min |
+| **Local dev (full)** | Makefile | `make batchalign-dashboard-e2e-real` | Rust bin, Python | ✓ (gate) | Mock and real server; about a minute with warm model caches. `make gate` runs it. |
 | **Local dev (headed)** | npm from frontend | `npm run test:e2e:headed` | None | ❌ | Visual browser, interactive |
 | **Desktop app CI** | npm from apps/dashboard-desktop | `npm run test` | Tauri + deps | ✓ | Via batchalign-desktop.yml |
 | **Dashboard CI (main only)** | CI workflow | `dashboard-e2e` job | Pre-built wheel | ✓ | Via batchalign-python.yml |

@@ -8,9 +8,7 @@ use super::*;
 /// The host policy plans are built against in these tests: declared, so a
 /// plan is the same on every machine that runs them.
 fn test_policy() -> crate::host_policy::HostExecutionPolicy {
-    crate::host_policy::HostExecutionPolicy::from_memory_tier(
-        crate::worker::handle::test_memory_tier(),
-    )
+    crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default()).policy()
 }
 use crate::api::{JobId, LanguageCode3, NumSpeakers, ReleasedCommand};
 use crate::options::{
