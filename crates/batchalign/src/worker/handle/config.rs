@@ -58,8 +58,14 @@ pub struct WorkerRuntimeConfig {
 /// The memory tier test fixtures launch with: declared, never read from the
 /// machine running the tests, so a test's outcome cannot depend on how much
 /// RAM that machine has or on whether the operating system reports it.
+///
+/// The SMALL tier, the smallest machine BA3 supports, because a test pool
+/// that spawns real worker processes reserves the tier's startup memory with
+/// the live spawn guard. Declaring a 64 GB tier made each Stanza worker
+/// reserve 12 GB: fine on a 256 GB workstation, refused on a 16 GB CI
+/// runner. Every machine that can run BA3 can grant a Small-tier reservation.
 pub fn test_memory_tier() -> MemoryTier {
-    MemoryTier::from_total_mb(64_000)
+    MemoryTier::from_total_mb(16_000)
 }
 
 impl WorkerRuntimeConfig {

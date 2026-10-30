@@ -564,26 +564,28 @@ pub struct PoolConfig {
     /// budget is not consumed by queue-wait when many callers contend for one
     /// shared GPU worker process.
     pub test_delay_ms: u64,
-    /// Whether spawn admission consults the host's live CPU load.
-    pub cpu_gate: CpuGatePolicy,
+    /// Whether spawn admission consults the host's live load and free memory.
+    pub pressure_gates: HostPressureGates,
 }
 
-/// Whether spawn admission consults the host's live CPU load.
+/// Whether spawn admission consults the host's live pressure: the 1-minute
+/// load average (`cpu_gate`) and free memory (`memory_gate`).
 ///
-/// This was `Option<f64>`, with `None` for the live gate and
-/// `f64::INFINITY` written by hand in every test that needed the gate
-/// out of the way: a sentinel each test had to remember. One that forgot
-/// (`pool_serializes_worker_bootstrap_per_key`) asserted three spawns
-/// and got one whenever the machine running it was busy. Test pools now
-/// start [`Self::Disabled`] (`PoolConfig::for_tests`), so no test's spawn
-/// count depends on what else the machine is doing; the gate's own
-/// behavior is tested directly in `cpu_gate`.
+/// Both are readings of the machine running the code, so a test whose
+/// outcome passes through them depends on that machine. The CPU gate was
+/// switched off in tests by an `f64::INFINITY` threshold written by hand,
+/// a sentinel one test forgot (it asserted three spawns and got one on a
+/// busy machine); the memory gate had no switch at all, and refused two
+/// admission unit tests on a 16 GB CI runner that passed on a 256 GB
+/// workstation. Test pools start [`Self::Disabled`] (`PoolConfig::for_tests`);
+/// each gate's own behavior is tested directly in its module. The spawn-time
+/// memory guard is not an admission gate and stays live everywhere: it is
+/// what keeps a real spawn from exhausting the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CpuGatePolicy {
-    /// Refuse a spawn while the 1-minute load average is at or above the
-    /// host's logical CPU count.
-    HostLoad,
-    /// Never consult the live load.
+pub enum HostPressureGates {
+    /// Refuse a spawn while the host is CPU-saturated or short of memory.
+    Live,
+    /// Never consult the live load or free memory at admission.
     Disabled,
 }
 
@@ -614,7 +616,7 @@ impl PoolConfig {
             ensure_task_timeout: None,
             worker_registry_path: None,
             test_delay_ms: 0,
-            cpu_gate: CpuGatePolicy::HostLoad,
+            pressure_gates: HostPressureGates::Live,
         }
     }
 
@@ -623,7 +625,7 @@ impl PoolConfig {
     /// [`test_memory_tier`]: crate::worker::handle::test_memory_tier
     pub fn for_tests() -> Self {
         Self {
-            cpu_gate: CpuGatePolicy::Disabled,
+            pressure_gates: HostPressureGates::Disabled,
             ..Self::with_runtime(WorkerRuntimeConfig::local(
                 crate::worker::handle::test_memory_tier(),
             ))

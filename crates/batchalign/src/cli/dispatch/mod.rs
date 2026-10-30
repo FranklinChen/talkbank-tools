@@ -508,7 +508,7 @@ pub(crate) fn build_direct_pool_config(
         ensure_task_timeout: cfg.ensure_task_timeout_s,
         worker_registry_path: cfg.worker_registry_path.clone(),
         test_delay_ms: 0,
-        cpu_gate: crate::worker::pool::CpuGatePolicy::HostLoad,
+        pressure_gates: crate::worker::pool::HostPressureGates::Live,
     }
 }
 

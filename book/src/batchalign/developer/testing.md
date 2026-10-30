@@ -748,9 +748,12 @@ Most flaky tests here have had one cause: an outcome that changes with host
 load. The rules that remove it:
 
 - **No live host gate in a test pool.** `PoolConfig::for_tests()` sets
-  `CpuGatePolicy::Disabled`, so a test's spawn count never depends on the
-  machine's load average; the CPU gate's own behavior is unit-tested in
-  `worker/pool/cpu_gate.rs`.
+  `HostPressureGates::Disabled`, so a test's spawn count never depends on
+  the machine's load average or free memory; each gate's own behavior is
+  unit-tested in `worker/pool/cpu_gate.rs` and `memory_gate.rs`. Test
+  fixtures declare the Small memory tier (`test_memory_tier()`), the
+  smallest machine BA3 supports, because a real worker spawn reserves the
+  tier's startup memory through the live spawn guard.
 - **Wait on progress, not a wall clock.** A wait that can be slow on a busy
   machine uses a `ServerTestDeadline` (`tests/live_deadline`): it fails
   only when nothing it watches changes for its idle window, or when it

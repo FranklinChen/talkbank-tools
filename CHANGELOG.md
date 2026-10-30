@@ -82,9 +82,13 @@ design; this file records how it changed.
 - Tests no longer flake under host load, each cause removed at the root
   and verified with every suite run while the load average sat above the
   CPU count:
-  - A test pool's spawn count depended on the live CPU-load gate, switched
-    off by a hand-written `f64::INFINITY` that one test forgot. The gate is
-    now `CpuGatePolicy::{HostLoad, Disabled}` and test pools start disabled.
+  - A test pool's spawn count depended on the live CPU-load and free-memory
+    admission gates; the CPU one was switched off by a hand-written
+    `f64::INFINITY` that one test forgot, the memory one not at all. Both
+    are now `HostPressureGates::{Live, Disabled}` and test pools start
+    disabled. Test fixtures declare the Small memory tier (the smallest
+    supported machine), so a real worker spawn in a test reserves memory a
+    16 GB CI runner can grant.
   - The oversubscription test gave each dispatch a fixed 60 s; a busy
     machine's slow queue timed out. Dispatch bursts now wait on a progress
     deadline (dispatches returning, workers starting) and every dispatch

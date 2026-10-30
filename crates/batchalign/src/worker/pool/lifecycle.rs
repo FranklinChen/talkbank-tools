@@ -193,12 +193,12 @@ impl WorkerPool {
         // gate disabled (`PoolConfig::for_tests`), so their spawn
         // counts never depend on the machine's load; the cpu_gate unit
         // tests cover the gate itself.
-        let saturation = match self.config.cpu_gate {
-            super::CpuGatePolicy::HostLoad => cpu_gate::check_cpu_saturation_with_state(
+        let saturation = match self.config.pressure_gates {
+            super::HostPressureGates::Live => cpu_gate::check_cpu_saturation_with_state(
                 pool_state,
                 cpu_gate::host_cpu_count_as_threshold(),
             ),
-            super::CpuGatePolicy::Disabled => Ok(()),
+            super::HostPressureGates::Disabled => Ok(()),
         };
         if let Err(saturated) = saturation {
             let count = self
@@ -252,11 +252,15 @@ impl WorkerPool {
                 Some(observed) => (observed, rss_observer::EstimateSource::ObservedAvgIdle),
                 None => (reservation_mb, rss_observer::EstimateSource::Reservation),
             };
-        match memory_gate::check_memory_saturation_with_state(
-            pool_state,
-            mem_threshold,
-            estimate_mb,
-        ) {
+        let memory = match self.config.pressure_gates {
+            super::HostPressureGates::Live => memory_gate::check_memory_saturation_with_state(
+                pool_state,
+                mem_threshold,
+                estimate_mb,
+            ),
+            super::HostPressureGates::Disabled => Ok(()),
+        };
+        match memory {
             Ok(()) => {}
             Err(memory_gate::GateRefusal::Unreadable(error)) => {
                 return Err(AdmissionRejection::HostUnreadable(error));
