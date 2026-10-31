@@ -750,9 +750,8 @@ mod provider_failure_tests {
                 ..
             }]
         ));
-        let summary = crate::cli::progress::diagnosed_summary(Some(
-            &crate::api::FileOutputDiagnostics::of_findings(Vec::new(), shortfalls),
-        ));
+        let summary =
+            crate::api::FileOutputDiagnostics::of_findings(Vec::new(), shortfalls).summary();
         assert!(summary.contains("provider_quota_exhausted"), "{summary}");
         assert!(summary.contains("controlled provider refusal"), "{summary}");
     }

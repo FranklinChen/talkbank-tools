@@ -695,6 +695,7 @@ mod tests {
             error_category: None,
             exclusions: Vec::new(),
             diagnostics: None,
+            review: crate::api::FileReview::default(),
             stamp: crate::api::FileStampOutcome::Unrecorded,
             started_at: if status == FileStatusKind::Done {
                 Some(crate::unix_time(0.0))

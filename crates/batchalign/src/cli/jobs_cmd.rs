@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::api::JobId;
+use crate::api::{FileStatusKind, JobId};
 use crate::config::RuntimeLayout;
 use crate::debug_artifacts::JobDebugArtifacts;
 use serde::Serialize;
@@ -206,6 +206,22 @@ async fn show_job(
                 .map(|e| format!(": {e}"))
                 .unwrap_or_default();
             eprintln!("  {:<30} {status}{error}", entry.filename);
+        }
+        // What to review in each file written with diagnostics, as the run
+        // that wrote it listed it: a status alone does not say where to look.
+        let mut diagnosed = info
+            .file_statuses
+            .iter()
+            .filter(|entry| entry.status == FileStatusKind::Diagnosed)
+            .peekable();
+        if diagnosed.peek().is_some() {
+            eprintln!();
+            eprintln!("Needs review:");
+            for entry in diagnosed {
+                for line in crate::cli::progress::diagnosed_entry_lines(entry) {
+                    eprintln!("{line}");
+                }
+            }
         }
     }
 

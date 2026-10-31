@@ -464,10 +464,14 @@ mod tests {
                     excluded_utterances: 1,
                     excluded_words: 3,
                     first_excluded: vec![crate::api::ExcludedUtteranceRecord {
-                        utterance: 2,
-                        words: 3,
-                        postcode: crate::api::OffRecordPostcode::Diary,
-                    }],
+                            location: crate::api::UtteranceLocator::for_test(
+                                2,
+                                "*PAR:\tdiary note . [+ diary]"
+                            )
+                            .into(),
+                            words: 3,
+                            postcode: crate::api::OffRecordPostcode::Diary,
+                        }],
                 }],
                 filename: DisplayPath::from("a.cha"),
                 content_type: ContentType::Chat,

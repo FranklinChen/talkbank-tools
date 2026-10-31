@@ -104,9 +104,9 @@ pub use mor_word::{clean_lemma, is_clitic, map_ud_word};
 pub use outcome::{MorOutcome, MorOutcomeKind, NotApplicableReason, classify_not_applicable};
 pub use payload::{
     AlignmentWarning, BatchWord, CollectedUtterance, MorphologyInput, MorphosyntaxBatchItem,
-    PayloadCollection, WordRole, clear_morphosyntax, clear_morphosyntax_selective,
-    collect_payloads, declared_languages, prepare_text, remove_empty_morphosyntax_placeholders,
-    validate_mor_alignment,
+    PayloadCollection, UtteranceAddress, WordRole, clear_morphosyntax,
+    clear_morphosyntax_selective, collect_payloads, declared_languages, prepare_text,
+    remove_empty_morphosyntax_placeholders, validate_mor_alignment,
 };
 pub use pos_hints::{
     HintOutcome, PosHintEvidence, apply_pos_hint_evidence, apply_pos_hints, collect_pos_hints,

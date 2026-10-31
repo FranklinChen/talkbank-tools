@@ -1,13 +1,6 @@
 import { useState, useCallback } from "react";
 import type { FileStatusEntry } from "../types";
-import {
-  diagnosedSummary,
-  diagnosticLines,
-  exclusionSummary,
-  exclusionText,
-  displayProgressLabel,
-  statusDotColor,
-} from "../utils";
+import { displayProgressLabel, statusDotColor } from "../utils";
 import { PipelineStageBar } from "./PipelineStageBar";
 import { ERROR_GROUPS, errorGroupOf } from "../errorCategories";
 
@@ -260,15 +253,16 @@ function FileRow({
   const dur = f.duration_s != null ? `${f.duration_s.toFixed(1)}s` : "";
   const hasErr = f.status === "error";
   const isLongError = hasErr && f.error != null && f.error.length > 80;
-  // A diagnosed file's findings expand like a long error does, but are
-  // styled as written output with diagnostics, never as a failure.
-  const isDiagnosed = f.status === "diagnosed";
-  // What the producer left out on purpose: information on a done or a
-  // diagnosed file, expandable like diagnostics but styled neutrally.
-  const exclusions = f.exclusions ?? [];
-  const hasExclusions = exclusions.length > 0;
+  // The server's review (`FileReview`) decides what is shown: what needs
+  // review, styled as written output with diagnostics, never as a failure;
+  // and what was left out on purpose, styled neutrally. The dashboard keeps
+  // no copy of the wording or of the rules for when each part exists.
+  const needsReview = f.review?.needs_review;
+  const leftOut = f.review?.left_out;
   const canExpand =
-    (hasErr && isLongError) || (isDiagnosed && f.diagnostics != null) || hasExclusions;
+    (hasErr && isLongError) ||
+    (needsReview?.lines ?? []).length > 0 ||
+    (leftOut?.lines ?? []).length > 0;
   const isExpanded = expandedErr === f.filename;
   const isProcessing = f.status === "processing";
   const progressLabel = displayProgressLabel(f.progress_stage, f.progress_label);
@@ -306,14 +300,14 @@ function FileRow({
                 {errorSnippet(f.error)}
               </span>
             )}
-            {isDiagnosed && (
+            {needsReview && (
               <span className="text-[11px] text-yellow-700 truncate max-w-xs">
-                {diagnosedSummary(f.diagnostics)}
+                {needsReview.headline}
               </span>
             )}
-            {hasExclusions && (
+            {leftOut && (
               <span className="text-[11px] text-zinc-500 truncate max-w-xs">
-                {exclusionSummary(exclusions)}
+                {leftOut.headline}
               </span>
             )}
             {/* Pipeline phase indicator */}
@@ -365,23 +359,23 @@ function FileRow({
           </td>
         </tr>
       )}
-      {isDiagnosed && isExpanded && f.diagnostics != null && (
+      {needsReview && isExpanded && (needsReview.lines ?? []).length > 0 && (
         <tr>
           <td
             colSpan={3}
             className="py-2 px-4 bg-yellow-50 text-[11px] text-yellow-800 font-mono whitespace-pre-wrap"
           >
-            {diagnosticLines(f.diagnostics).join("\n")}
+            {(needsReview.lines ?? []).join("\n")}
           </td>
         </tr>
       )}
-      {hasExclusions && isExpanded && (
+      {leftOut && isExpanded && (leftOut.lines ?? []).length > 0 && (
         <tr>
           <td
             colSpan={3}
             className="py-2 px-4 bg-zinc-50 text-[11px] text-zinc-600 font-mono whitespace-pre-wrap"
           >
-            {exclusions.map(exclusionText).join("\n")}
+            {(leftOut.lines ?? []).join("\n")}
           </td>
         </tr>
       )}

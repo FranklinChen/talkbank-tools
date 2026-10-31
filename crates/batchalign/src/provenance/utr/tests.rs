@@ -60,7 +60,8 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
 
     let diagnostics = crate::api::FileOutputDiagnostics::of_findings(Vec::new(), shortfalls);
     assert!(
-        crate::cli::progress::diagnosed_summary(Some(&diagnostics))
+        diagnostics
+            .summary()
             .contains("UTR initial pass unavailable")
     );
 

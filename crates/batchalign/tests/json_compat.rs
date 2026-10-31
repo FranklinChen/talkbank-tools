@@ -167,6 +167,7 @@ fn snapshot_job_info() {
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
+                review: batchalign::api::FileReview::default(),
             },
             FileStatusEntry {
                 filename: "04DM.cha".into(),
@@ -184,6 +185,7 @@ fn snapshot_job_info() {
                 progress_total: Some(5),
                 progress_stage: Some(FileProgressStage::AnalyzingMorphosyntax),
                 progress_label: Some("Analyzing morphosyntax".into()),
+                review: batchalign::api::FileReview::default(),
             },
         ],
         submitted_at: "2026-01-15T10:00:00Z".parse().unwrap(),

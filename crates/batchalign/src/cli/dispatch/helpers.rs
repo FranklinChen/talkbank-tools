@@ -235,6 +235,7 @@ pub(super) async fn poll_and_write_incrementally(
                         &error_details,
                         total_files,
                         &destinations.reporting_directory()?,
+                        crate::cli::error::DiagnosedRelist::Server(server_url.to_string()),
                     );
                 }
 
@@ -376,6 +377,7 @@ pub(super) fn finish_terminal_job(
     error_details: &[FileErrorDetail],
     total_files: u64,
     out_dir: &Path,
+    relist: crate::cli::error::DiagnosedRelist,
 ) -> Result<(), CliError> {
     let clean_success = info.status == JobStatus::Completed
         && error_details.is_empty()
@@ -396,6 +398,7 @@ pub(super) fn finish_terminal_job(
                 job_id: info.job_id.clone(),
                 diagnosed,
                 total: total_files,
+                relist,
             }),
         };
     }
@@ -703,8 +706,13 @@ fn print_done_exclusions(file_statuses: &[FileStatusEntry]) {
         .filter(|entry| entry.status == FileStatusKind::Done && !entry.exclusions.is_empty())
     {
         eprintln!("  \u{2713} {}:", entry.filename);
-        for exclusion in &entry.exclusions {
-            eprintln!("    {exclusion}");
+        let review = crate::api::FileReview::of(entry.status, None, &entry.exclusions);
+        for line in review
+            .left_out()
+            .map(crate::api::ReviewBlock::lines)
+            .unwrap_or_default()
+        {
+            eprintln!("    {line}");
         }
     }
 }
@@ -738,19 +746,8 @@ pub(super) fn print_failure_summary(
     // Written, so listed apart from failures: each with what admission found
     // and which stages were skipped because of it.
     for entry in diagnosed {
-        eprintln!(
-            "  ! {}: {}",
-            entry.filename,
-            crate::cli::progress::diagnosed_summary(entry.diagnostics.as_ref())
-        );
-        if let Some(diagnostics) = &entry.diagnostics {
-            for line in diagnostics.lines() {
-                eprintln!("    {line}");
-            }
-        }
-        // Information, beside the diagnostics: what was left out on purpose.
-        for exclusion in &entry.exclusions {
-            eprintln!("    {exclusion}");
+        for line in crate::cli::progress::diagnosed_entry_lines(entry) {
+            eprintln!("{line}");
         }
     }
     print_done_exclusions(file_statuses);
@@ -835,6 +832,7 @@ mod tests {
 
     use super::*;
     use crate::api::{FileStatusEntry, JobId, LanguageCode3, LanguageSpec, ReleasedCommand};
+    use crate::cli::error::DiagnosedRelist;
     use crate::cli::progress::ProgressDisplay;
     use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
 
@@ -870,6 +868,7 @@ mod tests {
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
+                review: crate::api::FileReview::default(),
             }],
             submitted_at: crate::unix_time(1_700_000_000.0),
             submitted_by: None,
@@ -953,6 +952,7 @@ mod tests {
             progress_total: None,
             progress_stage: None,
             progress_label: None,
+            review: crate::api::FileReview::default(),
         }
     }
 
@@ -1255,7 +1255,8 @@ mod tests {
         info.completed_files = 1;
         let out_dir = tempfile::tempdir().unwrap();
 
-        let result = finish_terminal_job(&info, &[], 1, out_dir.path());
+        let result =
+            finish_terminal_job(&info, &[], 1, out_dir.path(), DiagnosedRelist::ThisRunOnly);
 
         assert!(result.is_ok());
     }
@@ -1270,13 +1271,38 @@ mod tests {
         info.completed_files = 1;
         let out_dir = tempfile::tempdir().unwrap();
 
-        let result = finish_terminal_job(&info, &[], 1, out_dir.path());
+        let result =
+            finish_terminal_job(&info, &[], 1, out_dir.path(), DiagnosedRelist::ThisRunOnly);
 
         let Err(error @ CliError::WrittenWithDiagnostics { .. }) = result else {
             panic!("expected WrittenWithDiagnostics, got {result:?}");
         };
         assert_eq!(error.exit_code(), CliError::EXIT_DIAGNOSED);
-        assert!(error.to_string().contains("1 of 1 file(s)"), "{error}");
+        insta::assert_snapshot!(error, @"job job123 completed, but 1 of 1 file(s) need review before use: what to check in each is listed above");
+    }
+
+    /// A job on a server keeps its review: the message names the command
+    /// that lists it again, so a reader who only kept the last line can.
+    #[test]
+    fn a_diagnosed_server_job_names_the_command_that_lists_it_again() {
+        let mut info = test_job_info(JobStatus::Completed, None);
+        info.file_statuses[0].status = FileStatusKind::Diagnosed;
+        info.file_statuses[0].error = None;
+        info.completed_files = 1;
+        let out_dir = tempfile::tempdir().unwrap();
+
+        let result = finish_terminal_job(
+            &info,
+            &[],
+            1,
+            out_dir.path(),
+            DiagnosedRelist::Server("http://localhost:8001".into()),
+        );
+
+        let Err(error) = result else {
+            panic!("expected WrittenWithDiagnostics, got {result:?}");
+        };
+        insta::assert_snapshot!(error, @"job job123 completed, but 1 of 1 file(s) need review before use: what to check in each is listed above; to list it again: batchalign3 jobs --server http://localhost:8001 job123");
     }
 
     #[test]
@@ -1284,7 +1310,8 @@ mod tests {
         let info = test_job_info(JobStatus::Failed, Some("worker pool exploded"));
         let out_dir = tempfile::tempdir().unwrap();
 
-        let result = finish_terminal_job(&info, &[], 1, out_dir.path());
+        let result =
+            finish_terminal_job(&info, &[], 1, out_dir.path(), DiagnosedRelist::ThisRunOnly);
 
         match result {
             Err(CliError::JobFailed {
@@ -1306,7 +1333,13 @@ mod tests {
         let out_dir = tempfile::tempdir().unwrap();
         let errors = vec![FileErrorDetail::new("clip.cha", "decoder failed\ntrace")];
 
-        let result = finish_terminal_job(&info, &errors, 1, out_dir.path());
+        let result = finish_terminal_job(
+            &info,
+            &errors,
+            1,
+            out_dir.path(),
+            DiagnosedRelist::ThisRunOnly,
+        );
 
         match result {
             Err(CliError::JobFailed {
@@ -1343,6 +1376,7 @@ mod tests {
             progress_total: Some(3),
             progress_stage: None,
             progress_label: Some("processing".into()),
+            review: crate::api::FileReview::default(),
         }];
         info.completed_files = 0;
 
@@ -1365,6 +1399,7 @@ mod tests {
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
+                review: crate::api::FileReview::default(),
             },
             FileStatusEntry {
                 filename: "b.cha".into(),
@@ -1382,6 +1417,7 @@ mod tests {
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
+                review: crate::api::FileReview::default(),
             },
         ];
         info.completed_files = 2;

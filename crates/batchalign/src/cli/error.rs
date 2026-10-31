@@ -232,8 +232,9 @@ pub enum CliError {
     /// written with diagnostics: on disk, not certified complete. Exit code:
     /// [`EXIT_DIAGNOSED`](Self::EXIT_DIAGNOSED) (7).
     #[error(
-        "job {job_id} completed, but {diagnosed} of {total} file(s) were written with \
-         diagnostics; review them before use"
+        "job {job_id} completed, but {diagnosed} of {total} file(s) need review before \
+         use: what to check in each is listed above{}",
+        .relist.again(job_id)
     )]
     WrittenWithDiagnostics {
         /// ID of the completed job.
@@ -242,6 +243,8 @@ pub enum CliError {
         diagnosed: std::num::NonZeroUsize,
         /// Files in the job.
         total: u64,
+        /// How the reader can list them again after this run.
+        relist: DiagnosedRelist,
     },
 
     /// A server-returned filename would resolve to a path outside the output
@@ -338,6 +341,32 @@ impl std::fmt::Display for ServerBuild {
         match self {
             Self::Reported(build) => write!(f, "build {build}"),
             Self::Unreported => f.write_str("a build that reports no build identity"),
+        }
+    }
+}
+
+/// How a diagnosed job's per-file review can be shown again once the run
+/// that printed it is over: the job's record lives on a server, or only in
+/// this run's output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosedRelist {
+    /// The job ran on this server, which keeps its per-file review:
+    /// `batchalign3 jobs --server URL JOB_ID` prints it again.
+    Server(String),
+    /// The job ran in this process; no record outlives the run, so the list
+    /// printed above is the only copy.
+    ThisRunOnly,
+}
+
+impl DiagnosedRelist {
+    /// The end of the diagnosed-job message: the command that lists the
+    /// files again, or nothing when there is none.
+    fn again(&self, job_id: &JobId) -> String {
+        match self {
+            Self::Server(url) => {
+                format!("; to list it again: batchalign3 jobs --server {url} {job_id}")
+            }
+            Self::ThisRunOnly => String::new(),
         }
     }
 }

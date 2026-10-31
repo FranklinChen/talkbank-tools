@@ -314,10 +314,9 @@ impl AppliedAnalyses {
     /// Preserve pre-dispatch extraction failures before consuming positions.
     pub(crate) fn secondary_positions(
         &mut self,
-        chat: &crate::chat_ops::ChatFile,
         extraction: batchalign_transform::morphosyntax::l2::L2Extraction,
     ) -> Vec<batchalign_transform::morphosyntax::l2::L2DeferredPosition> {
-        self.secondary.capture_extraction(chat, &extraction);
+        self.secondary.capture_extraction(&extraction);
         extraction.into_reported_positions()
     }
 

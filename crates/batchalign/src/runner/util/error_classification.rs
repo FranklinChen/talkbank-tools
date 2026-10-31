@@ -200,6 +200,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
                 FailureCategory::System
             }
         },
+        ServerError::UtteranceLocation(_) => FailureCategory::System,
         ServerError::AnalysisUnavailable(_) => FailureCategory::AnalysisUnavailable,
         // Deterministic across retries: the same recording yields the same
         // silence, so this must never be retried. `Validation` is chosen for

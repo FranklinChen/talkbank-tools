@@ -142,17 +142,25 @@ impl BatchProgress {
         diagnostics: Option<&crate::api::FileOutputDiagnostics>,
         exclusions: &[crate::api::OutputExclusionRecord],
     ) {
-        self.overall.println(format!(
-            "  ! {filename}: {}",
-            diagnosed_summary(diagnostics)
-        ));
+        let review =
+            crate::api::FileReview::of(crate::api::FileStatusKind::Diagnosed, diagnostics, &[]);
+        if let Some(needs_review) = review.needs_review() {
+            self.overall
+                .println(format!("  ! {filename}: {}", needs_review.headline()));
+        }
         self.log_exclusions(exclusions);
     }
 
-    /// One indented line per exclusion, under its file's line.
+    /// What the producer left out on purpose, under its file's line: each
+    /// exclusion and the utterances it names, as the file's review has them.
     fn log_exclusions(&self, exclusions: &[crate::api::OutputExclusionRecord]) {
-        for exclusion in exclusions {
-            self.overall.println(format!("    {exclusion}"));
+        let review = crate::api::FileReview::of(crate::api::FileStatusKind::Done, None, exclusions);
+        for line in review
+            .left_out()
+            .map(crate::api::ReviewBlock::lines)
+            .unwrap_or_default()
+        {
+            self.overall.println(format!("    {line}"));
         }
     }
 
@@ -199,53 +207,37 @@ impl ProgressDisplay for BatchProgress {
     }
 }
 
-/// One line describing a file written with diagnostics: how many findings and
-/// the first of them, how many stages were not applied, and how many words
-/// forced alignment left untimed.
-pub(crate) fn diagnosed_summary(diagnostics: Option<&crate::api::FileOutputDiagnostics>) -> String {
-    let Some(diagnostics) = diagnostics else {
-        return "written with diagnostics (not recorded)".to_string();
+/// Everything a reader needs to review one file written with diagnostics,
+/// as lines: the file and its headline, then each detail under it, then what
+/// the command left out on purpose. The words are the record's
+/// [`crate::api::FileReview`], the same the server sends every dashboard;
+/// this adds only the CLI's layout. The CLI renders it from the entry rather
+/// than reading the server's copy, so a server too old to send one and a
+/// direct run both get it. Empty for a file not written with diagnostics.
+pub(crate) fn diagnosed_entry_lines(entry: &crate::api::FileStatusEntry) -> Vec<String> {
+    let review =
+        crate::api::FileReview::of(entry.status, entry.diagnostics.as_ref(), &entry.exclusions);
+    let Some(needs_review) = review.needs_review() else {
+        return Vec::new();
     };
-    let count = diagnostics.finding_count();
-    let noun = if count == 1 {
-        "diagnostic"
-    } else {
-        "diagnostics"
-    };
-    let mut line = format!("written with {count} {noun}");
-    if let Some(first) = diagnostics.first_findings().first() {
-        line.push_str(&format!(" (first: {first})"));
-    }
-    let mut stages = 0;
-    for shortfall in &diagnostics.shortfalls {
-        match shortfall {
-            crate::api::OutputShortfallRecord::SecondaryMorphologyIncomplete { .. }
-            | crate::api::OutputShortfallRecord::UtrUnavailable { .. }
-            | crate::api::OutputShortfallRecord::MorphologyProvenanceIncomplete { .. }
-            | crate::api::OutputShortfallRecord::SecondaryMorphologyUnplaced { .. } => {
-                line.push_str(&format!("; {shortfall}"));
-            }
-            crate::api::OutputShortfallRecord::StageSkipped { .. }
-            | crate::api::OutputShortfallRecord::StageNotApplied { .. } => stages += 1,
-            crate::api::OutputShortfallRecord::StageHeldOut {
-                stage,
-                held_out_utterances,
-                ..
-            } => line.push_str(&format!(
-                "; {} left out of {held_out_utterances} utterance(s)",
-                stage.name()
-            )),
-            crate::api::OutputShortfallRecord::TimingIncomplete {
-                required_words,
-                untimed_words,
-                ..
-            } => line.push_str(&format!(
-                "; {untimed_words} of {required_words} words untimed"
-            )),
-        }
-    }
-    if stages > 0 {
-        line.push_str(&format!("; {stages} requested stage(s) not applied"));
-    }
-    line
+    std::iter::once(format!(
+        "  ! {}: {}",
+        entry.filename,
+        needs_review.headline()
+    ))
+    .chain(
+        needs_review
+            .lines()
+            .iter()
+            .map(|line| format!("    {line}")),
+    )
+    .chain(
+        review
+            .left_out()
+            .map(crate::api::ReviewBlock::lines)
+            .unwrap_or_default()
+            .iter()
+            .map(|line| format!("    {line}")),
+    )
+    .collect()
 }

@@ -314,7 +314,11 @@ mod tests {
                 excluded_utterances: 1,
                 excluded_words: 4,
                 first_excluded: vec![ExcludedUtteranceRecord {
-                    utterance: 2,
+                    location: crate::api::UtteranceLocator::for_test(
+                        2,
+                        "*PAR:\tdiary note . [+ diary]",
+                    )
+                    .into(),
                     words: 4,
                     postcode: OffRecordPostcode::Diary,
                 }],

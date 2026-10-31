@@ -37,12 +37,26 @@ from audio-only input.
 
 A job's status describes the job as a whole. `completed` means every file was
 processed, not that every file came out clean; `failed` can mean that most
-files succeeded and a few did not. Check each file before using a batch:
+files succeeded and a few did not. Check each file before using a batch.
+
+When a run ends with files written with diagnostics, it lists them under
+`RESULTS:` with what to check in each. Untimed words are listed by utterance,
+as the utterance is written in the file (without its bullet), so it can be
+found with a text search in CLAN or an editor:
+
+```text
+  ! sample.cha: needs review: 1 of 120 words in 1 utterance(s) have no word timing
+    timing incomplete: 1 of 120 words in 1 utterance(s) have no timing and were written without it
+      *INV:	Mhm .   (1 of 1 words untimed: no alignment request, its audio window was refused (...))
+```
+
+The last line of the run names the command that prints the list again for a
+job run on a server. The same commands inspect any job:
 
 ```bash
 # The local daemon listens on port 8001 unless configured otherwise.
 batchalign3 jobs --server http://localhost:8001            # recent jobs
-batchalign3 jobs --server http://localhost:8001 JOB_ID     # one status per file
+batchalign3 jobs --server http://localhost:8001 JOB_ID     # per-file status, then what to review
 batchalign3 jobs --server http://localhost:8001 --json JOB_ID
 ```
 

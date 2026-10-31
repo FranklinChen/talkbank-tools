@@ -78,12 +78,12 @@ async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_
         .serialize();
     let (proof, report) = output.into_parts();
     assert!(proof.as_str().contains("L2|xxx"));
-    let (shortfalls, exclusions) = report.into_records();
+    let (shortfalls, exclusions) = report.into_records(proof.document()).unwrap();
     assert!(exclusions.is_empty());
     assert!(
         matches!(&shortfalls[..], [crate::api::OutputShortfallRecord::SecondaryMorphologyUnplaced {
         utterances: 1, words: 1, first_utterances,
-    }] if first_utterances[0].utterance == 1 && first_utterances[0].cause == crate::api::SecondaryExtractionFailure::Alignment)
+    }] if first_utterances[0].location.utterance() == 1 && first_utterances[0].location.main_tier().is_some() && first_utterances[0].cause == crate::api::SecondaryExtractionFailure::Alignment)
     );
     let wire = serde_json::to_value(shortfalls).unwrap();
     assert!(wire[0]["first_utterances"][0].get("first_word").is_none());
@@ -157,7 +157,7 @@ async fn an_unsupported_secondary_language_is_excluded() {
             .count(),
         1
     );
-    let (shortfalls, exclusions) = report.into_records();
+    let (shortfalls, exclusions) = report.into_records(proof.document()).unwrap();
     let produced = ProducedOutput::Admitted(proof);
     assert!(shortfalls.is_empty());
     assert!(matches!(
@@ -166,7 +166,7 @@ async fn an_unsupported_secondary_language_is_excluded() {
     ));
     assert!(
         matches!(&exclusions[..], [OutputExclusionRecord::UnsupportedSecondaryMorphology { spans: 1, words: 1, first_spans }]
-        if first_spans[0].utterance == 1 && first_spans[0].first_word == 2)
+        if first_spans[0].location.utterance() == 1 && first_spans[0].location.main_tier().is_some() && first_spans[0].first_word == 2)
     );
 }
 
@@ -422,7 +422,7 @@ async fn reused_morphology_carries_its_own_stamps_without_requiring_readable_met
             .await
             .expect("optional provenance cannot make reused morphology fail");
             let (document, report) = output.into_parts();
-            let (shortfalls, exclusions) = report.into_records();
+            let (shortfalls, exclusions) = report.into_records(document.document()).unwrap();
             let incomplete = prior_stamp.is_none_or(|stamp| stamp.contains("damaged"));
             assert_eq!(shortfalls.len(), usize::from(incomplete));
             assert!(exclusions.is_empty());
@@ -713,7 +713,7 @@ async fn incremental_complete_unsupported_precode_needs_no_model_capability() {
     .expect("source-admitted compatible complete analysis needs no model");
     let (document, report) = output.into_parts();
     assert!(matches!(
-        &report.into_records().0[..],
+        &report.into_records(document.document()).unwrap().0[..],
         [crate::api::OutputShortfallRecord::MorphologyProvenanceIncomplete { .. }]
     ));
     let output = document.into_text();

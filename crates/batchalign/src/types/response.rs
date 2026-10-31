@@ -382,7 +382,15 @@ impl FileOutputDiagnostics {
                 });
             }
         }
-        lines.extend(self.shortfalls.iter().map(ToString::to_string));
+        for shortfall in &self.shortfalls {
+            lines.push(shortfall.to_string());
+            lines.extend(
+                shortfall
+                    .detail_lines()
+                    .into_iter()
+                    .map(|line| format!("  {line}")),
+            );
+        }
         lines
     }
 }
@@ -672,10 +680,13 @@ pub enum OutputShortfallRecord {
         stage: OptionalStage,
         /// How many utterances it left out, at least one.
         held_out_utterances: u64,
-        /// The first of them (positions among the file's utterances before
-        /// the stage, counting from 1), at most
-        /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
-        first_held_out: Vec<u64>,
+        /// The first of them, at most
+        /// [`FileOutputDiagnostics::FIRST_FINDINGS`], located in the document
+        /// from before the stage. They keep their generated form, so the
+        /// main tier finds them in the written file; the position counts the
+        /// utterances before the stage, which a segmentation stage changes.
+        #[cfg_attr(feature = "server", schema(value_type = Vec<StoredUtteranceLocation>))]
+        first_held_out: Vec<StoredUtteranceLocation>,
     },
     /// Forced alignment left required words untimed. The measured timing
     /// was written; these words are in the transcript without bullets.
@@ -692,12 +703,95 @@ pub enum OutputShortfallRecord {
     },
 }
 
+impl OutputShortfallRecord {
+    /// The lines under this shortfall's own line that a reader acts on, in
+    /// order; empty when its line says everything. Exhaustive, so a new
+    /// shortfall decides here whether it names anything.
+    ///
+    /// A shortfall that carries utterances names each one the record holds,
+    /// as written, then how many more it counted: a reader acts on the
+    /// utterances, and the headline gives only the counts.
+    pub fn detail_lines(&self) -> Vec<String> {
+        match self {
+            Self::TimingIncomplete {
+                untimed_utterances,
+                first_untimed,
+                ..
+            } => listed(
+                first_untimed,
+                *untimed_utterances,
+                "utterance(s) with untimed words",
+            ),
+            Self::StageHeldOut {
+                held_out_utterances,
+                first_held_out,
+                ..
+            } => listed(
+                first_held_out,
+                *held_out_utterances,
+                "utterance(s) held out",
+            ),
+            Self::SecondaryMorphologyUnplaced {
+                utterances,
+                first_utterances,
+                ..
+            } => listed(first_utterances, *utterances, "utterance(s) not dispatched"),
+            Self::SecondaryMorphologyIncomplete {
+                spans, first_spans, ..
+            } => listed(first_spans, *spans, "span(s) with L2 placeholders"),
+            Self::UtrUnavailable { .. }
+            | Self::MorphologyProvenanceIncomplete { .. }
+            | Self::StageSkipped { .. }
+            | Self::StageNotApplied { .. } => Vec::new(),
+        }
+    }
+}
+
+/// One line per recorded item, then how many of `total` the record does not
+/// hold, named by `rest`.
+fn listed<T: std::fmt::Display>(recorded: &[T], total: u64, rest: &str) -> Vec<String> {
+    let mut lines: Vec<String> = recorded.iter().map(ToString::to_string).collect();
+    let shown = recorded.len() as u64;
+    if total > shown {
+        lines.push(format!("... and {} more {rest}", total - shown));
+    }
+    lines
+}
+
+impl std::fmt::Display for SecondaryMorphologyUnplacedUtterance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}   ({} word(s): {})",
+            self.location, self.words, self.detail
+        )
+    }
+}
+
+impl std::fmt::Display for SecondaryMorphologyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.span, self.detail)
+    }
+}
+
+impl std::fmt::Display for SecondaryMorphologySpan {
+    /// The utterance as written, then which of its words the span covers.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}   ({}, {} word(s) from word {})",
+            self.location, self.language, self.words, self.first_word
+        )
+    }
+}
+
 /// A primary-injection failure before a secondary span could be planned.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct SecondaryMorphologyUnplacedUtterance {
-    /// One-based utterance ordinal.
-    pub utterance: u64,
+    /// Where the utterance is.
+    #[serde(flatten)]
+    pub location: StoredUtteranceLocation,
     /// Secondary words left as placeholders.
     pub words: u64,
     /// Typed extraction boundary.
@@ -727,8 +821,9 @@ pub enum SecondaryExtractionFailure {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct SecondaryMorphologySpan {
-    /// One-based utterance ordinal, not a physical text line.
-    pub utterance: u64,
+    /// Where the span's utterance is.
+    #[serde(flatten)]
+    pub location: StoredUtteranceLocation,
     /// One-based morphology-item position within that utterance.
     pub first_word: u64,
     /// Morphology items in the span, not expanded clitic chunks.
@@ -807,14 +902,252 @@ pub struct SecondaryMorphologyFailure {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct UntimedUtteranceRecord {
-    /// The utterance's position among the file's utterances, counting from 1.
-    pub utterance: u64,
+    /// Where the utterance is: its position and, in records this build
+    /// writes, its main tier as written.
+    #[serde(flatten)]
+    pub location: StoredUtteranceLocation,
     /// Required lexical words in it.
     pub words: u64,
     /// How many of them are untimed, at least one.
     pub untimed_words: u64,
     /// Why.
     pub cause: StoredUntimedCause,
+}
+
+impl std::fmt::Display for UntimedUtteranceRecord {
+    /// One line a reader can act on: the utterance as written (its position
+    /// when an earlier build's record lacks the text), then how much of it is
+    /// untimed and why.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}   ({} of {} words untimed: {})",
+            self.location, self.untimed_words, self.words, self.cause
+        )
+    }
+}
+
+/// Where an utterance a record names is: its position among the document's
+/// utterances, counting from 1, and its main tier as written.
+///
+/// Code builds one only from the document that holds the utterance
+/// ([`Self::of`]), so the number and the text always name the same
+/// utterance; one read back from a stored record is as that record wrote it. The text is what
+/// a reader searches for: a position cannot be searched for in CLAN or an
+/// editor, and it names a different utterance once the file is edited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtteranceLocator {
+    utterance: u64,
+    main_tier: MainTierExcerpt,
+}
+
+/// An utterance index that is not in the document it was resolved against:
+/// the index came from another document, an internal fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("utterance {} is not in the document it was looked up in", .0.raw() + 1)]
+pub struct UtteranceNotInDocument(talkbank_model::UtteranceIdx);
+
+impl UtteranceLocator {
+    /// The utterance at `ordinal` (counting from 0) among `chat`'s utterances.
+    pub(crate) fn of(
+        chat: &talkbank_model::ChatFile,
+        ordinal: talkbank_model::UtteranceIdx,
+    ) -> Result<Self, UtteranceNotInDocument> {
+        chat.utterances()
+            .nth(ordinal.raw())
+            .map(|utterance| Self {
+                utterance: ordinal.raw() as u64 + 1,
+                main_tier: MainTierExcerpt::of(&utterance.main),
+            })
+            .ok_or(UtteranceNotInDocument(ordinal))
+    }
+
+    /// A locator from its parts, for tests of the records that carry one.
+    #[cfg(test)]
+    pub(crate) fn for_test(utterance: u64, main_tier: &str) -> Self {
+        Self {
+            utterance,
+            main_tier: MainTierExcerpt(main_tier.to_owned()),
+        }
+    }
+}
+
+/// Where a recorded utterance is, as a stored record holds it: located, as
+/// this build writes it, or numbered only, as records stored by builds before
+/// 0.8.7 carry it.
+///
+/// Its state is private. Code makes one only from an [`UtteranceLocator`]
+/// (`From`), so nothing this build writes can lack the main tier; a numbered
+/// location comes only from reading an earlier record. A record's
+/// `main_tier` that does not read is an error, never a numbered location
+/// with the text dropped. On the wire it is `{utterance, main_tier}`,
+/// flattened into the record that carries it; an earlier build's bare
+/// position (a number, or an object without `main_tier`) still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredLocationWire", into = "UtteranceLocationWire")]
+pub struct StoredUtteranceLocation(StoredLocation);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StoredLocation {
+    Located(UtteranceLocator),
+    Numbered(u64),
+}
+
+/// What a stored location is read through: the object this build writes, or
+/// the bare position some earlier records hold.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredLocationWire {
+    Object(UtteranceLocationWire),
+    Bare(u64),
+}
+
+/// The object form of a location on the wire, and the schema of what a
+/// location writes.
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+struct UtteranceLocationWire {
+    /// The utterance's position among the file's utterances, counting from 1.
+    utterance: u64,
+    /// The utterance's main tier as written, without its bullet; absent only
+    /// in records stored before 0.8.7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "server", schema(value_type = Option<String>))]
+    main_tier: Option<MainTierExcerpt>,
+}
+
+impl From<StoredLocationWire> for StoredUtteranceLocation {
+    fn from(wire: StoredLocationWire) -> Self {
+        Self(match wire {
+            StoredLocationWire::Object(UtteranceLocationWire {
+                utterance,
+                main_tier: Some(main_tier),
+            }) => StoredLocation::Located(UtteranceLocator {
+                utterance,
+                main_tier,
+            }),
+            StoredLocationWire::Object(UtteranceLocationWire {
+                utterance,
+                main_tier: None,
+            })
+            | StoredLocationWire::Bare(utterance) => StoredLocation::Numbered(utterance),
+        })
+    }
+}
+
+impl From<StoredUtteranceLocation> for UtteranceLocationWire {
+    fn from(location: StoredUtteranceLocation) -> Self {
+        match location.0 {
+            StoredLocation::Located(UtteranceLocator {
+                utterance,
+                main_tier,
+            }) => Self {
+                utterance,
+                main_tier: Some(main_tier),
+            },
+            StoredLocation::Numbered(utterance) => Self {
+                utterance,
+                main_tier: None,
+            },
+        }
+    }
+}
+
+impl From<UtteranceLocator> for StoredUtteranceLocation {
+    fn from(locator: UtteranceLocator) -> Self {
+        Self(StoredLocation::Located(locator))
+    }
+}
+
+impl StoredUtteranceLocation {
+    /// The utterance's position among the file's utterances, counting from 1.
+    pub fn utterance(&self) -> u64 {
+        match &self.0 {
+            StoredLocation::Located(locator) => locator.utterance,
+            StoredLocation::Numbered(utterance) => *utterance,
+        }
+    }
+
+    /// The utterance's main tier as written; absent only in a record an
+    /// earlier build stored.
+    pub fn main_tier(&self) -> Option<&MainTierExcerpt> {
+        match &self.0 {
+            StoredLocation::Located(locator) => Some(&locator.main_tier),
+            StoredLocation::Numbered(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StoredUtteranceLocation {
+    /// The main tier as written, which a reader can search for; the
+    /// position only when an earlier build's record lacks the text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            StoredLocation::Located(locator) => write!(f, "{}", locator.main_tier),
+            StoredLocation::Numbered(utterance) => write!(f, "utterance {utterance}"),
+        }
+    }
+}
+
+/// The schema of what a location writes: the wire object's, derived from
+/// it, because the type's own state is private and read through that form.
+#[cfg(feature = "server")]
+impl utoipa::PartialSchema for StoredUtteranceLocation {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        <UtteranceLocationWire as utoipa::PartialSchema>::schema()
+    }
+}
+
+#[cfg(feature = "server")]
+impl utoipa::ToSchema for StoredUtteranceLocation {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("StoredUtteranceLocation")
+    }
+}
+
+/// A main tier as written, without its bullet: what a reader searches for to
+/// find the utterance. Its first [`Self::MAX_CHARS`] characters, followed by
+/// ` ...` when the tier is longer. Rendered by the CHAT model's own writer,
+/// never assembled.
+///
+/// Bounded because every job poll copies the records that carry it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(transparent)]
+pub struct MainTierExcerpt(String);
+
+impl MainTierExcerpt {
+    /// The most characters kept; a longer tier is cut and ends in ` ...`.
+    pub const MAX_CHARS: usize = 160;
+
+    /// The tier as the writer renders it, its bullet removed (a bullet is
+    /// timing, not something a reader searches for), cut to the bound.
+    ///
+    /// The tier is cloned to clear the bullet, because the model's writer
+    /// always writes it; admission calls this for at most
+    /// [`FileOutputDiagnostics::FIRST_FINDINGS`] utterances per file.
+    pub(crate) fn of(main: &talkbank_model::model::MainTier) -> Self {
+        use talkbank_model::WriteChat;
+        let mut unbulleted = main.clone();
+        unbulleted.content.bullet = None;
+        let mut written = unbulleted.to_chat_string();
+        if let Some((cut, _)) = written.char_indices().nth(Self::MAX_CHARS) {
+            written.truncate(cut);
+            written.push_str(" ...");
+        }
+        Self(written)
+    }
+
+    /// The excerpt's text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for MainTierExcerpt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Why an utterance's words have no timing, as a record holds it: a cause
@@ -937,12 +1270,59 @@ pub enum OutputExclusionRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct ExcludedUtteranceRecord {
-    /// The utterance's position among the file's utterances, counting from 1.
-    pub utterance: u64,
+    /// Where the utterance is.
+    #[serde(flatten)]
+    pub location: StoredUtteranceLocation,
     /// Its lexical words.
     pub words: u64,
     /// The postcode that marks it.
     pub postcode: OffRecordPostcode,
+}
+
+impl OutputExclusionRecord {
+    /// The record in a short phrase, for a one-line summary of what a file
+    /// left out.
+    pub fn summary_phrase(&self) -> String {
+        match self {
+            Self::NotInRecording {
+                excluded_utterances,
+                ..
+            } => format!(
+                "{excluded_utterances} utterance(s) not in the recording, left out of alignment by design"
+            ),
+            Self::UnsupportedSecondaryMorphology { spans, .. } => {
+                format!("{spans} span(s) excluded from secondary morphology: unsupported languages")
+            }
+        }
+    }
+
+    /// The lines under this exclusion's own line: each utterance or span the
+    /// record names, then how many more it counted. Exhaustive, like
+    /// [`OutputShortfallRecord::detail_lines`].
+    pub fn detail_lines(&self) -> Vec<String> {
+        match self {
+            Self::NotInRecording {
+                excluded_utterances,
+                first_excluded,
+                ..
+            } => listed(
+                first_excluded,
+                *excluded_utterances,
+                "utterance(s) not in the recording",
+            ),
+            Self::UnsupportedSecondaryMorphology {
+                spans, first_spans, ..
+            } => listed(first_spans, *spans, "span(s) excluded"),
+        }
+    }
+}
+
+impl std::fmt::Display for ExcludedUtteranceRecord {
+    /// The utterance as written, then its postcode, said even though the
+    /// tier carries it: an excerpt of a long tier is cut before its end.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}   ({})", self.location, self.postcode)
+    }
 }
 
 impl std::fmt::Display for OutputExclusionRecord {
@@ -952,26 +1332,17 @@ impl std::fmt::Display for OutputExclusionRecord {
                 f,
                 "secondary morphology excluded: {spans} span(s), {words} words in unsupported languages; L2 placeholders retained"
             ),
+            // Counts only: `detail_lines` names the utterances.
             Self::NotInRecording {
                 excluded_utterances,
                 excluded_words,
-                first_excluded,
-            } => {
-                write!(
-                    f,
-                    "left out of alignment by design: {excluded_utterances} utterance(s) \
-                     ({excluded_words} words) marked as not in the recording were not \
-                     looked for in it"
-                )?;
-                if let Some(first) = first_excluded.first() {
-                    write!(
-                        f,
-                        " (first: utterance {}, {})",
-                        first.utterance, first.postcode
-                    )?;
-                }
-                Ok(())
-            }
+                first_excluded: _,
+            } => write!(
+                f,
+                "left out of alignment by design: {excluded_utterances} utterance(s) \
+                 ({excluded_words} words) marked as not in the recording were not \
+                 looked for in it"
+            ),
         }
     }
 }
@@ -1093,42 +1464,24 @@ impl std::fmt::Display for OutputShortfallRecord {
                 f,
                 "morphology provenance incomplete: {detail}; morphology and original records retained"
             ),
+            // The list-carrying shortfalls give counts only: `detail_lines`
+            // names their utterances one per line.
             Self::SecondaryMorphologyUnplaced {
                 utterances,
                 words,
-                first_utterances,
-            } => {
-                write!(
-                    f,
-                    "secondary morphology not dispatched: {words} words in {utterances} utterance(s) could not be placed"
-                )?;
-                if let Some(first) = first_utterances.first() {
-                    write!(
-                        f,
-                        " (first: utterance {}: {})",
-                        first.utterance, first.detail
-                    )?;
-                }
-                Ok(())
-            }
+                first_utterances: _,
+            } => write!(
+                f,
+                "secondary morphology not dispatched: {words} words in {utterances} utterance(s) could not be placed"
+            ),
             Self::SecondaryMorphologyIncomplete {
                 spans,
                 words,
-                first_spans,
-            } => {
-                write!(
-                    f,
-                    "secondary morphology incomplete: {spans} span(s), {words} words retain L2 placeholders"
-                )?;
-                if let Some(first) = first_spans.first() {
-                    write!(
-                        f,
-                        " (first: utterance {}, {}: {})",
-                        first.span.utterance, first.span.language, first.detail
-                    )?;
-                }
-                Ok(())
-            }
+                first_spans: _,
+            } => write!(
+                f,
+                "secondary morphology incomplete: {spans} span(s), {words} words retain L2 placeholders"
+            ),
             Self::StageSkipped { stage } => write!(
                 f,
                 "skipped {}: it requires an admitted document, and the generated \
@@ -1144,39 +1497,23 @@ impl std::fmt::Display for OutputShortfallRecord {
             Self::StageHeldOut {
                 stage,
                 held_out_utterances,
-                first_held_out,
-            } => {
-                write!(
-                    f,
-                    "{} applied except to {held_out_utterances} utterance(s) that carry the \
-                     findings, which keep their generated form",
-                    stage.name()
-                )?;
-                if let Some(first) = first_held_out.first() {
-                    write!(f, " (first: utterance {first})")?;
-                }
-                Ok(())
-            }
+                first_held_out: _,
+            } => write!(
+                f,
+                "{} applied except to {held_out_utterances} utterance(s) that carry the \
+                 findings, which keep their generated form",
+                stage.name()
+            ),
             Self::TimingIncomplete {
                 required_words,
                 untimed_words,
                 untimed_utterances,
-                first_untimed,
-            } => {
-                write!(
-                    f,
-                    "timing incomplete: {untimed_words} of {required_words} words in \
-                     {untimed_utterances} utterance(s) have no timing and were written without it"
-                )?;
-                if let Some(first) = first_untimed.first() {
-                    write!(
-                        f,
-                        " (first: utterance {}, {} of {} words, {})",
-                        first.utterance, first.untimed_words, first.words, first.cause
-                    )?;
-                }
-                Ok(())
-            }
+                first_untimed: _,
+            } => write!(
+                f,
+                "timing incomplete: {untimed_words} of {required_words} words in \
+                 {untimed_utterances} utterance(s) have no timing and were written without it"
+            ),
         }
     }
 }
@@ -1255,6 +1592,174 @@ pub struct FileStatusEntry {
     /// render friendly text without hard-coding label mappings in every UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_label: Option<String>,
+    /// The file's diagnostics and exclusions as a reader sees them: rendered
+    /// by the server from `diagnostics` and `exclusions` when the entry is
+    /// built, like `progress_label`, so every client shows the same words
+    /// instead of keeping its own copy of the renderer.
+    #[serde(default, skip_serializing_if = "FileReview::is_empty")]
+    pub review: FileReview,
+}
+
+/// A file's record as a reader sees it: what needs review, and what the
+/// command left out on purpose, each a headline and the lines under it.
+/// Rendered by [`Self::of`] from the record itself; its fields are private,
+/// so no client or producer writes its own wording. Absent on the wire when
+/// there is nothing in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FileReview {
+    /// What needs review; present only for a file written with diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    needs_review: Option<ReviewBlock>,
+    /// What the command left out on purpose; present only when it left
+    /// something out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    left_out: Option<ReviewBlock>,
+}
+
+/// One part of a review: a headline, and the lines under it (a line that
+/// belongs to the one above it is indented). Lines never exist without
+/// their headline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct ReviewBlock {
+    headline: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lines: Vec<String>,
+}
+
+impl ReviewBlock {
+    /// The headline.
+    pub fn headline(&self) -> &str {
+        &self.headline
+    }
+
+    /// The lines under it.
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+}
+
+impl FileReview {
+    /// The review of a file with this status, diagnostics and exclusions.
+    pub fn of(
+        status: FileStatusKind,
+        diagnostics: Option<&FileOutputDiagnostics>,
+        exclusions: &[OutputExclusionRecord],
+    ) -> Self {
+        let needs_review = match status {
+            FileStatusKind::Diagnosed => Some(match diagnostics {
+                Some(diagnostics) => ReviewBlock {
+                    headline: diagnostics.summary(),
+                    lines: diagnostics.lines(),
+                },
+                // A diagnosed status restored without its record.
+                None => ReviewBlock {
+                    headline: "needs review (no details were recorded)".to_owned(),
+                    lines: Vec::new(),
+                },
+            }),
+            FileStatusKind::Done
+            | FileStatusKind::Queued
+            | FileStatusKind::Processing
+            | FileStatusKind::Error
+            | FileStatusKind::Interrupted => None,
+        };
+        let left_out = (!exclusions.is_empty()).then(|| ReviewBlock {
+            headline: exclusions
+                .iter()
+                .map(OutputExclusionRecord::summary_phrase)
+                .collect::<Vec<_>>()
+                .join("; "),
+            lines: exclusions
+                .iter()
+                .flat_map(|exclusion| {
+                    std::iter::once(exclusion.to_string()).chain(
+                        exclusion
+                            .detail_lines()
+                            .into_iter()
+                            .map(|line| format!("  {line}")),
+                    )
+                })
+                .collect(),
+        });
+        Self {
+            needs_review,
+            left_out,
+        }
+    }
+
+    /// Whether there is nothing to review and nothing left out.
+    pub fn is_empty(&self) -> bool {
+        self.needs_review.is_none() && self.left_out.is_none()
+    }
+
+    /// What needs review, for a file written with diagnostics.
+    pub fn needs_review(&self) -> Option<&ReviewBlock> {
+        self.needs_review.as_ref()
+    }
+
+    /// What was left out on purpose, when anything was.
+    pub fn left_out(&self) -> Option<&ReviewBlock> {
+        self.left_out.as_ref()
+    }
+}
+
+/// One line describing a file written with diagnostics: what needs review,
+/// in the order a reader acts on it. Validation findings (with the first),
+/// each shortfall that is not a stage, stages left out of utterances, words
+/// forced alignment left untimed, and how many requested stages were not
+/// applied. Each part is present only when it applies, so a file diagnosed
+/// only by untimed words never reads as "0 diagnostics".
+impl FileOutputDiagnostics {
+    /// One line: what needs review, in the order a reader acts on it.
+    pub fn summary(&self) -> String {
+        let diagnostics = self;
+        let mut parts = Vec::new();
+        let count = diagnostics.finding_count();
+        if count > 0 {
+            let noun = if count == 1 { "finding" } else { "findings" };
+            let mut part = format!("{count} validation {noun}");
+            if let Some(first) = diagnostics.first_findings().first() {
+                part.push_str(&format!(" (first: {first})"));
+            }
+            parts.push(part);
+        }
+        let mut stages = 0;
+        for shortfall in &diagnostics.shortfalls {
+            match shortfall {
+                OutputShortfallRecord::SecondaryMorphologyIncomplete { .. }
+                | OutputShortfallRecord::UtrUnavailable { .. }
+                | OutputShortfallRecord::MorphologyProvenanceIncomplete { .. }
+                | OutputShortfallRecord::SecondaryMorphologyUnplaced { .. } => {
+                    parts.push(shortfall.to_string());
+                }
+                OutputShortfallRecord::StageSkipped { .. }
+                | OutputShortfallRecord::StageNotApplied { .. } => stages += 1,
+                OutputShortfallRecord::StageHeldOut {
+                    stage,
+                    held_out_utterances,
+                    ..
+                } => parts.push(format!(
+                    "{} left out of {held_out_utterances} utterance(s)",
+                    stage.name()
+                )),
+                OutputShortfallRecord::TimingIncomplete {
+                    required_words,
+                    untimed_words,
+                    untimed_utterances,
+                    ..
+                } => parts.push(format!(
+                    "{untimed_words} of {required_words} words in {untimed_utterances} \
+                 utterance(s) have no word timing"
+                )),
+            }
+        }
+        if stages > 0 {
+            parts.push(format!("{stages} requested stage(s) not applied"));
+        }
+        format!("needs review: {}", parts.join("; "))
+    }
 }
 
 /// Control-plane backend that currently owns orchestration for a server job.
@@ -1661,6 +2166,221 @@ pub(crate) fn default_cache_backend() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first main tier of `chat_text`, as the parser builds it.
+    fn first_main_tier(chat_text: &str) -> talkbank_model::model::MainTier {
+        use talkbank_parser_tests::test_error::ParseProductTestExt;
+        let parser = talkbank_parser::TreeSitterParser::new().expect("parser init");
+        let chat = parser.parse_chat_file(chat_text).expect_built();
+        chat.lines
+            .iter()
+            .find_map(|line| match line {
+                talkbank_model::model::Line::Utterance(utterance) => Some(utterance.main.clone()),
+                _ => None,
+            })
+            .expect("one utterance")
+    }
+
+    /// The excerpt is the tier a reader searches for: as the writer renders
+    /// it, without the bullet (timing, not text), and never longer than the
+    /// bound, cut on a character so a multibyte transcript cannot split.
+    #[test]
+    fn a_main_tier_excerpt_drops_the_bullet_and_is_bounded() {
+        let header = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n\
+                      @ID:\teng|test|PAR|||||Participant|||\n@Media:\tinput, audio\n";
+        let bulleted = first_main_tier(&format!(
+            "{header}*PAR:\t&-uh the dog is running . \u{15}1000_2500\u{15}\n@End\n"
+        ));
+        insta::assert_snapshot!(MainTierExcerpt::of(&bulleted), @"*PAR:	&-uh the dog is running .");
+
+        let long = "très ".repeat(60);
+        let excerpt =
+            MainTierExcerpt::of(&first_main_tier(&format!("{header}*PAR:\t{long}.\n@End\n")));
+        assert_eq!(
+            excerpt.as_str().chars().count(),
+            MainTierExcerpt::MAX_CHARS + " ...".len()
+        );
+        assert!(excerpt.as_str().ends_with(" ..."), "{excerpt}");
+    }
+
+    /// Records stored by 0.8.6 locate an utterance by position only: an
+    /// object without `main_tier`, or (held-out stages) a bare number. Both
+    /// still read, as numbered; one this build writes reads as located and
+    /// writes back the same shape; a `main_tier` that does not read is an
+    /// error, never a numbered location with the text dropped.
+    #[test]
+    fn a_location_stored_without_its_main_tier_still_reads() {
+        let cause = serde_json::json!({ "kind": "localization_unavailable" });
+        let stored: UntimedUtteranceRecord = serde_json::from_value(serde_json::json!({
+            "utterance": 29, "words": 1, "untimed_words": 1, "cause": cause,
+        }))
+        .expect("a 0.8.6 record reads");
+        assert_eq!(stored.location.main_tier(), None);
+        insta::assert_snapshot!(stored, @"utterance 29   (1 of 1 words untimed: no alignment request, no supplied timing or source-bound UTR search evidence)");
+
+        let located_json = serde_json::json!({
+            "utterance": 29, "main_tier": "*INV:\tMhm .", "words": 1, "untimed_words": 1,
+            "cause": cause,
+        });
+        let located: UntimedUtteranceRecord =
+            serde_json::from_value(located_json.clone()).expect("a located record reads");
+        assert_eq!(located.location.utterance(), 29);
+        insta::assert_snapshot!(located, @"*INV:	Mhm .   (1 of 1 words untimed: no alignment request, no supplied timing or source-bound UTR search evidence)");
+        assert_eq!(serde_json::to_value(&located).unwrap(), located_json);
+
+        let bare: Vec<StoredUtteranceLocation> = serde_json::from_value(serde_json::json!([3, 5]))
+            .expect("0.8.6 held-out positions read");
+        assert_eq!(
+            bare.iter()
+                .map(StoredUtteranceLocation::utterance)
+                .collect::<Vec<_>>(),
+            [3, 5]
+        );
+        assert!(bare.iter().all(|location| location.main_tier().is_none()));
+
+        let malformed = serde_json::from_value::<UntimedUtteranceRecord>(serde_json::json!({
+            "utterance": 29, "main_tier": 7, "words": 1, "untimed_words": 1, "cause": cause,
+        }));
+        assert!(malformed.is_err(), "{malformed:?}");
+    }
+
+    /// The review the server sends every client, for each kind of record:
+    /// what was the dashboard's own copy of these renderers is now this one
+    /// rendering. A record from 0.8.6 (no `main_tier`) renders by position.
+    #[test]
+    fn a_file_review_renders_every_record_kind_once() {
+        let located = |n: u64, tier: &str| -> StoredUtteranceLocation {
+            UtteranceLocator::for_test(n, tier).into()
+        };
+        let numbered: StoredUtteranceLocation =
+            serde_json::from_value(serde_json::json!(4)).expect("a 0.8.6 position");
+        let cause = StoredUntimedCause::Written(UntimedCauseRecord::LocalizationUnavailable);
+        let span = |location: StoredUtteranceLocation| SecondaryMorphologySpan {
+            location,
+            first_word: 2,
+            words: 2,
+            language: "spa".into(),
+        };
+        let diagnostics = FileOutputDiagnostics::of_findings(
+            Vec::new(),
+            vec![
+                OutputShortfallRecord::TimingIncomplete {
+                    required_words: 120,
+                    untimed_words: 3,
+                    untimed_utterances: 3,
+                    first_untimed: vec![
+                        UntimedUtteranceRecord {
+                            location: located(24, "*INV:\tMhm ."),
+                            words: 1,
+                            untimed_words: 1,
+                            cause: cause.clone(),
+                        },
+                        UntimedUtteranceRecord {
+                            location: numbered.clone(),
+                            words: 1,
+                            untimed_words: 1,
+                            cause,
+                        },
+                    ],
+                },
+                OutputShortfallRecord::SecondaryMorphologyIncomplete {
+                    spans: 1,
+                    words: 2,
+                    first_spans: vec![SecondaryMorphologyFailure {
+                        span: span(located(3, "*PAR:\tyo quiero agua .")),
+                        cause: SecondaryMorphologyFailureKind::Merge.into(),
+                        detail: "analysis could not be merged".into(),
+                    }],
+                },
+                OutputShortfallRecord::SecondaryMorphologyUnplaced {
+                    utterances: 1,
+                    words: 2,
+                    first_utterances: vec![SecondaryMorphologyUnplacedUtterance {
+                        location: numbered,
+                        words: 2,
+                        cause: SecondaryExtractionFailure::Alignment,
+                        detail: "primary analysis does not align".into(),
+                    }],
+                },
+                OutputShortfallRecord::StageSkipped {
+                    stage: OptionalStage::Morphosyntax,
+                },
+            ],
+        );
+        let exclusions = [
+            OutputExclusionRecord::NotInRecording {
+                excluded_utterances: 2,
+                excluded_words: 7,
+                first_excluded: vec![ExcludedUtteranceRecord {
+                    location: located(2, "*MOT:\twent to the park . [+ diary]"),
+                    words: 5,
+                    postcode: OffRecordPostcode::Diary,
+                }],
+            },
+            OutputExclusionRecord::UnsupportedSecondaryMorphology {
+                spans: 1,
+                words: 2,
+                first_spans: vec![span(located(5, "*PAR:\tbonjour mes amis ."))],
+            },
+        ];
+        let review = FileReview::of(FileStatusKind::Diagnosed, Some(&diagnostics), &exclusions);
+        let rendered = [review.needs_review(), review.left_out()]
+            .into_iter()
+            .flatten()
+            .flat_map(|block| {
+                std::iter::once(block.headline()).chain(block.lines().iter().map(String::as_str))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!(rendered, @"
+        needs review: 3 of 120 words in 3 utterance(s) have no word timing; secondary morphology incomplete: 1 span(s), 2 words retain L2 placeholders; secondary morphology not dispatched: 2 words in 1 utterance(s) could not be placed; 1 requested stage(s) not applied
+        timing incomplete: 3 of 120 words in 3 utterance(s) have no timing and were written without it
+          *INV:	Mhm .   (1 of 1 words untimed: no alignment request, no supplied timing or source-bound UTR search evidence)
+          utterance 4   (1 of 1 words untimed: no alignment request, no supplied timing or source-bound UTR search evidence)
+          ... and 1 more utterance(s) with untimed words
+        secondary morphology incomplete: 1 span(s), 2 words retain L2 placeholders
+          *PAR:	yo quiero agua .   (spa, 2 word(s) from word 2): analysis could not be merged
+        secondary morphology not dispatched: 2 words in 1 utterance(s) could not be placed
+          utterance 4   (2 word(s): primary analysis does not align)
+        skipped morphosyntax: it requires an admitted document, and the generated output was written with its diagnostics instead
+        2 utterance(s) not in the recording, left out of alignment by design; 1 span(s) excluded from secondary morphology: unsupported languages
+        left out of alignment by design: 2 utterance(s) (7 words) marked as not in the recording were not looked for in it
+          *MOT:	went to the park . [+ diary]   ([+ diary])
+          ... and 1 more utterance(s) not in the recording
+        secondary morphology excluded: 1 span(s), 2 words in unsupported languages; L2 placeholders retained
+          *PAR:	bonjour mes amis .   (spa, 2 word(s) from word 2)
+        ");
+
+        // A clean file with nothing left out has nothing to send.
+        assert!(FileReview::of(FileStatusKind::Done, None, &[]).is_empty());
+        assert_eq!(
+            serde_json::to_value(FileReview::of(FileStatusKind::Done, None, &[])).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    /// A locator is made from the document that holds the utterance; an index
+    /// past its utterances is refused, never a position with no text.
+    #[test]
+    fn a_locator_names_the_utterance_of_its_own_document() {
+        use talkbank_parser_tests::test_error::ParseProductTestExt;
+        let parser = talkbank_parser::TreeSitterParser::new().expect("parser init");
+        let chat = parser
+            .parse_chat_file(
+                "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n\
+                 @ID:\teng|test|PAR|||||Participant|||\n*PAR:\tone .\n*PAR:\ttwo words .\n@End\n",
+            )
+            .expect_built();
+        let second = UtteranceLocator::of(&chat, talkbank_model::UtteranceIdx::new(1))
+            .expect("the second utterance");
+        let location = StoredUtteranceLocation::from(second);
+        assert_eq!(location.utterance(), 2);
+        insta::assert_snapshot!(location, @"*PAR:	two words .");
+        assert_eq!(
+            UtteranceLocator::of(&chat, talkbank_model::UtteranceIdx::new(2)),
+            Err(UtteranceNotInDocument(talkbank_model::UtteranceIdx::new(2)))
+        );
+    }
 
     /// A stored record carries a cause this build writes, or one only an
     /// earlier build wrote; both read back by their own `kind`, with the

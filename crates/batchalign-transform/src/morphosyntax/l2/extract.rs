@@ -10,6 +10,7 @@
 
 use std::ops::Range;
 
+use crate::morphosyntax::UtteranceAddress;
 use talkbank_model::alignment::MorItemIndex;
 use talkbank_model::model::LanguageCode;
 use talkbank_model::validation::LanguageResolution;
@@ -103,7 +104,7 @@ impl PrimaryStructuralInfo {
 /// private and only the deferral builds one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct L2DeferredPosition {
-    line_idx: usize,
+    address: UtteranceAddress,
     word_idx: MorItemIndex,
     target_lang: LanguageCode,
     primary: PrimaryStructuralInfo,
@@ -114,7 +115,12 @@ pub struct L2DeferredPosition {
 impl L2DeferredPosition {
     /// Line index in `ChatFile.lines`.
     pub fn line_idx(&self) -> usize {
-        self.line_idx
+        self.address.line().raw()
+    }
+
+    /// Where the position's utterance is.
+    pub fn address(&self) -> UtteranceAddress {
+        self.address
     }
 
     /// The `%mor` item the position's word was written as.
@@ -147,6 +153,9 @@ impl L2DeferredPosition {
 
     /// A position for a test fixture, ending its utterance with a period.
     #[cfg(test)]
+    ///
+    /// Its utterance is numbered by its line: splicing, which these fixtures
+    /// exercise, reads only the line.
     pub(crate) fn for_test(
         line_idx: usize,
         word_idx: MorItemIndex,
@@ -155,7 +164,7 @@ impl L2DeferredPosition {
         primary: PrimaryStructuralInfo,
     ) -> Self {
         Self {
-            line_idx,
+            address: UtteranceAddress::for_test(line_idx, line_idx),
             word_idx,
             target_lang: LanguageCode::new(target_lang).expect("valid test language code"),
             primary,
@@ -179,8 +188,8 @@ impl L2DeferredPosition {
 /// Its `@s` words keep the `L2|xxx` placeholder injection writes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnalignedL2Utterance {
-    /// Line index in `ChatFile.lines`.
-    pub line_idx: usize,
+    /// Where the utterance is.
+    pub address: UtteranceAddress,
     /// How many `@s` words fall back.
     pub at_s_words: usize,
     /// Why the primary analysis could not be aligned to the utterance.
@@ -256,7 +265,7 @@ impl L2Extraction {
     pub fn into_reported_positions(self) -> Vec<L2DeferredPosition> {
         for unaligned in &self.unaligned {
             tracing::warn!(
-                line_idx = unaligned.line_idx,
+                line_idx = unaligned.address.line().raw(),
                 at_s_words = unaligned.at_s_words,
                 error = %unaligned.error,
                 "L2 extract: @s words fall back to L2|xxx because the primary \
@@ -273,7 +282,7 @@ impl L2Extraction {
     /// is reported in [`Self::unaligned`].
     pub(crate) fn defer_utterance(
         &mut self,
-        line_idx: usize,
+        address: UtteranceAddress,
         item: &MorphosyntaxBatchItem,
         alignment: Result<&UdAlignment<'_, MorItemIndex>, &UdAlignmentError>,
         placement: &ItemPlacement<'_>,
@@ -287,7 +296,7 @@ impl L2Extraction {
             .count();
         if unresolved > 0 {
             self.unaligned.push(UnalignedL2Utterance {
-                line_idx,
+                address,
                 at_s_words: unresolved,
                 error: L2ExtractError::LanguageUnresolved,
             });
@@ -302,11 +311,11 @@ impl L2Extraction {
         }
         let positions = alignment
             .map_err(|error| L2ExtractError::Alignment(error.clone()))
-            .and_then(|alignment| placement.positions(line_idx, item, alignment));
+            .and_then(|alignment| placement.positions(address, item, alignment));
         match positions {
             Ok(positions) => self.positions.extend(positions),
             Err(error) => self.unaligned.push(UnalignedL2Utterance {
-                line_idx,
+                address,
                 at_s_words,
                 error,
             }),
@@ -341,7 +350,7 @@ impl ItemPlacement<'_> {
     /// The positions of an utterance's dispatchable `@s` words.
     fn positions(
         &self,
-        line_idx: usize,
+        address: UtteranceAddress,
         item: &MorphosyntaxBatchItem,
         alignment: &UdAlignment<'_, MorItemIndex>,
     ) -> Result<Vec<L2DeferredPosition>, L2ExtractError> {
@@ -353,7 +362,7 @@ impl ItemPlacement<'_> {
             .filter_map(|(aligned, word)| dispatch_target(word).map(|lang| (aligned, word, lang)))
             .map(|(aligned, word, target_lang)| {
                 Ok(L2DeferredPosition {
-                    line_idx,
+                    address,
                     word_idx: self.word_item(&aligned)?,
                     target_lang,
                     primary: PrimaryStructuralInfo::of(
@@ -591,7 +600,7 @@ mod tests {
         assert_eq!(
             injection.l2().unaligned(),
             &[UnalignedL2Utterance {
-                line_idx: injection.l2().unaligned()[0].line_idx,
+                address: injection.l2().unaligned()[0].address,
                 at_s_words: 1,
                 error: L2ExtractError::Alignment(UdAlignmentError::WordCountMismatch {
                     chat_words: 1,

@@ -421,14 +421,9 @@ export interface components {
          * @description One utterance forced alignment left out because it is not in the
          *     recording.
          */
-        ExcludedUtteranceRecord: {
+        ExcludedUtteranceRecord: components["schemas"]["StoredUtteranceLocation"] & {
             /** @description The postcode that marks it. */
             postcode: components["schemas"]["OffRecordPostcode"];
-            /**
-             * Format: int64
-             * @description The utterance's position among the file's utterances, counting from 1.
-             */
-            utterance: number;
             /**
              * Format: int64
              * @description Its lexical words.
@@ -572,6 +567,17 @@ export interface components {
             provenance: components["schemas"]["FileProvenance"];
         };
         /**
+         * @description A file's record as a reader sees it: what needs review, and what the
+         *     command left out on purpose, each a headline and the lines under it.
+         *     Rendered by [`Self::of`] from the record itself; its fields are private,
+         *     so no client or producer writes its own wording. Absent on the wire when
+         *     there is nothing in it.
+         */
+        FileReview: {
+            left_out?: components["schemas"]["ReviewBlock"] | null;
+            needs_review?: components["schemas"]["ReviewBlock"] | null;
+        };
+        /**
          * @description What a command decided about stamping one file with provenance.
          *
          *     Recorded when the file completes and reported with its per-file status, so
@@ -648,6 +654,13 @@ export interface components {
              * @description Total number of sub-steps expected for this file.
              */
             progress_total?: number | null;
+            /**
+             * @description The file's diagnostics and exclusions as a reader sees them: rendered
+             *     by the server from `diagnostics` and `exclusions` when the entry is
+             *     built, like `progress_label`, so every client shows the same words
+             *     instead of keeping its own copy of the renderer.
+             */
+            review?: components["schemas"]["FileReview"];
             /**
              * @description What the command decided about stamping this file with provenance.
              *     Absent when nothing was recorded, which is what `Unrecorded` means: a
@@ -1370,11 +1383,13 @@ export interface components {
             stage: components["schemas"]["OptionalStage"];
         } | {
             /**
-             * @description The first of them (positions among the file's utterances before
-             *     the stage, counting from 1), at most
-             *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
+             * @description The first of them, at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`], located in the document
+             *     from before the stage. They keep their generated form, so the
+             *     main tier finds them in the written file; the position counts the
+             *     utterances before the stage, which a segmentation stage changes.
              */
-            first_held_out: number[];
+            first_held_out: components["schemas"]["StoredUtteranceLocation"][];
             /**
              * Format: int64
              * @description How many utterances it left out, at least one.
@@ -1604,6 +1619,15 @@ export interface components {
             postcode: components["schemas"]["OffRecordPostcode"];
         };
         /**
+         * @description One part of a review: a headline, and the lines under it (a line that
+         *     belongs to the one above it is indented). Lines never exist without
+         *     their headline.
+         */
+        ReviewBlock: {
+            headline: string;
+            lines?: string[];
+        };
+        /**
          * @description Why secondary positions could not be established from primary injection.
          * @enum {string}
          */
@@ -1623,7 +1647,7 @@ export interface components {
          */
         SecondaryMorphologyFailureKind: "invalid_language" | "worker" | "response_count" | "empty_analysis" | "merge" | "splice";
         /** @description Address of a secondary-language span in the post-injection document. */
-        SecondaryMorphologySpan: {
+        SecondaryMorphologySpan: components["schemas"]["StoredUtteranceLocation"] & {
             /**
              * Format: int64
              * @description One-based morphology-item position within that utterance.
@@ -1633,26 +1657,16 @@ export interface components {
             language: string;
             /**
              * Format: int64
-             * @description One-based utterance ordinal, not a physical text line.
-             */
-            utterance: number;
-            /**
-             * Format: int64
              * @description Morphology items in the span, not expanded clitic chunks.
              */
             words: number;
         };
         /** @description A primary-injection failure before a secondary span could be planned. */
-        SecondaryMorphologyUnplacedUtterance: {
+        SecondaryMorphologyUnplacedUtterance: components["schemas"]["StoredUtteranceLocation"] & {
             /** @description Typed extraction boundary. */
             cause: components["schemas"]["SecondaryExtractionFailure"];
             /** @description Bounded producer explanation. */
             detail: string;
-            /**
-             * Format: int64
-             * @description One-based utterance ordinal.
-             */
-            utterance: number;
             /**
              * Format: int64
              * @description Secondary words left as placeholders.
@@ -1724,6 +1738,22 @@ export interface components {
          */
         StoredUntimedCause: components["schemas"]["UntimedCauseRecord"] | components["schemas"]["RetiredUntimedCause"];
         /**
+         * @description The object form of a location on the wire, and the schema of what a
+         *     location writes.
+         */
+        StoredUtteranceLocation: {
+            /**
+             * @description The utterance's main tier as written, without its bullet; absent only
+             *     in records stored before 0.8.7.
+             */
+            main_tier?: string | null;
+            /**
+             * Format: int64
+             * @description The utterance's position among the file's utterances, counting from 1.
+             */
+            utterance: number;
+        };
+        /**
          * @description The host's memory as the operating system reported it for one response.
          *
          *     One reading, so the three figures are always from the same moment and are
@@ -1778,7 +1808,7 @@ export interface components {
             kind: "unrecorded";
         };
         /** @description One utterance forced alignment left with untimed words. */
-        UntimedUtteranceRecord: {
+        UntimedUtteranceRecord: components["schemas"]["StoredUtteranceLocation"] & {
             /** @description Why. */
             cause: components["schemas"]["StoredUntimedCause"];
             /**
@@ -1786,11 +1816,6 @@ export interface components {
              * @description How many of them are untimed, at least one.
              */
             untimed_words: number;
-            /**
-             * Format: int64
-             * @description The utterance's position among the file's utterances, counting from 1.
-             */
-            utterance: number;
             /**
              * Format: int64
              * @description Required lexical words in it.

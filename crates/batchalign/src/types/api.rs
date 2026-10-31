@@ -339,6 +339,7 @@ mod tests {
             progress_total: Some(10),
             progress_stage: Some(FileProgressStage::AnalyzingMorphosyntax),
             progress_label: Some("Analyzing morphosyntax".into()),
+            review: crate::api::FileReview::default(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: FileStatusEntry = serde_json::from_str(&json).unwrap();
@@ -362,7 +363,11 @@ mod tests {
                 excluded_utterances: 1,
                 excluded_words: 4,
                 first_excluded: vec![ExcludedUtteranceRecord {
-                    utterance: 2,
+                    location: crate::api::UtteranceLocator::for_test(
+                        2,
+                        "*PAR:\tdiary note . [+ diary]",
+                    )
+                    .into(),
                     words: 4,
                     postcode: OffRecordPostcode::Diary,
                 }],
@@ -378,7 +383,12 @@ mod tests {
                 "kind": "not_in_recording",
                 "excluded_utterances": 1,
                 "excluded_words": 4,
-                "first_excluded": [{"utterance": 2, "words": 4, "postcode": "diary"}],
+                "first_excluded": [{
+                    "utterance": 2,
+                    "main_tier": "*PAR:\tdiary note . [+ diary]",
+                    "words": 4,
+                    "postcode": "diary",
+                }],
             }])
         );
         let back: FileStatusEntry = serde_json::from_value(json).unwrap();
@@ -402,6 +412,7 @@ mod tests {
             progress_total: None,
             progress_stage: None,
             progress_label: None,
+            review: crate::api::FileReview::default(),
             ..entry
         };
         let json = serde_json::to_value(&diagnosed).unwrap();
@@ -542,6 +553,7 @@ mod tests {
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
+                review: crate::api::FileReview::default(),
             }],
             submitted_at: "2026-01-15T10:00:00Z".parse().unwrap(),
             submitted_by: Some("192.168.1.1".into()),

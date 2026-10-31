@@ -321,15 +321,49 @@ impl AsRef<MorphosyntaxBatchItem> for MorphosyntaxBatchItem {
     }
 }
 
+/// Where an utterance is in the file it was collected from: its line in
+/// `ChatFile.lines`, which is where splicing writes, and its position among
+/// the file's utterances, which is what a report names.
+///
+/// Both come from the one walk in [`collect_payloads`], so they cannot name
+/// different utterances; carrying the pair spares every later reader from
+/// counting utterances back from a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UtteranceAddress {
+    line: LineIdx,
+    utterance: talkbank_model::UtteranceIdx,
+}
+
+impl UtteranceAddress {
+    /// The utterance's line in `ChatFile.lines`.
+    pub fn line(&self) -> LineIdx {
+        self.line
+    }
+
+    /// The utterance's position among the file's utterances, from 0.
+    pub fn utterance(&self) -> talkbank_model::UtteranceIdx {
+        self.utterance
+    }
+
+    /// An address from its parts, for fixtures that build positions
+    /// directly.
+    #[cfg(test)]
+    pub(crate) fn for_test(line: usize, utterance: usize) -> Self {
+        Self {
+            line: LineIdx::new(line),
+            utterance: talkbank_model::UtteranceIdx::new(utterance),
+        }
+    }
+}
+
 /// One utterance of a file collected for the worker: where it is, the item
 /// sent for it, and the words its analysis is injected into.
 ///
-/// Built only by [`collect_payloads`], so its position names an utterance of
+/// Built only by [`collect_payloads`], so its address names an utterance of
 /// the file it was collected from.
 #[derive(Clone)]
 pub struct CollectedUtterance {
-    line: LineIdx,
-    utt_ordinal: usize,
+    address: UtteranceAddress,
     item: MorphosyntaxBatchItem,
     words: Vec<ExtractedWord>,
 }
@@ -337,12 +371,17 @@ pub struct CollectedUtterance {
 impl CollectedUtterance {
     /// The utterance's line in `ChatFile.lines`.
     pub fn line(&self) -> LineIdx {
-        self.line
+        self.address.line
+    }
+
+    /// Where the utterance is: its line and its position among utterances.
+    pub fn address(&self) -> UtteranceAddress {
+        self.address
     }
 
     /// The utterance's 0-based ordinal among the file's utterances.
     pub fn utt_ordinal(&self) -> usize {
-        self.utt_ordinal
+        self.address.utterance.raw()
     }
 
     /// The item sent to the worker.
@@ -543,8 +582,10 @@ pub fn collect_payloads(
             // outcome recorded there would vanish.
             match MorphologyInput::from_utterance(utt, declared_languages)? {
                 Some(input) => batch_items.push(CollectedUtterance {
-                    line: LineIdx::new(line_idx),
-                    utt_ordinal: utt_idx,
+                    address: UtteranceAddress {
+                        line: LineIdx::new(line_idx),
+                        utterance: talkbank_model::UtteranceIdx::new(utt_idx),
+                    },
                     item: input.item,
                     words: input.words,
                 }),

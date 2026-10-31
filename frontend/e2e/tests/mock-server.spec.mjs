@@ -233,9 +233,22 @@ async function startHarness() {
                 kind: "not_in_recording",
                 excluded_utterances: 2,
                 excluded_words: 9,
-                first_excluded: [{ utterance: 3, words: 5, postcode: "diary" }],
+                first_excluded: [
+                  {
+                    utterance: 3,
+                    main_tier: "*MOT:\twent to the park . [+ diary]",
+                    words: 5,
+                    postcode: "diary",
+                  },
+                ],
               },
             ],
+            // The server's review (`FileReview`), rendered in Rust and
+            // pinned there; opaque text here, because the dashboard only
+            // shows what it is sent.
+            review: {
+              left_out: { headline: "LEFT-OUT-HEADLINE", lines: ["LEFT-OUT-LINE-1", "  LEFT-OUT-LINE-2"] },
+            },
           }),
           makeFileStatus("noisy.cha", "diagnosed", {
             started_at: "2026-02-25T00:00:01.000Z",
@@ -262,6 +275,10 @@ async function startHarness() {
                 full_findings: { kind: "inline" },
               },
               shortfalls: [{ kind: "stage_skipped", stage: "morphosyntax" }],
+            },
+            // The server's review, opaque here (see the note above).
+            review: {
+              needs_review: { headline: "NEEDS-REVIEW-HEADLINE", lines: ["REVIEW-LINE-1", "  REVIEW-LINE-2"] },
             },
           }),
         ],
@@ -615,15 +632,21 @@ test("a file written with diagnostics renders as written output, not as an error
       waitUntil: "domcontentloaded",
     });
     await expect(page.getByText("noisy.cha")).toBeVisible();
-    await expect(
-      page.getByText("written, 2 diagnostics, 1 requested stage not applied").first(),
-    ).toBeVisible();
+    // The server's review is shown as sent: the dashboard keeps no copy of
+    // the wording.
+    await expect(page.getByText("NEEDS-REVIEW-HEADLINE").first()).toBeVisible();
+    // Opening the file shows each detail line under the headline.
+    await page.getByText("NEEDS-REVIEW-HEADLINE").first().click();
+    await expect(page.getByText("REVIEW-LINE-2", { exact: false }).first()).toBeVisible();
     await expect(page.getByRole("tab", { name: /Diagnosed/ })).toBeVisible();
     await expect(page.getByRole("tab", { name: /Errors/ })).toBeDisabled();
     // A done file's exclusions are listed as information, not as a fault.
     await expect(
-      page.getByText("2 utterances not in the recording, left out of alignment by design").first(),
+      page.getByText("LEFT-OUT-HEADLINE").first(),
     ).toBeVisible();
+    // Opening it lists what was left out.
+    await page.getByText("LEFT-OUT-HEADLINE").first().click();
+    await expect(page.getByText("LEFT-OUT-LINE-2", { exact: false }).first()).toBeVisible();
   } finally {
     await harness.close();
   }

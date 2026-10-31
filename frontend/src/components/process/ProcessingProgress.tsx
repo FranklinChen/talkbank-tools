@@ -21,8 +21,6 @@ import { cancelJob } from "../../api";
 import { controlPlaneOrigin } from "../../runtime";
 import { ErrorRecovery } from "./ErrorRecovery";
 import {
-  diagnosedSummary,
-  exclusionSummary,
   formatDuration,
   statusDotColor,
   displayProgressLabel,
@@ -331,13 +329,13 @@ export function ProcessingProgress({
                     </span>
                   )}
                   <span className="text-xs text-gray-400 flex-shrink-0">
-                    {f.status === "diagnosed"
-                      ? diagnosedSummary(f.diagnostics)
+                    {f.review?.needs_review
+                      ? f.review.needs_review.headline
                       : displayProgressLabel(f.progress_stage, f.progress_label)}
                   </span>
-                  {(f.exclusions ?? []).length > 0 && (
+                  {f.review?.left_out && (
                     <span className="text-xs text-gray-400 flex-shrink-0">
-                      {exclusionSummary(f.exclusions ?? [])}
+                      {f.review.left_out.headline}
                     </span>
                   )}
                   {f.duration_s != null && (
@@ -346,6 +344,19 @@ export function ProcessingProgress({
                     </span>
                   )}
                 </div>
+                {/* What to check in a file written with diagnostics, and
+                    what was left out on purpose: the server's review, so a
+                    reader sees which utterances, not only a count. */}
+                {(f.review?.needs_review?.lines ?? []).length > 0 && (
+                  <pre className="ml-5 mt-1 text-[11px] text-yellow-800 font-mono whitespace-pre-wrap">
+                    {(f.review?.needs_review?.lines ?? []).join("\n")}
+                  </pre>
+                )}
+                {(f.review?.left_out?.lines ?? []).length > 0 && (
+                  <pre className="ml-5 mt-1 text-[11px] text-gray-500 font-mono whitespace-pre-wrap">
+                    {(f.review?.left_out?.lines ?? []).join("\n")}
+                  </pre>
+                )}
                 {/* Stage-specific hint explaining why this step is slow */}
                 {hint && (
                   <div className="ml-5 mt-1 text-xs text-gray-400 italic">

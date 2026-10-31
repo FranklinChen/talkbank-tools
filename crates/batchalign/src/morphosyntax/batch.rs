@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use super::identity::{AdmittedMorphosyntaxResponse, AppliedAnalyses, MorphosyntaxResponseSource};
+use super::report::SpanAddress;
 use super::worker::infer_batch;
-use crate::api::{SecondaryMorphologyFailureKind as Failure, SecondaryMorphologySpan};
+use crate::api::SecondaryMorphologyFailureKind as Failure;
 use crate::chat_ops::morphosyntax_ops::l2;
 use crate::chat_ops::{ChatFile, LanguageCode};
 use crate::error::ServerError;
@@ -107,26 +108,11 @@ impl FixedSpanBatch {
 /// Retains identity and source until installation, not merely merge success.
 struct PendingSplice {
     span: l2::MergedL2Span,
-    address: SecondaryMorphologySpan,
+    address: SpanAddress,
     source: MorphosyntaxResponseSource,
 }
 
-fn span_address(chat: &ChatFile, span: &l2::L2SpanPlan) -> SecondaryMorphologySpan {
-    SecondaryMorphologySpan {
-        utterance: chat
-            .lines
-            .iter()
-            .take(span.line_idx() + 1)
-            .filter(|line| matches!(line, talkbank_model::model::Line::Utterance(_)))
-            .count() as u64,
-        first_word: span.first_word().as_usize() as u64 + 1,
-        words: span.len() as u64,
-        language: span.target_lang().as_str().to_owned(),
-    }
-}
-
 fn merge_responses(
-    chat: &ChatFile,
     outcome: SpanBatchOutcome,
     applied: &mut AppliedAnalyses,
     merged: &mut Vec<PendingSplice>,
@@ -141,7 +127,7 @@ fn merge_responses(
             for span in batch.spans {
                 applied
                     .secondary_mut()
-                    .failed(span_address(chat, &span), cause, &detail);
+                    .failed(SpanAddress::of(&span), cause, &detail);
             }
             return;
         }
@@ -151,7 +137,7 @@ fn merge_responses(
         analysis: admitted,
     } in analyzed
     {
-        let address = span_address(chat, &span);
+        let address = SpanAddress::of(&span);
         let Some(sentence) = admitted.response().sentence() else {
             applied.secondary_mut().failed(
                 address,
@@ -178,7 +164,7 @@ fn install_spans(
     mut merged: Vec<PendingSplice>,
     applied: &mut AppliedAnalyses,
 ) {
-    merged.sort_by_key(|pending| (pending.address.utterance, pending.address.first_word));
+    merged.sort_by_key(|pending| pending.address.order());
     for pending in merged {
         let outcome = l2::splice_l2_into_chat(chat, vec![pending.span]);
         for receipt in outcome.spans() {
@@ -281,7 +267,7 @@ async fn dispatch_secondary_l2_active(
                 );
                 for span in lang_spans {
                     applied.secondary_mut().failed(
-                        span_address(chat_file, &span),
+                        SpanAddress::of(&span),
                         Failure::InvalidLanguage,
                         "language code cannot be dispatched",
                     );
@@ -305,9 +291,7 @@ async fn dispatch_secondary_l2_active(
                     "L2 morphotag: no Stanza pipeline for this language; words stay L2|xxx"
                 );
                 for span in lang_spans {
-                    applied
-                        .secondary_mut()
-                        .excluded(span_address(chat_file, &span));
+                    applied.secondary_mut().excluded(SpanAddress::of(&span));
                 }
                 continue;
             }
@@ -316,7 +300,7 @@ async fn dispatch_secondary_l2_active(
         let outcome = FixedSpanBatch { spans: lang_spans }
             .infer(services, &secondary, cancellation)
             .await?;
-        merge_responses(chat_file, outcome, &mut applied, &mut merged);
+        merge_responses(outcome, &mut applied, &mut merged);
     }
 
     install_spans(chat_file, merged, &mut applied);
@@ -383,10 +367,10 @@ mod tests {
             let mut applied = super::AppliedAnalyses::none();
             let mut merged = Vec::new();
             let outcome = super::FixedSpanBatch { spans }.admit(responses);
-            super::merge_responses(&chat, outcome, &mut applied, &mut merged);
+            super::merge_responses(outcome, &mut applied, &mut merged);
             assert!(merged.is_empty());
             assert!(applied.ran_no_model());
-            let (shortfalls, exclusions) = applied.into_secondary().into_records();
+            let (shortfalls, exclusions) = applied.into_secondary().into_records(&chat).unwrap();
             assert!(exclusions.is_empty());
             let crate::api::OutputShortfallRecord::SecondaryMorphologyIncomplete {
                 spans,
@@ -425,7 +409,6 @@ mod tests {
         let mut applied = super::AppliedAnalyses::none();
         let mut merged = Vec::new();
         super::merge_responses(
-            &chat,
             super::FixedSpanBatch { spans }.admit(vec![
                 super::AdmittedMorphosyntaxResponse::for_test(response, "9.9.9", "spa"),
             ]),
@@ -436,7 +419,7 @@ mod tests {
         assert!(applied.ran_no_model(), "merge success is not installation");
         super::install_spans(&mut chat, merged, &mut applied);
         assert!(!applied.ran_no_model());
-        let (shortfalls, exclusions) = applied.into_secondary().into_records();
+        let (shortfalls, exclusions) = applied.into_secondary().into_records(&chat).unwrap();
         assert!(shortfalls.is_empty());
         assert!(exclusions.is_empty());
         assert!(batchalign_transform::serialize::to_chat_string(&chat).contains("noun|mundo"));

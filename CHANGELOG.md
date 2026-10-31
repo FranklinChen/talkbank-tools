@@ -3,6 +3,44 @@
 Fixes and behaviour changes, newest first. The book describes the current
 design; this file records how it changed.
 
+## Unreleased
+
+### A diagnosed job says what to check, and where
+
+- A file written with diagnostics only for untimed words was summarised as
+  "written with 0 diagnostics; 1 of 500 words untimed", which reads as a
+  contradiction. The summary now leads with what needs review ("needs
+  review: 1 of 500 words in 1 utterance(s) have no word timing") and names
+  validation findings only when there are any.
+- Each untimed utterance the record holds is listed under its file, as
+  written without its bullet (`*INV:	Mhm .   (1 of 1 words untimed: ...)`),
+  instead of only the first utterance by number. A number cannot be
+  searched for in CLAN, and it names the wrong utterance once the file is
+  edited. The record's `first_untimed` entries carry the excerpt as
+  `main_tier`; records stored by 0.8.6 and earlier still read, by number.
+- Every diagnostic that names an utterance now names it this way: a stage
+  held out of utterances (`first_held_out`, which was a bare list of
+  positions), secondary morphology not dispatched or left with placeholders,
+  and utterances left out of alignment as not in the recording. Each carries
+  `{utterance, main_tier}`; old records, including bare held-out positions,
+  still read. A shortfall that carries utterances gives counts on its own
+  line and lists them under it. A held-out utterance's `utterance` number
+  still counts the utterances before the stage, which segmentation changes;
+  its `main_tier` matches the written file, since held-out utterances keep
+  their generated form.
+- Morphotag's diagnostics are located after `--merge-abbrev` rewrites the
+  main tiers, so an excerpt quotes the file as written.
+- The dashboard shows what the CLI shows. The server sends each file's
+  review (`review` on every file status: summary, detail lines, and what was
+  left out on purpose), rendered by the same Rust code the CLI uses; the
+  dashboard's own copy of that wording is gone. The processing page now lists
+  which utterances to check, not only the summary, and an exclusion lists
+  every utterance it records, not only the first.
+- The end-of-job message says the list is above and, for a job run on a
+  server, gives the command that prints it again
+  (`batchalign3 jobs --server URL JOB_ID`). That command now prints the same
+  list under "Needs review:"; it used to print only the word `diagnosed`.
+
 ## 0.8.6 (October 30, 2026)
 
 ### Retokenize no longer rewrites what was said

@@ -283,8 +283,11 @@ construction, was their only producer. Inside `findings`:
   `FindingCodeCount::tally`, shared with the file's own findings.
   Or `{"kind": "timing_incomplete", "required_words", "untimed_words",
   "untimed_utterances", "first_untimed"}` from align, where `first_untimed`
-  holds at most 20 `{utterance, words, untimed_words, cause}` records
-  (`utterance` counts from 1; `cause` is `{"kind": "window_refused",
+  holds at most 20 `{utterance, main_tier, words, untimed_words, cause}`
+  records (`utterance` counts from 1; `main_tier` is the utterance as the
+  model's writer renders it, without its bullet, cut to 160 characters, so a
+  reader can search for it; together they are a `StoredUtteranceLocation`,
+  described below; `cause` is `{"kind": "window_refused",
   "window": ...}` with the refused window grouping recorded,
   `{"kind": "not_placed"}` when grouping could place it in no request,
   `{"kind": "localization_unavailable"}`, `{"kind": "requested", "answered",
@@ -294,6 +297,62 @@ construction, was their only producer. Inside `findings`:
 
 The database column holds the record's own JSON (`to_column_json` is
 `serde_json::to_value(self)`), so its field list is written once.
+
+### Naming an utterance in a record
+
+Every record that names an utterance (untimed and held-out utterances,
+secondary-morphology spans and unplaced utterances, utterances not in the
+recording) carries a `StoredUtteranceLocation`, flattened into it as
+`{utterance, main_tier}`. The graph has one entry point and one exit:
+
+```mermaid
+flowchart LR
+    doc["document + UtteranceIdx"] -->|"UtteranceLocator::of"| loc["UtteranceLocator<br/>(position + main tier)"]
+    loc -->|From| stored["StoredUtteranceLocation"]
+    wire["stored JSON"] -->|"Deserialize"| stored
+    stored --> record["record field"]
+```
+
+- `UtteranceLocator::of(document, index)` is the only way to make a
+  locator: position and text come from the same document, so they cannot
+  name different utterances. An index past the document is
+  `UtteranceNotInDocument`, an internal fault
+  (`ServerError::UtteranceLocation`), never a position without text.
+- A record is located where its document is in hand, and only for what it
+  names: align's accounts (`Recorded<T>` in `fa/completion.rs`) locate the
+  first `FIRST_FINDINGS` while admitting the output; a held-out stage asks
+  `LocalizedDiagnosis::held_out_locations`, which owns both the ordinals and
+  the document they index; morphotag keeps internal `SpanAddress`es by
+  utterance index and locates the bounded first ones in
+  `MorphosyntaxOutput::finish`, after the abbreviation merge, against the
+  document it writes.
+- Morphotag's utterance index is born where the utterances are walked:
+  `collect_payloads` gives each `CollectedUtterance` an `UtteranceAddress`
+  (line and utterance index from the one walk), and injection carries it to
+  every `L2DeferredPosition`, `L2SpanPlan` and `UnalignedL2Utterance`.
+  Nothing counts utterances back from a line, which would also shift when
+  `annotate` inserts its comment.
+- Known gap: a held-out stage's `utterance` number counts the document from
+  before the stage. Its excerpt is right, because a held-out utterance keeps
+  its generated form; numbering it in the output needs the localized stage
+  to return its output-space positions (`HeldOutInOutput`).
+- The numbered state (no `main_tier`) is reachable only by reading a record
+  an earlier build stored, as an object without `main_tier` or a bare number.
+  A `main_tier` that does not read is an error, not a numbered location.
+- A shortfall that carries utterances (`OutputShortfallRecord::detail_lines`)
+  gives counts on its own line and lists each named utterance under it, and
+  an exclusion does the same (`OutputExclusionRecord::detail_lines`).
+
+### One renderer for every reader
+
+`FileReview::of(status, diagnostics, exclusions)` renders a file's record as
+a reader sees it: a summary line and the lines under it, and what was left
+out on purpose. The server puts it on every `FileStatusEntry` it sends
+(`review`, built in `to_entry` beside `progress_label`, never stored), and the
+CLI lays out the same review at the end of a run and in `jobs JOB_ID`. The
+dashboard displays `review` as sent and keeps no copy of the wording, so a
+change to a record's text is one change in Rust, pinned by the
+`a_file_review_renders_every_record_kind_once` snapshot.
 
 ## Stage-to-stage ownership
 

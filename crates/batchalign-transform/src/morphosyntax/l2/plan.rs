@@ -16,6 +16,7 @@ use talkbank_model::model::LanguageCode;
 
 use super::deprel::UdDeprel;
 use super::extract::{L2DeferredPosition, PrimaryStructuralInfo};
+use crate::morphosyntax::UtteranceAddress;
 use crate::morphosyntax::alignment::HeadTarget;
 
 /// How a secondary span's root attaches to the host utterance.
@@ -146,7 +147,7 @@ impl L2Attachment<ExternalRelation> {
 /// [`plan_dispatch_spans`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct L2SpanPlan {
-    pub(super) line_idx: usize,
+    pub(super) address: UtteranceAddress,
     pub(super) target_lang: LanguageCode,
     pub(super) terminator: talkbank_model::Terminator,
     /// The host word of `positions[0]`, stored so no reader handles an
@@ -159,7 +160,12 @@ pub struct L2SpanPlan {
 impl L2SpanPlan {
     /// Owning line in the `ChatFile`.
     pub fn line_idx(&self) -> usize {
-        self.line_idx
+        self.address.line().raw()
+    }
+
+    /// Where the span's utterance is.
+    pub fn address(&self) -> UtteranceAddress {
+        self.address
     }
 
     /// Target language to dispatch this span to.
@@ -276,7 +282,7 @@ pub fn plan_dispatch_spans(deferred: Vec<L2DeferredPosition>) -> L2DispatchPlan 
         .filter_map(|positions| {
             let first = positions.first()?;
             Some(L2SpanPlan {
-                line_idx: first.line_idx(),
+                address: first.address(),
                 target_lang: first.target_lang().clone(),
                 terminator: first.terminator().clone(),
                 first_word: first.word_idx(),

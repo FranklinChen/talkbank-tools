@@ -845,6 +845,12 @@ pub enum ServerError {
     #[error(transparent)]
     AlignmentCompletion(#[from] AlignmentCompletionFailure),
 
+    /// A diagnostic record named an utterance its document does not hold.
+    /// Records are located against the document they describe, so this is
+    /// an internal fault, never a property of the input.
+    #[error(transparent)]
+    UtteranceLocation(#[from] crate::api::UtteranceNotInDocument),
+
     /// Transcription produced no words, so there is no transcript to write.
     ///
     /// Neither a malformed request nor an internal fault: the run reached the
@@ -1299,7 +1305,8 @@ impl ServerError {
             Self::MediaTiming(_)
             | Self::OutputParse(_)
             | Self::MorphosyntaxInjection(_)
-            | Self::UtterancePartition(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Self::UtterancePartition(_)
+            | Self::UtteranceLocation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::RequiredEvidenceUnavailable(_) | Self::AnalysisUnavailable(_) => {
                 StatusCode::PRECONDITION_FAILED
             }

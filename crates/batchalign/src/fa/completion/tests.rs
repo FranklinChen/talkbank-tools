@@ -102,6 +102,7 @@ fn eight_missing_timings_are_written_with_their_account() {
         "first_untimed": [
           {
             "utterance": 1,
+            "main_tier": "*PAR:\tone two three four five six seven eight nine .",
             "words": 9,
             "untimed_words": 8,
             "cause": {
@@ -112,7 +113,9 @@ fn eight_missing_timings_are_written_with_their_account() {
       }
     ]
     "#);
-    insta::assert_snapshot!(shortfalls[0].to_string(), @"timing incomplete: 8 of 9 words in 1 utterance(s) have no timing and were written without it (first: utterance 1, 8 of 9 words, no cause recorded)");
+    insta::assert_snapshot!(shortfalls[0].to_string(), @"timing incomplete: 8 of 9 words in 1 utterance(s) have no timing and were written without it");
+    // The utterance is named under it, as written, where a reader can find it.
+    insta::assert_snapshot!(shortfalls[0].detail_lines().join("\n"), @"*PAR:	one two three four five six seven eight nine .   (8 of 9 words untimed: no cause recorded)");
 }
 
 /// A request that covered the utterance is what explains its untimed words,
@@ -160,6 +163,7 @@ fn requested_untimed_words_count_what_their_requests_yielded() {
         "first_untimed": [
           {
             "utterance": 1,
+            "main_tier": "*PAR:\tone two three .",
             "words": 3,
             "untimed_words": 2,
             "cause": {
@@ -523,6 +527,7 @@ fn a_diary_note_is_an_exclusion_and_does_not_diagnose_the_file() {
         "first_excluded": [
           {
             "utterance": 2,
+            "main_tier": "*MOT:\twent to the park . [+ diary]",
             "words": 4,
             "postcode": "diary"
           }
@@ -530,7 +535,9 @@ fn a_diary_note_is_an_exclusion_and_does_not_diagnose_the_file() {
       }
     ]
     "#);
-    insta::assert_snapshot!(exclusions[0].to_string(), @"left out of alignment by design: 1 utterance(s) (4 words) marked as not in the recording were not looked for in it (first: utterance 2, [+ diary])");
+    insta::assert_snapshot!(exclusions[0].to_string(), @"left out of alignment by design: 1 utterance(s) (4 words) marked as not in the recording were not looked for in it");
+    // The utterance is named under it, as written.
+    insta::assert_snapshot!(exclusions[0].detail_lines().join("\n"), @"*MOT:	went to the park . [+ diary]   ([+ diary])");
 }
 
 /// Untimed speech beside a note: the speech is the shortfall, counted
@@ -558,7 +565,7 @@ fn untimed_speech_beside_a_note_is_a_shortfall_that_does_not_count_the_note() {
     else {
         panic!("expected the speech's shortfall alone, got {shortfalls:?}");
     };
-    assert_eq!(first_untimed[0].utterance, 1);
+    assert_eq!(first_untimed[0].location.utterance(), 1);
     assert!(matches!(
         exclusions.as_slice(),
         [crate::api::OutputExclusionRecord::NotInRecording {

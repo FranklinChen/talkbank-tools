@@ -152,15 +152,113 @@ impl WritableFaResult {
     }
 }
 
+/// The items of an account, in transcript order and never empty, of which a
+/// record names the first [`crate::api::FileOutputDiagnostics::FIRST_FINDINGS`]:
+/// each of those carries the locator of its utterance, made by admission
+/// while the output document is in hand. The rest are counted and logged,
+/// never named, so no locator is made for them, and the record's bound holds
+/// by construction rather than by a `take` at each reader. Built only by
+/// [`RecordedBuilder`], which fills the named ones first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Recorded<T> {
+    first: Named<T>,
+    /// After `first`, at most `FIRST_FINDINGS - 1`.
+    rest_named: Vec<Named<T>>,
+    /// Every later one, in order.
+    unnamed: Vec<T>,
+}
+
+/// An item a record names, with where its utterance is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Named<T> {
+    item: T,
+    locator: crate::api::UtteranceLocator,
+}
+
+impl<T> Recorded<T> {
+    /// Every item, in transcript order.
+    fn items(&self) -> impl Iterator<Item = &T> {
+        self.named().map(|named| &named.item).chain(&self.unnamed)
+    }
+
+    /// The items the record names, in transcript order.
+    fn named(&self) -> impl Iterator<Item = &Named<T>> {
+        std::iter::once(&self.first).chain(&self.rest_named)
+    }
+
+    /// How many items there are, at least one.
+    fn len(&self) -> usize {
+        1 + self.rest_named.len() + self.unnamed.len()
+    }
+}
+
+/// An item of an account, which names its own utterance, so a builder
+/// cannot be handed one utterance's item with another's index.
+trait AtUtterance {
+    fn utterance(&self) -> UtteranceIdx;
+}
+
+impl AtUtterance for UntimedUtterance {
+    fn utterance(&self) -> UtteranceIdx {
+        self.utterance
+    }
+}
+
+impl AtUtterance for ExcludedUtterance {
+    fn utterance(&self) -> UtteranceIdx {
+        self.utterance
+    }
+}
+
+/// Collects an account's items in transcript order, locating the first ones
+/// in the one document the account describes.
+struct RecordedBuilder<'d, T> {
+    document: &'d talkbank_model::ChatFile,
+    named: Vec<Named<T>>,
+    unnamed: Vec<T>,
+}
+
+impl<'d, T: AtUtterance> RecordedBuilder<'d, T> {
+    fn new(document: &'d talkbank_model::ChatFile) -> Self {
+        Self {
+            document,
+            named: Vec::new(),
+            unnamed: Vec::new(),
+        }
+    }
+
+    /// Add the next item. It is located only while the record still has
+    /// room to name it.
+    fn push(&mut self, item: T) -> Result<(), crate::api::UtteranceNotInDocument> {
+        if self.named.len() < crate::api::FileOutputDiagnostics::FIRST_FINDINGS {
+            let locator = crate::api::UtteranceLocator::of(self.document, item.utterance())?;
+            self.named.push(Named { item, locator });
+        } else {
+            self.unnamed.push(item);
+        }
+        Ok(())
+    }
+
+    /// The account, or `None` when nothing was added. `unnamed` fills only
+    /// once `named` is full, so an empty `named` means no item at all.
+    fn finish(self) -> Option<Recorded<T>> {
+        let mut named = self.named.into_iter();
+        named.next().map(|first| Recorded {
+            first,
+            rest_named: named.collect(),
+            unnamed: self.unnamed,
+        })
+    }
+}
+
 /// Every utterance with untimed required words, in transcript order, never
-/// empty: the first is a field of its own.
+/// empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UntimedAccount {
     /// Required lexical words in the whole file: every word of an utterance
     /// in the recording. A word of an excluded utterance is not required.
     required_words: usize,
-    first: UntimedUtterance,
-    rest: Vec<UntimedUtterance>,
+    utterances: Recorded<UntimedUtterance>,
 }
 
 /// One utterance with untimed required words. `untimed` is never empty.
@@ -248,14 +346,11 @@ impl RequestCoverage {
 }
 
 /// Every utterance alignment left out because the transcript marks it as not
-/// in the recording, in transcript order, never empty: the first is a field
-/// of its own. Built only by [`RequiredFaTiming::admit`], after it checked
-/// that the output gave none of them timing.
+/// in the recording, in transcript order, never empty. Built only by
+/// [`RequiredFaTiming::admit`], after it checked that the output gave none
+/// of them timing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExclusionAccount {
-    first: ExcludedUtterance,
-    rest: Vec<ExcludedUtterance>,
-}
+pub(crate) struct ExclusionAccount(Recorded<ExcludedUtterance>);
 
 /// One utterance left out of alignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,26 +362,19 @@ struct ExcludedUtterance {
 }
 
 impl ExclusionAccount {
-    fn utterances(&self) -> impl Iterator<Item = &ExcludedUtterance> {
-        std::iter::once(&self.first).chain(&self.rest)
-    }
-
-    /// The bounded record of this account: the totals and the first
-    /// utterances. The complete account is logged once by the caller.
+    /// The bounded record of this account: the totals and the utterances it
+    /// names. The complete account is logged once by the caller.
     pub(crate) fn record(&self) -> crate::api::OutputExclusionRecord {
         crate::api::OutputExclusionRecord::NotInRecording {
-            excluded_utterances: (1 + self.rest.len()) as u64,
-            excluded_words: self
-                .utterances()
-                .map(|utterance| utterance.words as u64)
-                .sum(),
+            excluded_utterances: self.0.len() as u64,
+            excluded_words: self.0.items().map(|utterance| utterance.words as u64).sum(),
             first_excluded: self
-                .utterances()
-                .take(crate::api::FileOutputDiagnostics::FIRST_FINDINGS)
-                .map(|excluded| crate::api::ExcludedUtteranceRecord {
-                    utterance: excluded.utterance.raw() as u64 + 1,
-                    words: excluded.words as u64,
-                    postcode: excluded.postcode,
+                .0
+                .named()
+                .map(|named| crate::api::ExcludedUtteranceRecord {
+                    location: named.locator.clone().into(),
+                    words: named.item.words as u64,
+                    postcode: named.item.postcode,
                 })
                 .collect(),
         }
@@ -297,7 +385,7 @@ impl std::fmt::Display for ExclusionAccount {
     /// Every utterance, for the one full log line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("not in the recording:")?;
-        for excluded in self.utterances() {
+        for excluded in self.0.items() {
             write!(
                 f,
                 " utterance {} {}",
@@ -312,7 +400,7 @@ impl std::fmt::Display for ExclusionAccount {
 impl UntimedAccount {
     /// Every utterance with untimed words, in transcript order.
     pub(crate) fn utterances(&self) -> impl Iterator<Item = &UntimedUtterance> {
-        std::iter::once(&self.first).chain(&self.rest)
+        self.utterances.items()
     }
 
     /// Untimed required words in the whole file, at least one.
@@ -328,10 +416,10 @@ impl UntimedAccount {
         crate::api::OutputShortfallRecord::TimingIncomplete {
             required_words: self.required_words as u64,
             untimed_words: self.untimed_words() as u64,
-            untimed_utterances: (1 + self.rest.len()) as u64,
+            untimed_utterances: self.utterances.len() as u64,
             first_untimed: self
-                .utterances()
-                .take(crate::api::FileOutputDiagnostics::FIRST_FINDINGS)
+                .utterances
+                .named()
                 .map(UntimedUtterance::record)
                 .collect(),
         }
@@ -339,12 +427,14 @@ impl UntimedAccount {
 }
 
 impl UntimedUtterance {
-    fn record(&self) -> crate::api::UntimedUtteranceRecord {
+    /// The record of a named untimed utterance, located where it was named.
+    fn record(named: &Named<Self>) -> crate::api::UntimedUtteranceRecord {
+        let utterance = &named.item;
         crate::api::UntimedUtteranceRecord {
-            utterance: self.utterance.raw() as u64 + 1,
-            words: self.words as u64,
-            untimed_words: self.untimed.len() as u64,
-            cause: match &self.cause {
+            location: named.locator.clone().into(),
+            words: utterance.words as u64,
+            untimed_words: utterance.untimed.len() as u64,
+            cause: match &utterance.cause {
                 UntimedCause::WindowRefused(window) => {
                     crate::api::UntimedCauseRecord::WindowRefused {
                         window: window.clone(),
@@ -641,9 +731,13 @@ impl RequiredFaTiming {
                 Line::Utterance(utterance) => Some((line, utterance.as_ref())),
                 _ => None,
             });
+        // Both accounts are located in the output document, the one they
+        // describe; an index it does not hold is an internal fault
+        // (`ServerError::UtteranceLocation`), never an invented position.
+        let document = result.document.document();
         let mut required_words = 0;
-        let mut untimed = Vec::new();
-        let mut excluded = Vec::new();
+        let mut untimed = RecordedBuilder::new(document);
+        let mut excluded = RecordedBuilder::new(document);
         for (ordinal, expected) in self.0.iter().enumerate() {
             let index = UtteranceIdx::new(ordinal);
             let Some((line, utterance)) = utterances.next() else {
@@ -666,7 +760,7 @@ impl RequiredFaTiming {
                 ObligedPresence::InRecording => {
                     required_words += expected.words.len();
                     if !missing.is_empty() {
-                        untimed.push(UntimedUtterance {
+                        let utterance_untimed = UntimedUtterance {
                             utterance: index,
                             words: expected.words.len(),
                             untimed: missing,
@@ -675,7 +769,8 @@ impl RequiredFaTiming {
                                 (None, Some(requested)) => UntimedCause::Requested(*requested),
                                 (None, None) => UntimedCause::Unrecorded,
                             },
-                        });
+                        };
+                        untimed.push(utterance_untimed)?;
                     }
                 }
                 ObligedPresence::NotInRecording {
@@ -706,7 +801,7 @@ impl RequiredFaTiming {
                         utterance: index,
                         words: expected.words.len(),
                         postcode: *postcode,
-                    });
+                    })?;
                 }
             }
         }
@@ -716,20 +811,14 @@ impl RequiredFaTiming {
             }
             .into());
         }
-        let mut excluded = excluded.into_iter();
-        let exclusions = excluded.next().map(|first| ExclusionAccount {
-            first,
-            rest: excluded.collect(),
-        });
-        let mut untimed = untimed.into_iter();
-        Ok(match untimed.next() {
+        let exclusions = excluded.finish().map(ExclusionAccount);
+        Ok(match untimed.finish() {
             None => FaCompletion::Complete(CompleteFaResult { result, exclusions }),
-            Some(first) => FaCompletion::Partial(PartialFaResult {
+            Some(utterances) => FaCompletion::Partial(PartialFaResult {
                 result,
                 account: UntimedAccount {
                     required_words,
-                    first,
-                    rest: untimed.collect(),
+                    utterances,
                 },
                 exclusions,
             }),

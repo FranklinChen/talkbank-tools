@@ -284,7 +284,7 @@ pub(crate) async fn process_morphosyntax_incremental(
                         // positions read from the analysis injection mapped.
                         let (retokenization_traces, l2) = injection_result.into_parts();
                         let l2_deferred = if params.policy.l2.should_analyze() {
-                            applied.secondary_positions(&after_file, l2)
+                            applied.secondary_positions(l2)
                         } else {
                             Vec::new()
                         };

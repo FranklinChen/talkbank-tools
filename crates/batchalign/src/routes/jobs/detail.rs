@@ -303,6 +303,7 @@ mod tests {
                 progress_total: None,
                 progress_stage: None,
                 progress_label: None,
+                review: crate::api::FileReview::default(),
             }],
         }
     }

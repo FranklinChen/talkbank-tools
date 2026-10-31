@@ -452,11 +452,13 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/types/response.rs",
         struct_name: "FileStatusEntry",
-        max_fields: 15,
+        max_fields: 16,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
-        reason: "API response record for one file's processing status; the newest field is the \
-                 wire projection of FileStatus's provenance stamp outcome",
+        reason: "API response record for one file's processing status; the newest field is \
+                 `review`, the server-rendered FileReview of the entry's own diagnostics and \
+                 exclusions, built only in `to_entry` like `progress_label` (deriving it only at \
+                 serialization would remove the field)",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/response.rs",

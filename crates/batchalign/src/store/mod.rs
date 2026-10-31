@@ -714,6 +714,11 @@ impl FileStatus {
                 .stage
                 .map(FileProgressStage::label)
                 .map(str::to_string),
+            review: crate::api::FileReview::of(
+                self.phase.kind(),
+                self.phase.diagnostics(),
+                self.phase.exclusions(),
+            ),
         }
     }
 }

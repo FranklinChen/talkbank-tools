@@ -473,7 +473,7 @@ impl<D: AnalysisScope> Analysis<Inferred, D> {
                 // in the items it wrote.
                 let (retokenization_traces, l2) = injection.into_parts();
                 let deferred = if options.l2.should_analyze() {
-                    applied.secondary_positions(&self.chat, l2)
+                    applied.secondary_positions(l2)
                 } else {
                     Vec::new()
                 };

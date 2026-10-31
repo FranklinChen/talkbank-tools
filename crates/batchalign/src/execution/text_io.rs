@@ -88,34 +88,48 @@ pub(crate) async fn write_text_results(
         let stamp = file_result.stamp;
         match file_result.result {
             Ok(output_chat) => {
-                let (output_chat, report) = output_chat.into_parts();
-                let (shortfalls, exclusions) = report.into_records();
-                // The abbreviation merge is a step INSIDE the gate, so the
-                // bytes written below are bytes a gate judged. It used to run
-                // on `output_chat.as_str()` in the artifact loop and the
-                // writer wrote ITS result, which put a transform after the
-                // proof: the proof described a document that never reached
-                // disk. Done once here rather than per artifact, because the
-                // answer cannot differ between a file's artifacts.
-                let finished = if should_merge_abbrev {
-                    match output_chat.with_abbreviations_merged() {
-                        Ok(finished) => finished,
-                        // POLICY, stated here because the refusal hands back
-                        // `refused.unmerged`, an admissible output this seam
-                        // deliberately declines to write: a merge that breaks
-                        // its own gate is a defect in the transform, and
-                        // shipping past it would leave nobody looking at it.
-                        // The failure names the merge, so the operator is not
-                        // told their command's output was invalid.
-                        Err(refused) => {
-                            lifecycle
-                                .fail(&refused.to_string(), FailureCategory::Validation)
-                                .await;
-                            continue;
-                        }
+                // Merged (when asked) and then located against the merged
+                // document, the one written below. The abbreviation merge is
+                // a step INSIDE the gate, so the bytes written are bytes a
+                // gate judged; done once here rather than per artifact,
+                // because the answer cannot differ between a file's
+                // artifacts.
+                let crate::morphosyntax::report::FinishedMorphosyntax {
+                    document: finished,
+                    shortfalls,
+                    exclusions,
+                } = match output_chat.finish(
+                    crate::pipeline::post_validate::MergeAbbreviations::from_option(
+                        should_merge_abbrev,
+                    ),
+                ) {
+                    Ok(finished) => finished,
+                    // POLICY, stated here because the refusal hands back
+                    // `refused.unmerged`, an admissible output this seam
+                    // deliberately declines to write: a merge that breaks its
+                    // own gate is a defect in the transform, and shipping
+                    // past it would leave nobody looking at it. The failure
+                    // names the merge, so the operator is not told their
+                    // command's output was invalid.
+                    Err(crate::morphosyntax::report::FinishRefused::Merge(refused)) => {
+                        lifecycle
+                            .fail(&refused.to_string(), FailureCategory::Validation)
+                            .await;
+                        continue;
                     }
-                } else {
-                    output_chat
+                    // A record that cannot name its utterance is an internal
+                    // fault: the file fails rather than reporting a position
+                    // nobody can find, classified as every such fault is.
+                    Err(crate::morphosyntax::report::FinishRefused::Location(error)) => {
+                        let error = crate::error::ServerError::from(error);
+                        lifecycle
+                            .fail(
+                                &error.to_string(),
+                                crate::runner::util::classify_server_error(&error),
+                            )
+                            .await;
+                        continue;
+                    }
                 };
                 let finished = crate::pipeline::post_validate::ProducedOutput::Admitted(finished);
                 set_file_progress(
@@ -225,10 +239,7 @@ pub(crate) fn resolve_before_path(
 #[cfg(test)]
 mod reporting_tests {
     use super::*;
-    use crate::api::{
-        FileStatusKind, LanguageSpec, SecondaryMorphologyFailure, SecondaryMorphologyFailureKind,
-        SecondaryMorphologySpan,
-    };
+    use crate::api::{FileStatusKind, LanguageSpec, SecondaryMorphologyFailureKind};
     use crate::morphosyntax::report::{MorphosyntaxOutput, SecondaryReport};
     use crate::pipeline::post_validate::PostValidated;
     use crate::text_batch::TextBatchFileResult;
@@ -262,19 +273,14 @@ mod reporting_tests {
             ));
             store.submit(job).await.unwrap();
             let host = DispatchHostContext::from_store(store.clone());
-            let address = SecondaryMorphologySpan {
-                utterance: 1,
-                first_word: 2,
-                words: 1,
-                language: "spa".into(),
-            };
+            let address = crate::morphosyntax::report::SpanAddress::for_test(0, 2, 1, "spa");
             let report = if unavailable {
                 SecondaryReport::for_test(
-                    vec![SecondaryMorphologyFailure {
-                        span: address,
-                        cause: SecondaryMorphologyFailureKind::Worker.into(),
-                        detail: "model unavailable".into(),
-                    }],
+                    vec![(
+                        address,
+                        SecondaryMorphologyFailureKind::Worker,
+                        "model unavailable",
+                    )],
                     Vec::new(),
                 )
             } else if provenance {

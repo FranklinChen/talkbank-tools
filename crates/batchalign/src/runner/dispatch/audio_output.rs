@@ -30,30 +30,7 @@ use crate::recipe_runner::runtime::{
 use crate::scheduling::FailureCategory;
 use crate::store::RunnerFilesystemConfig;
 
-/// Whether a CHAT document has its single-letter abbreviations merged before
-/// it is written.
-///
-/// A sum rather than a `bool` because `write_primary_output_artifact(.., true)`
-/// says nothing at a call site about which question `true` answers, and this
-/// value used to be the eighth positional argument of a nine-argument shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MergeAbbreviations {
-    /// Collapse runs of single letters that name a known abbreviation.
-    Merge,
-    /// Write the document as the pipeline produced it.
-    Leave,
-}
-
-impl MergeAbbreviations {
-    /// Read the caller's `merge_abbrev` option into this vocabulary.
-    pub(crate) fn from_option(should_merge: bool) -> Self {
-        if should_merge {
-            Self::Merge
-        } else {
-            Self::Leave
-        }
-    }
-}
+pub(crate) use crate::pipeline::post_validate::MergeAbbreviations;
 
 /// A judged CHAT document with what the writer must report beside it.
 #[derive(Debug, Clone, PartialEq)]
@@ -572,7 +549,11 @@ mod tests {
             excluded_utterances: 1,
             excluded_words: 3,
             first_excluded: vec![crate::api::ExcludedUtteranceRecord {
-                utterance: 2,
+                location: crate::api::UtteranceLocator::for_test(
+                    2,
+                    "*PAR:\tdiary note . [+ diary]",
+                )
+                .into(),
                 words: 3,
                 postcode: crate::api::OffRecordPostcode::Diary,
             }],

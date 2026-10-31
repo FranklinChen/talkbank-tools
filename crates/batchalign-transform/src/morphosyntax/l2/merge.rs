@@ -276,7 +276,7 @@ pub fn merge_planned_secondary_span(
     let attachment = external_relation(span.attachment, root);
 
     Ok(MergedL2Span {
-        line_idx: span.line_idx,
+        line_idx: span.address.line().raw(),
         target_lang: span.target_lang,
         first_word: span.first_word,
         grammar_summary: gras

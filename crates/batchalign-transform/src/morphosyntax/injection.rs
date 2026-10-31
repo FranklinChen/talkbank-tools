@@ -328,8 +328,7 @@ impl BoundMorphosyntaxResponses<'_> {
             UtteranceInjection {
                 parser,
                 utt,
-                line_idx,
-                utt_ordinal: collected.utt_ordinal(),
+                address: collected.address(),
                 item: collected.item(),
                 words: collected.words(),
                 result: &mut result,
@@ -349,8 +348,9 @@ impl BoundMorphosyntaxResponses<'_> {
 struct UtteranceInjection<'a, 'u> {
     parser: &'a talkbank_parser::TreeSitterParser,
     utt: &'u mut talkbank_model::model::Utterance,
-    line_idx: usize,
-    utt_ordinal: usize,
+    /// Where the utterance is: its line, for decision records, and its
+    /// position among utterances, which the `@s` deferral carries on.
+    address: super::payload::UtteranceAddress,
     item: &'a super::payload::MorphosyntaxBatchItem,
     words: &'a [crate::extract::ExtractedWord],
     result: &'a mut InjectionProgress,
@@ -359,7 +359,7 @@ struct UtteranceInjection<'a, 'u> {
 impl UtteranceInjection<'_, '_> {
     fn mapping_failure(&self, error: MappingError) -> Box<DecisionRecord> {
         Box::new(DecisionRecord::new_and_trace(
-            self.line_idx,
+            self.address.line().raw(),
             self.utt.main.speaker.as_str().to_string(),
             DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
             format!("ud_to_chat_error={error}"),
@@ -422,7 +422,7 @@ impl UtteranceInjection<'_, '_> {
                     if let Some((_, rescued)) = &analysed {
                         let alignment = UdAlignment::<MorItemIndex>::new(rescued, item_count);
                         self.result.l2.defer_utterance(
-                            self.line_idx,
+                            self.address,
                             self.item,
                             alignment.as_ref(),
                             &ItemPlacement::PerChatWord,
@@ -437,7 +437,7 @@ impl UtteranceInjection<'_, '_> {
             // The model returned nothing for an utterance with words it
             // must analyse: record it and leave the utterance untouched.
             return Err(Box::new(DecisionRecord::new_and_trace(
-                self.line_idx,
+                self.address.line().raw(),
                 self.utt.main.speaker.as_str().to_string(),
                 DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::NlpNoSentences),
                 "stanza_returned_empty_response".into(),
@@ -462,7 +462,7 @@ impl UtteranceInjection<'_, '_> {
             Ok(walked) => walked,
             Err(e) => {
                 return Err(Box::new(DecisionRecord::new_and_trace(
-                    self.line_idx,
+                    self.address.line().raw(),
                     self.utt.main.speaker.as_str().to_string(),
                     DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
                     format!("ud_to_chat_error={e}"),
@@ -480,7 +480,7 @@ impl UtteranceInjection<'_, '_> {
                     Ok(surface) => surface,
                     Err(SurfaceError::Walk(e)) => {
                         return Err(Box::new(DecisionRecord::new_and_trace(
-                            self.line_idx,
+                            self.address.line().raw(),
                             self.utt.main.speaker.as_str().to_string(),
                             DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
                             format!("ud_to_chat_error={e}"),
@@ -533,7 +533,7 @@ impl UtteranceInjection<'_, '_> {
             Err(diag) => self.misalignment(diag, &[], RetokenizationContext::Preserve),
             Ok(()) => {
                 self.result.l2.defer_utterance(
-                    self.line_idx,
+                    self.address,
                     self.item,
                     alignment.as_ref(),
                     &ItemPlacement::PerChatWord,
@@ -600,7 +600,7 @@ impl UtteranceInjection<'_, '_> {
 
         // Collect retokenization trace info before modifying the AST.
         self.result.retokenization_traces.push(RetokenizationInfo {
-            utterance_ordinal: self.utt_ordinal,
+            utterance_ordinal: self.address.utterance().raw(),
             original_words: self
                 .words
                 .iter()
@@ -633,7 +633,7 @@ impl UtteranceInjection<'_, '_> {
                     by_text: &by_text,
                 });
                 self.result.l2.defer_utterance(
-                    self.line_idx,
+                    self.address,
                     self.item,
                     alignment.as_ref(),
                     &placement,
@@ -658,7 +658,7 @@ impl UtteranceInjection<'_, '_> {
         };
         let diag = enrich_diagnostic(diag, tokens);
         Err(Box::new(DecisionRecord::new_and_trace(
-            self.line_idx,
+            self.address.line().raw(),
             self.utt.main.speaker.as_str().to_string(),
             DecisionStrategy::Morphosyntax(strategy),
             format!(

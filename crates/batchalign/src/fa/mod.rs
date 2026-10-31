@@ -1139,6 +1139,7 @@ mod tests {
             "first_untimed": [
               {
                 "utterance": 2,
+                "main_tier": "*CHI:\tmore words here .",
                 "words": 3,
                 "untimed_words": 3,
                 "cause": {
@@ -1285,9 +1286,19 @@ mod tests {
             (*required_words, *untimed_words, *untimed_utterances),
             (160, 160, 80)
         );
-        assert!(!first_untimed.is_empty());
+        // The record names the first utterances, each located, and only
+        // counts the rest: the bound is admission's, not a reader's.
+        assert_eq!(
+            first_untimed.len(),
+            crate::api::FileOutputDiagnostics::FIRST_FINDINGS
+        );
+        assert!(
+            first_untimed
+                .iter()
+                .all(|utterance| utterance.location.main_tier().is_some())
+        );
         assert!(first_untimed.iter().all(|utterance| matches!(
-            utterance.cause,
+            &utterance.cause,
             crate::api::StoredUntimedCause::Written(
                 crate::api::UntimedCauseRecord::LocalizationUnavailable
             )

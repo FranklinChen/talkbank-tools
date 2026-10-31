@@ -439,6 +439,26 @@ impl LocalizedDiagnosis {
         &self.diagnosed.document.file
     }
 
+    /// The first held-out utterances, at most
+    /// [`crate::api::FileOutputDiagnostics::FIRST_FINDINGS`], located in this
+    /// diagnosed document: the one the held-out ordinals index, so the pair
+    /// is made where both are owned.
+    pub(crate) fn held_out_locations(
+        &self,
+    ) -> Result<Vec<crate::api::StoredUtteranceLocation>, crate::api::UtteranceNotInDocument> {
+        self.held_out
+            .ordinals()
+            .take(crate::api::FileOutputDiagnostics::FIRST_FINDINGS)
+            .map(|ordinal| {
+                crate::api::UtteranceLocator::of(
+                    self.model(),
+                    talkbank_model::UtteranceIdx::new(ordinal),
+                )
+                .map(Into::into)
+            })
+            .collect()
+    }
+
     /// The diagnosed output unchanged, for a stage that declines to run.
     pub(crate) fn into_diagnosed(self) -> DiagnosedOutput {
         self.diagnosed
@@ -1125,6 +1145,31 @@ impl PostValidationFailure {
         crate::error::ServerError::OutputAdmission {
             command: self.command,
             details: crate::error::OutputAdmissionRefusal::Judged { bar, first, rest },
+        }
+    }
+}
+
+/// Whether a CHAT document has its single-letter abbreviations merged before
+/// it is written.
+///
+/// A sum rather than a `bool` because `write_primary_output_artifact(.., true)`
+/// says nothing at a call site about which question `true` answers, and this
+/// value used to be the eighth positional argument of a nine-argument shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeAbbreviations {
+    /// Collapse runs of single letters that name a known abbreviation.
+    Merge,
+    /// Write the document as the pipeline produced it.
+    Leave,
+}
+
+impl MergeAbbreviations {
+    /// Read the caller's `merge_abbrev` option into this vocabulary.
+    pub(crate) fn from_option(should_merge: bool) -> Self {
+        if should_merge {
+            Self::Merge
+        } else {
+            Self::Leave
         }
     }
 }

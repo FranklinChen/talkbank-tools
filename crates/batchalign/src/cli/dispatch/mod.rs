@@ -467,6 +467,7 @@ async fn dispatch_direct_mode(
         &error_details,
         prepared.total_files as u64,
         &prepared.destinations.reporting_directory()?,
+        crate::cli::error::DiagnosedRelist::ThisRunOnly,
     )
 }
 

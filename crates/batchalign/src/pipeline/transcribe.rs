@@ -932,8 +932,7 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
     let route = match post_chat_route(ctx, asr)? {
         PostChatRoute::Run(route) => route,
         PostChatRoute::RecognizerBoundaries => {
-            let held_out =
-                held_out_shortfall(OptionalStage::UtteranceSegmentation, localized.held_out());
+            let held_out = held_out_shortfall(OptionalStage::UtteranceSegmentation, &localized)?;
             return Ok((
                 ProducedOutput::Diagnosed(localized.into_diagnosed()),
                 held_out,
@@ -955,7 +954,7 @@ async fn stage_run_localized_utseg<P: TranscribePlan>(
         .unwrap_or("unknown");
     ctx.dumper.dump_pre_utseg_chat(filename, localized.as_str());
     let evidence_filename = ctx.audio_path.to_string_lossy();
-    let held_out = held_out_shortfall(OptionalStage::UtteranceSegmentation, localized.held_out());
+    let held_out = held_out_shortfall(OptionalStage::UtteranceSegmentation, &localized)?;
     // Kept so a refused segmentation leaves the document it started from.
     let before = localized.clone().into_diagnosed();
     let segmented = crate::utseg::process_localized_utseg_with_evidence(
@@ -1034,17 +1033,13 @@ fn not_applied<T>(
 /// diagnosed document's findings are confined to.
 fn held_out_shortfall(
     stage: OptionalStage,
-    held_out: &crate::pipeline::post_validate::HeldOutUtterances,
-) -> Shortfall {
-    Shortfall::StageHeldOut {
+    localized: &crate::pipeline::post_validate::LocalizedDiagnosis,
+) -> Result<Shortfall, ServerError> {
+    Ok(Shortfall::StageHeldOut {
         stage,
-        held_out_utterances: held_out.len() as u64,
-        first_held_out: held_out
-            .ordinals()
-            .take(crate::api::FileOutputDiagnostics::FIRST_FINDINGS)
-            .map(|ordinal| ordinal as u64 + 1)
-            .collect(),
-    }
+        held_out_utterances: localized.held_out().len() as u64,
+        first_held_out: localized.held_out_locations()?,
+    })
 }
 
 /// Morphosyntax on a diagnosed transcript, outside the utterances its
@@ -1067,7 +1062,7 @@ async fn stage_run_localized_morphosyntax<P: TranscribePlan>(
         .unwrap_or("unknown");
     ctx.dumper
         .dump_pre_morphosyntax_chat(filename, localized.as_str());
-    let held_out = held_out_shortfall(OptionalStage::Morphosyntax, localized.held_out());
+    let held_out = held_out_shortfall(OptionalStage::Morphosyntax, &localized)?;
     // Kept so a refused analysis leaves the document it started from.
     let before = localized.clone().into_diagnosed();
     let empty_mwt = std::collections::BTreeMap::new();
