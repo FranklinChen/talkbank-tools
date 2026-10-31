@@ -3001,7 +3001,7 @@
       "name": "BSD-3-Clause"
     },
     "title": "batchalign",
-    "version": "0.8.6"
+    "version": "0.8.7"
   },
   "openapi": "3.1.0",
   "paths": {

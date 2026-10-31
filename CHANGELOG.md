@@ -3,7 +3,7 @@
 Fixes and behaviour changes, newest first. The book describes the current
 design; this file records how it changed.
 
-## Unreleased
+## 0.8.7 (October 31, 2026)
 
 ### A diagnosed job says what to check, and where
 
