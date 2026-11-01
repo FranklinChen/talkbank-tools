@@ -9,6 +9,7 @@ import { useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { useAnyConnected, useServerStatuses, useStats } from "../state";
 import { useDesktopEnvironment } from "../desktop/DesktopContext";
+import { DESKTOP_APP_NAME } from "../desktop/protocol";
 import { HelpPanel } from "./process/HelpPanel";
 import { SettingsModal } from "./process/SettingsModal";
 
@@ -44,7 +45,7 @@ export function Layout({ children }: { children: ReactNode }) {
               className="flex items-center gap-2 no-underline"
             >
               <span className="font-mono text-sm font-semibold tracking-tight text-white/90">
-                batchalign
+                {environment.isDesktop ? DESKTOP_APP_NAME : "batchalign"}
               </span>
               {!environment.isDesktop && (
                 <span className="text-white/30 text-xs font-light">dashboard</span>

@@ -1615,7 +1615,7 @@ impl PostValidated {
     pub(crate) fn with_provenance_injected(
         self,
         comment: &crate::provenance::ProvenanceComment,
-    ) -> Result<Self, PostValidationFailure> {
+    ) -> Result<Self, crate::error::ServerError> {
         let command = self.command;
         let (judgement, file) = match self.proof {
             OutputProof::Gated {
@@ -1626,8 +1626,8 @@ impl PostValidated {
             }
         };
         let mut file = file.into_unchecked();
-        crate::provenance::inject_provenance(&mut file, comment);
-        Self::judge(file, judgement, command)
+        crate::provenance::inject_provenance(&mut file, comment)?;
+        Self::judge(file, judgement, command).map_err(PostValidationFailure::into_server_error)
     }
 
     /// The command whose output these bytes are.

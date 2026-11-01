@@ -136,6 +136,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/jobs/{job_id}/output-folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inspect recorded destinations without guessing an output root or reading
+         *     file contents. The native action separately admits directory existence.
+         */
+        get: operations["get_output_folders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/jobs/{job_id}/restart": {
         parameters: {
             query?: never;
@@ -1096,6 +1116,13 @@ export interface components {
              */
             total_files: number;
         };
+        /** @description Snapshot identity and its independent local-output evidence. */
+        JobOutputFolders: {
+            /** @description Absence, refusal and recorded destinations are distinct outcomes. */
+            access: components["schemas"]["LocalOutputAccess"];
+            /** @description The record whose submitted destinations were projected. */
+            job_id: components["schemas"]["JobId"];
+        };
         /** @description `GET /jobs/{id}/results` response: completed job results. */
         JobResultResponse: {
             /** @description Per-file results (empty until the job completes). */
@@ -1213,6 +1240,27 @@ export interface components {
             heartbeat_at: components["schemas"]["MachineTime"];
             /** @description Identifier of the node that currently owns the lease. */
             leased_by_node: components["schemas"]["NodeId"];
+        };
+        /**
+         * @description Directory existence belongs to the native opener at action time. A recorded
+         *     destination remains useful even when all input files were refused.
+         */
+        LocalOutputAccess: {
+            /** @enum {string} */
+            state: "content_mode";
+        } | {
+            /** @enum {string} */
+            state: "not_recorded";
+        } | {
+            /** @description Nonempty destinations admitted together from the stored mapping. */
+            directories: string[];
+            /** @enum {string} */
+            state: "recorded";
+        } | {
+            /** @description Why the stored mapping could not supply folder authority. */
+            message: string;
+            /** @enum {string} */
+            state: "refused";
         };
         /**
          * Format: date-time
@@ -2062,6 +2110,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StatusMessageResponse"];
+                };
+            };
+            /** @description Job not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_output_folders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Job identifier */
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recorded local output folders */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobOutputFolders"];
+                };
+            };
+            /** @description Not a local request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Job not found */

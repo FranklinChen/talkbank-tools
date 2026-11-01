@@ -1,168 +1,133 @@
-# Batchalign3 Desktop App (Tauri)
+# BA3 Runner desktop shell
 
-**Status:** Current
-**Last updated:** 2026-04-28 23:04 EDT
+**Last modified:** 2026-11-01 15:44 EST
 
-Tauri desktop shell wrapping the canonical React frontend (`../../frontend`).
-Provides a native GUI so researchers can pick files, choose a command, and watch
-progress without opening a terminal.
+BA3 Runner is a small native launcher for the installed `batchalign3`
+CLI and its managed local server. It offers command selection, folder input,
+explicit output selection, job progress and diagnostics. It is experimental;
+local tests alone do not establish a qualified distributable bundle.
 
-This is the Batchalign desktop shell.
+Its scope is six one-command workflows over the CLI: transcription, morphology,
+alignment, translation, segmentation and accuracy scoring. Usability means
+making those workflows and their failures understandable from the app.
 
-## Architecture
+Its installed bundle is `BA3 Runner.app`, executable `ba3-runner`, identifier
+`com.franklinchen.ba3-runner`. It has a separate identity and installation path
+from other Batchalign apps; installing it must not replace them.
 
-```
-Tauri Shell (this directory)
-  ├── Plugins: dialog (file picker), shell (open folders)
-  ├── Custom commands: file discovery, setup/config I/O, local server lifecycle
-  ├── Local ownership: first-launch config + managed batchalign3 child process
-  └── Webview loads React SPA from frontend/dist/
+## Runtime ownership
 
-React SPA (../../frontend/)
-  ├── desktop/protocol.ts inventories raw shell commands/events
-  ├── DesktopContext fans that protocol into focused capability hooks
-  ├── /process    ← End-user processing flow (default in desktop)
-  ├── /dashboard  ← Fleet monitoring (power users)
-  └── HTTP/SSE/WS to batchalign3 server at localhost:18000
+The app asks `batchalign3 serve status --format json` for a structured server
+observation. Only an identified loopback endpoint is admitted. A stopped service
+can be started through `batchalign3 serve start`; an incompatible or unreachable
+service is reported with an actionable error. The CLI checks its own build
+against the running service. The app never retains a service PID, stops the
+service on exit, or replaces an incompatible running service.
 
-batchalign3 server (auto-managed)
-  ├── Spawned as child process: batchalign3 serve start --foreground --port 18000
-  ├── Auto-started on app launch, auto-stopped on exit
-  └── Manual start/stop via server status bar
-```
+Discovery requests have a 15-second deadline; a service-start request has a
+60-second deadline. A stalled CLI produces a retryable error, not a guessed
+service state. Cancelling or timing out a request kills only that owned CLI
+probe, never the managed service. Check for operating-system file-access
+prompts before retrying when configuration lives on a protected volume.
 
-The Tauri Rust side stays thin, native dialogs, config I/O, and local
-server/process management only. All shared UI logic lives in the React
-frontend, which consumes shell-only capabilities through
-`frontend/src/desktop/DesktopContext.tsx`; `frontend/src/desktop/protocol.ts`
-inventories the raw command/event boundary; `frontend/src/lib/tauri.ts` keeps
-the dynamic Tauri imports and browser fallbacks in one place.
+`DesktopBootstrap` completes discovery before mounting server consumers. The
+native IPC inventory is `frontend/src/desktop/protocol.ts`; components use the
+focused capabilities in `DesktopContext.tsx`. Configuration writes share the
+CLI's credential-preserving preferences writer. Unrelated keys, provider
+credentials and comments in `~/.batchalign.ini` are retained; read or write
+failures are visible.
 
-The desktop app auto-starts a local batchalign3 server on port 18000 and talks
-to it over HTTP, the same way the web dashboard does. It uses `paths_mode: true`
-for `POST /jobs`, sending absolute file paths so the server reads/writes files
-directly from disk.
+The native adapter admits reads as `PreferenceDraft`, writes only validated
+`PreferenceEdit` and returns `SavedPreferences` only after a complete native
+acknowledgement. Settings cannot be edited before a successful read; failed
+reads offer retry and unsupported engines require an explicit choice. Reopening
+retires the old read owner. Stored keys are not copied into the password field:
+retain and replace are different intents, and successful replacement retires
+into retain before another save. The first-run wizard owns credential fields
+only in its Rev.AI states and cannot show Done while saving or after failure.
 
-## Prerequisites
+A `PreparedJob` captures immutable choices before native filesystem admission
+can produce the private `JobPlan` accepted by submission. Native admission
+resolves directory aliases, checks file identities and derives the output paths.
+Separate input/output trees must be disjoint. Outputs may not overwrite selected
+inputs or collide through hard links, case or Unicode normalization; explicit
+in-place CHAT processing remains supported. Discovery visits regular files and
+directories, skipping links inside the chosen folder and special files.
+Admission is read-only observation, not a reservation against concurrent changes.
+Submission has one synchronous owner throughout admission and preference reads.
+The form also owns folder dialogs and discovery as distinct pending states.
+Pending selection disables editing and submission. Dialog cancellation retains
+the earlier explicit choice; failed input discovery clears it. Back withdraws
+the interaction so late results cannot alter another configuration.
+Discovery has distinct empty and nonempty outcomes. Only immutable
+`SelectedInputs` can reach job preparation. A keyboard-accessible review lists
+the discovered full paths in pages of 25; paging never changes job membership.
+Command metadata owns both discovery extensions and empty-folder guidance.
+Benchmarking requires a
+separate output folder and matching gold `.cha` files beside its audio inputs.
+Job progress comes from authoritative `GET /jobs/{id}` observations. Disconnects
+are not completion and never cause automatic resubmission. Diagnosed,
+interrupted and writeback-failed jobs remain distinct from clean completion.
+Opening output is a native directory-only command, not a generic shell opener.
 
-- Node.js and npm
-- Rust toolchain
-- Tauri v2 prerequisites for your platform (see [Tauri docs](https://tauri.app/start/prerequisites/))
+Cancellation has a job-bound owner above reconnecting progress views. Available,
+requesting, acknowledged and failed states have different capabilities. The
+owner closes synchronously before HTTP; acknowledgement does not re-enable
+Cancel or manufacture a complete job record. A failure permits explicit retry
+and retires its error on the next attempt. An already-finished response retains
+the service's actual outcome while file results are refreshed.
 
-## Setup
+Submission distinguishes a definite refusal, a confirmed `SubmittedJob` identity
+and an unconfirmed result. Transport loss, server timeouts/failures or unusable
+acknowledgements never return the captured plan to a retryable form. The
+unconfirmed view retains the task and folders, offers task-list inspection and
+requires deliberate new configuration before another job. No mutation retry is
+automatic. This is protection within the launcher, not server-side deduplication.
+
+## Development and local build
+
+Install the CLI first, then install npm dependencies in both `frontend/` and
+`apps/dashboard-desktop/`. From this directory:
 
 ```bash
-cd apps/dashboard-desktop
-npm ci
-```
-
-The frontend dependencies must also be installed:
-
-```bash
-cd ../../frontend
-npm ci
-```
-
-## Development
-
-```bash
-cd apps/dashboard-desktop
 npm run dev
-```
-
-This starts Tauri dev mode: the frontend dev server on `:1420` with hot reload,
-and the Tauri webview pointing at `/process?server=http://127.0.0.1:18000`.
-
-The app auto-starts a batchalign3 server on port 18000. If `batchalign3` is not
-on PATH, the status bar shows install instructions.
-
-## Build
-
-```bash
-cd apps/dashboard-desktop
 npm run build
 ```
 
-Produces a platform-native bundle (`.app` on macOS, `.msi` on Windows, `.deb`/`.AppImage` on Linux).
+The dev webview uses port 1420. Backend discovery uses the installed CLI's
+configuration; the app does not start a private fixed-port server. The release
+bundle is under the Cargo workspace's `target/release/bundle/`.
 
-## Release hardening
+The icon source is `app-icon.svg`. Run `npm run tauri -- icon app-icon.svg`
+here to regenerate the platform icons; retain the desktop icon files. The
+build admits every PNG named in the bundle configuration as a complete square
+RGBA8 image before Tauri embeds it. An unsupported 16-bit image is a build error,
+rather than an application that packages successfully and aborts on launch.
 
-Public macOS distribution of this Tauri shell should ship as a signed and
-notarized `Batchalign3.app` (bundle identifier
-`org.talkbank.batchalign3.dashboard`), normally inside a DMG or release zip.
-Reuse the private signing reference in
-`../../../docs/code-signing-and-distribution.md`, which already extracts the
-institutional knowledge from `../../../java-chatter-stable/build-mac-app.sh`
-and `../../../java-chatter-stable/notarize.sh`.
+## Coordinated CLI and app deployment
 
-- This is a Rust/Tauri app, so the Java 25 JIT entitlements from legacy Chatter
-  do **not** apply. Start with hardened runtime + timestamp and only add
-  entitlements if a future Tauri capability requires them.
-- The current shell launches `batchalign3` from PATH. Notarizing the app does
-  **not** sign or notarize a separately distributed CLI artifact.
-- If we later bundle the CLI inside the app, sign the nested executable before
-  sealing the `.app` and submitting the outer DMG/zip.
-- This desktop surface remains dormant from a release perspective. Keep signing
-  prep staged until end-user distribution resumes.
+Qualify the CLI wheel and native app from the same clean source commit. Preserve
+both exact artifacts and their digests, platform/architecture and source
+identity. A GUI bundle alone does not install the Python worker environment or
+CLI. Conversely, installing a CLI wheel does not install the app.
 
-## Backend Target
+Before describing a deployment as ready, verify both installed artifacts and
+exercise the packaged native app: startup discovery, a real managed-server job,
+diagnostics, output files and opening their directory. Closing a window must
+leave the service and its jobs intact. Configuration must survive an upgrade.
+For macOS distribution, use a Developer ID signed and notarized application;
+verify the actual signed artifact, not just rejection fixtures. Unsigned local
+builds are development evidence only. No public release is implied by the
+experimental artifact workflow.
 
-Desktop mode defaults to `http://127.0.0.1:18000`.
-Override at runtime with query parameter: `?server=http://host:port`
-
-## Tauri Commands
-
-| Command | Purpose |
-|---------|---------|
-| `discover_files(dir, extensions)` | Walk a directory, return paths matching extensions. Bridges folder picker → `POST /jobs` `source_paths`. |
-| `start_server()` | Spawn `batchalign3 serve start --foreground --port 18000` as a managed child process and return the resulting `{ running, port, binary_path, pid }` snapshot. |
-| `stop_server()` | Kill the managed server child process and return the resulting `{ running, port, binary_path, pid }` snapshot. |
-| `server_status()` | Return `{ running, port, binary_path, pid }` for the status bar. |
-| `get_batchalign_path()` | Return the path to the `batchalign3` binary, or null if not found. |
-| `is_first_launch()` | True if `~/.batchalign.ini` doesn't exist, triggers setup wizard. |
-| `read_config()` | Read user config (engine + Rev.AI key) from `~/.batchalign.ini`. |
-| `write_config(config)` | Write user config to `~/.batchalign.ini` and return `{ message }`. |
-
-## Tauri Events
-
-| Event | Payload | Purpose |
-|-------|---------|---------|
-| `desktop://server-status-changed` | `{ status: { running, port, binary_path, pid } }` | Shell-owned server lifecycle updates consumed by `useServerLifecycle`. |
-
-The config commands resolve `~/.batchalign.ini` via `HOME`, then Windows-style
-`USERPROFILE` or `HOMEDRIVE` + `HOMEPATH` fallbacks so the setup wizard works
-consistently across desktop shells.
-
-The Rust side mirrors this transport contract in `src-tauri/src/protocol.rs` so
-command/event names and payload shapes stay easy to audit next to the frontend
-inventory in `frontend/src/desktop/protocol.ts`.
-
-## Shell Tests
+## Focused verification
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test -p batchalign-dashboard-desktop --bin batchalign-dashboard-desktop
+cargo test -p batchalign-types --lib asr_preferences
+cargo test -p batchalign --test cli_integration_suite serve_status
 ```
 
-The Rust-side shell tests intentionally stay narrow and fast:
-
-- `src-tauri/src/protocol.rs`: protocol identifier stability and event payload serialization
-- `src-tauri/src/main.rs`: `discover_files_in_dir()` recursion, filtering, and
-  sorting
-- `src-tauri/src/config.rs`: config roundtrip plus Windows-friendly home-dir
-  fallbacks
-- `src-tauri/src/server.rs`: `ServerProcess` empty/running/exited child
-  lifecycle behavior
-
-Frontend seam checks live in `frontend/e2e/tests/mock-server.spec.mjs` and use a
-small fake Tauri runtime to verify first-launch config flow, file discovery, and
-server status event wiring without booting a native shell.
-
-Keep new shell logic behind pure helpers or `ServerProcess` methods so this
-suite can validate native contracts without booting a full Tauri app.
-
-## Tauri Plugins
-
-| Plugin | Capabilities | Used For |
-|--------|-------------|----------|
-| `dialog` | `dialog:allow-open`, `dialog:allow-save` | Native file/folder picker |
-| `shell` | `shell:allow-open` | Open output folders in Finder/Explorer |
+Frontend seam tests live in `frontend/e2e/tests/mock-server.spec.mjs`. They use a
+fake native transport and do not qualify Tauri permissions, Finder/Explorer,
+model execution, signing or installation.

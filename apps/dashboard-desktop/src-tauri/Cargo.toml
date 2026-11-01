@@ -1,17 +1,31 @@
 [package]
 name = "batchalign-dashboard-desktop"
 version = "0.1.0"
-description = "Tauri desktop shell for the Batchalign3 React dashboard (experimental, not yet released)"
+description = "BA3 Runner: a minimal desktop launcher for the batchalign3 CLI (experimental)"
 publish = false
 edition = "2021"
 license = "BSD-3-Clause"
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
+png = "0.18"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
+thiserror = "2"
+batchalign-types = { path = "../../../crates/batchalign-types" }
+tokio = { workspace = true }
+unicode-normalization = "0.1"
+
+[target.'cfg(not(unix))'.dependencies]
+same-file = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

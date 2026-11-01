@@ -8,53 +8,69 @@ import { useRef, type KeyboardEvent } from "react";
 import { commandStyle } from "../../utils";
 
 /** Command metadata for the picker grid. */
-export interface CommandDef {
-  /** Server command name (e.g. "transcribe"). */
-  id: string;
+interface CommandLabels {
   /** User-facing label. */
   label: string;
   /** One-line description of what the command does. */
   description: string;
-  /** Whether the command needs a language selection. */
-  needsLang: boolean;
 }
+
+/** The command selects its language policy; a text-NLP command cannot carry a
+ * job-level language selector. These are the launcher's supported commands. */
+export type CommandDef = CommandLabels & (
+  | { id: "morphotag" | "translate"; language: "per-file"; input: "transcripts" }
+  | { id: "align" | "utseg"; language: "job"; input: "transcripts" }
+  | { id: "transcribe" | "benchmark"; language: "job"; input: "recordings" }
+);
+
+/** One input policy supplies discovery and the matching user-facing guidance. */
+export const INPUT_POLICIES = {
+  recordings: { label: "audio or video recordings", extensions: ["wav", "mp3", "mp4", "m4a", "flac", "ogg", "webm"] },
+  transcripts: { label: "CHAT transcripts", extensions: ["cha"] },
+} as const;
 
 export const COMMANDS: CommandDef[] = [
   {
     id: "transcribe",
     label: "Transcribe Audio",
     description: "Turn audio or video recordings into written transcripts in CHAT format",
-    needsLang: true,
+    language: "job",
+    input: "recordings",
   },
   {
     id: "morphotag",
     label: "Add Grammar",
     description: "Add part-of-speech tags and grammatical structure, needed for CLAN commands like MLU and DSS",
-    needsLang: true,
+    language: "per-file",
+    input: "transcripts",
   },
   {
     id: "align",
     label: "Align to Audio",
-    description: "Link each word in a transcript to its exact moment in the audio, so you can click to play",
-    needsLang: true,
+    description: "Estimate word timing in a transcript using its audio; review the inferred timing before relying on it",
+    language: "job",
+    input: "transcripts",
   },
   {
     id: "translate",
     label: "Translate",
     description: "Add an English translation line under each utterance in a non-English transcript",
-    needsLang: false,
+    language: "per-file",
+    input: "transcripts",
   },
   {
     id: "utseg",
     label: "Segment Utterances",
-    description: "Automatically break a long block of text into separate speaker turns",
-    needsLang: true,
+    description: "Identify utterance boundaries in an existing transcript",
+    language: "job",
+    input: "transcripts",
   },
   {
     id: "benchmark",
     label: "Score Accuracy",
     description: "Measure how closely a machine transcript matches a human-verified one",
-    needsLang: true,
+    language: "job",
+    input: "recordings",
   },
 ];
 

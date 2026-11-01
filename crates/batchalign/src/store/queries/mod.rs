@@ -342,6 +342,45 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn output_folders_survive_database_recovery_without_using_source_dir() {
+        use batchalign_types::paths::ClientPath;
+
+        let (store, db, directory) = test_store_with_db().await;
+        let root = directory.path().canonicalize().unwrap();
+        let path = |suffix: &str| ClientPath::new(root.join(suffix).to_str().unwrap());
+        let mut job = make_job(
+            "persisted-output",
+            crate::ReleasedCommand::Morphotag,
+            vec!["one.cha".into(), "nested/two.cha".into()],
+        );
+        job.filesystem.paths_mode = true;
+        job.source.source_dir = path("misleading-input");
+        job.filesystem.source_paths = vec![path("input/one.cha"), path("input/nested/two.cha")];
+        job.filesystem.output_paths = vec![path("results/one.cha"), path("results/nested/two.cha")];
+        let id = JobId::from("persisted-output");
+        store.submit(job).await.unwrap();
+        let before =
+            serde_json::to_value(store.get_job_detail(&id).await.unwrap().output_folders).unwrap();
+        drop(store);
+        let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let recovered = JobStore::for_tests(
+            test_config(),
+            Some(db),
+            tx,
+            Arc::new(crate::clock::SystemClock),
+        );
+        assert_eq!(recovered.load_from_db().await.unwrap(), 1);
+        let after =
+            serde_json::to_value(recovered.get_job_detail(&id).await.unwrap().output_folders)
+                .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            after,
+            serde_json::json!({"job_id":"persisted-output", "access": {"state":"recorded", "directories": [root.join("results").to_str().unwrap(), root.join("results/nested").to_str().unwrap()]}})
+        );
+    }
+
     /// Create a store backed by a temporary SQLite database.
     /// A refused finalize must not be persisted to SQLite either.
     ///

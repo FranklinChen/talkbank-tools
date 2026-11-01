@@ -24,7 +24,7 @@ use crate::server_handshake::{HandshakeSlot, ServerHandshake};
 use crate::worker::handle::WorkerRuntimeConfig;
 use crate::worker::pool::PoolConfig;
 
-use crate::cli::args::{ServeStartArgs, ServeStatusArgs};
+use crate::cli::args::{ServeStartArgs, ServeStatusArgs, ServeStatusFormat};
 use crate::cli::client::BatchalignClient;
 use crate::cli::daemon;
 use crate::cli::error::CliError;
@@ -334,6 +334,82 @@ pub async fn stop() -> Result<(), CliError> {
     }
 }
 
+/// Machine-readable discovery never fabricates a ready URL from a failed probe.
+#[derive(serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum ServerObservation {
+    Ready { url: String, build_hash: String },
+    Stopped,
+    Refused { message: String },
+}
+
+/// A configured address is not evidence of a running service. Only an
+/// unrecorded fallback can become `Stopped` after an OS connection refusal.
+enum StatusTarget {
+    Explicit(String),
+    Recorded(String),
+    Configured {
+        url: String,
+        address: std::net::SocketAddrV4,
+    },
+}
+
+impl StatusTarget {
+    fn url(&self) -> &str {
+        match self {
+            Self::Explicit(url) | Self::Recorded(url) | Self::Configured { url, .. } => url,
+        }
+    }
+
+    async fn observe(self, client: &BatchalignClient) -> ServerObservation {
+        if let Self::Configured { address, .. } = &self {
+            // HTTP transport errors may erase the OS cause or involve a proxy.
+            // Only direct refusal of this known loopback socket proves absence.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::net::TcpStream::connect(*address),
+            )
+            .await
+            {
+                Ok(Ok(connection)) => drop(connection),
+                Ok(Err(error)) => {
+                    return match error.kind() {
+                        std::io::ErrorKind::ConnectionRefused => ServerObservation::Stopped,
+                        _ => ServerObservation::Refused {
+                            message: format!(
+                                "Cannot inspect the configured local service at {address}: {error}"
+                            ),
+                        },
+                    };
+                }
+                Err(_) => {
+                    return ServerObservation::Refused {
+                        message: format!(
+                            "Timed out inspecting the configured local service at {address}. No replacement was started."
+                        ),
+                    };
+                }
+            }
+        }
+        match client.health_check(self.url()).await {
+            Ok(health) if health.build_hash == crate::build_hash() => ServerObservation::Ready {
+                url: self.url().to_owned(), build_hash: health.build_hash,
+            },
+            Ok(_) => ServerObservation::Refused {
+                message: "The managed server and installed CLI are different builds. Update/restart the managed service before processing; the desktop will not replace it.".to_owned(),
+            },
+            Err(error) => ServerObservation::Refused {
+                message: format!("Cannot reach the discovered server at {}: {error}", self.url()),
+            },
+        }
+    }
+}
+
+fn print_observation(observation: &ServerObservation) -> Result<(), CliError> {
+    println!("{}", serde_json::to_string(observation)?);
+    Ok(())
+}
+
 /// `serve status`: check server health.
 pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
     let client = BatchalignClient::new()?;
@@ -344,7 +420,7 @@ pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
     let cfg = config::load_config_from_layout(&layout, None)?;
 
     let server = if let Some(ref s) = args.server {
-        s.trim_end_matches('/').to_string()
+        StatusTarget::Explicit(s.trim_end_matches('/').to_string())
     } else {
         // Try local daemon first
         // The daemon's port comes from the handshake it published, not from
@@ -354,37 +430,68 @@ pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
             // A diagnostic command: say so, then look for a server the other
             // ways rather than stopping here.
             Err(unreadable) => {
+                if matches!(args.format, ServeStatusFormat::Json) {
+                    return print_observation(&ServerObservation::Refused {
+                        message: unreadable.to_string(),
+                    });
+                }
                 eprintln!("warning: {unreadable}");
                 None
             }
         };
-        let daemon_url = recorded.and_then(|info| {
-            ServerHandshake::published_port(layout.state_dir(), HandshakeSlot::Main)
-                .map(|port| (info.pid, format!("http://127.0.0.1:{port}")))
-        });
-        match daemon_url {
-            Some((pid, url)) if client.health_check(&url).await.is_ok() => {
-                eprintln!("Using local daemon (PID {pid})");
-                url
+        let published = match ServerHandshake::read(layout.state_dir(), HandshakeSlot::Main) {
+            Ok(handshake) => handshake,
+            Err(error) if matches!(args.format, ServeStatusFormat::Json) => {
+                return print_observation(&ServerObservation::Refused {
+                    message: error.to_string(),
+                });
             }
-            // Either no daemon record, or its published port does not answer.
-            // Falling back to the same URL would just re-probe what failed.
-            _ => match daemon::local_server_url(&layout, cfg.port) {
-                Some(url) => url,
-                None => {
-                    eprintln!("No local server discoverable. Pass --server URL.");
-                    return Ok(());
-                }
+            Err(error) => {
+                eprintln!("warning: {error}");
+                None
+            }
+        };
+        // Bind target classification to the records just read; do not re-read
+        // a handshake that another process may replace between these steps.
+        let port = published
+            .and_then(ServerHandshake::bound_port)
+            .map(|port| port.get())
+            .or_else(|| cfg.port.fixed().map(|port| port.get()));
+        let url = port.map(|port| format!("http://127.0.0.1:{port}"));
+        match (url, recorded, published, cfg.port.fixed()) {
+            (Some(url), None, None, Some(port)) => StatusTarget::Configured {
+                url,
+                address: std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port.get()),
             },
+            (Some(url), _, _, _) => StatusTarget::Recorded(url),
+            (None, None, None, _) => {
+                if matches!(args.format, ServeStatusFormat::Json) {
+                    return print_observation(&ServerObservation::Stopped);
+                }
+                eprintln!("No local server discoverable. Pass --server URL.");
+                return Ok(());
+            }
+            (None, _, _, _) => {
+                if matches!(args.format, ServeStatusFormat::Json) {
+                    return print_observation(&ServerObservation::Refused {
+                        message: "A local service is recorded but has not published a listening port. Check its startup log before retrying.".to_owned(),
+                    });
+                }
+                eprintln!("The recorded local service has not published a listening port.");
+                return Ok(());
+            }
         }
     };
 
-    match client.health_check(&server).await {
+    if matches!(args.format, ServeStatusFormat::Json) {
+        return print_observation(&server.observe(&client).await);
+    }
+    match client.health_check(server.url()).await {
         Ok(health) => {
             eprintln!();
             eprintln!("Batchalign Server Status");
             eprintln!("{}", "-".repeat(40));
-            eprintln!("URL:              {server}");
+            eprintln!("URL:              {}", server.url());
             eprintln!("Status:           {}", health.status);
             eprintln!("Version:          {}", health.version);
             if !health.build_hash.is_empty() {
@@ -398,7 +505,7 @@ pub async fn status(args: &ServeStatusArgs) -> Result<(), CliError> {
             eprintln!();
         }
         Err(e) => {
-            eprintln!("error: cannot reach server at {server}: {e}");
+            eprintln!("error: cannot reach server at {}: {e}", server.url());
         }
     }
 

@@ -169,28 +169,13 @@ fn resolve_config(args: &SetupArgs) -> Result<SetupConfig, CliError> {
     }
 }
 
-fn render_ini(config: &SetupConfig) -> String {
-    let mut out = String::from("[asr]\n");
-    out.push_str(&format!(
-        "engine = {}\n",
-        match config.engine {
-            SetupEngine::Rev => "rev",
-            SetupEngine::Whisper => "whisper",
-        }
-    ));
-    if let Some(key) = &config.rev_key {
-        out.push_str(&format!("engine.rev.key = {key}\n"));
-    }
-    out
-}
-
 fn write_config(path: &Path, config: &SetupConfig) -> Result<(), CliError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, render_ini(config))?;
+    use batchalign_types::asr_preferences::{PreferenceEdit, PreferenceEngine};
+    let engine = match config.engine {
+        SetupEngine::Rev => PreferenceEngine::Rev,
+        SetupEngine::Whisper => PreferenceEngine::Whisper,
+    };
+    PreferenceEdit::new(engine, config.rev_key.clone())?.write_to(path)?;
     Ok(())
 }
 

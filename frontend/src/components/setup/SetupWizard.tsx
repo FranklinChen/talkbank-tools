@@ -1,251 +1,110 @@
-/** First-time setup wizard for the desktop app.
- *
- * Guides the user through ASR engine configuration on first launch. This
- * mirrors the `batchalign3 setup` / batchalign2 `interactive_setup()` flow
- * in a GUI. Writes to `~/.batchalign.ini` via Tauri config commands.
- *
- * Steps:
- * 1. Welcome: explain what this does
- * 2. Engine selection: Rev.AI (cloud, fast, paid) vs Whisper (local, free)
- * 3. API key: if Rev.AI selected, prompt for key with confirmation
- * 4. Done: summary + "Get Started" button
- */
-
-import { useState } from "react";
+/** First-run choice, credential entry, saving and acknowledged completion are
+ * distinct states. No screen can declare setup done before the native receipt. */
+import { useEffect, useRef, useState } from "react";
 import { useDesktopConfig } from "../../desktop/DesktopContext";
+import { DESKTOP_APP_NAME } from "../../desktop/protocol";
+import { PreferenceDraft, type PreferenceEdit, type SavedPreferences } from "../../desktop/preferences";
 import { EngineCard } from "./EngineCard";
 
-type Step = "welcome" | "engine" | "api-key" | "done";
-type Engine = "rev" | "whisper";
+type Credentials = { key: string; confirmation: string };
+type EngineSelection = { kind: "whisper" } | { kind: "rev"; credentials: Credentials };
+type EngineStep = { kind: "engine"; selection: EngineSelection; error: string | null };
+type KeyStep = { kind: "api-key"; credentials: Credentials; error: string | null };
+type EditableStep = { kind: "welcome" } | EngineStep | KeyStep;
+type WizardState = EditableStep
+  | { kind: "saving"; edit: PreferenceEdit; previous: EngineStep | KeyStep }
+  | { kind: "done"; receipt: SavedPreferences };
+interface SetupWizardProps { onComplete: () => void }
 
-interface SetupWizardProps {
-  /** Called when setup is complete. */
-  onComplete: () => void;
-}
-
+/** Configure one validated edit and keep failures on the screen that owns it. */
 export function SetupWizard({ onComplete }: SetupWizardProps) {
-  const desktopConfig = useDesktopConfig();
-  const [step, setStep] = useState<Step>("welcome");
-  const [engine, setEngine] = useState<Engine>("whisper");
-  const [revKey, setRevKey] = useState("");
-  const [revKeyConfirm, setRevKeyConfirm] = useState("");
-  const [keyError, setKeyError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const config = useDesktopConfig();
+  const [state, setState] = useState<WizardState>({ kind: "welcome" });
+  const operation = useRef<PreferenceEdit | null>(null);
+  useEffect(() => () => { operation.current = null; }, []);
+  function navigate(next: EditableStep) { if (!operation.current) setState(next); }
 
-  async function handleSave() {
-    if (engine === "rev") {
-      if (!revKey.trim()) {
-        setKeyError("API key cannot be empty.");
-        return;
-      }
-      if (revKey !== revKeyConfirm) {
-        setKeyError("Keys do not match. Please try again.");
-        return;
-      }
-    }
-
-    setSaving(true);
+  async function advance(previous: EngineStep | KeyStep) {
+    if (operation.current) return;
+    let edit: PreferenceEdit;
     try {
-      await desktopConfig.writeConfig({
-        engine,
-        rev_key: engine === "rev" ? revKey.trim() : null,
-      });
-      setStep("done");
-    } catch (e) {
-      setKeyError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
+      switch (previous.kind) {
+        case "engine":
+          if (previous.selection.kind === "rev") {
+            navigate({ kind: "api-key", credentials: previous.selection.credentials, error: null });
+            return;
+          }
+          edit = PreferenceDraft.firstRun("whisper", "").prepare();
+          break;
+        case "api-key":
+          if (previous.credentials.key !== previous.credentials.confirmation) throw new Error("Keys do not match. Please try again.");
+          edit = PreferenceDraft.firstRun("rev", previous.credentials.key).prepare();
+          break;
+      }
+    } catch (error) { setState({ ...previous, error: String(error) }); return; }
+    operation.current = edit;
+    setState({ kind: "saving", edit, previous });
+    try {
+      const receipt = await config.writeConfig(edit);
+      if (operation.current === edit) setState({ kind: "done", receipt });
+    } catch (error) {
+      if (operation.current === edit) setState({ ...previous, error: "Could not confirm setup saved. " + String(error) });
+    } finally { if (operation.current === edit) operation.current = null; }
   }
 
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--bg-page)]">
-      <div className="max-w-lg w-full mx-4">
-        {/* Welcome */}
-        {step === "welcome" && (
-          <div className="text-center space-y-6">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">
-                Welcome to Batchalign
-              </h1>
-              <p className="text-gray-600 mt-3 leading-relaxed">
-                Thanks for checking out Batchalign! This appears to be your first
-                time using the app, so let's do some quick setup.
-              </p>
-              <p className="text-gray-500 text-sm mt-3 leading-relaxed">
-                For speech-to-text tasks, you can choose between Rev.AI (a fast
-                cloud service that requires an API key) or Whisper (a free local
-                model that runs on your machine). You can always change this later.
-              </p>
-            </div>
-            <button
-              onClick={() => setStep("engine")}
-              className="px-8 py-3 text-sm font-semibold text-white bg-indigo-600 rounded-lg
-                hover:bg-indigo-700 transition-colors"
-            >
-              Let's Get Started
-            </button>
+  const view = state.kind === "saving" ? state.previous : state;
+  return <div className="min-h-screen flex items-center justify-center bg-[var(--bg-page)]">
+    <div className="max-w-lg w-full mx-4 space-y-4">
+      <fieldset disabled={state.kind === "saving"} className="space-y-5">
+        {view.kind === "welcome" && <div className="text-center space-y-6">
+          <h1 className="text-2xl font-bold">Welcome to {DESKTOP_APP_NAME}</h1>
+          <p>Set up {DESKTOP_APP_NAME} to use your installed batchalign3 CLI.</p>
+          <p>Rev.AI uploads recordings to a paid cloud service. Whisper runs locally and needs model downloads. You can change the preference later in Settings.</p>
+          <button type="button" onClick={() => navigate({ kind: "engine", selection: { kind: "whisper" }, error: null })}
+            className="rounded bg-indigo-600 text-white px-6 py-3">Let's Get Started</button>
+        </div>}
+        {view.kind === "engine" && <div className="space-y-5">
+          <h2 className="text-lg font-semibold">Choose your ASR engine</h2>
+          <p className="text-sm">This sets the default for speech-to-text tasks.</p>
+          <EngineCard name="Rev.AI" description="Paid cloud service; uploads recordings."
+            pros={["No local ASR model required"]} cons={["Requires an API key", "Uses a paid service"]}
+            selected={view.selection.kind === "rev"} onSelect={() => navigate({ ...view, selection: view.selection.kind === "rev" ? view.selection : { kind: "rev", credentials: { key: "", confirmation: "" } }, error: null })} />
+          <EngineCard name="Whisper" description="Local inference; requires model downloads."
+            pros={["No ASR API key required"]} cons={["Uses local compute", "First-use downloads"]}
+            selected={view.selection.kind === "whisper"} onSelect={() => navigate({ ...view, selection: { kind: "whisper" }, error: null })} />
+          {view.error && <p role="alert">{view.error}</p>}
+          <div className="flex justify-between">
+            <button type="button" onClick={() => navigate({ kind: "welcome" })}>Back</button>
+            <button type="button" onClick={() => { void advance(view); }} className="rounded border px-4 py-2">{view.selection.kind === "rev" ? "Next" : "Finish Setup"}</button>
           </div>
-        )}
-
-        {/* Engine selection */}
-        {step === "engine" && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">
-                Choose your ASR engine
-              </h2>
-              <p className="text-sm text-gray-500 mt-1">
-                This sets your default for speech-to-text. You can override per-job later.
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              <EngineCard
-                name="Rev.AI"
-                description="Cloud-based, fast and accurate. Requires a paid API key. English only."
-                pros={["Faster processing", "Higher accuracy", "No GPU needed"]}
-                cons={["English only", "Requires API key", "Costs per minute of audio"]}
-                selected={engine === "rev"}
-                onSelect={() => setEngine("rev")}
-              />
-              <EngineCard
-                name="Whisper"
-                description="Runs locally on your machine. Free, but slower."
-                pros={["Free to use", "No API key needed", "Works offline"]}
-                cons={["Slower processing", "Requires GPU for best speed", "Downloads ~2 GB of models on first use"]}
-                selected={engine === "whisper"}
-                onSelect={() => setEngine("whisper")}
-              />
-            </div>
-
-            <div className="flex justify-between pt-2">
-              <button
-                onClick={() => setStep("welcome")}
-                className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                Back
-              </button>
-              <button
-                onClick={() => {
-                  if (engine === "rev") {
-                    setStep("api-key");
-                  } else {
-                    handleSave();
-                  }
-                }}
-                className="px-6 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-lg
-                  hover:bg-indigo-700 transition-colors"
-              >
-                {engine === "rev" ? "Next" : saving ? "Saving..." : "Finish Setup"}
-              </button>
-            </div>
+        </div>}
+        {view.kind === "api-key" && <div className="space-y-5">
+          <h2 className="text-lg font-semibold">Rev.AI API Key</h2>
+          <p className="text-sm">Enter your Rev.AI key. It is saved locally in ~/.batchalign.ini.</p>
+          <label className="block text-sm">API key
+            <input aria-label="API key" type="password" autoComplete="off" value={view.credentials.key}
+              onChange={event => navigate({ ...view, credentials: { ...view.credentials, key: event.target.value }, error: null })}
+              className="block w-full rounded border p-2" />
+          </label>
+          <label className="block text-sm">Confirm API key
+            <input aria-label="Confirm API key" type="password" autoComplete="off" value={view.credentials.confirmation}
+              onChange={event => navigate({ ...view, credentials: { ...view.credentials, confirmation: event.target.value }, error: null })}
+              className="block w-full rounded border p-2" />
+          </label>
+          {view.error && <p role="alert">{view.error}</p>}
+          <div className="flex justify-between">
+            <button type="button" onClick={() => navigate({ kind: "engine", selection: { kind: "rev", credentials: view.credentials }, error: null })}>Back</button>
+            <button type="button" onClick={() => { void advance(view); }} className="rounded border px-4 py-2">Save &amp; Finish</button>
           </div>
-        )}
-
-        {/* API key entry */}
-        {step === "api-key" && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">
-                Rev.AI API Key
-              </h2>
-              <p className="text-sm text-gray-500 mt-1">
-                Head to{" "}
-                <span className="text-indigo-600 font-medium">
-                  rev.ai/auth/signup
-                </span>{" "}
-                to get an API key, then paste it below. We'll store it locally
-                on your machine.
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  value={revKey}
-                  onChange={(e) => {
-                    setRevKey(e.target.value);
-                    setKeyError(null);
-                  }}
-                  placeholder="Paste your Rev.AI API key"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                    focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Confirm API Key
-                </label>
-                <input
-                  type="password"
-                  value={revKeyConfirm}
-                  onChange={(e) => {
-                    setRevKeyConfirm(e.target.value);
-                    setKeyError(null);
-                  }}
-                  placeholder="Paste again to confirm"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                    focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
-              </div>
-            </div>
-
-            {keyError && (
-              <p className="text-sm text-red-600">{keyError}</p>
-            )}
-
-            <div className="flex justify-between pt-2">
-              <button
-                onClick={() => setStep("engine")}
-                className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                Back
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="px-6 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-lg
-                  hover:bg-indigo-700 transition-colors disabled:opacity-50"
-              >
-                {saving ? "Saving..." : "Save & Finish"}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Done */}
-        {step === "done" && (
-          <div className="text-center space-y-6">
-            <div>
-              <h2 className="text-xl font-bold text-gray-900">
-                You're all set!
-              </h2>
-              <p className="text-gray-600 mt-3">
-                Default ASR engine:{" "}
-                <span className="font-semibold">
-                  {engine === "rev" ? "Rev.AI" : "Whisper"}
-                </span>
-              </p>
-              <p className="text-sm text-gray-400 mt-2">
-                You can change this anytime from Settings.
-                Your configuration is saved at ~/.batchalign.ini
-              </p>
-            </div>
-            <button
-              onClick={onComplete}
-              className="px-8 py-3 text-sm font-semibold text-white bg-emerald-600 rounded-lg
-                hover:bg-emerald-700 transition-colors"
-            >
-              Get Started
-            </button>
-          </div>
-        )}
-      </div>
+        </div>}
+        {view.kind === "done" && <div className="text-center space-y-6">
+          <h2 className="text-xl font-bold">You're all set!</h2>
+          <p>Default ASR engine: {view.receipt.engine === "rev" ? "Rev.AI" : "Whisper"}</p>
+          <p className="text-sm">You can change this in Settings. Other provider credentials are preserved.</p>
+          <button type="button" onClick={onComplete} className="rounded bg-emerald-600 text-white px-6 py-3">Get Started</button>
+        </div>}
+      </fieldset>
+      {state.kind === "saving" && <p role="status">Saving setup...</p>}
     </div>
-  );
+  </div>;
 }

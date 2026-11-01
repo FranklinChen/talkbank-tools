@@ -232,6 +232,9 @@ impl fmt::Display for BindingMismatch {
 /// comparison result: nothing was compared.
 #[derive(Debug, thiserror::Error)]
 enum UtsegReplayRefusal {
+    /// The replay producer could not write its own header.
+    #[error("generated header was blank: {0}")]
+    GeneratedHeader(talkbank_model::model::BlankContent),
     /// The parser failed internally, without establishing artifact validity.
     #[error("{origin}: {failure}")]
     InternalParser {
@@ -393,10 +396,22 @@ enum UtsegReplayRefusal {
     Stamp(#[from] UnparseableStamp),
 }
 
+impl From<crate::utseg::UtsegDocumentRefusal> for UtsegReplayRefusal {
+    fn from(error: crate::utseg::UtsegDocumentRefusal) -> Self {
+        match error {
+            crate::utseg::UtsegDocumentRefusal::Partition(error) => Self::Partition(error),
+            crate::utseg::UtsegDocumentRefusal::GeneratedHeader(error) => {
+                Self::GeneratedHeader(error)
+            }
+        }
+    }
+}
+
 impl From<UtsegReplayRefusal> for CliError {
     /// Keep tool failure distinct from refusals about the selected artifacts.
     fn from(refusal: UtsegReplayRefusal) -> Self {
         match refusal {
+            UtsegReplayRefusal::GeneratedHeader(error) => Self::Server(error.into()),
             UtsegReplayRefusal::InternalParser { origin, failure } => {
                 Self::ChatParserFailure { origin, failure }
             }
@@ -850,7 +865,8 @@ fn comparable_lines<'a>(
     for line in file.lines.as_slice() {
         if let Line::Header { header, .. } = line
             && let Header::Comment { content } = header.as_ref()
-            && let Some(generated) = recognize_generated_comment(&content.to_chat_string())?
+            && let Some(generated) =
+                recognize_generated_comment(&content.as_bullet_content().to_chat_string())?
         {
             set_aside.push(SetAsideComment::from(generated));
             continue;
@@ -1028,6 +1044,23 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn replay_distinguishes_partition_input_from_generated_header_failure() {
+        let partition = crate::utseg::UtsegDocumentRefusal::from(
+            batchalign_transform::utseg::UtsegApplyRefusal::UnknownUtterance(99),
+        );
+        assert!(matches!(
+            CliError::from(UtsegReplayRefusal::from(partition)),
+            CliError::InvalidArgument(_)
+        ));
+        let blank = talkbank_model::model::CommentContent::try_from_text(" ").unwrap_err();
+        let generated = crate::utseg::UtsegDocumentRefusal::from(blank);
+        assert!(matches!(
+            CliError::from(UtsegReplayRefusal::from(generated)),
+            CliError::Server(crate::error::ServerError::GeneratedHeader(_))
+        ));
+    }
 
     /// One multi-word utterance, so the collector dispatches exactly one
     /// request and a split is observable.

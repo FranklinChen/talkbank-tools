@@ -546,8 +546,8 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
             &self.state.applied,
             options.tokenization == TokenizationMode::StanzaRetokenize,
         );
-        crate::provenance::inject_provenance(&mut self.chat, &provenance);
-        self.state.applied.annotate_secondary(&mut self.chat);
+        crate::provenance::inject_provenance(&mut self.chat, &provenance)?;
+        self.state.applied.annotate_secondary(&mut self.chat)?;
         remove_empty_morphosyntax_placeholders(&mut self.chat);
 
         let output = self.scope.judge(self.chat)?;

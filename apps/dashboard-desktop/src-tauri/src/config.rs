@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use crate::protocol::{DesktopCommandAck, UserConfig};
 
 /// Path to `~/.batchalign.ini`.
-fn config_path() -> PathBuf {
+fn config_path() -> Result<PathBuf, String> {
     home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".batchalign.ini")
+        .map(|home| home.join(".batchalign.ini"))
+        .ok_or_else(|| {
+            "Cannot locate your home directory; configuration was not changed".to_owned()
+        })
 }
 
 /// Best-effort user home directory lookup across Unix and Windows shells.
@@ -24,17 +26,20 @@ fn home_dir() -> Option<PathBuf> {
 
 /// Resolve the config path from an injected environment lookup.
 #[cfg(test)]
-fn config_path_from_env(mut get_var: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
-    home_dir_from_env(&mut get_var)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".batchalign.ini")
+fn config_path_from_env(mut get_var: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+    home_dir_from_env(&mut get_var).map(|home| home.join(".batchalign.ini"))
 }
 
 /// Best-effort user home directory lookup across Unix and Windows shells.
 fn home_dir_from_env(mut get_var: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
     get_var("HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| get_var("USERPROFILE").map(PathBuf::from))
+        .or_else(|| {
+            get_var("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(|| {
             let drive = get_var("HOMEDRIVE")?;
             let path = get_var("HOMEPATH")?;
@@ -49,18 +54,18 @@ fn default_user_config() -> UserConfig {
     }
 }
 
+#[cfg(test)]
 fn is_first_launch_at(path: &Path) -> bool {
     !path.is_file()
 }
 
-fn read_config_from_path(path: &Path) -> UserConfig {
-    if !path.is_file() {
-        return default_user_config();
-    }
-
+fn read_config_from_path(path: &Path) -> Result<UserConfig, String> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return default_user_config(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_user_config())
+        }
+        Err(error) => return Err(format!("Could not read your configuration: {error}")),
     };
 
     // Parse INI manually (same format as batchalign2/batchalign3 CLI).
@@ -71,7 +76,7 @@ fn read_config_from_path(path: &Path) -> UserConfig {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_asr = trimmed == "[asr]";
+            in_asr = trimmed.eq_ignore_ascii_case("[asr]");
             continue;
         }
         if in_asr {
@@ -81,30 +86,25 @@ fn read_config_from_path(path: &Path) -> UserConfig {
         }
     }
 
-    UserConfig {
+    Ok(UserConfig {
         engine: values
             .get("engine")
             .cloned()
             .unwrap_or_else(|| "whisper".into()),
         rev_key: values.get("engine.rev.key").cloned(),
-    }
+    })
 }
 
 fn write_config_to_path(path: &Path, config: &UserConfig) -> Result<DesktopCommandAck, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to prepare config directory: {e}"))?;
-    }
-
-    let mut content = String::from("[asr]\n");
-    content.push_str(&format!("engine = {}\n", config.engine));
-    if let Some(key) = &config.rev_key {
-        if !key.is_empty() {
-            content.push_str(&format!("engine.rev.key = {key}\n"));
-        }
-    }
-
-    std::fs::write(path, content).map_err(|e| format!("Failed to write config: {e}"))?;
+    use batchalign_types::asr_preferences::{PreferenceEdit, PreferenceEngine};
+    let engine = match config.engine.as_str() {
+        "rev" => PreferenceEngine::Rev,
+        "whisper" => PreferenceEngine::Whisper,
+        _ => return Err("Choose Rev.AI or Whisper before saving settings".to_owned()),
+    };
+    PreferenceEdit::new(engine, config.rev_key.clone())
+        .and_then(|edit| edit.write_to(path))
+        .map_err(|error| format!("Configuration was not changed: {error}"))?;
     Ok(DesktopCommandAck {
         message: format!("Config saved to {}", path.display()),
     })
@@ -112,24 +112,28 @@ fn write_config_to_path(path: &Path, config: &UserConfig) -> Result<DesktopComma
 
 /// True if `~/.batchalign.ini` does NOT exist, triggers the setup wizard.
 #[tauri::command]
-pub fn is_first_launch() -> bool {
-    is_first_launch_at(&config_path())
+pub fn is_first_launch() -> Result<bool, String> {
+    let path = config_path()?;
+    match path.try_exists() {
+        Ok(exists) => Ok(!exists),
+        Err(error) => Err(format!("Could not check your configuration: {error}")),
+    }
 }
 
 /// Read the current user config from `~/.batchalign.ini`.
 ///
 /// Returns default fields if the file doesn't exist or is missing keys.
 #[tauri::command]
-pub fn read_config() -> UserConfig {
-    read_config_from_path(&config_path())
+pub fn read_config() -> Result<UserConfig, String> {
+    read_config_from_path(&config_path()?)
 }
 
 /// Write user config to `~/.batchalign.ini`.
 ///
-/// Creates the file if it doesn't exist. Overwrites any existing content.
+/// Creates a missing file; preserves unrelated credentials, sections and comments.
 #[tauri::command]
 pub fn write_config(config: UserConfig) -> Result<DesktopCommandAck, String> {
-    write_config_to_path(&config_path(), &config)
+    write_config_to_path(&config_path()?, &config)
 }
 
 #[cfg(test)]
@@ -187,7 +191,7 @@ mod tests {
         let message = write_config_to_path(&path, &config).expect("write config");
 
         assert!(message.message.contains(".batchalign.ini"));
-        assert_eq!(read_config_from_path(&path), config);
+        assert_eq!(read_config_from_path(&path).unwrap(), config);
         assert!(!is_first_launch_at(&path));
     }
 
@@ -196,8 +200,40 @@ mod tests {
         let temp = TempDirGuard::new();
         let path = temp.path().join(".batchalign.ini");
 
-        assert_eq!(read_config_from_path(&path), default_user_config());
+        assert_eq!(read_config_from_path(&path).unwrap(), default_user_config());
         assert!(is_first_launch_at(&path));
+    }
+
+    #[test]
+    fn settings_preserve_credentials_and_refuse_failed_reads_or_injection() {
+        let temp = TempDirGuard::new();
+        let path = temp.path().join(".batchalign.ini");
+        let original = "# personal\n[asr]\nengine=rev\nengine.rev.key=retained\nengine.tencent.key=other\n[diarization]\nkey=speaker\n";
+        std::fs::write(&path, original).unwrap();
+        write_config_to_path(
+            &path,
+            &UserConfig {
+                engine: "whisper".into(),
+                rev_key: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original.replace("engine=rev", "engine = whisper")
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert!(write_config_to_path(
+            &path,
+            &UserConfig {
+                engine: "rev\n[other]".into(),
+                rev_key: None
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(read_config_from_path(temp.path()).is_err());
+        assert_eq!(config_path_from_env(|_| None), None);
     }
 
     #[test]
@@ -210,7 +246,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            home_path,
+            home_path.unwrap(),
             PathBuf::from("unix-home").join(".batchalign.ini")
         );
 
@@ -222,7 +258,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            userprofile_path,
+            userprofile_path.unwrap(),
             PathBuf::from("windows-home").join(".batchalign.ini")
         );
 
@@ -234,7 +270,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            drive_home_path,
+            drive_home_path.unwrap(),
             PathBuf::from("drive")
                 .join("fallback-home")
                 .join(".batchalign.ini")

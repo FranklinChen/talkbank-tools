@@ -9,7 +9,7 @@
  * batchalign2 behavior where `config_read(interactive=True)` triggers
  * `interactive_setup()` on first CLI invocation.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppRoutes } from "./AppRoutes";
 import { useFleetDashboardSync } from "./hooks/useFleetDashboardSync";
 import { SetupWizard } from "./components/setup/SetupWizard";
@@ -24,10 +24,11 @@ export function App() {
   const environment = useDesktopEnvironment();
   const desktopConfig = useDesktopConfig();
 
-  const [showWizard, setShowWizard] = useState<boolean | null>(null);
+  const [setup, setSetup] = useState<{ kind: "checking" } | { kind: "needed" } | { kind: "ready" } | { kind: "failed"; message: string }>({ kind: "checking" });
+  const checkOwner = useRef<object | null>(null);
 
   const handleSetupComplete = useCallback(() => {
-    setShowWizard(false);
+    setSetup({ kind: "ready" });
     if (environment.isDesktop && window.location.pathname === "/") {
       window.history.replaceState(
         null,
@@ -38,28 +39,29 @@ export function App() {
     }
   }, [environment]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadFirstLaunchState() {
-      const next = environment.isDesktop
-        ? await desktopConfig.isFirstLaunch()
-        : false;
-      if (!cancelled) {
-        setShowWizard(next);
-      }
-    }
-
-    void loadFirstLaunchState();
-    return () => {
-      cancelled = true;
-    };
-  }, [desktopConfig, environment]);
+  async function loadFirstLaunchState() {
+    if (checkOwner.current) return;
+    const owner = {};
+    checkOwner.current = owner;
+    setSetup({ kind: "checking" });
+    try {
+      const next = environment.isDesktop ? await desktopConfig.isFirstLaunch() : false;
+      if (typeof next !== "boolean") throw new Error("The desktop returned an incomplete first-launch check.");
+      if (checkOwner.current === owner) setSetup(next ? { kind: "needed" } : { kind: "ready" });
+    } catch (error) {
+      if (checkOwner.current === owner) setSetup({ kind: "failed", message: String(error) });
+    } finally { if (checkOwner.current === owner) checkOwner.current = null; }
+  }
+  useEffect(() => { void loadFirstLaunchState(); return () => { checkOwner.current = null; }; }, [desktopConfig, environment]);
 
   // Still checking: render nothing briefly
-  if (showWizard === null && environment.isDesktop) return null;
+  if (setup.kind === "checking" && environment.isDesktop) return <p role="status">Reading configuration...</p>;
+  if (setup.kind === "failed") return <div>
+    <p role="alert">Could not read configuration: {setup.message}. No settings were changed.</p>
+    <button type="button" onClick={() => { void loadFirstLaunchState(); }}>Retry configuration check</button>
+  </div>;
 
-  if (showWizard) {
+  if (setup.kind === "needed") {
     return <SetupWizard onComplete={handleSetupComplete} />;
   }
 

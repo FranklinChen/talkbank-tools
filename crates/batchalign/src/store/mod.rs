@@ -784,6 +784,8 @@ pub struct FileResultEntry {
 /// enough information for the handler to locate result files on disk and decide
 /// whether to stream content or return paths.
 pub struct JobDetail {
+    /// Admitted output locations from the persisted paths-mode mapping.
+    pub output_folders: crate::api::JobOutputFolders,
     /// Submitted typed options, including the required native export format.
     pub options: crate::options::CommandOptions,
     /// Command whose output policy maps input names to result artifacts.

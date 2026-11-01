@@ -13,7 +13,7 @@ The CHAT-format core (the `chatter` CLI, the Rust CHAT parsing and validation cr
 | Task | Surface | Support Status |
 |---|---|---|
 | Transcribe, align, or morphotag CHAT with audio and ML | `batchalign3` CLI / server | 🔷 Public preview; wheels for Windows, macOS, Linux |
-| Standalone desktop GUI for Batchalign | Batchalign Desktop (`apps/dashboard-desktop/`) | ⚠️ Experimental only; build from source |
+| Standalone desktop GUI for Batchalign | BA3 Runner (`apps/dashboard-desktop/`) | ⚠️ Experimental only; build from source |
 
 **Legend:** 🔷 = Public preview, ⚠️ = Experimental (not supported for end-users).
 

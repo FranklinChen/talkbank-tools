@@ -1,19 +1,20 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Batchalign3",
+  "productName": "BA3 Runner",
+  "mainBinaryName": "ba3-runner",
   "version": "0.1.0",
-  "identifier": "org.talkbank.batchalign3.dashboard",
+  "identifier": "com.franklinchen.ba3-runner",
   "build": {
-    "beforeDevCommand": "cd ../../../frontend && npm run dev -- --host 127.0.0.1 --port 1420",
-    "devUrl": "http://127.0.0.1:1420/process?server=http://127.0.0.1:18000",
-    "beforeBuildCommand": "bash ../../../scripts/generate_dashboard_api_types.sh && cd ../../../frontend && npm run build",
+    "beforeDevCommand": "npm --prefix ../../frontend run dev -- --host 127.0.0.1 --port 1420",
+    "devUrl": "http://127.0.0.1:1420/process",
+    "beforeBuildCommand": "bash ../../scripts/generate_dashboard_api_types.sh && npm --prefix ../../frontend run build",
     "frontendDist": "../../../frontend/dist"
   },
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "Batchalign3",
+        "title": "BA3 Runner",
         "width": 1024,
         "height": 720,
         "minWidth": 800,
@@ -27,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "targets": "all"
   }
 }

@@ -5,7 +5,8 @@
  * components should depend on so the desktop seam stays explicit and small.
  */
 
-import type { DesktopConfig, DesktopServerStatus } from "./protocol";
+import type { DesktopServerStatus, DesktopPathProposal, DesktopPathReceipt } from "./protocol";
+import type { PreferenceDraft, PreferenceEdit, SavedPreferences } from "./preferences";
 
 /** Runtime-only capability: answers whether the UI runs in the desktop shell. */
 export interface DesktopEnvironmentCapability {
@@ -15,6 +16,8 @@ export interface DesktopEnvironmentCapability {
 
 /** File-system and native-dialog helpers needed by the process flow. */
 export interface DesktopFilesCapability {
+  /** Inspect real filesystem identities before a local job is submitted. */
+  admitJobPaths: (proposal: DesktopPathProposal) => Promise<DesktopPathReceipt>;
   /** Open the native folder picker. */
   pickFolder: (title?: string) => Promise<string | null>;
   /** Open the native output-folder picker. */
@@ -30,16 +33,10 @@ export interface DesktopConfigCapability {
   /** Detect whether the desktop shell should show the first-run wizard. */
   isFirstLaunch: () => Promise<boolean>;
   /** Read the desktop shell's persisted user configuration. */
-  readConfig: () => Promise<DesktopConfig>;
+  readConfig: () => Promise<PreferenceDraft>;
   /** Persist one user-configuration update through the desktop shell. */
-  writeConfig: (config: DesktopConfig) => Promise<void>;
+  writeConfig: (edit: PreferenceEdit) => Promise<SavedPreferences>;
 }
-
-/** Callback fired when the shell emits one server-status update. */
-export type DesktopServerStatusListener = (status: DesktopServerStatus) => void;
-
-/** Unsubscribe function returned by desktop event subscriptions. */
-export type DesktopCapabilityUnlisten = () => void;
 
 /** Server lifecycle helpers needed by the process flow. */
 export interface DesktopServerCapability {
@@ -47,10 +44,4 @@ export interface DesktopServerCapability {
   serverStatus: () => Promise<DesktopServerStatus>;
   /** Ask the desktop shell to start the local server process. */
   startServer: () => Promise<DesktopServerStatus>;
-  /** Ask the desktop shell to stop the local server process. */
-  stopServer: () => Promise<DesktopServerStatus>;
-  /** Subscribe to shell-side server lifecycle changes. */
-  onServerStatusChange: (
-    listener: DesktopServerStatusListener,
-  ) => Promise<DesktopCapabilityUnlisten>;
 }

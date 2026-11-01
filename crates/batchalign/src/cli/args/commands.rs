@@ -1378,6 +1378,18 @@ pub struct ServeStatusArgs {
     /// Server URL to check.
     #[arg(long)]
     pub server: Option<String>,
+    /// Output for people or for a desktop/client discovering the managed server.
+    #[arg(long, value_enum, default_value = "human")]
+    pub format: ServeStatusFormat,
+}
+
+/// Representation of an observed server, independent of its health state.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ServeStatusFormat {
+    /// Human-readable diagnostic on stderr.
+    Human,
+    /// One explicit ready/stopped/refused observation on stdout.
+    Json,
 }
 
 /// Arguments for the `jobs` subcommand.

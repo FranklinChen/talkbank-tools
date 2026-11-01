@@ -275,7 +275,7 @@ where
     // command with no engine behind it.
     match (hooks.provenance)(lang, &responses)? {
         TextStamp::Stamped(comment) => {
-            crate::provenance::inject_provenance(chat_file, &comment);
+            crate::provenance::inject_provenance(chat_file, &comment)?;
         }
         TextStamp::NotStamped(reason) => {
             info!(
@@ -543,7 +543,13 @@ where
         // reason rather than an absence an operator has to interpret.
         let stamp = match (hooks.provenance)(lang, &file_responses) {
             Ok(TextStamp::Stamped(comment)) => {
-                crate::provenance::inject_provenance(chat_file, &comment);
+                if let Err(error) = crate::provenance::inject_provenance(chat_file, &comment) {
+                    results.push(TextBatchFileResult::err(
+                        file.filename.clone(),
+                        TextWorkflowFileError::from_server_error(&ServerError::from(error)),
+                    ));
+                    continue;
+                }
                 FileStampOutcome::Stamped {
                     command: hooks.command.to_string(),
                 }

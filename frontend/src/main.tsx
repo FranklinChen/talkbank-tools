@@ -11,11 +11,12 @@ import { App } from "./app";
 import { DesktopProvider } from "./desktop/DesktopContext";
 import { queryClient } from "./query";
 import "./app.css";
+import { DesktopBootstrap } from "./desktop/Bootstrap";
 
 createRoot(document.getElementById("app")!).render(
-  <QueryClientProvider client={queryClient}>
+  <DesktopBootstrap><QueryClientProvider client={queryClient}>
     <DesktopProvider>
       <App />
     </DesktopProvider>
-  </QueryClientProvider>
+  </QueryClientProvider></DesktopBootstrap>
 );

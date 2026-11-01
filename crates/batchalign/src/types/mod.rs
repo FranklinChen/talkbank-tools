@@ -118,6 +118,7 @@ pub mod domain;
 pub mod engines;
 pub mod execution_plan;
 pub mod options;
+pub mod output_access;
 pub mod params;
 pub mod request;
 pub mod response;

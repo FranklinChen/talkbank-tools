@@ -821,15 +821,22 @@ pub(crate) fn insert_pos_after_constant_headers(file: &ChatFile) -> usize {
 /// (`[fc-ba3 <command> |` or the legacy `[ba3 <command> |`). New comments are
 /// placed immediately after the constant participant headers (the last `@ID` /
 /// `@Birth of` / `@Birthplace of` / `@L1 of`).
-pub fn inject_provenance(file: &mut ChatFile, comment: &ProvenanceComment) {
+pub fn inject_provenance(
+    file: &mut ChatFile,
+    comment: &ProvenanceComment,
+) -> Result<(), talkbank_model::model::BlankContent> {
     let new_content = comment.format();
+    let content = talkbank_model::model::CommentContent::try_from_text(&new_content)?;
 
     // Remove existing provenance comment for this command.
     file.lines.retain(|line| {
         if let Line::Header { header, .. } = line
             && let Header::Comment { content } = header.as_ref()
         {
-            return !is_stamp_for(&content.to_chat_string(), comment.command);
+            return !is_stamp_for(
+                &content.as_bullet_content().to_chat_string(),
+                comment.command,
+            );
         }
         true
     });
@@ -838,17 +845,11 @@ pub fn inject_provenance(file: &mut ChatFile, comment: &ProvenanceComment) {
     // @ID), so @Birth of / @Birthplace of / @L1 of stay adjacent to @ID.
     let insert_pos = insert_pos_after_constant_headers(file);
 
-    let bullet_content = crate::chat_ops::BulletContent::from_text(new_content);
-
     file.lines.insert(
         insert_pos,
-        Line::header(
-            Location::Unlocated,
-            Header::Comment {
-                content: bullet_content,
-            },
-        ),
+        Line::header(Location::Unlocated, Header::Comment { content }),
     );
+    Ok(())
 }
 
 /// Carry the source's morphology records with morphology copied from it.
@@ -865,7 +866,7 @@ pub(crate) fn inherit_morphotag_provenance(
         matches!(line,
             Line::Header { header, .. }
             if matches!(header.as_ref(), Header::Comment { content }
-                if is_stamp_for(&content.to_chat_string(), ReleasedCommand::Morphotag)))
+                if is_stamp_for(&content.as_bullet_content().to_chat_string(), ReleasedCommand::Morphotag)))
     };
     let inherited = prior
         .document()
@@ -887,13 +888,24 @@ pub(crate) fn inherit_morphotag_provenance(
 /// rather than AST objects. Parse failure returns the original diagnostics;
 /// a recovered document must not be serialized as successful output merely
 /// because the caller requested a provenance comment.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvenanceInjectionError {
+    /// The source cannot be parsed without recovery.
+    #[error(transparent)]
+    Parse(#[from] talkbank_model::ParseErrors),
+    /// The producer supplied blank provenance content.
+    #[error("generated provenance header was blank: {0}")]
+    Header(#[from] talkbank_model::model::BlankContent),
+}
+
+/// Parse strictly, then admit and insert the generated provenance header.
 pub fn inject_provenance_into_text(
     chat_text: &str,
     comment: &ProvenanceComment,
-) -> Result<String, talkbank_model::ParseErrors> {
+) -> Result<String, ProvenanceInjectionError> {
     let parser = crate::chat_parser();
     let mut file = parse_strict(&parser, chat_text)?;
-    inject_provenance(&mut file, comment);
+    inject_provenance(&mut file, comment)?;
     Ok(to_chat_string(&file))
 }
 
@@ -1002,14 +1014,14 @@ pub(crate) fn finish_incremental_morphotag_provenance(
     lang: &LanguageCode3,
     applied: &AppliedAnalyses,
     retokenize: bool,
-) -> MorphologyProvenanceReport {
+) -> Result<MorphologyProvenanceReport, talkbank_model::model::BlankContent> {
     let candidate = match prior {
         Some(prior) => incremental_morphotag_provenance(prior, lang, applied, retokenize),
         None => Ok(Some(morphotag_provenance(lang, applied, retokenize))),
     };
-    match candidate {
+    Ok(match candidate {
         Ok(Some(stamp)) => {
-            inject_provenance(destination, &stamp);
+            inject_provenance(destination, &stamp)?;
             MorphologyProvenanceReport::Complete
         }
         Ok(None) => MorphologyProvenanceReport::Complete,
@@ -1027,7 +1039,7 @@ pub(crate) fn finish_incremental_morphotag_provenance(
             let already_marked = destination.lines.iter().any(|line| {
                 let Line::Header { header, .. } = line else { return false; };
                 let Header::Comment { content } = header.as_ref() else { return false; };
-                let text = content.to_chat_string();
+                let text = content.as_bullet_content().to_chat_string();
                 matches!(RecognizedComment::classify(&text), RecognizedComment::Stamp(record)
                     if record.records(ReleasedCommand::Morphotag)
                     && record.parse().is_ok_and(|parsed| parsed.fields.contains_key(StampField::ProvenanceIncomplete.as_str())))
@@ -1039,14 +1051,16 @@ pub(crate) fn finish_incremental_morphotag_provenance(
                     Line::header(
                         Location::Unlocated,
                         Header::Comment {
-                            content: crate::chat_ops::BulletContent::from_text(stamp.format()),
+                            content: talkbank_model::model::CommentContent::try_from_text(
+                                stamp.format(),
+                            )?,
                         },
                     ),
                 );
             }
             MorphologyProvenanceReport::Incomplete(cause)
         }
-    }
+    })
 }
 
 /// Build the stamp for an incremental morphotag run, which reanalyzes only the
@@ -1133,7 +1147,7 @@ fn stamped_morphotag_record(
         let Header::Comment { content } = header.as_ref() else {
             continue;
         };
-        let text = content.to_chat_string();
+        let text = content.as_bullet_content().to_chat_string();
         let stamp = match RecognizedComment::classify(&text) {
             RecognizedComment::Stamp(stamp) if stamp.records(command) => stamp,
             // Another command's stamp, our warning, someone else's comment, or
@@ -1434,15 +1448,19 @@ fn our_warning_engine(text: &str) -> Option<&str> {
 /// A previous warning of ours, in either shape, is replaced rather than
 /// duplicated when re-transcribing; see [`OUR_WARNING_SHAPES`] for what counts
 /// as ours.
-pub(crate) fn inject_unchecked_warning(file: &mut ChatFile, asr: &AsrIdentity) {
+pub(crate) fn inject_unchecked_warning(
+    file: &mut ChatFile,
+    asr: &AsrIdentity,
+) -> Result<(), talkbank_model::model::BlankContent> {
     let warning_text = UncheckedAsrWarning { asr }.to_string();
+    let content = talkbank_model::model::CommentContent::try_from_text(warning_text)?;
 
     // Remove existing unchecked warning (if re-transcribing).
     file.lines.retain(|line| {
         if let Line::Header { header, .. } = line
             && let Header::Comment { content } = header.as_ref()
         {
-            return our_warning_engine(&content.to_chat_string()).is_none();
+            return our_warning_engine(&content.as_bullet_content().to_chat_string()).is_none();
         }
         true
     });
@@ -1451,17 +1469,11 @@ pub(crate) fn inject_unchecked_warning(file: &mut ChatFile, asr: &AsrIdentity) {
     // provenance), so @Birth of / @Birthplace of / @L1 of stay adjacent to @ID.
     let insert_pos = insert_pos_after_constant_headers(file);
 
-    let bullet_content = crate::chat_ops::BulletContent::from_text(warning_text);
-
     file.lines.insert(
         insert_pos,
-        Line::header(
-            Location::Unlocated,
-            Header::Comment {
-                content: bullet_content,
-            },
-        ),
+        Line::header(Location::Unlocated, Header::Comment { content }),
     );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,7 +2030,9 @@ mod tests {
             );
             let errors = inject_provenance_into_text(&chat, &comment)
                 .expect_err("provenance must not hide main-tier or generated-tier parse errors");
-            assert!(!errors.errors.is_empty());
+            assert!(
+                matches!(errors, ProvenanceInjectionError::Parse(errors) if !errors.errors.is_empty())
+            );
         }
     }
 
@@ -2307,7 +2321,7 @@ mod tests {
             crate::types::engines::AsrEngineName::RevAi,
             &BTreeMap::new(),
         );
-        inject_unchecked_warning(&mut file, &rev);
+        inject_unchecked_warning(&mut file, &rev).unwrap();
         let result = to_chat_string(&file);
 
         assert!(!result.contains("Batchalign 0.8.5"), "{result}");
@@ -2344,7 +2358,7 @@ mod tests {
             crate::types::engines::AsrEngineName::Whisper,
             &BTreeMap::new(),
         );
-        inject_unchecked_warning(&mut file, &whisper);
+        inject_unchecked_warning(&mut file, &whisper).unwrap();
         let result = to_chat_string(&file);
 
         let birth_pos = result
@@ -2754,7 +2768,8 @@ mod tests {
                 &LanguageCode3::eng(),
                 &applied_that_repaired(2),
                 false,
-            );
+            )
+            .unwrap();
             assert!(matches!(report, MorphologyProvenanceReport::Incomplete(_)));
             let text = batchalign_transform::serialize::to_chat_string(&output);
             assert!(text.contains(fields), "original evidence: {text}");
@@ -2770,7 +2785,8 @@ mod tests {
                 &LanguageCode3::eng(),
                 &AppliedAnalyses::none(),
                 false,
-            );
+            )
+            .unwrap();
             assert!(matches!(report, MorphologyProvenanceReport::Incomplete(_)));
             assert_eq!(
                 batchalign_transform::serialize::to_chat_string(&output),
@@ -2783,7 +2799,8 @@ mod tests {
                 &LanguageCode3::eng(),
                 &applied_that_ran("1.12.0"),
                 false,
-            );
+            )
+            .unwrap();
             assert!(matches!(report, MorphologyProvenanceReport::Complete));
             let fresh = batchalign_transform::serialize::to_chat_string(&output);
             assert!(!fresh.contains("provenance_incomplete"));
@@ -2797,7 +2814,8 @@ mod tests {
             &LanguageCode3::eng(),
             &applied_that_ran("1.11.1+cpu"),
             false,
-        );
+        )
+        .unwrap();
         assert!(matches!(
             report,
             MorphologyProvenanceReport::Incomplete(

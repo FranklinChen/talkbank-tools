@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>BA3 Runner</title>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#123747"/>
+  <g fill="#63d5ca">
+    <rect x="26" y="48" width="8" height="32" rx="4"/>
+    <rect x="42" y="36" width="8" height="56" rx="4"/>
+    <rect x="58" y="44" width="8" height="40" rx="4"/>
+  </g>
+  <path d="M80 42 L105 64 L80 86 Z" fill="#ffffff"/>
+</svg>

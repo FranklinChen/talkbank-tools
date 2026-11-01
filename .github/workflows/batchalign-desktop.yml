@@ -1,9 +1,9 @@
 # Experimental artifact-only workflow for dashboard desktop shells. This helps
 # internal validation of signed/unsigned bundles, but it is not a public release
 # line and does not create a GitHub Release.
-name: Batchalign Desktop Bundles (Experimental)
+name: BA3 Runner Bundles (Experimental)
 
-run-name: Experimental desktop bundles
+run-name: Experimental BA3 Runner bundles
 
 on:
   workflow_dispatch: {}
@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Node 20
+      - name: Set up Node
         uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -82,6 +82,6 @@ jobs:
       - name: Upload desktop bundle artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: dashboard-desktop-experimental-${{ matrix.os }}
-          path: apps/dashboard-desktop/src-tauri/target/release/bundle/
+          name: ba3-runner-experimental-${{ matrix.os }}
+          path: target/release/bundle/
           if-no-files-found: error

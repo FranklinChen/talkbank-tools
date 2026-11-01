@@ -1,164 +1,81 @@
-/** Low-level Tauri adapter for the shared desktop runtime seam.
- *
- * React components and hooks consume focused capability contexts from
- * `desktop/DesktopContext.tsx`. This module stays lower level: it owns the
- * dynamic Tauri imports, shell/browser fallbacks, and the raw protocol
- * registry from `desktop/protocol.ts`.
- */
-
+/** Low-level native transport. Failures are reported to the owning UI instead
+ * of being turned into default credentials or successful empty discovery. */
 import { isDesktop } from "../runtime";
+import { PreferenceDraft, SavedPreferences, type PreferenceEdit } from "../desktop/preferences";
 import {
   DESKTOP_COMMANDS,
-  DESKTOP_EVENTS,
-  DEFAULT_DESKTOP_CONFIG,
-  DEFAULT_DESKTOP_SERVER_STATUS,
-  type DesktopCommandKey,
-  type DesktopCommandRequest,
-  type DesktopCommandResponse,
-  type DesktopConfig,
-  type DesktopEventKey,
-  type DesktopEventPayload,
+  type DesktopCommandKey, type DesktopCommandRequest, type DesktopCommandResponse,
   type DesktopServerStatus,
+  type DesktopPathProposal, type DesktopPathReceipt,
 } from "../desktop/protocol";
 
-type DesktopCommandArgs<K extends DesktopCommandKey> =
-  DesktopCommandRequest<K> extends void ? [] : [DesktopCommandRequest<K>];
-
 function desktopOnlyError(action: string): Error {
-  return new Error(`${action} requires the desktop app`);
+  return new Error(action + " requires the desktop app");
 }
 
-/** Invoke one known desktop command through a dynamic import. */
 async function tauriInvoke<K extends DesktopCommandKey>(
   command: K,
-  ...args: DesktopCommandArgs<K>
+  ...args: DesktopCommandRequest<K> extends void ? [] : [DesktopCommandRequest<K>]
 ): Promise<DesktopCommandResponse<K>> {
   const { invoke } = await import("@tauri-apps/api/core");
-  const payload = args[0] as Record<string, unknown> | undefined;
-  return invoke<DesktopCommandResponse<K>>(DESKTOP_COMMANDS[command].name, payload);
+  return invoke<DesktopCommandResponse<K>>(DESKTOP_COMMANDS[command].name, args[0] as Record<string, unknown> | undefined);
 }
 
-/** Subscribe to one known desktop event through a dynamic import. */
-async function tauriListen<K extends DesktopEventKey>(
-  event: K,
-  onEvent: (payload: DesktopEventPayload<K>) => void,
-): Promise<() => void> {
-  const { listen } = await import("@tauri-apps/api/event");
-  const unlisten = await listen<DesktopEventPayload<K>>(
-    DESKTOP_EVENTS[event].name,
-    ({ payload }) => onEvent(payload),
-  );
-  return () => {
-    void unlisten();
-  };
-}
-
-/** Open a native folder picker dialog. Returns the selected path or null if cancelled. */
+/** Open the native directory picker; null means the user cancelled. */
 export async function pickFolder(title?: string): Promise<string | null> {
-  if (!isDesktop()) return null;
+  if (!isDesktop()) throw desktopOnlyError("Folder selection");
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const result = await open({
-    directory: true,
-    multiple: false,
-    title: title ?? "Choose a folder",
-  });
-  // open() returns string | string[] | null for directory picks
-  if (Array.isArray(result)) return result[0] ?? null;
-  return result;
+  const result = await open({ directory: true, multiple: false, title: title ?? "Choose a folder" });
+  return Array.isArray(result) ? result[0] ?? null : result;
 }
 
-/** Open a native folder picker for the output destination. */
-export async function pickOutputFolder(): Promise<string | null> {
+/** Choose the output directory through the same native capability. */
+export function pickOutputFolder(): Promise<string | null> {
   return pickFolder("Choose output folder");
 }
 
-/** Invoke the Tauri `discover_files` command to enumerate files in a directory. */
-export async function discoverFiles(
-  dir: string,
-  extensions: string[],
-): Promise<string[]> {
-  if (!isDesktop()) {
-    throw desktopOnlyError("discoverFiles");
-  }
+/** Enumerate selected local inputs. */
+export function discoverFiles(dir: string, extensions: string[]): Promise<string[]> {
+  if (!isDesktop()) return Promise.reject(desktopOnlyError("File discovery"));
   return tauriInvoke("discoverFiles", { dir, extensions });
 }
 
-/** Open a path in the native file manager (Finder, Explorer, etc.). */
+/** Resolve local file identities without writing or submitting any job. */
+export function admitJobPaths(proposal: DesktopPathProposal): Promise<DesktopPathReceipt> {
+  if (!isDesktop()) return Promise.reject(desktopOnlyError("Input/output admission"));
+  return tauriInvoke("admitJobPaths", { proposal });
+}
+
+/** Reveal the actual output directory in the file manager. */
 export async function openPath(path: string): Promise<void> {
-  if (!isDesktop()) {
-    // Best-effort fallback: won't work for local paths in browsers
-    return;
-  }
-  const { open } = await import("@tauri-apps/plugin-shell");
-  await open(path);
+  if (!isDesktop()) throw desktopOnlyError("Opening an output folder");
+  await tauriInvoke("openOutputDirectory", { path });
 }
 
-/** Check whether the desktop shell should show the first-run setup wizard. */
-export async function isFirstLaunch(): Promise<boolean> {
-  if (!isDesktop()) return false;
-  try {
-    return await tauriInvoke("isFirstLaunch");
-  } catch {
-    return false;
-  }
+/** Detect genuine first-run absence; read failures remain failures. */
+export function isFirstLaunch(): Promise<boolean> {
+  return isDesktop() ? tauriInvoke("isFirstLaunch") : Promise.resolve(false);
 }
 
-/** Read the desktop shell's persisted user configuration. */
-export async function readConfig(): Promise<DesktopConfig> {
-  if (!isDesktop()) return { ...DEFAULT_DESKTOP_CONFIG };
-  try {
-    return await tauriInvoke("readConfig");
-  } catch {
-    return { ...DEFAULT_DESKTOP_CONFIG };
-  }
+/** Read preferences without inventing values after a failed read. */
+export async function readConfig(): Promise<PreferenceDraft> {
+  if (!isDesktop()) return Promise.reject(desktopOnlyError("Reading settings"));
+  return PreferenceDraft.loaded(await tauriInvoke("readConfig"));
 }
 
-/** Persist one desktop user-configuration update. */
-export async function writeConfig(config: DesktopConfig): Promise<void> {
-  if (!isDesktop()) {
-    throw desktopOnlyError("writeConfig");
-  }
-  await tauriInvoke("writeConfig", { config });
+/** Apply a narrow, native-validated settings edit. */
+export async function writeConfig(edit: PreferenceEdit): Promise<SavedPreferences> {
+  if (!isDesktop()) throw desktopOnlyError("Saving settings");
+  const acknowledgement = await tauriInvoke("writeConfig", { config: edit.config });
+  return SavedPreferences.admit(edit, acknowledgement);
 }
 
-/** Resolve the local `batchalign3` binary path from the desktop shell. */
-export async function getBatchalignPath(): Promise<string | null> {
-  if (!isDesktop()) return null;
-  return tauriInvoke("getBatchalignPath");
-}
-
-/** Query the desktop shell's managed server status. */
-export async function serverStatus(): Promise<DesktopServerStatus> {
-  if (!isDesktop()) {
-    return { ...DEFAULT_DESKTOP_SERVER_STATUS };
-  }
+/** Observe the CLI-managed service without owning it. */
+export function serverStatus(): Promise<DesktopServerStatus> {
   return tauriInvoke("serverStatus");
 }
 
-/** Ask the desktop shell to start the managed local server. */
-export async function startServer(): Promise<DesktopServerStatus> {
-  if (!isDesktop()) {
-    throw desktopOnlyError("startServer");
-  }
+/** Ask the CLI to start a missing managed service; refuse incompatible ones. */
+export function startServer(): Promise<DesktopServerStatus> {
   return tauriInvoke("startServer");
-}
-
-/** Ask the desktop shell to stop the managed local server. */
-export async function stopServer(): Promise<DesktopServerStatus> {
-  if (!isDesktop()) {
-    throw desktopOnlyError("stopServer");
-  }
-  return tauriInvoke("stopServer");
-}
-
-/** Subscribe to shell-emitted server status snapshots. */
-export async function onServerStatusChange(
-  listener: (status: DesktopServerStatus) => void,
-): Promise<() => void> {
-  if (!isDesktop()) {
-    return () => {};
-  }
-  return tauriListen("serverStatusChanged", ({ status }) => {
-    listener(status);
-  });
 }

@@ -3,6 +3,17 @@
 Fixes and behaviour changes, newest first. The book describes the current
 design; this file records how it changed.
 
+## Unreleased
+
+- Leaving BA3 Runner's Process screen during file checking or preference reading
+  now retires the unsent launch. Delayed replies cannot submit abandoned work
+  or affect a later configuration. Leaving after submission preserves the
+  service's job and never cancels or resends it implicitly.
+- BA3 Runner's job detail page can open the output folders recorded by its
+  local managed service after reopening the app. Distinct destinations are
+  listed separately. Missing location records and moved folders have explicit
+  explanations; uploaded-content and remote jobs do not expose a local opener.
+
 ## 0.8.7 (October 31, 2026)
 
 ### A diagnosed job says what to check, and where

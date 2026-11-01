@@ -50,6 +50,7 @@ pub struct StatusMessageResponse {
         crate::routes::jobs::submit_job,
         crate::routes::jobs::list_jobs,
         crate::routes::jobs::get_job,
+        crate::routes::jobs::get_output_folders,
         crate::routes::jobs::get_results,
         crate::routes::jobs::get_single_result,
         crate::routes::jobs::get_binary_result,

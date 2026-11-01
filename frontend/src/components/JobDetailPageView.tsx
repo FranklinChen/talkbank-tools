@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Layout } from "./Layout";
 import { ProgressBar } from "./ProgressBar";
 import { ActionButtons } from "./ActionButtons";
+import { JobOutputFolders } from "./JobOutputFolders";
 import { StatusSummaryStrip } from "./StatusSummaryStrip";
 import { ErrorPanel } from "./ErrorPanel";
 import { FilterTabs } from "./FilterTabs";
@@ -311,6 +312,9 @@ export function JobDetailPageView({
               serverBase={serverBase}
               onDeleted={onDeleted}
             />
+          </div>
+          <div className="mt-3">
+            <JobOutputFolders jobId={detail.job_id} serverBase={serverBase} />
           </div>
         </div>
 

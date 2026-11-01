@@ -337,9 +337,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
         // after the proof had been thrown away, and it stamped a `@Comment`
         // even onto the `NoAlign` documents the book promises are returned
         // with zero modifications; a pass-through is now returned untouched.
-        let document = document
-            .with_provenance_injected(&provenance)
-            .map_err(|failure| failure.into_server_error())?;
+        let document = document.with_provenance_injected(&provenance)?;
         Ok(FileOutput::Chat(ChatOutput {
             document: document.into(),
             shortfalls,

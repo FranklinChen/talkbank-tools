@@ -457,13 +457,28 @@ fn apply_utseg_predictions(
     Ok(())
 }
 
+/// Structural input refusal and producer-header failure keep distinct owners.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UtsegDocumentRefusal {
+    #[error(transparent)]
+    Partition(#[from] batchalign_transform::utseg::UtsegApplyRefusal),
+    #[error("generated header was blank: {0}")]
+    GeneratedHeader(#[from] talkbank_model::model::BlankContent),
+}
+
+impl From<UtsegDocumentRefusal> for ServerError {
+    fn from(error: UtsegDocumentRefusal) -> Self {
+        match error {
+            UtsegDocumentRefusal::Partition(error) => Self::UtterancePartition(error),
+            UtsegDocumentRefusal::GeneratedHeader(error) => Self::GeneratedHeader(error),
+        }
+    }
+}
+
 pub(crate) fn apply_utseg_document(
     chat_file: &mut ChatFile,
     assignment_map: &HashMap<usize, Vec<usize>>,
-) -> Result<
-    batchalign_transform::utseg::SegmentationLayout,
-    batchalign_transform::utseg::UtsegApplyRefusal,
-> {
+) -> Result<batchalign_transform::utseg::SegmentationLayout, UtsegDocumentRefusal> {
     let batchalign_transform::utseg::UtsegApplied {
         invalidated: losses,
         layout,
@@ -490,7 +505,7 @@ pub(crate) fn apply_utseg_document(
             talkbank_model::model::Line::header(
                 talkbank_model::Location::Unlocated,
                 talkbank_model::model::Header::Comment {
-                    content: crate::chat_ops::BulletContent::from_text(text),
+                    content: talkbank_model::model::CommentContent::try_from_text(text)?,
                 },
             ),
         );

@@ -162,7 +162,7 @@ impl AlignableMedia {
             MediaType::Unsupported(token) => {
                 return Err(AlignmentMediaRefusal::Unsupported {
                     field: "media type",
-                    as_written: token.clone(),
+                    as_written: token.as_str().to_owned(),
                 });
             }
         }
@@ -178,7 +178,7 @@ impl AlignableMedia {
             Some(MediaStatus::Unsupported(token)) => {
                 return Err(AlignmentMediaRefusal::Unsupported {
                     field: "status",
-                    as_written: token.clone(),
+                    as_written: token.as_str().to_owned(),
                 });
             }
         };
@@ -385,7 +385,7 @@ pub(crate) fn read_fa_source_named(
             matches!(header,
                 Header::Options { options } if options.iter().any(|flag| match flag {
                     ChatOptionFlag::Ca | ChatOptionFlag::NoAlign => true,
-                    ChatOptionFlag::Unsupported(flag) => flag == "dummy",
+                    ChatOptionFlag::Unsupported(flag) => flag.as_str() == "dummy",
                 })
             )
         });

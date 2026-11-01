@@ -8,11 +8,13 @@
 pub(crate) mod binary;
 pub(crate) mod detail;
 pub(crate) mod lifecycle;
+pub(crate) mod output_folders;
 pub(crate) mod stream;
 
 pub(crate) use binary::get_binary_result;
 pub(crate) use detail::{get_job, get_results, get_single_result};
 pub(crate) use lifecycle::{cancel_job, delete_job, list_job_cancellations, restart_job};
+pub(crate) use output_folders::get_output_folders;
 pub(crate) use stream::stream_job;
 
 // Re-export utoipa-generated path structs so that the `OpenApi` derive in
@@ -25,6 +27,8 @@ pub(crate) use detail::{__path_get_job, __path_get_results, __path_get_single_re
 pub(crate) use lifecycle::{
     __path_cancel_job, __path_delete_job, __path_list_job_cancellations, __path_restart_job,
 };
+#[allow(unused_imports)]
+pub(crate) use output_folders::__path_get_output_folders;
 #[allow(unused_imports)]
 pub(crate) use stream::__path_stream_job;
 
@@ -61,6 +65,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/jobs", get(list_jobs))
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/results", get(get_results))
+        .route("/jobs/{job_id}/output-folders", get(get_output_folders))
         .route("/jobs/{job_id}/results/{*filename}", get(get_single_result))
         .route(
             "/jobs/{job_id}/artifacts/{*filename}",

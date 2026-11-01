@@ -7,11 +7,12 @@
 export type OutputMode = "separate" | "in-place";
 
 interface OutputModeSelectorProps {
+  allowInPlace?: boolean;
   mode: OutputMode;
   onChange: (mode: OutputMode) => void;
 }
 
-export function OutputModeSelector({ mode, onChange }: OutputModeSelectorProps) {
+export function OutputModeSelector({ mode, onChange, allowInPlace = true }: OutputModeSelectorProps) {
   return (
     <div>
       <label className="block text-sm font-medium text-gray-700 mb-1.5">
@@ -33,6 +34,7 @@ export function OutputModeSelector({ mode, onChange }: OutputModeSelectorProps) 
         <button
           type="button"
           onClick={() => onChange("in-place")}
+          disabled={!allowInPlace}
           className={`flex-1 text-sm py-1.5 px-3 rounded-md transition-colors ${
             mode === "in-place"
               ? "bg-white text-gray-800 shadow-sm font-medium"

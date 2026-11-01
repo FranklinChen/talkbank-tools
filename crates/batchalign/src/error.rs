@@ -674,6 +674,10 @@ impl std::fmt::Display for AsrProviderDisposition {
 /// a structured `conflicts` array.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// Producer-owned header text was blank. This is a server defect, not
+    /// malformed user input and not a reason to repeat model inference.
+    #[error("generated header was blank: {0}")]
+    GeneratedHeader(#[from] talkbank_model::model::BlankContent),
     /// A job was routed to a remote fleet target, but this host would not
     /// report its name, which names the job's remote scratch directory.
     #[error(
@@ -1304,6 +1308,7 @@ impl ServerError {
             | Self::ReplacementPlanContradicted { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MediaTiming(_)
             | Self::OutputParse(_)
+            | Self::GeneratedHeader(_)
             | Self::MorphosyntaxInjection(_)
             | Self::UtterancePartition(_)
             | Self::UtteranceLocation(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1646,6 +1651,24 @@ mod tests {
             crate::runner::util::classify_server_error(&invalid),
             crate::scheduling::FailureCategory::Validation
         );
+    }
+
+    #[test]
+    fn generated_header_failure_keeps_producer_http_and_retry_ownership() {
+        let blank = talkbank_model::model::CommentContent::try_from_text(" ").unwrap_err();
+        let error = super::ServerError::from(crate::utseg::UtsegDocumentRefusal::from(blank));
+        assert_eq!(
+            error.status_code(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            crate::runner::util::classify_server_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+        assert!(matches!(error, super::ServerError::GeneratedHeader(_)));
+        let partition = batchalign_transform::utseg::UtsegApplyRefusal::UnknownUtterance(99);
+        let error = super::ServerError::from(crate::utseg::UtsegDocumentRefusal::from(partition));
+        assert!(matches!(error, super::ServerError::UtterancePartition(_)));
     }
 
     use super::*;

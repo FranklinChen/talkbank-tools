@@ -1,9 +1,9 @@
-/** SSE-driven live progress view for an active job.
+/** Authoritative polled progress view for an active job.
  *
  * Shows a progress bar, file count, elapsed time, and a live-updating file
  * list. Addresses the "frozen progress bar" problem with three strategies:
  *
- * 1. **Elapsed timer**: always ticking, proves the app is alive
+ * 1. **Elapsed timer**: frontend observation time, not proof of worker progress
  * 2. **Indeterminate bar**, for batched commands (morphotag, utseg, etc.)
  *    where no per-file progress is available during the batch_infer call
  * 3. **Sub-file progress**, for per-file commands (align, transcribe),
@@ -15,10 +15,10 @@
  */
 
 import { useEffect, useState } from "react";
-import { useJobStream } from "../../hooks/useJobStream";
+import { useJobStream, TERMINAL_JOB, type ObservedProgress } from "../../hooks/useJobStream";
 import { useDesktopFiles } from "../../desktop/DesktopContext";
-import { cancelJob } from "../../api";
-import { controlPlaneOrigin } from "../../runtime";
+import { useJobCancellation, type JobCancellation } from "../../hooks/useJobCancellation";
+import { CancellationControl } from "./CancellationControl";
 import { ErrorRecovery } from "./ErrorRecovery";
 import {
   formatDuration,
@@ -59,12 +59,7 @@ function fileSortKey(f: FileStatusEntry): number {
 }
 
 /** Contextual messages shown during long waits for batched commands. */
-const BATCH_WAIT_MESSAGES = [
-  "All utterances are being processed together for best accuracy...",
-  "The model is analyzing your entire corpus as one batch...",
-  "This can take a few minutes for large collections of files...",
-  "Batch processing is more accurate than file-by-file, hang tight...",
-];
+const BATCH_WAIT_MESSAGES = ["Waiting for the next processing update. Model downloads or analysis can take several minutes."];
 
 /** Contextual messages for per-file commands during processing. */
 const PER_FILE_MESSAGES = [
@@ -120,13 +115,13 @@ function stageHint(stage: string | null | undefined): string | null {
     case "recovering_timing_fallback":
       return "Timing recovery failed on some segments, retrying with full-file transcription";
     case "transcribing":
-      return "Transcribing audio: Rev.AI runs roughly in real-time, Whisper may take 2-5x the audio length";
+      return "Transcribing with the selected engine; duration depends on the recording and available resources";
     case "aligning":
       return "Running forced alignment on each utterance group";
     case "resolving_audio":
       return "Locating and preparing the audio file for processing";
     case "analyzing_morphosyntax":
-      return "Running part-of-speech tagging and grammatical analysis, all files are batched together for GPU efficiency";
+      return "Running part-of-speech tagging and grammatical analysis";
     default:
       return null;
   }
@@ -161,17 +156,27 @@ export function ProcessingProgress({
   outputFolder,
   onReset,
 }: ProcessingProgressProps) {
-  const desktopFiles = useDesktopFiles();
-  const { streamStatus, progress } = useJobStream(jobId);
-  const { files: fileStatuses, completedFiles, jobStatus } = progress;
-  const [cancelling, setCancelling] = useState(false);
+  const observation = useJobStream(jobId);
+  const cancellation = useJobCancellation(jobId);
+  if (observation.kind === "connecting") return <div><p role="status">Connecting to job progress...</p><CancellationControl cancellation={cancellation} /></div>;
+  if (observation.kind === "unavailable") return <div role="alert">
+    <p>Progress could not be read. The job may still be running; it has not been resubmitted.</p>
+    <p>{observation.message}</p><button type="button" onClick={observation.retry}>Retry progress</button>
+    <CancellationControl cancellation={cancellation} />
+  </div>;
+  return <ObservedProcessingProgress jobId={jobId} totalFiles={totalFiles} command={command}
+    outputFolder={outputFolder} onReset={onReset} progress={observation.progress} cancellation={cancellation} />;
+}
 
-  const isTerminal =
-    jobStatus === "completed" ||
-    jobStatus === "failed" ||
-    jobStatus === "cancelled";
-  const isSuccess = jobStatus === "completed";
-  const isRunning = !isTerminal && streamStatus !== "connecting";
+function ObservedProcessingProgress({ totalFiles, command, outputFolder, onReset, progress, cancellation }: ProcessingProgressProps & { progress: ObservedProgress; cancellation: JobCancellation }) {
+  const desktopFiles = useDesktopFiles();
+  const { files: fileStatuses, completedFiles, jobStatus } = progress;
+
+  const isTerminal = TERMINAL_JOB[jobStatus];
+  const isSuccess = jobStatus === "completed" && completedFiles === totalFiles
+    && fileStatuses.size === totalFiles && [...fileStatuses.values()].every(file => file.status === "done");
+  const isRunning = !isTerminal;
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const isBatched = BATCHED_COMMANDS.has(command);
   const noFilesCompleted = completedFiles === 0;
@@ -186,16 +191,6 @@ export function ProcessingProgress({
     8,
     isRunning && noFilesCompleted,
   );
-
-  async function handleCancel() {
-    setCancelling(true);
-    try {
-      await cancelJob(jobId, controlPlaneOrigin());
-    } catch {
-      // SSE stream will reflect the actual state regardless
-    }
-    setCancelling(false);
-  }
 
   const sortedFiles = [...fileStatuses.values()].sort(
     (a, b) => fileSortKey(a) - fileSortKey(b),
@@ -229,16 +224,9 @@ export function ProcessingProgress({
         {!isTerminal && (
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-400">
-              {streamStatus === "connecting" ? "Connecting..." : "Processing"}
+              Processing
             </span>
-            <button
-              type="button"
-              onClick={handleCancel}
-              disabled={cancelling}
-              className="text-xs text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"
-            >
-              {cancelling ? "Cancelling..." : "Cancel"}
-            </button>
+            <CancellationControl cancellation={cancellation} />
           </div>
         )}
       </div>
@@ -274,11 +262,11 @@ export function ProcessingProgress({
       {/* Completion actions */}
       {isTerminal && (
         <div className="flex gap-3">
-          {isSuccess && outputFolder && (
+          {outputFolder && (
             <button
               type="button"
               onClick={() => {
-                void desktopFiles.openPath(outputFolder);
+                void desktopFiles.openPath(outputFolder).catch(error => setActionError(String(error)));
               }}
               className="px-4 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg
                 hover:bg-emerald-700 transition-colors"
@@ -298,6 +286,8 @@ export function ProcessingProgress({
       )}
 
       {/* Error recovery (shown when job has failed files) */}
+      {actionError && <p role="alert" className="text-red-700">{actionError}</p>}
+      {isTerminal && !isSuccess && <p role="status">Job {jobStatus}. Review the file results below; some output may need attention.</p>}
       {isTerminal && errorFiles.length > 0 && (
         <ErrorRecovery errorFiles={errorFiles} />
       )}

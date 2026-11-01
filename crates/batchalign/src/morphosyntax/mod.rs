@@ -208,7 +208,7 @@ pub(crate) async fn process_morphosyntax_incremental(
             &primary_api_language,
             &identity::AppliedAnalyses::none(),
             params.tokenization_mode == TokenizationMode::StanzaRetokenize,
-        );
+        )?;
         return gate_incremental_output(after_file)
             .map(|document| MorphosyntaxOutput::from(document).with_provenance(provenance));
     }
@@ -332,8 +332,8 @@ pub(crate) async fn process_morphosyntax_incremental(
         &primary_api_language,
         &applied,
         retokenize,
-    );
-    applied.secondary_mut().annotate(&mut after_file);
+    )?;
+    applied.secondary_mut().annotate(&mut after_file)?;
     gate_incremental_output(after_file).map(|document| {
         MorphosyntaxOutput::new(document, applied.into_secondary()).with_provenance(provenance)
     })

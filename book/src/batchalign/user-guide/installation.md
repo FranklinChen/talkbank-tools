@@ -92,7 +92,7 @@ may take a few minutes depending on your connection; subsequent runs use cached
 models.
 
 **Evaluating the experimental GUI shell?** See
-[Batchalign Desktop (Experimental)](desktop-app.md). The supported first-time
+[BA3 Runner (Experimental)](desktop-app.md). The supported first-time
 user path is the `batchalign3` CLI above.
 
 ## Worker Python resolution

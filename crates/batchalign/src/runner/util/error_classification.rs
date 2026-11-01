@@ -229,7 +229,8 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         | ServerError::MediaTiming(_)
         | ServerError::MorphosyntaxInjection(_)
         | ServerError::UtterancePartition(_)
-        | ServerError::OutputParse(_) => FailureCategory::System,
+        | ServerError::OutputParse(_)
+        | ServerError::GeneratedHeader(_) => FailureCategory::System,
         ServerError::JobNotFound(_)
         | ServerError::JobConflict { .. }
         | ServerError::JobNotTerminal(_)

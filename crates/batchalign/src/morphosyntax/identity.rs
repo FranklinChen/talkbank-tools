@@ -299,8 +299,11 @@ impl AppliedAnalyses {
         self.secondary.extend(other.secondary);
     }
 
-    pub(crate) fn annotate_secondary(&self, chat: &mut crate::chat_ops::ChatFile) {
-        self.secondary.annotate(chat);
+    pub(crate) fn annotate_secondary(
+        &self,
+        chat: &mut crate::chat_ops::ChatFile,
+    ) -> Result<(), talkbank_model::model::BlankContent> {
+        self.secondary.annotate(chat)
     }
 
     pub(super) fn secondary_mut(&mut self) -> &mut super::report::SecondaryReport {

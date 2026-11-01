@@ -1,186 +1,142 @@
-# Batchalign Desktop (Experimental)
+# BA3 Runner (Experimental)
 
-**Status:** Current
-**Last updated:** 2026-08-30 21:00 EDT
+**Last modified:** 2026-11-01 19:40 EST
 
-Batchalign Desktop is the native Batchalign GUI shell in
-`apps/dashboard-desktop/`. It is **experimental** and is **not** currently a
-supported public release surface.
+BA3 Runner is a small native interface to the installed `batchalign3`
+CLI and its managed local server. It remains experimental until a packaged
+application has been qualified for deployment alongside its matching CLI.
+See [Installation](installation.md) for the supported CLI installation path.
 
-For supported end-user workflows today, install and run **`batchalign3`** via
-the canonical CLI path in [Installation](installation.md). Treat this chapter as
-orientation for the in-repo desktop shell, not as the primary installation path
-for first-time users.
-
-## Current status
-
-- **Release contract:** Experimental (see the
-  [Release Contract](../developer/release-contract.md))
-- **Distribution:** no supported public desktop bundle line today
-- **Desktop shell location:** `apps/dashboard-desktop/`
-- **Supported product surface today:** `batchalign3` CLI, local server, and
-  dashboard UI
-
-## Evaluating from source
+The application is named **BA3 Runner**, with its own bundle identity. It can
+coexist with other Batchalign applications and does not replace them.
 
 ## Getting started
 
-1. **Install Batchalign**: follow the [Installation](installation.md) guide.
-   The desktop app needs `batchalign3` on your PATH.
+Install the matching CLI and desktop app. When evaluating from source, install
+npm dependencies in `frontend/` and `apps/dashboard-desktop/`, then run
+`npm run dev` from the latter directory.
 
-2. **Launch the shell from source**: run `npm run dev` from
-   `apps/dashboard-desktop/`.
+On launch the app locates the CLI and discovers its managed local service. It
+starts a missing service through the CLI, or reports why a service cannot be
+used. Closing the window leaves the service and running jobs intact. A build
+mismatch must be resolved by updating the CLI and managed service; the app does
+not silently replace a running service.
 
-3. **First-time setup**: on first launch, a setup wizard asks you to choose
-   your default speech-to-text engine:
-   - **Rev.AI**: fast cloud service, requires a paid API key from
-     [rev.ai/auth/signup](https://www.rev.ai/auth/signup)
-   - **Whisper**: free local model, slower, downloads ~2 GB on first use
-
-   This creates `~/.batchalign.ini`, the same config file that `batchalign3
-   setup` writes from the terminal.
-
-## What the shell is for
-
-When run from source, the Batchalign desktop shell is meant to expose the same
-high-level processing flows as the `batchalign3` CLI and web dashboard:
-
-- pick a processing command
-- choose files or folders
-- launch work against a local Batchalign server
-- monitor progress in a native window
-
-## The home screen
-
-After setup, you see the home screen with two zones:
-
-**Command cards**: six tasks you can perform:
-
-| Card | Command | What it does |
-|------|---------|-------------|
-| Transcribe Audio | `transcribe` | Turn audio or video recordings into written transcripts in CHAT format |
-| Add Grammar | `morphotag` | Add part-of-speech tags and grammatical structure, needed for CLAN commands like MLU and DSS |
-| Align to Audio | `align` | Link each word in a transcript to its exact moment in the audio, so you can click to play |
-| Translate | `translate` | Add an English translation line under each utterance in a non-English transcript |
-| Segment Utterances | `utseg` | Automatically break a long block of text into separate speaker turns |
-| Score Accuracy | `benchmark` | Measure how closely a machine transcript matches a human-verified one |
-
-**Recent tasks**: a compact list of your most recent processing jobs, with
-status and file count.
+On first launch, choose Rev.AI (a paid cloud service, requiring a key and uploading
+audio) or Whisper (local inference, requiring model downloads). Setup and
+Settings edit the same `~/.batchalign.ini` as the CLI. Other provider keys and
+settings are preserved. Configuration errors are shown rather than replaced
+with defaults.
 
 ## Processing a folder
 
-1. **Pick a command**: click one of the six cards.
+1. Choose Transcribe, Add Grammar, Align, Translate, Segment Utterances or Score
+   Accuracy. Segmentation finds utterance boundaries; it does not identify
+   speaker turns. Alignment infers timing, which still needs review.
+2. Choose an input folder. The app recursively discovers matching regular files.
+   Links inside that folder and special files are skipped. To include linked
+   content, choose its original folder.
+   The supported file types appear below the folder button. If none are found,
+   check those types or choose another folder. Expand **Review input files** to
+   inspect full paths, 25 at a time; Previous/Next changes only the displayed
+   page. The job uses every discovered input file, including the other pages.
+3. Choose a separate output folder explicitly, or select Modify in place for
+   commands that permit it. Neither separate folder may contain the other.
+   In-place processing replaces input files: keep
+   backups. Score Accuracy requires separate output and a matching gold `.cha`
+   beside each input audio file.
+4. Where shown, set the ISO 639-3 language code (for example `eng`) and the
+   positive whole-number speaker count. Add Grammar and Translate read language
+   from each transcript's `@Languages` header. Transcribe and Score Accuracy use the
+   Rev.AI or Whisper preference selected in Settings.
+5. Start once. The app submits one job and displays its observed state.
 
-2. **Choose input files**: click the dashed area to open a native folder
-   picker. The app scans the folder for relevant files (`.cha` for most
-   commands, audio files for Transcribe). You'll see the file count and
-   folder path.
+While choosing a folder or scanning its files, configuration and Start Processing
+are disabled. Canceling the folder dialog retains your earlier choice. If input
+selection or scanning fails, choose the input folder again; the previous folder
+cannot be submitted accidentally. Back abandons the pending choice, and a late
+dialog or scan result cannot change the next configuration.
 
-3. **Choose output location**: by default, output goes to a separate folder
-   (click to choose one). You can switch to "Modify in place" if you want to
-   overwrite the originals, make backups first.
+Before submission, the native app checks actual file identities and resolves
+folder links. An output that aliases a selected input is refused, except for
+explicit in-place CHAT processing. Multiple inputs may not share an output,
+including names differing only in case or Unicode normalization. This portable
+naming policy also applies on case-sensitive filesystems. Rename conflicting
+inputs or select a disjoint output folder as the diagnostic directs.
+Nested relative paths are preserved. Transcription writes `.cha` output rather
+than overwriting input audio. Existing unrelated outputs can be replaced; keep
+backups. The check does not reserve files against changes by another program.
 
-4. **Select language**: shown for commands that need it (Transcribe, Align,
-   Segment Utterances, Score Accuracy). Defaults to English.
+## Progress and diagnostics
 
-5. **Start processing**: click the full-width Start button. The app submits
-   the job to the local server and switches to the progress view.
+If the service refuses a submission, correct the reported problem before
+starting again. If submission **could not be confirmed**, the service may
+already have started it. The app preserves the task and folders and does not
+send it again. Check Recent Tasks or open the task list to inspect the job.
+An absent entry does not prove rejection. After checking, use **I checked the
+tasks; configure another job** only when you intend a new submission.
 
-## Watching progress
+While **Checking input and output files** or **Reading ASR preferences** is
+shown, leaving Process abandons that unsent launch. Delayed replies cannot start
+it after you leave or change a later configuration. Once **Submitting job** is
+shown, the request has been attempted: navigating away does not cancel or resend
+it. Use Recent Tasks to inspect it, and Cancel explicitly if needed.
 
-The progress screen shows:
+Progress is refreshed from the server's job record. If connectivity is lost,
+the app reports that observation failed: the job may still be running. Retry
+reconnects to the same job; it does not submit the work again.
 
-- **Summary bar**: command name, file count ("12 of 45 files")
-- **Progress bar**: animated blue stripe while running, turns green on
-  completion or red on failure
-- **File list**: live-updating via server-sent events. Currently processing
-  files appear at the top with a pulsing blue dot, followed by queued,
-  completed, and errored files. Each row shows the filename, current stage
-  (e.g., "Aligning", "Transcribing"), and duration.
-- **Cancel**: click **Cancel** in the top-right to stop the job. Files that
-  already finished processing are kept.
+Clean completion, completion with diagnostics, failure, cancellation,
+interruption and output-write failure have different outcomes. Read the file
+messages and any listed utterances before using diagnosed output. Missing-timing
+diagnostics do not certify the correctness of timing that was produced.
 
-When processing finishes:
+Open Output Folder reveals the job's actual output directory. After reopening
+the app, select a job under Recent Tasks: its detail page offers the folders
+recorded by the local service, even though the original submission screen is
+gone. Jobs with outputs in several directories list each folder separately.
+These are recorded destinations, not a claim that every file succeeded or
+that the folder still exists. Missing or moved folders produce a visible error
+without changing the job result. Uploaded-content jobs and records without
+local output paths explain why no local folder is available. A remote job's
+folders must be opened on its processing computer.
 
-- **Success**: the bar turns green. Click **Open Output Folder** to view
-  your results in Finder/Explorer. Click **Process More Files** to start
-  another job.
-- **Errors**: an error panel appears below the progress bar, grouping
-  failed files by error type with plain-language explanations and suggested
-  fixes. Common causes include invalid CHAT format, missing audio files, or
-  low memory.
+Cancel sends one request. While
+it is pending or acknowledged, it cannot be sent again. The app waits for the
+service's final job record, including when progress disconnects and reconnects.
+If cancellation cannot be confirmed, read the explanation and use Retry
+cancellation explicitly. A job can finish before cancellation arrives; the app
+preserves that outcome. Completed output may remain on disk.
 
-## Server status
+## Settings and troubleshooting
 
-The app automatically starts a local batchalign3 server when it launches
-(on port 18000) and stops it when you quit. A status bar at the top of the
-screen shows the connection state:
+Settings can select Rev.AI or Whisper and update a Rev.AI key. Switching to
+Whisper does not delete a stored Rev.AI key. Other engines and advanced options
+remain available through the CLI; an unsupported configured engine is reported
+rather than silently substituted.
 
-| Indicator | Meaning |
-|-----------|---------|
-| Green dot, "Server running" | Ready to accept jobs |
-| Yellow pulsing dot, "Server starting..." | Server is booting (usually 1-3 seconds) |
-| Red dot, "Server stopped" | Server crashed or was stopped, click **Start Server** to restart |
-| Red dot, "batchalign3 not found" | The `batchalign3` binary isn't installed, follow the install instructions shown |
+Settings first reads your current preferences. If that fails, use **Retry
+reading settings** after resolving the reported problem. An unsupported engine
+stays visible until you choose Rev.AI or Whisper explicitly. Stored API keys are
+not displayed: leave the Rev.AI key field blank to keep the stored key, or enter
+a replacement to change it. After a confirmed save, the field returns to blank
+and later saves keep the current stored key. Switching to Whisper also keeps it.
 
-You can manually stop and restart the server from the status bar.
+**Reload settings** reads the file again and discards unsaved edits. While a
+save is pending, editing and closing the settings dialog are disabled. A failed
+or unconfirmed save shows its explanation; reload to check the file. Setup
+likewise keeps failed saves on their original screen and offers completion only
+after confirmation. If the initial configuration check fails, use **Retry
+configuration check**; the app does not treat the failure as a missing file.
 
-## Help
+If the CLI is missing, install it using the [installation guide](installation.md).
+The macOS shell also checks the usual `~/.local/bin` and Homebrew locations.
+For connection failures, use `batchalign3 serve status` and follow its diagnostic.
+If a connection attempt times out, check for a macOS file-access prompt for
+BA3 Runner. The app needs access to its configuration and chosen folders;
+retry after resolving the prompt. A timed-out probe does not mean the service
+or its jobs stopped.
+For missing inputs, check the selected command's supported extensions and access
+to the folder. First-use model downloads can delay processing.
 
-Click the **?** button in the top-right corner of the header to open a help
-panel with descriptions of all six commands and answers to common questions.
-
-## Dashboard (power users)
-
-Click **Dashboard** in the header to switch to the fleet monitoring view.
-This shows all jobs across servers with detailed file-level status, error
-grouping, and algorithm trace visualizations. It's the same dashboard
-available in a web browser at `http://localhost:18000/dashboard`.
-
-## Settings and configuration
-
-Click the **gear icon** in the top-right corner of the header to open
-Settings. From there you can:
-
-- Switch your default ASR engine between Rev.AI and Whisper
-- Add or update your Rev.AI API key
-
-Changes are saved to `~/.batchalign.ini`, the same config file that the CLI
-uses. You can also edit this file directly if you prefer:
-
-```ini
-[asr]
-engine = rev
-engine.rev.key = YOUR_KEY_HERE
-```
-
-Valid engine values: `rev` (Rev.AI cloud) or `whisper` (local).
-
-## Keyboard shortcuts
-
-The app does not currently define custom keyboard shortcuts. Standard
-platform shortcuts (Cmd+Q / Alt+F4 to quit, Cmd+W to close window) work
-as expected.
-
-## Troubleshooting
-
-**"batchalign3 not found"**: the app can't find the CLI binary. Make sure
-you've installed Batchalign (see the [Installation guide](installation.md)) and that your
-terminal's PATH is available to GUI apps. On macOS, you may need to restart
-after installing.
-
-**Server won't start**: check that nothing else is using port 18000.
-Try running `batchalign3 serve start --port 18000` in a terminal to see
-the error output.
-
-**Files not showing up**: the folder picker filters by file extension.
-For most commands, only `.cha` files are shown. For Transcribe, only audio
-files (`.wav`, `.mp3`, `.mp4`, `.m4a`, `.flac`) are shown.
-
-**Processing is slow**: the first run downloads ML models (~2 GB) and may
-take several minutes. Subsequent runs are much faster because models stay
-cached and the server keeps them in memory. See [Performance](performance.md)
-for tuning tips.
-
-For other issues, see [Troubleshooting](troubleshooting.md).
+For command behavior and diagnostic remedies, see [Troubleshooting](troubleshooting.md).

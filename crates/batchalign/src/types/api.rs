@@ -11,6 +11,7 @@
 
 pub use super::cancellation::*;
 pub use super::domain::*;
+pub use super::output_access::*;
 pub use super::request::*;
 pub use super::response::*;
 pub use super::status::*;

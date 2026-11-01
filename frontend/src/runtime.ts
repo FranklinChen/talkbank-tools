@@ -1,8 +1,49 @@
-const DEFAULT_DESKTOP_SERVER = "http://127.0.0.1:18000";
+/** Control-plane ownership. Native discovery admits an endpoint before queries
+ * mount; route changes cannot replace it with an origin or guessed port. */
+import type { DesktopServerStatus } from "./desktop/protocol";
+
+/** A complete local endpoint admitted at the native transport boundary. */
+export class DesktopEndpoint {
+  private constructor(private readonly origin: string) {}
+
+  /** Admit the ready wire state; other service states cannot construct it. */
+  static fromReady(observation: Extract<DesktopServerStatus, { state: "ready" }>): DesktopEndpoint {
+    const url = new URL(observation.url);
+    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port
+      || url.username || url.password || url.pathname !== "/" || url.search || url.hash
+      || !observation.build_hash) throw new Error("The native service did not identify a local endpoint.");
+    return new DesktopEndpoint(url.origin);
+  }
+
+  /** Return a copy, so consumers cannot mutate the admitted endpoint. */
+  url(): URL { return new URL(this.origin); }
+}
+
+type DesktopControlPlane = { kind: "awaiting-discovery" } | { kind: "admitted"; endpoint: DesktopEndpoint };
+let desktopControlPlane: DesktopControlPlane = { kind: "awaiting-discovery" };
+
+/** Bind the discovery proof independently of the current document URL. */
+export function bindDesktopEndpoint(endpoint: DesktopEndpoint): void {
+  desktopControlPlane = { kind: "admitted", endpoint };
+}
 
 /** True when running inside a Tauri webview (desktop app). */
 export function isDesktop(): boolean {
   return "__TAURI_INTERNALS__" in window;
+}
+
+/** Return the native discovery capability only for this exact job server.
+ * A remote dashboard record can never borrow the local computer's opener.
+ */
+export function desktopEndpointForServer(base: string): DesktopEndpoint | null {
+  if (!isDesktop() || desktopControlPlane.kind === "awaiting-discovery") return null;
+  const endpoint = desktopControlPlane.endpoint;
+  if (!base) return endpoint;
+  try {
+    const url = new URL(base);
+    return url.origin === endpoint.url().origin && url.pathname === "/"
+      && !url.username && !url.password && !url.search && !url.hash ? endpoint : null;
+  } catch { return null; }
 }
 
 function normalizeServerUrl(raw: string): URL | null {
@@ -26,6 +67,12 @@ function serverOverrideFromQuery(): URL | null {
 }
 
 export function controlPlaneUrl(): URL {
+  if (isDesktop()) {
+    switch (desktopControlPlane.kind) {
+      case "awaiting-discovery": throw new Error("Native service discovery has not completed.");
+      case "admitted": return desktopControlPlane.endpoint.url();
+    }
+  }
   const override = serverOverrideFromQuery();
   if (override) return override;
 
@@ -33,7 +80,7 @@ export function controlPlaneUrl(): URL {
     return new URL(`${location.protocol}//${location.host}`);
   }
 
-  return new URL(DEFAULT_DESKTOP_SERVER);
+  throw new Error("The browser page has no HTTP control-plane endpoint.");
 }
 
 export function controlPlaneOrigin(): string {

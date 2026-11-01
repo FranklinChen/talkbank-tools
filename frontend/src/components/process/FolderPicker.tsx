@@ -1,154 +1,43 @@
-/** Native folder picker with drag-and-drop zone.
- *
- * In desktop mode, uses the Tauri dialog plugin for a native folder picker and
- * the desktop file capability for recursive discovery. Falls back to a disabled
- * state in web mode with a message directing users to the desktop app.
- */
+/** Present the form-owned directory selection. A local busy state must never
+ * leave the submission owner believing that an earlier folder is still ready. */
+import { useDesktopEnvironment } from "../../desktop/DesktopContext";
+import type { SelectedInputs } from "./inputSelection";
+import type { INPUT_POLICIES } from "./CommandPicker";
+import { InputFileReview } from "./InputFileReview";
 
-import { useState, type DragEvent } from "react";
-import {
-  useDesktopEnvironment,
-  useDesktopFiles,
-} from "../../desktop/DesktopContext";
+export type FolderSelection = { kind: "empty" }
+  | { kind: "no-matches"; folder: string }
+  | { kind: "ready"; input: SelectedInputs }
+  | { kind: "picking" }
+  | { kind: "scanning"; folder: string };
 
 interface FolderPickerProps {
-  /** Label shown above the picker. */
-  label: string;
-  /** File extensions to filter for (e.g. ["cha", "wav"]). Empty = all files. */
-  extensions: string[];
-  /** Called with the selected folder path and discovered file paths. */
-  onSelect: (folder: string, files: string[]) => void;
-  /** Currently selected folder path. */
-  selectedFolder: string | null;
-  /** Number of discovered files in the selected folder. */
-  fileCount: number;
-  /** Optional dialog title. */
-  dialogTitle?: string;
+  label: string; selection: FolderSelection; onChoose: () => void;
+  policy: typeof INPUT_POLICIES[keyof typeof INPUT_POLICIES];
 }
 
-export function FolderPicker({
-  label,
-  extensions,
-  onSelect,
-  selectedFolder,
-  fileCount,
-  dialogTitle,
-}: FolderPickerProps) {
+/** Render only the selection owned by the surrounding process state machine. */
+export function FolderPicker({ label, selection, policy, onChoose }: FolderPickerProps) {
   const environment = useDesktopEnvironment();
-  const files = useDesktopFiles();
-  const [isLoading, setIsLoading] = useState(false);
-  const [isDragOver, setIsDragOver] = useState(false);
-
-  function handleDragOver(e: DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(true);
-  }
-
-  function handleDragLeave(e: DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-  }
-
-  async function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-    if (!environment.isDesktop) return;
-
-    // Tauri webview provides paths via dataTransfer
-    const items = e.dataTransfer?.files;
-    if (!items || items.length === 0) return;
-
-    // Use the first dropped item's path (webkitRelativePath or name)
-    // In Tauri, the file path comes through the File API
-    const firstFile = items[0];
-    const path = (firstFile as File & { path?: string }).path;
-    if (!path) return;
-
-    setIsLoading(true);
-    try {
-      const discovered = await files.discoverFiles(path, extensions);
-      onSelect(path, discovered);
-    } catch (err) {
-      console.error("Drop discovery failed:", err);
-    } finally {
-      setIsLoading(false);
+  function selectedLabel() {
+    switch (selection.kind) {
+      case "picking": return "Choosing input folder...";
+      case "scanning": return <>Scanning files...<span className="block text-xs">{selection.folder}</span></>;
+      case "ready": return <><span>{selection.input.files.length} {selection.input.files.length === 1 ? "file" : "files"} found</span><span className="block text-xs">{selection.input.folder}</span></>;
+      case "no-matches": return <>0 files found<span className="block text-xs">{selection.folder}</span></>;
+      case "empty": return environment.isDesktop ? "Click to choose a folder" : "Folder selection requires the desktop app";
     }
+    return selection satisfies never;
   }
-
-  async function handleClick() {
-    if (!environment.isDesktop) return;
-    setIsLoading(true);
-    try {
-      const folder = await files.pickFolder(dialogTitle ?? label);
-      if (!folder) return;
-      const discovered = await files.discoverFiles(folder, extensions);
-      onSelect(folder, discovered);
-    } catch (err) {
-      console.error("Folder pick failed:", err);
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  /** Extract the last path component for compact display. */
-  function folderName(path: string): string {
-    const parts = path.replace(/\/+$/, "").split(/[/\\]/);
-    return parts[parts.length - 1] || path;
-  }
-
-  return (
-    <div>
-      <label className="block text-sm font-medium text-gray-700 mb-1.5">
-        {label}
-      </label>
-
-      <button
-        type="button"
-        onClick={handleClick}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        disabled={!environment.isDesktop || isLoading}
-        className={`w-full border-2 border-dashed rounded-lg p-6 text-center
-          transition-colors cursor-pointer
-          disabled:opacity-50 disabled:cursor-not-allowed ${
-            isDragOver
-              ? "border-indigo-500 bg-indigo-50"
-              : "border-gray-300 hover:border-indigo-400 hover:bg-indigo-50/50"
-          }`}
-      >
-        {isLoading ? (
-          <span className="text-sm text-gray-500">Scanning files...</span>
-        ) : selectedFolder ? (
-          <div>
-            <div className="text-sm font-medium text-gray-800">
-              {folderName(selectedFolder)}
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              {fileCount} file{fileCount !== 1 ? "s" : ""} found
-            </div>
-            <div className="text-xs text-gray-400 mt-0.5 truncate max-w-md mx-auto">
-              {selectedFolder}
-            </div>
-          </div>
-        ) : (
-          <div>
-            <div className="text-sm text-gray-600">
-              {environment.isDesktop
-                ? "Click to choose a folder, or drag one here"
-                : "Folder selection requires the desktop app"}
-            </div>
-            {extensions.length > 0 && (
-              <div className="text-xs text-gray-400 mt-1">
-                Looking for: {extensions.map((e) => `.${e}`).join(", ")}
-              </div>
-            )}
-          </div>
-        )}
-      </button>
-    </div>
-  );
+  return <div>
+    <label className="block text-sm font-medium mb-2">{label}</label>
+    <button type="button" onClick={onChoose} disabled={!environment.isDesktop || selection.kind === "picking" || selection.kind === "scanning"}
+      className="w-full border rounded p-5 text-left disabled:opacity-50">
+      {selectedLabel()}
+    </button>
+    <p className="mt-2 text-xs text-gray-600">Looks for {policy.label}: {policy.extensions.map(ext => "." + ext).join(", ")}. Includes subfolders.</p>
+    {selection.kind === "no-matches" && <p role="status" className="mt-2 text-sm text-amber-800">No {policy.label} found. Check the file types above or choose another folder.</p>}
+    {(selection.kind === "ready" || selection.kind === "no-matches") && <p className="text-sm text-gray-600">Links inside the selected folder are skipped. Choose their original folder to include them.</p>}
+    {selection.kind === "ready" && <InputFileReview input={selection.input} />}
+  </div>;
 }

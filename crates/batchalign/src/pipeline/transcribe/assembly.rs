@@ -89,10 +89,10 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
         ctx.state.word_segmenter.as_ref(),
         synthesized_terminators,
     );
-    crate::provenance::inject_provenance(&mut chat_file, &provenance);
+    crate::provenance::inject_provenance(&mut chat_file, &provenance)?;
 
     // Inject human-readable "unchecked ASR" warning (a user's workflow depends on this).
-    crate::provenance::inject_unchecked_warning(&mut chat_file, &asr);
+    crate::provenance::inject_unchecked_warning(&mut chat_file, &asr)?;
 
     // CHAT construction validity is not acoustic speaker accuracy. Retain the
     // producer-derived caveat even when no debug directory was requested.
@@ -107,7 +107,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
             crate::chat_ops::Line::header(
                 talkbank_model::Location::Unlocated,
                 crate::chat_ops::Header::Comment {
-                    content: crate::chat_ops::BulletContent::from_text(warning),
+                    content: talkbank_model::model::CommentContent::try_from_text(warning)?,
                 },
             ),
         );

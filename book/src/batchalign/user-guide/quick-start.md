@@ -9,7 +9,7 @@ processing commands can reach a Python runtime with `batchalign.worker`
 available.
 
 **Evaluating the experimental GUI shell?** See
-[Batchalign Desktop (Experimental)](desktop-app.md). The supported first-time
+[BA3 Runner (Experimental)](desktop-app.md). The supported first-time
 user path today is still the `batchalign3` CLI.
 
 For the full command surface, see the [CLI Reference](cli-reference.md).
@@ -131,7 +131,7 @@ Costs](network-costs.md).
 
 ## Next steps
 
-- [Batchalign Desktop (Experimental)](desktop-app.md), in-repo GUI shell status and scope
+- [BA3 Runner (Experimental)](desktop-app.md), in-repo GUI shell status and scope
 - [CLI Reference](cli-reference.md)
 - [Performance](performance.md)
 - [Server Mode](server-mode.md)

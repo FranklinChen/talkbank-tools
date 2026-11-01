@@ -4,8 +4,8 @@
  * command picker, configure a job, and watch progress, all without opening
  * a terminal. The existing `/dashboard` routes are preserved for power users.
  *
- * In desktop mode, manages the server lifecycle (auto-start, status bar,
- * manual start/stop). In web mode, assumes the server is externally managed.
+ * Native startup has already admitted the CLI-managed service. This page
+ * observes its availability without owning or stopping its process.
  */
 
 import { ProcessForm } from "../components/process/ProcessForm";

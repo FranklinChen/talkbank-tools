@@ -16,7 +16,7 @@ the server.
 
 `batchalign3` is the supported public **Batchalign** surface today. It is a
 **public preview** product line with wheels for Windows, macOS, and Linux. The
-separate **Batchalign Desktop** shell in `apps/dashboard-desktop/` is still
+separate **BA3 Runner** shell in `apps/dashboard-desktop/` is still
 experimental and should not be described as the supported first-time-user entry
 point. For current platform details, see [Platform Support](reference/platform-support.md)
 and the [Release Contract](developer/release-contract.md).

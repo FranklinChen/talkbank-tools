@@ -24,14 +24,14 @@ instead of maintaining a second matrix.
 |----------|------|-------|
 | All (web browser) | B | Production bundle built in CI and embedded in release wheels; browser behavior is exercised by the dashboard test suite |
 
-## Batchalign Desktop (experimental)
+## BA3 Runner (experimental)
 
 | Platform | Tier | Notes |
 |----------|------|-------|
 | macOS / Windows | C (Experimental) | In-repo Tauri shell only; not a supported public release surface |
 | Linux | C (Experimental) | No supported public desktop distribution |
 
-This section is about **Batchalign Desktop** in `apps/dashboard-desktop/`.
+This section is about **BA3 Runner** in `apps/dashboard-desktop/`.
 
 ## Tier Definitions
 

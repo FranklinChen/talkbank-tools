@@ -623,6 +623,17 @@ impl JobRegistry {
     /// Project the download-facing detail view for one job.
     pub(crate) async fn job_detail(&self, job_id: &JobId) -> Option<JobDetail> {
         self.project_job(job_id.clone(), |job| JobDetail {
+            output_folders: crate::api::JobOutputFolders {
+                job_id: job.identity.job_id.clone(),
+                access: crate::api::LocalOutputAccess::admit(if job.filesystem.paths_mode {
+                    crate::types::output_access::OutputLocationSource::Paths {
+                        count: job.filesystem.filenames.len(),
+                        outputs: &job.filesystem.output_paths,
+                    }
+                } else {
+                    crate::types::output_access::OutputLocationSource::Content
+                }),
+            },
             options: job.dispatch.options.clone(),
             command: job.dispatch.command,
             status: job.execution.status,

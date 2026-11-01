@@ -154,14 +154,17 @@ impl SecondaryReport {
 
     /// Put the same producer-owned availability facts in the saved transcript.
     /// Replacing only this named comment preserves contributor comments.
-    pub(crate) fn annotate(&self, chat: &mut crate::chat_ops::ChatFile) {
+    pub(crate) fn annotate(
+        &self,
+        chat: &mut crate::chat_ops::ChatFile,
+    ) -> Result<(), talkbank_model::model::BlankContent> {
         use talkbank_model::{Header, Line, Location};
         const PREFIX: &str = "[batchalign morphology availability]";
-        chat.lines.retain(|line| {
+        let preserve = |line: &Line| {
             !matches!(line,
             Line::Header { header, .. } if matches!(header.as_ref(),
-                Header::Comment { content } if content.to_chat_string().starts_with(PREFIX)))
-        });
+                Header::Comment { content } if content.as_bullet_content().to_chat_string().starts_with(PREFIX)))
+        };
         let mut notes = Vec::new();
         if !self.exclusions.is_empty() {
             let languages: std::collections::BTreeSet<_> = self
@@ -186,22 +189,21 @@ impl SecondaryReport {
             notes.push(format!("L2 analysis could not be dispatched for {} word(s); see job diagnostics for language or alignment causes", self.unplaced.iter().map(|item| item.words).sum::<u64>()));
         }
         if notes.is_empty() {
-            return;
+            chat.lines.retain(preserve);
+            return Ok(());
         }
         let text = format!(
             "{PREFIX} {}. L2|xxx marks unavailable analysis; surrounding morphology is retained.",
             notes.join("; ")
         );
+        let content = talkbank_model::model::CommentContent::try_from_text(text)?;
+        chat.lines.retain(preserve);
         let position = crate::provenance::insert_pos_after_constant_headers(chat);
         chat.lines.insert(
             position,
-            Line::header(
-                Location::Unlocated,
-                Header::Comment {
-                    content: crate::chat_ops::BulletContent::from_text(text),
-                },
-            ),
+            Line::header(Location::Unlocated, Header::Comment { content }),
         );
+        Ok(())
     }
 
     /// Counts include every span; inline examples are bounded for job

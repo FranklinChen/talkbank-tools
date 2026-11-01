@@ -1459,6 +1459,24 @@
         ],
         "type": "object"
       },
+      "JobOutputFolders": {
+        "description": "Snapshot identity and its independent local-output evidence.",
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/LocalOutputAccess",
+            "description": "Absence, refusal and recorded destinations are distinct outcomes."
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/JobId",
+            "description": "The record whose submitted destinations were projected."
+          }
+        },
+        "required": [
+          "job_id",
+          "access"
+        ],
+        "type": "object"
+      },
       "JobResultResponse": {
         "description": "`GET /jobs/{id}/results` response: completed job results.",
         "properties": {
@@ -1670,6 +1688,85 @@
           "expires_at"
         ],
         "type": "object"
+      },
+      "LocalOutputAccess": {
+        "description": "Directory existence belongs to the native opener at action time. A recorded\ndestination remains useful even when all input files were refused.",
+        "oneOf": [
+          {
+            "description": "Content uploads have downloadable results, not client-local folders.",
+            "properties": {
+              "state": {
+                "enum": [
+                  "content_mode"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A legacy/empty record contains no output-location evidence.",
+            "properties": {
+              "state": {
+                "enum": [
+                  "not_recorded"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every entry is the parent of a recorded output path, never source_dir.",
+            "properties": {
+              "directories": {
+                "description": "Nonempty destinations admitted together from the stored mapping.",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "state": {
+                "enum": [
+                  "recorded"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "directories",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Malformed stored mappings cannot produce a successful empty response.",
+            "properties": {
+              "message": {
+                "description": "Why the stored mapping could not supply folder authority.",
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "refused"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "message",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "MachineTime": {
         "description": "RFC 3339 in UTC with exactly three fractional digits, so string order is time order.",
@@ -3282,6 +3379,58 @@
           }
         },
         "summary": "Request cancellation of a running or queued job.",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/jobs/{job_id}/output-folders": {
+      "get": {
+        "operationId": "get_output_folders",
+        "parameters": [
+          {
+            "description": "Job identifier",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOutputFolders"
+                }
+              }
+            },
+            "description": "Recorded local output folders"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not a local request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Job not found"
+          }
+        },
+        "summary": "Inspect recorded destinations without guessing an output root or reading\nfile contents. The native action separately admits directory existence.",
         "tags": [
           "jobs"
         ]

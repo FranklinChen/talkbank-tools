@@ -1,307 +1,152 @@
-/** Main form composing command selection, file picking, output mode, and submission.
- *
- * This is the primary user flow for the desktop app. A researcher picks a
- * command, selects an input folder, optionally picks an output folder, and
- * starts processing. Desktop-only file interactions stay behind the focused
- * file capability so the form never imports raw Tauri APIs.
- */
-
-import { useState } from "react";
-import { CommandPicker, type CommandDef } from "./CommandPicker";
-import { FolderPicker } from "./FolderPicker";
-import { OutputModeSelector, type OutputMode } from "./OutputModeSelector";
+/** One-command launcher. Configuration and submitted jobs are distinct states;
+ * the submitted state retains the admitted plan and returned job identity. */
+import { useEffect, useRef, useState } from "react";
+import { CommandPicker, INPUT_POLICIES, type CommandDef } from "./CommandPicker";
+import { FolderPicker, type FolderSelection } from "./FolderPicker";
+import { OutputModeSelector } from "./OutputModeSelector";
 import { ProcessingProgress } from "./ProcessingProgress";
+import { UnconfirmedSubmission } from "./UnconfirmedSubmission";
+import { JobPlan, PreparedJob, type OutputChoice } from "./jobPlan";
+import { SelectedInputs, type DiscoveredInput } from "./inputSelection";
 import { useSubmitJob } from "../../hooks/useSubmitJob";
-import {
-  useDesktopEnvironment,
-  useDesktopFiles,
-} from "../../desktop/DesktopContext";
+import { useDesktopFiles } from "../../desktop/DesktopContext";
 
-/** File extensions relevant to each command. */
-function extensionsForCommand(command: string): string[] {
-  switch (command) {
-    case "transcribe":
-      return ["wav", "mp3", "mp4", "m4a", "flac", "ogg", "webm"];
-    default:
-      return ["cha"];
-  }
-}
+type Configuration = {
+  kind: "configure"; session: symbol; command: CommandDef; input: DiscoveredInput | null;
+  output: OutputChoice; lang: string; speakers: string; error: string | null;
+};
+type InputAttempt = { kind: "input"; configuration: Configuration };
+type SelectionAttempt = InputAttempt | { kind: "output"; configuration: Configuration };
+type FormState = { kind: "choose" } | Configuration
+  | { kind: "picking"; attempt: SelectionAttempt }
+  | { kind: "scanning"; attempt: InputAttempt; folder: string }
+  | { kind: "unconfirmed"; command: CommandDef; plan: JobPlan; message: string }
+  | { kind: "processing"; plan: JobPlan; jobId: string };
 
-type FormStep = "pick-command" | "configure" | "processing";
-
-interface ProcessFormProps {
-  /** Whether the server is ready to accept jobs (from lifecycle hook). */
-  isServerReady: boolean;
-}
-
-export function ProcessForm({ isServerReady }: ProcessFormProps) {
-  const environment = useDesktopEnvironment();
+/** Configure one checked plan and submit it once to the admitted local service. */
+export function ProcessForm({ isServerReady }: { isServerReady: boolean }) {
   const files = useDesktopFiles();
-  const [step, setStep] = useState<FormStep>("pick-command");
-  const [command, setCommand] = useState<CommandDef | null>(null);
-  const [inputFolder, setInputFolder] = useState<string | null>(null);
-  const [inputFiles, setInputFiles] = useState<string[]>([]);
-  const [outputMode, setOutputMode] = useState<OutputMode>("separate");
-  const [outputFolder, setOutputFolder] = useState<string | null>(null);
-  const [lang, setLang] = useState("eng");
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-
-  const submitJob = useSubmitJob();
-
-  function handleCommandSelect(cmd: CommandDef) {
-    setCommand(cmd);
-    setStep("configure");
-    // Reset file selections when switching commands
-    setInputFolder(null);
-    setInputFiles([]);
-    setOutputFolder(null);
+  const [form, setForm] = useState<FormState>({ kind: "choose" });
+  const submit = useSubmitJob();
+  const selectionOwner = useRef<SelectionAttempt | null>(null);
+  useEffect(() => () => { selectionOwner.current = null; }, []);
+  function reset() { selectionOwner.current = null; setForm({ kind: "choose" }); submit.reset(); }
+  if (form.kind === "processing") return <ProcessingProgress
+    jobId={form.jobId} totalFiles={form.plan.request.sourcePaths.length}
+    command={form.plan.request.command} outputFolder={form.plan.outputFolder} onReset={reset} />;
+  if (form.kind === "unconfirmed") return <UnconfirmedSubmission command={form.command}
+    plan={form.plan} message={form.message} onConfigure={reset} />;
+  switch (submit.state.kind) {
+    case "checking-paths": return <p role="status">Checking input and output files...</p>;
+    case "reading-preferences": return <p role="status">Reading ASR preferences...</p>;
+    case "sending": return <p role="status">Submitting job...</p>;
+    case "available": case "finished": case "retired": break;
   }
-
-  function handleInputSelect(folder: string, discovered: string[]) {
-    setInputFolder(folder);
-    setInputFiles(discovered);
+  if (form.kind === "choose") return <CommandPicker onSelect={command => setForm({
+    kind: "configure", session: Symbol(), command, input: null,
+    output: { kind: "separate", folder: null }, lang: "eng", speakers: "1", error: null,
+  })} />;
+  const current = form.kind === "configure" ? form : form.attempt.configuration;
+  const inputPolicy = INPUT_POLICIES[current.command.input];
+  const inputView: FolderSelection = form.kind === "scanning" ? { kind: "scanning", folder: form.folder }
+    : form.kind === "picking" && form.attempt.kind === "input" ? { kind: "picking" }
+    : current.input?.kind === "selected" ? { kind: "ready", input: current.input.input }
+    : current.input?.kind === "empty" ? { kind: "no-matches", folder: current.input.folder } : { kind: "empty" };
+  function update(change: (previous: Configuration) => Configuration) {
+    setForm(previous => previous.kind === "configure" && previous.session === current.session ? change(previous) : previous);
   }
-
-  async function handleOutputSelect() {
-    const folder = await files.pickOutputFolder();
-    if (folder) setOutputFolder(folder);
-  }
-
-  /** Build output paths: either mirror structure into output folder, or overwrite in place.
-   *
-   * For the separate-folder case, subdirectory structure relative to the
-   * input folder is preserved. For example, if inputFolder is
-   * `.../French` and a file is `.../French/Newcastle/S1.wav`, the output
-   * path is `<dest>/Newcastle/S1.cha`. This prevents name collisions for
-   * corpora where different subdirectories contain identically-named files.
-   */
-  function buildOutputPaths(): string[] {
-    if (outputMode === "in-place") {
-      return inputFiles;
+  async function chooseFolder(kind: SelectionAttempt["kind"]) {
+    if (form.kind !== "configure" || selectionOwner.current || submit.state.kind !== "available") return;
+    const attempt: SelectionAttempt = kind === "input"
+      ? { kind: "input", configuration: current } : { kind: "output", configuration: current };
+    selectionOwner.current = attempt;
+    setForm({ kind: "picking", attempt });
+    // Only the owner may settle this interaction. Back or unmount withdraws
+    // ownership before a delayed dialog or scan can affect another screen.
+    function settle(configuration: Configuration) {
+      if (selectionOwner.current === attempt) setForm(configuration);
     }
-    const dest = outputFolder ?? inputFolder;
-    if (!dest) return inputFiles;
-
-    // Strip trailing slashes from the input folder so the prefix is clean.
-    const folderPrefix = (inputFolder ?? "").replace(/\/+$/, "") + "/";
-
-    return inputFiles.map((inputPath) => {
-      // Compute the path relative to the input folder, falling back to just
-      // the filename if the path doesn't start with the expected prefix.
-      const relativePath = inputPath.startsWith(folderPrefix)
-        ? inputPath.slice(folderPrefix.length)
-        : (inputPath.split(/[/\\]/).pop() ?? inputPath);
-
-      // For transcribe, the input is audio but the output is a .cha transcript.
-      const outputRelPath =
-        command?.id === "transcribe"
-          ? relativePath.replace(/\.[^.]+$/, ".cha")
-          : relativePath;
-
-      return `${dest}/${outputRelPath}`;
-    });
-  }
-
-  async function handleSubmit() {
-    if (!command || inputFiles.length === 0) return;
-
-    const outputPaths = buildOutputPaths();
-
     try {
-      const job = await submitJob.mutateAsync({
-        command: command.id,
-        lang: command.needsLang ? lang : undefined,
-        sourcePaths: inputFiles,
-        outputPaths,
-        sourceDir: inputFolder ?? undefined,
-      });
-      setActiveJobId(job.job_id);
-      setStep("processing");
-    } catch {
-      // Error state is exposed via submitJob.isError / submitJob.error
+      const folder = await (attempt.kind === "input"
+        ? files.pickFolder("Select " + current.command.label + " input folder") : files.pickOutputFolder());
+      if (selectionOwner.current !== attempt) return;
+      if (!folder) { settle(current); return; }
+      switch (attempt.kind) {
+        case "output": settle({ ...current, output: { kind: "separate", folder }, error: null }); break;
+        case "input": {
+          setForm({ kind: "scanning", attempt, folder });
+          const discovered = await files.discoverFiles(folder, [...inputPolicy.extensions]);
+          settle({ ...current, input: SelectedInputs.fromDiscovery(folder, discovered), error: null });
+          break;
+        }
+      }
+    } catch (error) {
+      switch (attempt.kind) {
+        case "input": settle({ ...current, input: null, error: "Input folder selection failed. Choose the input folder again. " + String(error) }); break;
+        case "output": settle({ ...current, error: String(error) }); break;
+      }
+    } finally {
+      if (selectionOwner.current === attempt) selectionOwner.current = null;
     }
   }
-
-  function handleReset() {
-    setStep("pick-command");
-    setCommand(null);
-    setInputFolder(null);
-    setInputFiles([]);
-    setOutputFolder(null);
-    setActiveJobId(null);
-    submitJob.reset();
+  async function start() {
+    if (form.kind !== "configure" || current.input?.kind !== "selected" || selectionOwner.current || submit.state.kind !== "available") return;
+    let attempt: PreparedJob;
+    try {
+      attempt = PreparedJob.prepare(current.command, current.input.input, current.output, current.lang, current.speakers);
+    } catch (error) { update(previous => ({ ...previous, error: String(error) })); return; }
+    // The available snapshot owns the claim. A stale handler cannot start it
+    // twice, and unmount retires pre-POST work inside the launch controller.
+    const outcome = await submit.state.start(attempt);
+    switch (outcome.kind) {
+      case "accepted": setForm({ kind: "processing", plan: outcome.plan, jobId: outcome.job.id }); return;
+      case "refused": update(previous => ({ ...previous, error: outcome.message })); return;
+      case "unconfirmed": setForm({ kind: "unconfirmed", command: current.command, plan: outcome.plan, message: outcome.message }); return;
+      case "retired": return;
+    }
+    return outcome satisfies never;
   }
-
-  // Processing screen
-  if (step === "processing" && activeJobId && command) {
-    return (
-      <ProcessingProgress
-        jobId={activeJobId}
-        totalFiles={inputFiles.length}
-        command={command.id}
-        outputFolder={outputMode === "separate" ? outputFolder : inputFolder}
-        onReset={handleReset}
-      />
-    );
-  }
-
-  // Configure screen
-  if (step === "configure" && command) {
-    const canSubmit =
-      isServerReady && inputFiles.length > 0 && !submitJob.isPending;
-    const needsOutputFolder = outputMode === "separate";
-
-    return (
-      <div className="max-w-xl mx-auto space-y-5">
-        {/* Header */}
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setStep("pick-command")}
-            className="text-gray-400 hover:text-gray-600 transition-colors"
-            aria-label="Back"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-          <h2 className="text-lg font-semibold text-gray-800">
-            {command.label}
-          </h2>
-        </div>
-
-        {/* Input folder */}
-        <FolderPicker
-          label="Choose input files"
-          extensions={extensionsForCommand(command.id)}
-          onSelect={handleInputSelect}
-          selectedFolder={inputFolder}
-          fileCount={inputFiles.length}
-          dialogTitle={`Select ${command.label} input folder`}
-        />
-
-        {/* Output mode */}
-        <OutputModeSelector mode={outputMode} onChange={setOutputMode} />
-
-        {/* Output folder picker (when separate mode) */}
-        {needsOutputFolder && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Output folder
-            </label>
-            {outputFolder ? (
-              <button
-                type="button"
-                onClick={handleOutputSelect}
-                className="w-full text-left border border-gray-200 rounded-lg p-3 hover:border-gray-300 transition-colors"
-              >
-                <div className="text-sm text-gray-700 truncate">{outputFolder}</div>
-                <div className="text-xs text-gray-400 mt-0.5">Click to change</div>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleOutputSelect}
-                disabled={!environment.isDesktop}
-                className="w-full border-2 border-dashed border-gray-300 rounded-lg p-4 text-center
-                  hover:border-indigo-400 hover:bg-indigo-50/50 transition-colors
-                  disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <span className="text-sm text-gray-600">
-                  Click to choose output folder
-                </span>
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Language selector */}
-        {command.needsLang && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Language
-            </label>
-            <select
-              value={lang}
-              onChange={(e) => setLang(e.target.value)}
-              className="block w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              {/* Germanic */}
-              <option value="eng">English</option>
-              <option value="deu">German</option>
-              <option value="nld">Dutch</option>
-              <option value="afr">Afrikaans</option>
-              <option value="swe">Swedish</option>
-              <option value="dan">Danish</option>
-              <option value="nor">Norwegian</option>
-              {/* Romance */}
-              <option value="spa">Spanish</option>
-              <option value="fra">French</option>
-              <option value="ita">Italian</option>
-              <option value="por">Portuguese</option>
-              <option value="cat">Catalan</option>
-              {/* Slavic */}
-              <option value="rus">Russian</option>
-              <option value="pol">Polish</option>
-              <option value="ces">Czech</option>
-              <option value="slk">Slovak</option>
-              <option value="ukr">Ukrainian</option>
-              <option value="bul">Bulgarian</option>
-              {/* East Asian */}
-              <option value="zho">Chinese (Mandarin)</option>
-              <option value="yue">Cantonese</option>
-              <option value="jpn">Japanese</option>
-              <option value="kor">Korean</option>
-              {/* Other */}
-              <option value="ara">Arabic</option>
-              <option value="heb">Hebrew</option>
-              <option value="tur">Turkish</option>
-              <option value="fin">Finnish</option>
-              <option value="est">Estonian</option>
-              <option value="eus">Basque</option>
-              <option value="ind">Indonesian</option>
-              <option value="vie">Vietnamese</option>
-              <option value="tha">Thai</option>
-              <option value="hin">Hindi</option>
-              <option value="ben">Bengali</option>
-              <option value="mar">Marathi</option>
-              <option value="tel">Telugu</option>
-              <option value="tam">Tamil</option>
-              <option value="mal">Malayalam</option>
-            </select>
-          </div>
-        )}
-
-        {/* Error display */}
-        {submitJob.isError && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-            {submitJob.error?.message ?? "Failed to submit job"}
-          </div>
-        )}
-
-        {/* Submit button */}
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={!canSubmit}
-          className="w-full py-3 text-sm font-semibold text-white bg-indigo-600 rounded-lg
-            hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {submitJob.isPending
-            ? "Submitting..."
-            : `Start Processing ${inputFiles.length > 0 ? `(${inputFiles.length} files)` : ""}`}
-        </button>
-
-        {!isServerReady && (
-          <p className="text-xs text-amber-600 text-center">
-            Waiting for server to start...
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  // Home screen (pick command)
-  return <CommandPicker onSelect={handleCommandSelect} />;
+  const outputMissing = current.output.kind === "separate" && !current.output.folder;
+  return <div className="max-w-xl mx-auto space-y-5">
+    <button type="button" onClick={reset} disabled={submit.state.kind !== "available"} aria-label="Back">Back</button>
+    {form.kind === "picking" && <p role="status">Choosing {form.attempt.kind} folder...</p>}
+    {form.kind === "scanning" && <p role="status">Scanning input folder: {form.folder}</p>}
+    <fieldset disabled={form.kind !== "configure"} className="space-y-5">
+    <h2 className="text-lg font-semibold">{current.command.label}</h2>
+    <FolderPicker label="Choose input files" selection={inputView} policy={inputPolicy} onChoose={() => { void chooseFolder("input"); }} />
+    {current.command.id === "benchmark" && <p className="text-sm text-gray-600">
+      Choose recordings with matching reference transcripts beside them (for example, clip.wav and clip.cha).
+    </p>}
+    <OutputModeSelector mode={current.output.kind} allowInPlace={current.command.id !== "benchmark"}
+      onChange={mode => update(previous => ({ ...previous, output: mode === "in-place" ? { kind: "in-place" } : { kind: "separate", folder: null }, error: null }))} />
+    {current.output.kind === "separate" && <div>
+      <label className="block text-sm font-medium mb-2">Output folder</label>
+      <button type="button" onClick={() => { void chooseFolder("output"); }} disabled={submit.state.kind !== "available"}
+        className="w-full border border-dashed rounded p-4 text-left">
+        {current.output.folder ?? "Click to choose output folder"}
+      </button>
+    </div>}
+    {current.command.language === "per-file" && <p className="text-sm text-gray-600">Uses each transcript’s @Languages header.</p>}
+    {current.command.language === "job" && <label className="block text-sm">Language (three-letter code)
+      <input aria-label="Language" value={current.lang} disabled={submit.state.kind !== "available"}
+        onChange={event => update(previous => ({ ...previous, lang: event.target.value, error: null }))}
+        className="block border rounded p-2 mt-1" />
+    </label>}
+    {(current.command.id === "transcribe" || current.command.id === "benchmark") && <p className="text-sm text-gray-600">
+      Uses the ASR engine selected in Settings. Rev.AI uploads recordings to a paid cloud service; Whisper runs locally.
+    </p>}
+    {(current.command.id === "transcribe" || current.command.id === "benchmark") && <label className="block text-sm">Number of speakers
+      <input aria-label="Number of speakers" type="number" min="1" step="1" value={current.speakers}
+        onChange={event => update(previous => ({ ...previous, speakers: event.target.value, error: null }))}
+        className="block border rounded p-2 mt-1" />
+    </label>}
+    {current.error && <p role="alert" className="text-red-700">{current.error}</p>}
+    <button type="button" onClick={start}
+      disabled={!isServerReady || current.input?.kind !== "selected" || outputMissing || submit.state.kind !== "available"}
+      className="w-full rounded p-3 bg-indigo-600 text-white disabled:opacity-50">
+      Start Processing
+    </button>
+    {!isServerReady && <p role="status">Waiting for the processing service...</p>}
+    </fieldset>
+  </div>;
 }

@@ -335,7 +335,13 @@ where
             [&applied.engine],
         ) {
             TextStamp::Stamped(comment) => {
-                crate::provenance::inject_provenance(&mut document, &comment);
+                if let Err(error) = crate::provenance::inject_provenance(&mut document, &comment) {
+                    results.push(TextBatchFileResult::err(
+                        file.filename.clone(),
+                        TextWorkflowFileError::from_server_error(&ServerError::from(error)),
+                    ));
+                    continue;
+                }
                 FileStampOutcome::Stamped {
                     command: command.to_string(),
                 }

@@ -277,6 +277,10 @@ mod tests {
 
     fn job_detail(paths_mode: bool) -> JobDetail {
         JobDetail {
+            output_folders: crate::api::JobOutputFolders {
+                job_id: crate::api::JobId::from("job-1"),
+                access: crate::api::LocalOutputAccess::NotRecorded,
+            },
             command: crate::ReleasedCommand::Align,
             options: crate::recipe_runner::runtime::test_options(crate::ReleasedCommand::Align),
             status: JobStatus::Completed,

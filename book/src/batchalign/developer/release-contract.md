@@ -45,7 +45,7 @@ invoke the CLI or local server.
 
 ## Experimental or internal surfaces
 
-- **Batchalign Desktop (Tauri)**: an in-repo shell, not released.
+- **BA3 Runner (Tauri desktop)**: an in-repo shell, not released.
 - **Direct Python imports**: internal implementation detail.
 - **Internal Rust crates**: workspace implementation details, not separately
   published by the BA3 release workflow.

@@ -1,310 +1,289 @@
-//! Server lifecycle management for the Tauri desktop shell.
+//! Non-owning connection to the CLI-managed local server.
 //!
-//! Spawns `batchalign3 serve start --foreground --port 18000` as a managed child
-//! process. The server is auto-started on app launch via the Tauri `setup` hook
-//! and auto-stopped on app exit. The frontend can also start/stop manually.
-//!
-//! Port 18000 is used instead of the default 8000 to avoid conflicts with any
-//! manually started development server.
+//! Discovery belongs to the CLI, which owns handshake/config/build admission.
+//! A desktop window never owns the service PID and cannot kill shared jobs.
 
-use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, State};
+use tokio::process::Command;
 
-use crate::protocol::{ServerStatusChangedEvent, ServerStatusInfo, SERVER_STATUS_CHANGED_EVENT};
+use crate::protocol::ServerStatusInfo;
 
-/// The desktop server port. Matches `DEFAULT_DESKTOP_SERVER` in `runtime.ts`.
-const SERVER_PORT: u16 = 18000;
+#[derive(Debug, thiserror::Error)]
+enum ConnectionError {
+    #[error("Could not run the installed Batchalign CLI: {0}")]
+    Launch(#[source] std::io::Error),
+    #[error("The installed CLI did not finish {action} within {seconds} seconds. Check whether the operating system is waiting for file access, then retry. The managed service has not been stopped.")]
+    TimedOut { action: &'static str, seconds: u64 },
+    #[error("The installed CLI could not complete {action}. Update it using the Batchalign installation guide. {detail}")]
+    CliRefused { action: String, detail: String },
+    #[error("The installed CLI did not return a supported server observation. Update the CLI before opening the desktop app.")]
+    UnsupportedObservation(#[source] serde_json::Error),
+    #[error("Invalid managed server URL: {0}")]
+    InvalidUrl(#[source] url::ParseError),
+    #[error("The desktop requires an identified local managed server.")]
+    NotLocal,
+}
 
-/// Managed state holding the server child process handle.
-///
-/// Wrapped in a `Mutex` so Tauri commands (which run on async threads) can
-/// safely check and mutate the process. The `Option` is `None` when no server
-/// has been started or after it has been stopped.
-pub struct ServerProcess(Mutex<Option<Child>>);
+/// Possession means a concrete installed executable was found, not guessed.
+struct InstalledCli(PathBuf);
 
-impl ServerProcess {
-    /// Create a new empty server-process manager.
-    pub fn new() -> Self {
-        Self(Mutex::new(None))
-    }
+/// Every subprocess request owns a finite wait and its child process. A stalled
+/// diagnostic can neither fabricate a stopped observation nor hang startup.
+struct CliRequest {
+    action: CliAction,
+    deadline: Duration,
+}
 
-    fn lock(&self) -> Result<MutexGuard<'_, Option<Child>>, String> {
-        self.0.lock().map_err(|e| format!("Lock error: {e}"))
-    }
+#[derive(Clone, Copy)]
+enum CliAction {
+    Observe,
+    Start,
+}
 
-    fn start(&self) -> Result<(), String> {
-        let mut guard = self.lock()?;
-
-        if is_child_alive(&mut guard) {
-            return Ok(());
+impl CliAction {
+    fn request(self) -> CliRequest {
+        CliRequest {
+            action: self,
+            deadline: Duration::from_secs(match self {
+                Self::Observe => 15,
+                Self::Start => 60,
+            }),
         }
-
-        let binary = find_batchalign().ok_or_else(|| {
-            "batchalign3 not found on PATH. Install it with: uv tool install batchalign3"
-                .to_string()
-        })?;
-
-        let child = Command::new(&binary)
-            .args([
-                "serve",
-                "start",
-                "--foreground",
-                "--port",
-                &SERVER_PORT.to_string(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to start server: {e}"))?;
-
-        *guard = Some(child);
-        Ok(())
     }
 
-    fn stop(&self) -> Result<(), String> {
-        let mut guard = self.lock()?;
-
-        if let Some(mut child) = guard.take() {
-            // kill() sends SIGKILL on Unix, TerminateProcess on Windows.
-            // We prefer this over a graceful SIGTERM because the server's
-            // shutdown handler may take seconds and we want fast app exit.
-            let _ = child.kill();
-            let _ = child.wait(); // reap the zombie
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Observe => &["serve", "status", "--format", "json"],
+            Self::Start => &["serve", "start"],
         }
-        Ok(())
     }
 
-    fn status(&self) -> Result<ServerStatusInfo, String> {
-        let mut guard = self.lock()?;
-        let running = is_child_alive(&mut guard);
-        let pid = guard.as_ref().map(|c| c.id());
-
-        Ok(ServerStatusInfo {
-            running,
-            port: SERVER_PORT,
-            binary_path: find_batchalign(),
-            pid,
-        })
-    }
-
-    fn shutdown(&self) {
-        if let Ok(mut guard) = self.0.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+    fn description(self) -> &'static str {
+        match self {
+            Self::Observe => "checking the local service",
+            Self::Start => "starting the local service",
         }
     }
 }
 
-fn emit_status(app: &AppHandle, status: &ServerStatusInfo) {
-    if let Err(error) = app.emit(
-        SERVER_STATUS_CHANGED_EVENT,
-        ServerStatusChangedEvent {
-            status: status.clone(),
-        },
-    ) {
-        eprintln!("[tauri] Failed to emit {SERVER_STATUS_CHANGED_EVENT}: {error}");
+/// Only successful, completed requests can supply bytes to observation decoding.
+struct CompletedCliRequest(Vec<u8>);
+
+impl CliRequest {
+    async fn run(self, cli: &InstalledCli) -> Result<CompletedCliRequest, ConnectionError> {
+        let output = tokio::time::timeout(
+            self.deadline,
+            Command::new(&cli.0)
+                .args(self.action.args())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| ConnectionError::TimedOut {
+            action: self.action.description(),
+            seconds: self.deadline.as_secs(),
+        })?
+        .map_err(ConnectionError::Launch)?;
+        if !output.status.success() {
+            return Err(ConnectionError::CliRefused {
+                action: self.action.args().join(" "),
+                detail: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(CompletedCliRequest(output.stdout))
     }
 }
 
-/// Start the managed server and emit the resulting status snapshot.
-pub(crate) fn start_managed_server(
-    app: &AppHandle,
-    process: &ServerProcess,
-) -> Result<ServerStatusInfo, String> {
-    process.start()?;
-    let status = process.status()?;
-    emit_status(app, &status);
+impl InstalledCli {
+    fn discover() -> Option<Self> {
+        let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect())
+            .unwrap_or_default();
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            dirs.push(PathBuf::from(home).join(".local/bin"));
+        }
+        dirs.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]);
+        let name = if cfg!(windows) {
+            "batchalign3.exe"
+        } else {
+            "batchalign3"
+        };
+        dirs.into_iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .map(Self)
+    }
+
+    async fn observe(&self) -> Result<ServerStatusInfo, ConnectionError> {
+        let completed = CliAction::Observe.request().run(self).await?;
+        decode_observation(&completed.0)
+    }
+}
+
+fn decode_observation(bytes: &[u8]) -> Result<ServerStatusInfo, ConnectionError> {
+    let status: ServerStatusInfo =
+        serde_json::from_slice(bytes).map_err(ConnectionError::UnsupportedObservation)?;
+    // Only local path-mode inputs are supported by this shell.
+    if let ServerStatusInfo::Ready { url, build_hash } = &status {
+        let parsed = url::Url::parse(url).map_err(ConnectionError::InvalidUrl)?;
+        if parsed.scheme() != "http"
+            || parsed.host_str() != Some("127.0.0.1")
+            || parsed.port().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || build_hash.is_empty()
+        {
+            return Err(ConnectionError::NotLocal);
+        }
+    }
     Ok(status)
 }
 
-/// Stop the managed server and emit the resulting status snapshot.
-pub(crate) fn stop_managed_server(
-    app: &AppHandle,
-    process: &ServerProcess,
-) -> Result<ServerStatusInfo, String> {
-    process.stop()?;
-    let status = process.status()?;
-    emit_status(app, &status);
-    Ok(status)
+async fn observe() -> Result<ServerStatusInfo, ConnectionError> {
+    match InstalledCli::discover() {
+        Some(cli) => cli.observe().await,
+        None => Ok(ServerStatusInfo::MissingBinary),
+    }
 }
 
-/// Locate the `batchalign3` binary on PATH.
-///
-/// Tries `batchalign3` first (installed via `uv tool install` or cargo),
-/// then common locations on macOS/Linux.
-fn find_batchalign() -> Option<String> {
-    #[cfg(unix)]
-    let cmd = "which";
-    #[cfg(windows)]
-    let cmd = "where";
-
-    if let Ok(output) = Command::new(cmd).arg("batchalign3").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
+async fn connect() -> Result<ServerStatusInfo, ConnectionError> {
+    let Some(cli) = InstalledCli::discover() else {
+        return Ok(ServerStatusInfo::MissingBinary);
+    };
+    match cli.observe().await? {
+        ServerStatusInfo::Stopped => {
+            // The CLI starts its persistent service. No child handle is retained.
+            CliAction::Start.request().run(&cli).await?;
+            cli.observe().await
         }
-    }
-
-    None
-}
-
-/// Check whether the managed child process is still alive.
-///
-/// Returns `true` if the process exists and hasn't exited. Also cleans up
-/// the `Option` if the process has exited so subsequent calls see `None`.
-fn is_child_alive(guard: &mut Option<Child>) -> bool {
-    match guard {
-        Some(child) => match child.try_wait() {
-            Ok(None) => true, // still running
-            Ok(Some(_)) => {
-                // Process exited: clean up handle
-                *guard = None;
-                false
-            }
-            Err(_) => {
-                *guard = None;
-                false
-            }
-        },
-        None => false,
+        observed @ (ServerStatusInfo::Ready { .. }
+        | ServerStatusInfo::Refused { .. }
+        | ServerStatusInfo::MissingBinary) => Ok(observed),
     }
 }
 
-/// Start the batchalign3 server as a managed child process.
-///
-/// Returns a fresh shell status snapshot. The frontend should still poll
-/// `/health` to detect when the server is ready to accept jobs.
+/// Discover the local service without starting, stopping or replacing it.
 #[tauri::command]
-pub fn start_server(
-    app: AppHandle,
-    state: State<'_, ServerProcess>,
-) -> Result<ServerStatusInfo, String> {
-    start_managed_server(&app, state.inner())
+pub async fn server_status() -> Result<ServerStatusInfo, String> {
+    observe().await.map_err(|error| error.to_string())
 }
 
-/// Stop the managed server process and return the resulting shell status.
+/// Reuse a compatible service or ask the installed CLI to start a missing one.
 #[tauri::command]
-pub fn stop_server(
-    app: AppHandle,
-    state: State<'_, ServerProcess>,
-) -> Result<ServerStatusInfo, String> {
-    stop_managed_server(&app, state.inner())
-}
-
-/// Return current server status for the frontend status bar.
-#[tauri::command]
-pub fn server_status(state: State<'_, ServerProcess>) -> Result<ServerStatusInfo, String> {
-    state.inner().status()
-}
-
-/// Return the path to the batchalign3 binary, or null if not found.
-///
-/// The frontend keeps this command in the raw protocol inventory even though
-/// the current capability surface relies on `server_status().binary_path`.
-#[tauri::command]
-pub fn get_batchalign_path() -> Option<String> {
-    find_batchalign()
-}
-
-/// Auto-stop the server when the app exits.
-pub fn shutdown_server(process: &ServerProcess) {
-    process.shutdown();
+pub async fn start_server() -> Result<ServerStatusInfo, String> {
+    connect().await.map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     #[cfg(unix)]
-    fn spawn_running_child() -> Child {
-        Command::new("sleep")
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn long-running child")
-    }
-
-    #[cfg(windows)]
-    fn spawn_running_child() -> Child {
-        Command::new("cmd")
-            .args(["/C", "ping 127.0.0.1 -n 30 > NUL"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn long-running child")
+    struct FixtureCli {
+        directory: tempfile::TempDir,
+        cli: InstalledCli,
     }
 
     #[cfg(unix)]
-    fn spawn_exited_child() -> Child {
-        Command::new("sh")
-            .args(["-c", "exit 0"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn short-lived child")
-    }
-
-    #[cfg(windows)]
-    fn spawn_exited_child() -> Child {
-        Command::new("cmd")
-            .args(["/C", "exit 0"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn short-lived child")
-    }
-
-    #[test]
-    fn fresh_status_reports_no_running_server() {
-        let process = ServerProcess::new();
-
-        let status = process.status().expect("query server status");
-
-        assert!(!status.running);
-        assert_eq!(status.port, SERVER_PORT);
-        assert!(status.pid.is_none());
-    }
-
-    #[test]
-    fn status_cleans_up_exited_children() {
-        let process = ServerProcess::new();
-        {
-            let mut guard = process.lock().expect("lock server process");
-            *guard = Some(spawn_exited_child());
+    impl FixtureCli {
+        fn script(body: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("batchalign3");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self {
+                directory,
+                cli: InstalledCli(path),
+            }
         }
-        std::thread::sleep(Duration::from_millis(50));
+    }
 
-        let status = process.status().expect("query server status");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn actual_cli_process_admits_ready_and_preserves_refusals() {
+        let ready = FixtureCli::script(
+            "printf '%s' '{\"state\":\"ready\",\"url\":\"http://127.0.0.1:8001\",\"build_hash\":\"fixture\"}'",
+        );
+        assert!(matches!(
+            ready.cli.observe().await.unwrap(),
+            ServerStatusInfo::Ready { .. }
+        ));
+        let refused = FixtureCli::script("printf '%s' 'fixture refusal' >&2; exit 7");
+        assert!(
+            matches!(refused.cli.observe().await, Err(ConnectionError::CliRefused { detail, .. }) if detail == "fixture refusal")
+        );
+        let malformed = FixtureCli::script("printf '%s' 'not an observation'");
+        assert!(matches!(
+            malformed.cli.observe().await,
+            Err(ConnectionError::UnsupportedObservation(_))
+        ));
+    }
 
-        assert!(!status.running);
-        assert!(status.pid.is_none());
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stalled_cli_is_reaped_without_fabricating_a_stopped_service() {
+        let stalled = FixtureCli::script(
+            "printf '%s' \"$$\" > \"$(dirname \"$0\")/pid\"\nexec /bin/sleep 60",
+        );
+        let request = CliRequest {
+            action: CliAction::Observe,
+            deadline: Duration::from_millis(250),
+        };
+        assert!(matches!(
+            request.run(&stalled.cli).await,
+            Err(ConnectionError::TimedOut { .. })
+        ));
+        let pid = std::fs::read_to_string(stalled.directory.path().join("pid")).unwrap();
+        // kill_on_drop is an OS boundary, not a claim inferred from timeout.
+        // Tokio may reap on its next scheduler turn, so allow a bounded wait.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !Command::new("/bin/kill")
+                    .args(["-0", &pid])
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed-out diagnostic child must not survive");
     }
 
     #[test]
-    fn stop_reaps_running_children() {
-        let process = ServerProcess::new();
-        {
-            let mut guard = process.lock().expect("lock server process");
-            *guard = Some(spawn_running_child());
+    fn discovery_admits_only_complete_local_observations() {
+        assert!(matches!(
+            decode_observation(
+                br#"{"state":"ready","url":"http://127.0.0.1:8001","build_hash":"build"}"#
+            )
+            .unwrap(),
+            ServerStatusInfo::Ready { .. }
+        ));
+        for invalid in [
+            r#"{"state":"ready","url":"http://remote.example:8001","build_hash":"build"}"#,
+            r#"{"state":"ready","url":"http://127.0.0.1:8001","build_hash":""}"#,
+            r#"{"state":"ready","url":"http://127.0.0.1:8001"}"#,
+            r#"{"state":"unknown"}"#,
+            r#"{"running":true,"port":8001}"#,
+        ] {
+            assert!(decode_observation(invalid.as_bytes()).is_err(), "{invalid}");
         }
-
-        let before = process.status().expect("query running status");
-        assert!(before.running);
-        assert!(before.pid.is_some());
-
-        process.stop().expect("stop running child");
-        let after = process.status().expect("query stopped status");
-
-        assert!(!after.running);
-        assert!(after.pid.is_none());
+        assert!(matches!(
+            decode_observation(br#"{"state":"stopped"}"#).unwrap(),
+            ServerStatusInfo::Stopped
+        ));
     }
 }

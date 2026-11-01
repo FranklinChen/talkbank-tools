@@ -1,7 +1,7 @@
 # Tauri + React Dashboard
 
 **Status:** Current
-**Last updated:** 2026-10-01 15:49 EDT
+**Last updated:** 2026-11-01
 
 ## Overview
 
@@ -13,14 +13,14 @@ Batchalign3 dashboard delivery uses:
 The frontend serves two surfaces:
 
 - **`/process`**: End-user processing flow. Researchers pick a command, choose
-  files via native folder picker, and watch SSE-driven progress. Default landing
+  files via native folder picker, and watch observed job progress. Default landing
   page in desktop mode.
 - **`/dashboard`**: Fleet monitoring for power users. Real-time job status,
   file progress, error grouping, algorithm visualizations.
 
 The Tauri shell stays thin: a small set of custom commands for file discovery,
-config I/O, and local server lifecycle plus two plugins (`dialog` for file
-pickers, `shell` for opening folders). All shared UI logic lives in the React
+config I/O, output-directory opening and managed-service discovery, plus the
+`dialog` plugin for file pickers. All shared UI logic lives in the React
 frontend, which now consumes shell-only capabilities through an explicit
 desktop runtime seam instead of scattering raw Tauri imports across hooks and
 components.
@@ -45,14 +45,14 @@ flowchart TD
             process --> cmdpicker["CommandPicker\n(2x3 grid)"]
             process --> folder["FolderPicker\n(native dialog)"]
             process --> form["ProcessForm"]
-            process --> progress["ProcessingProgress\n(SSE-driven)"]
+            process --> progress["ProcessingProgress\n(job-record observations)"]
         end
     end
 
     subgraph "Tauri Backend (src-tauri/src/)"
         discover["discover_files()"]
         start["start_server()"]
-        stop["stop_server()"]
+        reveal["open_output_directory()"]
         status["server_status()"]
         config["read_config() / write_config()"]
     end
@@ -61,13 +61,14 @@ flowchart TD
         lifecycle["useServerLifecycle"]
         health["useServerHealth"]
         submit["useSubmitJob"]
-        stream["useJobStream\n(SSE EventSource)"]
+        stream["useJobStream\n(GET job record)"]
     end
 
-    lifecycle -->|"Tauri IPC"| start & stop & status
+    lifecycle -->|"Tauri IPC"| status
     folder -->|"Tauri IPC"| discover
     form -->|"HTTP POST /jobs"| submit
-    progress -->|"SSE /jobs/id/stream"| stream
+    progress -->|"GET /jobs/id"| stream
+    progress -->|"Tauri IPC"| reveal
 ```
 
 ## Web Dashboard Development
@@ -145,166 +146,162 @@ scripts/build_react_dashboard.sh /tmp/batchalign-dashboard
 
 ## Desktop Dashboard (Tauri)
 
-Run in development mode:
+The native shell stays deliberately small. See the
+[desktop user guide](../user-guide/desktop-app.md) for the processing flow and
+`apps/dashboard-desktop/README.md` for build, qualification and coordinated
+CLI/app deployment requirements.
 
-```bash
-cd apps/dashboard-desktop
-npm ci
-npm run dev
-```
+### Runtime and ownership
 
-This starts the frontend dev server on `:1420` with hot reload and opens the
-Tauri webview at `/process?server=http://127.0.0.1:18000`.
+`DesktopBootstrap` completes native service discovery before server consumers
+mount. The shell invokes the installed CLI's `serve status --format json` and
+admits only complete local observations. A stopped service may transition
+through `serve start` to another observation. Missing, refused and failed
+observations are visible; no default endpoint is substituted. The app owns no
+service PID, has no stop command and does not stop shared work on exit.
 
-The app auto-starts a batchalign3 server on port 18000. If `batchalign3` is not
-on PATH, the status bar shows install instructions.
+`DesktopEndpoint` owns the admitted native origin independently of the route
+URL. The bootstrap binds it before mounting queries. Redirecting `/` to
+`/process`, following a navigation link or dropping query parameters cannot
+substitute another origin. An unadmitted native runtime has no endpoint; there
+is no guessed-port fallback. Browser query overrides remain a web-only path.
 
-Build desktop bundle:
+The native command inventory includes `discover_files`, `admit_job_paths`, `open_output_directory`,
+`server_status`, `start_server`, `is_first_launch`, `read_config` and
+`write_config`. `desktop/protocol.ts` pairs command names with their request and
+response types. `DesktopContext.tsx` exposes focused capabilities; `lib/tauri.ts`
+owns the dynamic native adapter. Only the dialog plugin is needed. Opening
+output consumes a native-admitted existing directory.
 
-```bash
-cd apps/dashboard-desktop
-npm run build
-```
+Settings and CLI setup share `batchalign_types::asr_preferences::PreferenceEdit`.
+A validated edit owns only the selected engine and an explicitly supplied Rev
+key. Other configuration bytes survive an atomic publication; malformed or
+unreadable configuration is refused rather than overwritten.
 
-Default backend target for desktop mode:
+The frontend config capability returns admitted `PreferenceDraft`, accepts
+nominal `PreferenceEdit`, and returns validated `SavedPreferences`. Raw native
+DTOs stay at the adapter. A draft records retain/replace credential intent;
+the old read key is reduced to availability and never replayed on Save.
+Acknowledgement retires replacement intent and clears the editor. The native
+writer still resolves retain against the current INI bytes at write time.
 
-`http://127.0.0.1:18000`
+`SettingsSession` owns loading, load failure, editing and saving. A synchronous
+operation claim blocks duplicate reads/writes; closing retires pending reads,
+while an in-flight save keeps editing and close actions disabled. Reopening
+mounts a fresh owner. Saved notices carry receipts and retire when editing.
+The first-run wizard has separate engine, Rev.AI credential, saving and receipt
+states; credential data cannot accompany a Whisper choice or fabricate Done.
+Read failures and setup saves have visible retry paths. The first-launch check
+admits an actual boolean; transport failure cannot manufacture file absence.
 
-Override backend at runtime using query parameter:
+### Processing states
 
-`?server=http://host:port`
+`ProcessForm` owns choosing, configuring, picking a folder, scanning inputs and
+the accepted/unconfirmed result views. `JobLaunch` owns preparation and sending;
+there is no parallel mutation busy flag or form admission/submission state.
+A selection attempt owns
+its configuration and is claimed synchronously before opening a dialog.
+Only an input attempt can enter scanning. Pending selection disables the
+configuration fieldset and cannot start admission. Cancel restores the earlier
+configuration; input failure clears its input; Back or unmount withdraws the
+owner before delayed results can settle. `FolderPicker` only presents this
+form-owned state and has no independent busy state or async selection callback.
 
-### Tauri Commands
+Native discovery enters `DiscoveredInput`: either a genuine empty folder or
+immutable nonempty `SelectedInputs`. `PreparedJob.prepare` requires the latter,
+so it has no empty-list fallback. `CommandDef` fixes each command's input kind;
+one policy supplies both native discovery extensions and displayed guidance.
+`InputFilePage` admits bounded pages belonging to that selected population;
+rediscovery retires the previous page, and reviewing never filters submission.
 
-| Command | Signature | Purpose |
-|---------|-----------|---------|
-| `discover_files` | `(dir: String, extensions: Vec<String>) -> Vec<String>` | Walk directory tree, return paths matching extensions. Bridges native folder picker to `POST /jobs` `source_paths`. |
-| `start_server` | `() -> ServerStatusInfo` | Spawn `batchalign3 serve start --foreground --port 18000` as managed child and return the resulting `{ running, port, binary_path, pid }` snapshot. |
-| `stop_server` | `() -> ServerStatusInfo` | Kill managed server process and return the resulting `{ running, port, binary_path, pid }` snapshot. |
-| `server_status` | `() -> ServerStatusInfo` | Return `{ running, port, binary_path, pid }`. |
-| `get_batchalign_path` | `() -> Option<String>` | Find `batchalign3` on PATH. |
-| `is_first_launch` | `() -> bool` | True if `~/.batchalign.ini` doesn't exist (triggers setup wizard). |
-| `read_config` | `() -> UserConfig` | Read `~/.batchalign.ini` (engine + Rev.AI key). |
-| `write_config` | `(config: UserConfig) -> DesktopCommandAck` | Write `~/.batchalign.ini`. |
+`PreparedJob` captures immutable paths and validated scalar
+choices before any await. Native `PathProposal::admit` is the only producer of
+`AdmittedPathPlan`: it resolves directory aliases, checks source/output file
+identities and admits disjoint separate roots and unique portable output names.
+Only its complete receipt can create the private `JobPlan` accepted by HTTP
+submission. This is read-only filesystem observation, not a file reservation.
+A synchronous available-state claim prevents duplicate submissions throughout
+admission and settings reads. `JobLaunchState` offers Start only when available;
+checking-paths, reading-preferences, sending, finished and retired states carry
+no launch action. `PreparingLaunch` is the only predecessor accepted by the
+private sending edge. `LaunchRequest` distinguishes commands with explicit ASR
+selection from those without it. Discovery skips nested links
+and special files rather than following them beyond the selected tree.
 
-### Tauri Events
+`SubmissionOutcome` separates accepted, refused and unconfirmed HTTP results.
+Only a validated `SubmittedJob` supplies the identifier used to open progress;
+its receipt does not pretend to contain the full `JobInfo`. Known request and
+admission refusals restore configuration, while transport loss, timeouts, server
+failures, malformed JSON and unusable identifiers retain the admitted plan in
+an unconfirmed state. Unexpected post-attempt failures take that same edge.
+Native/preferences failures before the POST remain correctable configuration
+errors. No automatic POST retry is offered; list refresh performs reads only. Recovery
+offers inspection and deliberate fresh configuration, not replay of the plan.
+This does not add server idempotency or persist a deduplication record across
+navigation, app restarts or other clients.
 
-| Event | Payload | Purpose |
-|-------|---------|---------|
-| `desktop://server-status-changed` | `ServerStatusChangedEvent` | Shell-owned server lifecycle updates consumed by the frontend server capability. |
+`useSubmitJob` attaches the launch owner through a layout effect, so unmount
+retires it at commit rather than waiting for passive cleanup. Each reply must
+still own its exact phase before another native operation or the POST can begin;
+a later attachment cannot revive an old snapshot. Claiming and initiating HTTP
+are synchronous before notification. After sending, unmount only retires the
+view: it does not cancel the server job or retry the request. Even a retired
+launch refreshes job discovery after its HTTP outcome; it cannot publish into
+the replacement launcher's configuration. Browser boundary tests hold native
+admission and preference replies across router unmounts, and hold a real mock
+HTTP reply after its job record exists. These prove transport ownership, not
+packaged OS permission or model behavior.
 
-### Server Lifecycle
+`useJobStream` polls the authoritative job record; its historical name does not
+imply an SSE completion signal. `ObservedProgress` admits the job identity,
+closed status set, file identities and counts. A failed observation is distinct
+from a terminal job and never triggers submission. Success requires the full
+expected file population to be present and cleanly completed; diagnosed,
+interrupted and writeback-failed outcomes remain visible.
 
-The Tauri `setup` hook auto-starts the server on app launch. The
-`on_window_event(Destroyed)` callback auto-stops it on exit. The `ServerProcess`
-managed state holds the child process handle so start/stop/status commands can
-inspect and control it.
+`useJobCancellation` retains one `CancellationAction` per job and service origin
+above the transient observation view. Available/failed states expose request or
+retry; requesting and acknowledged states expose neither. Synchronous state
+publication owns the double-click boundary without a separate boolean latch.
+`CancellationReceipt` admits only the route's cancelled/completed/failed outcome
+and its explanation. This receipt is not `ObservedProgress`; the complete job
+record still owns terminal presentation. A progress outage does not reopen an
+acknowledged action, and a retry retires the previous cancellation error.
 
-`ServerProcess` now keeps the raw child handle behind `start()`, `stop()`,
-`status()`, and `shutdown()` methods. That keeps the shell-local synchronization
-detail out of the architectural surface and gives the Rust tests a stable unit
-boundary.
+### Reopened job output access
 
-Port 18000 is used (not the default 8000) to avoid conflicts with manually
-started development servers.
+The loopback-only `GET /jobs/{job_id}/output-folders` projection reads the
+persisted paths-mode mapping through the existing store/backend. It does not
+change the database schema, reconstruct destinations from `source_dir`, or
+add a second client-side job store. `LocalOutputRequest` admits peer locality
+before the route can look up a job. `LocalOutputAccess` distinguishes content
+mode, absent evidence, malformed records and a nonempty set of recorded folder
+parents. Distinct destinations stay distinct; there is no guessed common root.
+The store projects the record's identity and output evidence together as
+`JobOutputFolders`; the route emits that snapshot without attaching a separately
+supplied identity to its folders.
 
-### Tauri Plugins
+`desktopEndpointForServer` gives `LocalJobOutputRequest` the native discovery
+capability only when the viewed job belongs to that exact managed origin.
+`RecordedOutputFolder` requires that local request capability, rather than a
+bare job-id string, to admit the response's job identity and wire states before
+exposing an open action. `OutputFolderAction` owns idle/opening/failed
+transitions; query and action owners are scoped to `(server, job_id)`, so stale
+replies cannot settle another route. The existing native directory constructor
+checks actual filesystem existence when clicked. A recorded folder is neither
+a completion certificate nor a filesystem permission guarantee. Browser and
+remote-job views do not borrow the local native opener.
 
-| Plugin | Permissions | Purpose |
-|--------|------------|---------|
-| `dialog` | `dialog:allow-open`, `dialog:allow-save` | Native file/folder picker dialogs |
-| `shell` | `shell:allow-open` | Open output folders in Finder/Explorer |
+### Verification boundaries
 
-### Desktop-Specific Frontend Code
-
-Low-level Tauri API access remains isolated in `frontend/src/lib/tauri.ts`, but
-the React tree now consumes it through a protocol/capability split:
-
-- `frontend/src/desktop/protocol.ts` inventories raw command/event identifiers
-  and pairs them with request/response payload types
-- `DesktopProvider` wraps the app in `frontend/src/main.tsx`
-- `frontend/src/desktop/DesktopContext.tsx` exposes focused hooks:
-  `useDesktopEnvironment()`, `useDesktopFiles()`, `useDesktopConfig()`, and
-  `useDesktopServer()`
-- `lib/tauri.ts` keeps the dynamic imports and browser fallbacks for dialogs,
-  config, server lifecycle, event subscription, and shell-open helpers
-- `runtime.ts` still owns environment detection only
-
-New desktop-only features should extend one focused capability seam instead of
-importing `@tauri-apps/*` or ad hoc command/event names directly in
-components/hooks.
-
-### Process Flow Components
-
-Desktop-specific processing UI lives in `frontend/src/components/process/`:
-
-| Component | Role |
-|-----------|------|
-| `CommandPicker` | 2×3 grid of command cards (transcribe, morphotag, align, translate, utseg, benchmark) |
-| `FolderPicker` | Native folder picker wrapping Tauri dialog plugin |
-| `OutputModeSelector` | Separate folder vs in-place output toggle |
-| `ProcessForm` | Main orchestrator: command → configure → processing |
-| `ProcessingProgress` | SSE-driven live file progress with completion actions |
-| `RecentJobs` | Compact recent jobs list for home screen |
-
-Supporting hooks:
-
-| Hook | Role |
-|------|------|
-| `useServerLifecycle` | Auto-start server, subscribe to `desktop://server-status-changed`, track status (starting/running/stopped/not-found), expose start/stop |
-| `useServerHealth` | Poll `GET /health` every 5s, expose reachability + capabilities |
-| `useSubmitJob` | React Query mutation for `POST /jobs` with `paths_mode: true` |
-| `useJobStream` | SSE `EventSource` wrapper for `/jobs/{id}/stream` |
-
-Supporting components:
-
-| Component | Role |
-|-----------|------|
-| `ServerStatusBar` | Green/yellow/red dot + label + manual start/stop button |
-| `ErrorRecovery` | Structured error messages grouped by category with suggested actions |
-| `OnboardingOverlay` | First-time 3-step guide (pick task → select files → watch progress) |
-| `HelpPanel` | Slide-out panel with command descriptions and FAQ |
-
-### First-Time Setup Wizard
-
-On first launch (no `~/.batchalign.ini`), the desktop app shows a multi-step
-setup wizard before the main route tree loads. This matches batchalign2's
-behavior where `config_read(interactive=True)` triggers `interactive_setup()`
-on first CLI invocation.
-
-The wizard lives in `frontend/src/components/setup/`:
-
-| Component | Role |
-|-----------|------|
-| `SetupWizard` | Multi-step flow: welcome → engine selection → API key → done |
-| `EngineCard` | Rev.AI vs Whisper card with pros/cons |
-
-The CLI has the same gate: processing commands check for `~/.batchalign.ini`
-and auto-trigger `batchalign3 setup` if missing (interactive terminal) or
-error with instructions (non-interactive).
-
-### Desktop Shell Tests
-
-Run the shell-focused Rust tests with:
-
-```bash
-cargo test --manifest-path apps/dashboard-desktop/src-tauri/Cargo.toml
-```
-
-These tests intentionally cover the native shell contracts only:
-
-- `src-tauri/src/protocol.rs`: protocol identifier stability and event payload serialization
-- `src-tauri/src/main.rs`: `discover_files_in_dir()` recursion/filter/sort
-- `src-tauri/src/config.rs`: config roundtrip and Windows home-dir fallbacks
-- `src-tauri/src/server.rs`: `ServerProcess` empty/running/exited child states
-
-Keep new shell logic behind pure helpers or small state wrappers so this suite
-can stay fast without booting the full webview.
-
-Focused frontend seam checks live in
-`frontend/e2e/tests/mock-server.spec.mjs`, which fakes the Tauri runtime to
-exercise first-launch config flow, file discovery, and server status event
-wiring.
+Run native shell tests with
+`cargo test -p batchalign-dashboard-desktop --bin batchalign-dashboard-desktop`.
+Shared preferences tests belong to `batchalign-types`; the CLI observation
+subprocess test belongs to `cli_integration_suite`. Frontend seam checks in
+`frontend/e2e/tests/mock-server.spec.mjs` fake the native transport. They cannot
+certify native dialogs, filesystem permissions, model execution, signing or
+installation. Qualify those with a packaged application and an identified
+managed service before distribution.
 
 ## API Contract Discipline
 
@@ -569,16 +566,10 @@ Detail pages follow the same split:
 
 ### Process flow (desktop)
 
-1. **Setup**: `App` checks `useDesktopConfig().isFirstLaunch()` and shows
-   `SetupWizard` before routes load
-2. **Server**: `useServerLifecycle` reads `useDesktopServer().serverStatus()`,
-   subscribes to `desktop://server-status-changed`, and auto-starts via
-   `useDesktopServer().startServer()`
-3. **Health**: `useServerHealth` polls `GET /health` on a fixed interval
-4. **Command**: User picks from the command card grid
-5. **Files**: `useDesktopFiles().pickFolder()` → native dialog →
-   `useDesktopFiles().discoverFiles()` → file list
-6. **Submit**: `useSubmitJob` sends `POST /jobs` with `paths_mode: true`
-7. **Progress**: `useJobStream` opens SSE to `/jobs/{id}/stream` for live updates
-8. **Complete**: `useDesktopFiles().openPath()` reveals the output folder in
-   Finder/Explorer
+1. Discover the CLI-managed local service before mounting server consumers.
+2. Detect first-run absence or show configuration read errors.
+3. Select a command, input directory, explicit output policy and parameters.
+4. Claim a `PreparedJob`, await native path admission, then construct `JobPlan`.
+5. Submit with `paths_mode: true` and retain the returned job identity.
+6. Poll that job's record; reconnect without resubmitting after an outage.
+7. Present its actual terminal state, diagnostics and output directory.

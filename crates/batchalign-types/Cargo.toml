@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 # stored time is validated where it is read. Only `batchalign` enables it.
 sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true }
+tempfile = "3"
 utoipa = { workspace = true }
 
 [features]

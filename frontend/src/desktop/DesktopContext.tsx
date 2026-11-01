@@ -15,15 +15,14 @@ import {
 import { isDesktop } from "../runtime";
 import {
   discoverFiles,
+  admitJobPaths,
   isFirstLaunch,
-  onServerStatusChange,
   openPath,
   pickFolder,
   pickOutputFolder,
   readConfig,
   serverStatus,
   startServer,
-  stopServer,
   writeConfig,
 } from "../lib/tauri";
 import type {
@@ -50,6 +49,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       pickFolder,
       pickOutputFolder,
       discoverFiles,
+      admitJobPaths,
       openPath,
     }),
     [],
@@ -66,8 +66,6 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     () => ({
       serverStatus,
       startServer,
-      stopServer,
-      onServerStatusChange,
     }),
     [],
   );

@@ -153,10 +153,81 @@ async fn serve_status_healthy() {
 
     let args = ServeStatusArgs {
         server: Some(base_url.to_owned()),
+        format: batchalign::cli::args::ServeStatusFormat::Human,
     };
     serve_cmd::status(&args)
         .await
         .expect("serve status should succeed");
+}
+
+#[tokio::test]
+async fn serve_status_json_is_one_complete_build_bound_observation() {
+    let session = acquire_test_server_session().await;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_batchalign3"))
+        .args([
+            "serve",
+            "status",
+            "--server",
+            session.base_url(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .await
+        .expect("run CLI discovery");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one JSON observation on stdout");
+    assert_eq!(report["state"], "ready");
+    assert_eq!(report["url"], session.base_url());
+    assert_eq!(report["build_hash"], batchalign::build_hash());
+}
+
+#[test]
+fn serve_status_json_distinguishes_absent_service_from_explicit_refusal() {
+    // Release a port allocated to this test to exercise actual refusal. A TCP
+    // socket held bound without listening times out on macOS instead; timeout
+    // must never be interpreted as permission to start another service.
+    let reserved = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("allocate test port");
+    let address = reserved.local_addr().expect("bound address");
+    drop(reserved);
+    let harness = cli_common::CliHarness::new();
+    harness.write_server_config(&format!("auto_daemon: false\nport: {}\n", address.port()));
+
+    let output = harness
+        .cmd()
+        .args(["serve", "status", "--format", "json"])
+        .output()
+        .expect("observe missing configured service");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("JSON observation");
+    assert_eq!(report["state"], "stopped", "{report}");
+
+    let output = harness
+        .cmd()
+        .args([
+            "serve",
+            "status",
+            "--format",
+            "json",
+            "--server",
+            &format!("http://{address}"),
+        ])
+        .output()
+        .expect("observe unavailable explicit service");
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
+    assert_eq!(report["state"], "refused");
 }
 
 // ---------------------------------------------------------------------------

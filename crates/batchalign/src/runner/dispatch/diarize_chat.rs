@@ -20,6 +20,8 @@ use crate::types::worker_v2::SpeakerSegmentV2;
 /// Refusals retain input eligibility versus producer failure, not diagnostic prose.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum DiarizeChatRefusal {
+    #[error("generated header was blank: {0}")]
+    GeneratedHeader(#[from] talkbank_model::model::BlankContent),
     #[error("--speaker-map PAR{track} names undeclared participant {participant}")]
     UndeclaredParticipant {
         track: usize,
@@ -52,7 +54,8 @@ impl DiarizeChatRefusal {
             }
             | Self::ProducerCoordinate
             | Self::ProducerInterval
-            | Self::Output(_) => FailureCategory::System,
+            | Self::Output(_)
+            | Self::GeneratedHeader(_) => FailureCategory::System,
             Self::WordTiming { .. } => FailureCategory::Validation,
         }
     }
@@ -241,7 +244,7 @@ impl<'source> MappedDiarizeSource<'source> {
                 Line::header(
                     talkbank_model::Location::Unlocated,
                     Header::Comment {
-                        content: crate::chat_ops::BulletContent::from_text(text),
+                        content: talkbank_model::model::CommentContent::try_from_text(text)?,
                     },
                 ),
             );

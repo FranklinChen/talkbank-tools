@@ -1,52 +1,38 @@
-/** React Query mutation for submitting a processing job via `POST /jobs`.
- *
- * Wraps `submitJob()` from the API layer and exposes mutation state so
- * the process form can show loading/error/success feedback.
- */
-
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+/** Bind the launch state machine to a mounted screen and admitted service.
+ * This hook owns HTTP/cache effects; the controller owns all launch phases. */
+import { useLayoutEffect, useState, useSyncExternalStore } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { submitJob } from "../api";
 import { controlPlaneOrigin } from "../runtime";
-import type { JobInfo } from "../types";
+import { useDesktopConfig, useDesktopFiles } from "../desktop/DesktopContext";
+import { JobLaunch } from "../desktop/jobLaunch";
 
-export interface SubmitJobParams {
-  command: string;
-  lang?: string;
-  numSpeakers?: number;
-  sourcePaths: string[];
-  outputPaths: string[];
-  sourceDir?: string;
-}
-
-/** Build the command-specific `options` payload expected by the server. */
-function buildOptions(command: string): Record<string, unknown> {
-  // The server requires `options.command` to match the top-level `command` field.
-  // All other fields use server defaults when omitted.
-  return { command };
-}
-
+/** Submit one checked plan and retain the server's actual job identity. */
 export function useSubmitJob() {
   const base = controlPlaneOrigin();
   const queryClient = useQueryClient();
-
-  return useMutation<JobInfo, Error, SubmitJobParams>({
-    mutationFn: (params) =>
-      submitJob(
-        {
-          command: params.command,
-          lang: params.lang ?? "eng",
-          num_speakers: params.numSpeakers ?? 1,
-          paths_mode: true,
-          source_paths: params.sourcePaths,
-          output_paths: params.outputPaths,
-          source_dir: params.sourceDir,
-          options: buildOptions(params.command),
-        },
-        base,
-      ),
-    onSuccess: () => {
-      // Invalidate the jobs list so the dashboard picks up the new job.
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+  const files = useDesktopFiles();
+  const preferences = useDesktopConfig();
+  const create = () => new JobLaunch({
+    inspect: files.admitJobPaths,
+    preferences: preferences.readConfig,
+    send: request => {
+      const { plan } = request;
+      return submitJob({
+        command: plan.request.command, lang: plan.request.lang, num_speakers: plan.request.numSpeakers,
+        paths_mode: true, source_paths: plan.request.sourcePaths, output_paths: plan.request.outputPaths,
+        source_dir: plan.request.sourceDir,
+        options: { command: plan.request.command, ...(request.kind === "with-asr" ? { asr_engine: request.engine } : {}) },
+      }, base);
     },
+    // An unconfirmed response may still have created a job. Refresh the list
+    // for inspection without guessing a match or submitting anything again.
+    observed: () => { void queryClient.invalidateQueries({ queryKey: ["jobs"] }); },
   });
+  const [owner, setOwner] = useState(create);
+  // Retire at the unmount commit, before a queued native reply can continue;
+  // passive effect cleanup would leave an unnecessary post-commit window.
+  useLayoutEffect(() => owner.attach(), [owner]);
+  const state = useSyncExternalStore(owner.subscribe, owner.read);
+  return { state, reset: () => { setOwner(create()); } };
 }
