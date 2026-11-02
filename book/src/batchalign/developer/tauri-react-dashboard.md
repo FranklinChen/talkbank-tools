@@ -270,6 +270,16 @@ acknowledged action, and a retry retires the previous cancellation error.
 
 ### Reopened job output access
 
+The job-page controller projects a closed loading/unavailable/ready state. Only
+ready carries detail and its server/action scope. A resolved record wins over
+a pending background owner lookup, so late REST/WebSocket discovery cannot
+unmount that scope and implicitly retry an errored folder query. Route absence
+creates no query scope; a selected job owns a keyed controller rather than
+passing an empty-string job sentinel through the hooks. Controlled browser
+coverage holds both initial delivery paths and the later owner lookup reply.
+A failed discovery offers an explicit read retry; it cannot certify job absence
+or resubmit processing work.
+
 The loopback-only `GET /jobs/{job_id}/output-folders` projection reads the
 persisted paths-mode mapping through the existing store/backend. It does not
 change the database schema, reconstruct destinations from `source_dir`, or

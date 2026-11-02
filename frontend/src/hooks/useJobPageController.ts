@@ -20,14 +20,17 @@ import { useJobDetailQuery } from "./useJobDetailQuery";
 import { useJobLookupQuery } from "./useJobLookupQuery";
 
 /** Route-level state needed by the job-detail page view. */
-type JobPageControllerState = {
-  loading: boolean;
-  detail: JobInfo | null;
-  wsJob: JobListItem | undefined;
-  multiServer: boolean;
-  effectiveServer: string;
-  serverBase: string;
-};
+type JobPageControllerState =
+  | { kind: "loading" }
+  | { kind: "unavailable"; retry: () => void }
+  | {
+      kind: "ready";
+      detail: JobInfo;
+      wsJob: JobListItem | undefined;
+      multiServer: boolean;
+      effectiveServer: string;
+      serverBase: string;
+    };
 
 /** Resolve job ownership, fetch detail state, and expose the correct action base URL. */
 export function useJobPageController(jobId: string): JobPageControllerState {
@@ -55,16 +58,19 @@ export function useJobPageController(jobId: string): JobPageControllerState {
     lookupQuery.data?.job ?? null
   );
   const detail = detailQuery.data ?? lookupQuery.data?.job ?? null;
-  const loading =
-    lookupQuery.isPending ||
-    (Boolean(effectiveServer) && detailQuery.isPending && !detail);
-
-  return {
-    loading,
-    detail,
-    wsJob,
-    multiServer,
-    effectiveServer,
-    serverBase: serverBaseUrl(hostPort),
-  };
+  // A preferred-server discovery may start after a record is already resolved.
+  // Keep that ready scope mounted: retiring it would discard action ownership
+  // and let query remount behavior replay a failed output lookup implicitly.
+  if (detail !== null) {
+    return {
+      kind: "ready", detail, wsJob, multiServer, effectiveServer,
+      serverBase: serverBaseUrl(hostPort),
+    };
+  }
+  if (lookupQuery.isPending || (effectiveServer !== "" && detailQuery.isPending)) {
+    return { kind: "loading" };
+  }
+  // A failed scan cannot establish that the job does not exist. Keep the
+  // observation failure explicit and retry discovery without submitting work.
+  return { kind: "unavailable", retry: () => { void lookupQuery.refetch(); } };
 }

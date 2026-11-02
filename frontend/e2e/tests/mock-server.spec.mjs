@@ -197,7 +197,7 @@ async function staticFileResponse(pathname) {
   }
 }
 
-async function startHarness() {
+async function startHarness(deliverSnapshot = send => send()) {
   await fs.access(path.join(buildDir, "index.html"));
 
   const submissions = [];
@@ -465,13 +465,13 @@ async function startHarness() {
       }
     });
 
-    ws.send(
+    deliverSnapshot(() => ws.send(
       JSON.stringify({
         type: "snapshot",
         jobs: Array.from(jobs.values()).map(listItem),
         health: { status: "ok" },
       })
-    );
+    ));
   });
 
   await new Promise((resolve, reject) => {
@@ -719,6 +719,75 @@ for (const [name, body] of [
     } finally { await harness.close(); }
   });
 }
+
+test("job lookup failure remains uncertain and can recover through an explicit read", async ({ page }) => {
+  const harness = await startHarness();
+  /** @type {"refuse" | "recover"} */
+  let lookup = "refuse";
+  try {
+    // This job is absent from bootstrap summaries, so no earlier observation
+    // can legitimately keep its ready detail visible while HTTP is unavailable.
+    await page.route(url => url.pathname === "/jobs/laterjob", route => lookup === "refuse"
+      ? route.fulfill({ status: 503, json: { detail: "Service temporarily unavailable." } })
+      : route.fulfill({ json: makeJob("laterjob", "completed", {
+          completed: 1, total: 1, fileStatuses: [makeFileStatus("sample.cha", "done")],
+        }) }));
+    await page.goto(harness.baseUrl + "/dashboard/jobs/laterjob");
+    await expect(page.getByRole("alert")).toContainText("Job details could not be loaded");
+    await expect(page.getByText("Job not found.", { exact: true })).toHaveCount(0);
+    lookup = "recover";
+    await page.getByRole("button", { name: "Retry job lookup", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copy job ID", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry job lookup", exact: true })).toHaveCount(0);
+    expect(harness.submissions).toEqual([]);
+  } finally { await harness.close(); }
+});
+
+test("desktop output lookup retains failure during delayed ownership discovery", async ({ page }) => {
+  const connected = Promise.withResolvers();
+  const snapshot = Promise.withResolvers();
+  const lookupStarted = Promise.withResolvers();
+  const lookupReply = Promise.withResolvers();
+  /** @type {"initial" | "snapshot-delivered"} */
+  let discovery = "initial";
+  const harness = await startHarness(send => {
+    connected.resolve();
+    return snapshot.promise.then(() => { discovery = "snapshot-delivered"; send(); });
+  });
+  let reads = 0;
+  try {
+    await installOutputFolderDesktop(page, harness);
+    // The REST bootstrap must not resolve the preferred owner before the held
+    // WebSocket snapshot; both are real independent initial-delivery paths.
+    await page.route("**/jobs", route => route.fulfill({ json: [] }));
+    await page.route("**/jobs/donejob/output-folders", route => {
+      reads++;
+      return reads === 1 ? route.fulfill({ status: 503, json: { detail: "Output records temporarily unavailable." } })
+        : route.fulfill({ json: { job_id: "donejob", access: { state: "recorded", directories: ["/recorded/retry"] } } });
+    });
+    await page.route("**/jobs/donejob", async route => {
+      if (discovery === "snapshot-delivered") {
+        lookupStarted.resolve();
+        await lookupReply.promise;
+      }
+      await route.continue();
+    });
+    await page.goto(harness.baseUrl + "/dashboard/jobs/donejob");
+    await connected.promise;
+    await expect(page.getByRole("alert")).toContainText("Output records temporarily unavailable.");
+    snapshot.resolve();
+    await lookupStarted.promise;
+    // The resolved record must survive the preferred-server lookup. Otherwise
+    // unmount/remount makes React Query retry its failed output read implicitly.
+    await expect(page.getByRole("alert")).toContainText("Output records temporarily unavailable.");
+    lookupReply.resolve();
+    await expect(page.getByRole("alert")).toContainText("Output records temporarily unavailable.");
+    expect(reads).toBe(1);
+    await page.getByRole("button", { name: "Retry output lookup", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open Output Folder", exact: true })).toBeVisible();
+    expect(reads).toBe(2);
+  } finally { snapshot.resolve(); lookupReply.resolve(); await harness.close(); }
+});
 
 test("desktop output lookup has visible read failure and explicit retry", async ({ page }) => {
   const harness = await startHarness();

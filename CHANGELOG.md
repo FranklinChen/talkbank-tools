@@ -5,6 +5,9 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- Job details stay mounted while background server discovery refines an already
+  resolved record. Output-location failures retain their explicit Retry action
+  instead of disappearing into an implicit lookup on remount.
 - Leaving BA3 Runner's Process screen during file checking or preference reading
   now retires the unsent launch. Delayed replies cannot submit abandoned work
   or affect a later configuration. Leaving after submission preserves the

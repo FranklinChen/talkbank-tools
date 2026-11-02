@@ -1,6 +1,6 @@
 # BA3 Runner (Experimental)
 
-**Last modified:** 2026-11-01 19:40 EST
+**Last modified:** 2026-11-01 21:03 EST
 
 BA3 Runner is a small native interface to the installed `batchalign3`
 CLI and its managed local server. It remains experimental until a packaged
@@ -100,6 +100,9 @@ that the folder still exists. Missing or moved folders produce a visible error
 without changing the job result. Uploaded-content jobs and records without
 local output paths explain why no local folder is available. A remote job's
 folders must be opened on its processing computer.
+
+If recorded output locations cannot be read, **Retry output lookup** reads them
+again. The error stays visible while the job's background details refresh.
 
 Cancel sends one request. While
 it is pending or acknowledged, it cannot be sent again. The app waits for the
