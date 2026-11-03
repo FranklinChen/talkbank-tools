@@ -166,7 +166,7 @@ flowchart TD
     resolve_audio --> ensure_wav[ensure_wav: convert mp4→wav if needed]
     ensure_wav --> parse[parse_lenient → ChatFile]
     parse --> reuse_check{Complete reusable\n%wor timing?}
-    reuse_check -->|Yes| reuse[Refresh main-tier bullets from %wor\nmechanically, then resolve overlap\n(--end-overlap-policy) and only THEN\noptionally regenerate %wor from the\nresolved state]
+    reuse_check -->|Yes| reuse["Refresh main-tier bullets from %wor\nmechanically, then resolve overlap\n(--end-overlap-policy) and only THEN\noptionally regenerate %wor from the\nresolved state"]
     reuse_check -->|No| count[count_utterance_timing → timed, untimed]
     reuse --> done([Output .cha file])
 
@@ -209,7 +209,7 @@ flowchart TD
     heal --> cache_check
 
     cache_check[Cache lookup: BLAKE3 keys]
-    cache_check --> worker_infer[execute_v2(task="fa") misses → Python FA worker\nprepared audio + prepared text]
+    cache_check --> worker_infer["execute_v2(task=#quot;fa#quot;) misses → Python FA worker\nprepared audio + prepared text"]
     worker_infer --> response_shape{Worker response shape?}
     response_shape -->|Wave2Vec / Cantonese indexed intervals| indexed_fa[Validate one timing per requested word]
     response_shape -->|Whisper token onsets| dp_align_fa[DP-align returned tokens → transcript words]
