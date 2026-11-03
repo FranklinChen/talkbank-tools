@@ -1421,7 +1421,7 @@ impl std::fmt::Display for UntimedCauseRecord {
                 unrequested,
             } => write!(
                 f,
-                "no positive interval from its requests ({answered} answered, {unaligned} \
+                "no positive interval in the final output ({answered} answered, {unaligned} \
                  unaligned, {unrequested} unrequested)"
             ),
             Self::Unrecorded => f.write_str("no cause recorded"),

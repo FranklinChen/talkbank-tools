@@ -32,8 +32,8 @@ Alignment aims to time every alignable lexical word. When some words cannot
 be timed (their audio window was refused, the audio left for them could not
 contain them, or the aligner gave no usable interval),
 the file is still
-written: every measured timing is kept, the
-untimed words stay in the transcript without bullets, and the file is reported
+written with the timings admitted by its configured finalization policies.
+Words without a final timing stay in the transcript without bullets, and the file is reported
 `diagnosed`, not done, with a `timing_incomplete` record giving the
 required and untimed word counts and the first untimed utterances with their
 cause. The CLI exits with code 7 when any file is diagnosed. This holds even
@@ -52,6 +52,24 @@ successful recovery, output can remain entirely untimed and diagnosed (exit 7).
 Whisper UTR decodes in the transcript's resolved language, Cantonese
 included, with the transcription task. That fixes what Whisper is asked to
 recognize; it does not guarantee recognition or alignment accuracy.
+
+Tencent UTR requests `16k_yue` for Cantonese (`yue`). Mandarin and the other
+Chinese varieties retain `16k_zh_large`. The selected provider parameter is
+also part of the recognition-cache identity: an earlier general-Chinese
+response cannot satisfy a Cantonese request. This is recognition used to
+locate untimed speech; the separately selected forced aligner still places
+the supplied transcript's words. The Tencent account needs the applicable
+speech-recognition service and recording-recognition entitlement; a speaker-
+recognition purchase or storage quota alone does not establish that entitlement.
+
+An answered alignment request does not mean every returned timing survives
+into the output. Finalization can remove a backwards-starting utterance's
+timings or discard words when resolving same-speaker overlap. Those words
+remain in the transcript and count as untimed. A short acknowledgement can
+also receive no request when its uncertain search window exceeds the engine
+budget; this does not mean the spoken acknowledgement itself was long.
+Keep the diagnostic or debug evidence when asking which stage left a word
+untimed; the missing-timing count alone does not identify an acoustic failure.
 
 **Missing localization:** speech without supplied timing or source-bound UTR
 search evidence receives no alignment request and is reported as

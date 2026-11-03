@@ -19,6 +19,7 @@ from batchalign.inference.qwen_forced_alignment import (
     OutsideAudioWindow,
     PairedWindowAlignment,
     QwenTimingInvalid,
+    RejectedAlignmentDiagnostic,
     SpanDefect,
     TimingBoundary,
 )
@@ -111,31 +112,36 @@ class WindowAlignment:
     window: AudioWindow
 
     def __init__(self, reported: PairedWindowAlignment, window: AudioWindow) -> None:
-        admitted: list[AlignedWindowWord] = []
-        previous: ObservedWindowSpan | None = None
-        for index, word in enumerate(reported.words):
-            unit = IndexedWindowUnit(index, word)
-            timing: WindowTiming
-            if word.start_s == word.end_s:
-                timing = UnavailableWindowTiming(unit, window)
-            else:
-                timing = ObservedWindowSpan(unit, window)
-                if word.text.strip():
-                    if previous is not None:
-                        if timing.start_s < previous.start_s:
-                            raise QwenTimingInvalid(
-                                BackwardsUnitSpan(
-                                    previous.unit, unit, TimingBoundary.START
+        try:
+            admitted: list[AlignedWindowWord] = []
+            previous: ObservedWindowSpan | None = None
+            for index, word in enumerate(reported.words):
+                unit = IndexedWindowUnit(index, word)
+                timing: WindowTiming
+                if word.start_s == word.end_s:
+                    timing = UnavailableWindowTiming(unit, window)
+                else:
+                    timing = ObservedWindowSpan(unit, window)
+                    if word.text.strip():
+                        if previous is not None:
+                            if timing.start_s < previous.start_s:
+                                raise QwenTimingInvalid(
+                                    BackwardsUnitSpan(
+                                        previous.unit, unit, TimingBoundary.START
+                                    )
                                 )
-                            )
-                        if timing.end_s < previous.end_s:
-                            raise QwenTimingInvalid(
-                                BackwardsUnitSpan(
-                                    previous.unit, unit, TimingBoundary.END
+                            if timing.end_s < previous.end_s:
+                                raise QwenTimingInvalid(
+                                    BackwardsUnitSpan(
+                                        previous.unit, unit, TimingBoundary.END
+                                    )
                                 )
-                            )
-                    previous = timing
-            admitted.append(AlignedWindowWord(word.text, timing))
+                        previous = timing
+                admitted.append(AlignedWindowWord(word.text, timing))
+        except QwenTimingInvalid as error:
+            raise error.with_diagnostic(
+                RejectedAlignmentDiagnostic(reported, window.duration_s)
+            ) from error
         object.__setattr__(self, "units", reported.units)
         object.__setattr__(self, "words", tuple(admitted))
         object.__setattr__(self, "window", window)

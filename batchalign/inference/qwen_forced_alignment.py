@@ -22,9 +22,10 @@ bootstrap can reference it without paying for either.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -162,6 +163,18 @@ class WindowAlignedWord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ReportedTimestampTrace:
+    """Native classifier reports beside decoded reports, never admitted timing.
+
+    Keeping the two observations together lets a diagnostic distinguish the
+    model's class predictions from the processor's monotonicity repair.
+    """
+
+    timestamp_segment_ms: float
+    timestamp_classes: tuple[int, ...]
+
+
 class SpanDefect(Enum):
     NON_FINITE = "non-finite"
     NEGATIVE = "negative"
@@ -224,9 +237,12 @@ class QwenTimingInvalid(ModelOutputInvalidError):
         self,
         problem: TimingProblem,
         location: TimingLocation = _RELATIVE_AUDIO_WINDOW,
+        *,
+        diagnostic: RejectedAlignmentDiagnostic | None = None,
     ) -> None:
         self.problem = problem
         self.location = location
+        self.diagnostic = diagnostic
         match problem:
             case InvalidUnitSpan(unit=unit, defect=defect):
                 detail = f"unit {unit.index + 1} {unit.word.text!r} has {defect.value} timing {unit.word.start_s!r}..{unit.word.end_s!r} s"
@@ -254,17 +270,30 @@ class QwenTimingInvalid(ModelOutputInvalidError):
                 where = f"recording window {start:g}..{start + duration:g} s (reported times are relative to that window)"
             case unreachable:
                 assert_never(unreachable)
-        super().__init__(
+        message = (
             f"Qwen forced-aligner model output rejected in {where}: {detail}. "
             "These are generated timings, not a CHAT input error; retain this diagnostic "
             "with the audio sample for investigation before rerunning the batch."
         )
+        if diagnostic is not None:
+            message += "\nQwen rejected alignment diagnostic: " + json.dumps(
+                asdict(diagnostic), ensure_ascii=False
+            )
+        super().__init__(message)
+
+    def with_diagnostic(
+        self, diagnostic: RejectedAlignmentDiagnostic
+    ) -> QwenTimingInvalid:
+        """Attach the available paired report at its admission failure edge."""
+        return QwenTimingInvalid(self.problem, self.location, diagnostic=diagnostic)
 
     def in_recording_window(
         self, start_s: float, duration_s: float
     ) -> QwenTimingInvalid:
         return QwenTimingInvalid(
-            self.problem, RecordingAudioWindow(start_s, duration_s)
+            self.problem,
+            RecordingAudioWindow(start_s, duration_s),
+            diagnostic=self.diagnostic,
         )
 
 
@@ -280,6 +309,12 @@ class PairedWindowAlignment:
     """The aligner's own segmentation, as the aligning call used it."""
     words: tuple[WindowAlignedWord, ...]
     """One timed span per unit, in the same order."""
+    native_trace: ReportedTimestampTrace | None = None
+    """Original classifier observations when supplied by the native producer.
+
+    Other implementations of the aligner protocol may supply decoded reports
+    only. Absence does not fabricate classifier observations for them.
+    """
 
     def __post_init__(self) -> None:
         # Snapshot even a direct caller's lists: a frozen wrapper around a
@@ -293,12 +328,28 @@ class PairedWindowAlignment:
 
     @classmethod
     def of(
-        cls, units: Iterable[str], words: Iterable[WindowAlignedWord]
+        cls,
+        units: Iterable[str],
+        words: Iterable[WindowAlignedWord],
+        *,
+        native_trace: ReportedTimestampTrace | None = None,
     ) -> PairedWindowAlignment:
         """Snapshot model output and pass through the constructor's admission."""
         unit_tuple = tuple(str(unit) for unit in units)
         word_tuple = tuple(words)
-        return cls(units=unit_tuple, words=word_tuple)
+        return cls(units=unit_tuple, words=word_tuple, native_trace=native_trace)
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedAlignmentDiagnostic:
+    """An unchanged rejected report bound to the actual supplied window.
+
+    This accompanies the typed failure through worker protocol and job storage;
+    retaining model observations must not depend on a process's log level.
+    """
+
+    reported: PairedWindowAlignment
+    window_duration_s: float
 
 
 class ForcedAligner(Protocol):
@@ -728,11 +779,22 @@ class QwenForcedAligner:
             timestamp_token_id=self.model.config.timestamp_token_id,
         )[0]
 
+        words = tuple(WindowAlignedWord.from_decoded(unit) for unit in aligned)
+        predictions = logits.argmax(dim=-1)[0]
+        marker_mask = inputs["input_ids"][0] == self.model.config.timestamp_token_id
+        trace = ReportedTimestampTrace(
+            timestamp_segment_ms=float(self.processor.timestamp_segment_time),
+            timestamp_classes=tuple(
+                int(value) for value in predictions[marker_mask].tolist()
+            ),
+        )
+
         # One transcript in, so one word list out; `prepare_forced_aligner_inputs`
         # refuses a transcript/audio count mismatch itself.
         return PairedWindowAlignment.of(
             units=word_lists[0],
-            words=[WindowAlignedWord.from_decoded(unit) for unit in aligned],
+            words=words,
+            native_trace=trace,
         )
 
 

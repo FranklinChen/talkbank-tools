@@ -519,6 +519,54 @@ mod typed_cache_tests {
         }
     }
 
+    #[tokio::test]
+    async fn cantonese_tencent_does_not_reuse_general_chinese_recognition() {
+        let cache_dir = tempfile::tempdir().expect("temporary cache");
+        let cache = super::UtteranceCache::sqlite(Some(cache_dir.path().to_owned()))
+            .await
+            .expect("cache");
+        let cantonese = namespace_for_language(
+            &UtrEngine::HkTencent,
+            &crate::api::LanguageCode3::try_from("yue").expect("Cantonese"),
+        );
+        let mandarin = namespace_for_language(
+            &UtrEngine::HkTencent,
+            &crate::api::LanguageCode3::try_from("cmn").expect("Mandarin"),
+        );
+        assert_eq!(
+            cantonese.namespace(),
+            "utr-asr-v1:tencent_utr:tencent|engine_model_type=tencent-asr@16k_yue"
+        );
+        assert_eq!(
+            mandarin.namespace(),
+            "utr-asr-v1:tencent_utr:tencent|engine_model_type=tencent-asr@16k_zh_large"
+        );
+        let retained = serde_json::json!({"retained_provider_response": "general Chinese"});
+        cache
+            .put(
+                "same-recording",
+                super::tasks::UTR_ASR,
+                &mandarin,
+                &retained,
+            )
+            .await
+            .expect("retain earlier model response");
+        assert_eq!(
+            cache
+                .get("same-recording", super::tasks::UTR_ASR, &cantonese)
+                .await
+                .expect("Cantonese lookup"),
+            None
+        );
+        assert_eq!(
+            cache
+                .get("same-recording", super::tasks::UTR_ASR, &mandarin)
+                .await
+                .expect("unchanged Mandarin lookup"),
+            Some(retained)
+        );
+    }
+
     /// RED FIRST: the namespace named Cantonese's decision through a hand
     /// `yue` arm and every other language's not at all, so a policy change
     /// for another language would have replayed rows decoded the old way.

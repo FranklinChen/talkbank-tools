@@ -92,7 +92,7 @@ def _valid_config(**overrides: str) -> configparser.ConfigParser:
 def _make_recognizer() -> TencentRecognizer:
     recognizer = TencentRecognizer.__new__(TencentRecognizer)
     recognizer.lang_code = "yue"
-    recognizer.engine_model_type = "16k_zh_large"
+    recognizer.engine_model_type = "16k_yue"
     recognizer._poll_interval_s = 0.0
     recognizer._bucket_name = "bucket"
     recognizer._region = "ap-guangzhou"
@@ -110,9 +110,7 @@ def test_init_reports_missing_sdk_dependency(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(ImportError, match="Tencent engine dependencies"):
-        TencentRecognizer(
-            "yue", engine_model_type="16k_zh_large", config=_valid_config()
-        )
+        TencentRecognizer("yue", engine_model_type="16k_yue", config=_valid_config())
 
 
 def test_init_wires_sdk_clients_and_language_state(monkeypatch) -> None:
@@ -121,14 +119,14 @@ def test_init_wires_sdk_clients_and_language_state(monkeypatch) -> None:
     recognizer = TencentRecognizer(
         "yue",
         poll_interval_s=0.5,
-        engine_model_type="16k_zh_large",
+        engine_model_type="16k_yue",
         config=_valid_config(),
     )
 
     assert recognizer.lang_code == "yue"
     # The model type is CHOSEN by the Rust control plane and carried in, not
     # derived here from the language.
-    assert recognizer.engine_model_type == "16k_zh_large"
+    assert recognizer.engine_model_type == "16k_yue"
     assert recognizer._poll_interval_s == 1.0
     assert recognizer._bucket_name == "bucket"
     assert recognizer._region == "ap-guangzhou"
@@ -140,7 +138,7 @@ def test_init_rejects_empty_region_in_shared_config_reader(monkeypatch) -> None:
     with pytest.raises(ConfigError, match=r"engine\.tencent\.region"):
         TencentRecognizer(
             "yue",
-            engine_model_type="16k_zh_large",
+            engine_model_type="16k_yue",
             config=_valid_config(**{"engine.tencent.region": ""}),
         )
 
@@ -256,6 +254,7 @@ def test_transcribe_returns_result_detail_after_polling(monkeypatch) -> None:
     # hold one, so `SpeakerNumber` can never ask this service to separate a
     # recording into a single speaker.
     submitted = recognizer._asr_client.request
+    assert submitted.EngineModelType == "16k_yue"
     assert submitted.SpeakerDiarization == 1
     assert submitted.SpeakerNumber == 2
 

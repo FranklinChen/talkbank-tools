@@ -41,7 +41,7 @@
 
 use batchalign_transform::translate::WritingSystem;
 
-use batchalign_types::iso639_part1::Iso639Part1Lookup;
+use batchalign_types::iso639_part1::{Iso639Part1, Iso639Part1Lookup};
 
 use crate::api::LanguageCode3;
 use crate::types::engines::{AsrEngineName, FUNAUDIO_MODEL_OVERRIDE_KEY, PARAFORMER_CHECKPOINT};
@@ -185,8 +185,43 @@ const REV_PROVIDER: ManifestEntry = ManifestEntry {
     revision: ManifestRevision::ProviderParameter(REV_PROVIDER_PARAMETER),
 };
 
-/// Tencent's engine-model selector for every Chinese variety.
-const TENCENT_CHINESE_MODEL_TYPE: &str = "16k_zh_large";
+/// A language-admitted Tencent model, before lowering to the provider wire.
+/// Cantonese and the general Chinese model are separate choices: changing
+/// one cannot rename the other through a shared Chinese-model constant.
+enum TencentModelType {
+    Cantonese,
+    ChineseLarge,
+    IsoLanguage(Iso639Part1),
+}
+
+impl TencentModelType {
+    fn for_language(lang: &LanguageCode3) -> Result<Self, ModelPlanError> {
+        if lang.as_ref() == "yue" {
+            return Ok(Self::Cantonese);
+        }
+        if WritingSystem::of_language_code(lang.as_ref()) == WritingSystem::Han {
+            return Ok(Self::ChineseLarge);
+        }
+        match lang.to_iso_639_1() {
+            Iso639Part1Lookup::Paired(code) => Ok(Self::IsoLanguage(code)),
+            Iso639Part1Lookup::NoTwoLetterCode => {
+                Err(ModelPlanError::TencentLanguageHasNoModelType { lang: lang.clone() })
+            }
+        }
+    }
+
+    fn into_parameter(self) -> Result<ProviderParameterV2, ModelPlanError> {
+        match self {
+            Self::Cantonese => Ok(const { ProviderParameterV2::from_static("16k_yue") }),
+            Self::ChineseLarge => Ok(const { ProviderParameterV2::from_static("16k_zh_large") }),
+            Self::IsoLanguage(code) => ProviderParameterV2::try_from(format!("16k_{code}"))
+                .map_err(|error| ModelPlanError::MalformedManifestEntry {
+                    id: "tencent",
+                    detail: error.to_string(),
+                }),
+        }
+    }
+}
 
 /// The engine-override key the pinned models travel to the worker under.
 ///
@@ -441,35 +476,21 @@ fn floating(key: &'static str, id: &str) -> Result<RequestedModelV2, ModelPlanEr
 /// The `EngineModelType` Tencent is asked for.
 ///
 /// Chosen in Rust for EVERY language, through the one ISO 639-3 to 639-1
-/// conversion and the one Han-script table. The Python derivation this replaces
+/// conversion and the one Han-script table. Cantonese has its own provider
+/// model; the other Chinese varieties retain the general Chinese model.
+/// The Python derivation this replaces
 /// used pycountry with its own five-code Chinese list that OMITTED Mandarin, so
 /// a `cmn` job asked Tencent for `16k_cmn`, and any language without a
 /// two-letter code asked for `16k_<iso3>`; neither is a model type Tencent
 /// defines.
 ///
-/// [`WritingSystem`] is consulted first because every Chinese variety shares
-/// one large model whatever its own code, and it already owns that list.
+/// The admitted selection owns the provider parameter used for dispatch and
+/// manifest/cache identity, so the Cantonese route cannot retain an old
+/// general-Chinese cache namespace while asking the provider for Cantonese.
 pub(crate) fn tencent_engine_model_type(
     lang: &LanguageCode3,
 ) -> Result<ProviderParameterV2, ModelPlanError> {
-    if WritingSystem::of_language_code(lang.as_ref()) == WritingSystem::Han {
-        return Ok(const { ProviderParameterV2::from_static(TENCENT_CHINESE_MODEL_TYPE) });
-    }
-    match lang.to_iso_639_1() {
-        Iso639Part1Lookup::Paired(code) => {
-            // Total: a two-letter code is ASCII letters, so the joined value is
-            // always admissible stamp-safe text.
-            ProviderParameterV2::try_from(format!("16k_{code}")).map_err(|error| {
-                ModelPlanError::MalformedManifestEntry {
-                    id: "tencent",
-                    detail: error.to_string(),
-                }
-            })
-        }
-        Iso639Part1Lookup::NoTwoLetterCode => {
-            Err(ModelPlanError::TencentLanguageHasNoModelType { lang: lang.clone() })
-        }
-    }
+    TencentModelType::for_language(lang)?.into_parameter()
 }
 
 // ---------------------------------------------------------------------------
@@ -885,12 +906,11 @@ mod tests {
         );
     }
 
-    /// THE FIX. Mandarin asks for the Chinese model, like every other Chinese
-    /// variety. It used to ask for `16k_cmn`, which Tencent does not define,
-    /// because the Python list of Chinese codes omitted `cmn`.
+    /// Mandarin still asks for the general Chinese model, not an invented
+    /// `16k_cmn` or the distinct Cantonese model.
     #[test]
-    fn every_chinese_variety_including_mandarin_asks_for_the_chinese_model() {
-        for code in ["cmn", "zho", "yue", "wuu", "nan", "hak"] {
+    fn non_cantonese_chinese_varieties_keep_the_general_model() {
+        for code in ["cmn", "zho", "wuu", "nan", "hak"] {
             assert_eq!(
                 tencent_engine_model_type(&lang(code))
                     .expect("a Chinese variety has a model type")
@@ -899,6 +919,20 @@ mod tests {
                 "{code} is a Chinese variety"
             );
         }
+    }
+
+    #[test]
+    fn cantonese_has_a_distinct_provider_model() {
+        assert!(matches!(
+            TencentModelType::for_language(&lang("yue")).expect("Cantonese model"),
+            TencentModelType::Cantonese
+        ));
+        assert_eq!(
+            tencent_engine_model_type(&lang("yue"))
+                .expect("Cantonese parameter")
+                .as_str(),
+            "16k_yue"
+        );
     }
 
     /// A language with a two-letter code is unchanged from the Python
@@ -1109,7 +1143,7 @@ mod tests {
         );
         assert_eq!(
             value["engine_model_type"]["revision"]["parameter"],
-            "16k_zh_large"
+            "16k_yue"
         );
 
         // An unpinned member is a tagged variant with no payload, not a null.

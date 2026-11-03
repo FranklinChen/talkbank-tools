@@ -415,7 +415,7 @@ def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> Non
         pinned = TencentModelsV2(
             engine_model_type=RequestedModelV2(
                 id="tencent-asr",
-                revision=RequestedProviderParameterV2(parameter="16k_zh_large"),
+                revision=RequestedProviderParameterV2(parameter="16k_yue"),
             )
         )
         overrides = {
@@ -445,7 +445,7 @@ def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> Non
             "lang": "yue",
             # Chosen by the Rust control plane and carried through the pin,
             # not derived from the language by this worker.
-            "engine_model_type": "16k_zh_large",
+            "engine_model_type": "16k_yue",
             "config": None,
         }
         assert _state.asr_engine is AsrEngine.TENCENT
