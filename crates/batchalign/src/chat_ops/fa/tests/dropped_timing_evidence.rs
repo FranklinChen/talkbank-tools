@@ -52,6 +52,7 @@ fn timeline_trace_for(input: &str) -> FaTimelineTrace {
         WordGapHealing::PreserveMeasured,
         "test_engine",
         &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
+        crate::types::results::RecordingRead::Read,
     )
     .with_written_decisions(written)
     .into_timeline_trace()

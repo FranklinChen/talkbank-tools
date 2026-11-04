@@ -538,7 +538,7 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
                 repairs = count.get(),
                 tally = %self.state.applied.repair_tally(),
                 lang = %self.language.admitted.language(),
-                "Stanza relations and feature values repaired before injection"
+                "Stanza output repaired before injection (relations, feature values, feature names, lemmas)"
             );
         }
         let provenance = crate::provenance::morphotag_provenance(

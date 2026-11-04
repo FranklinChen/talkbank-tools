@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-03 23:37 EST
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -121,7 +121,7 @@ flowchart TD
     backend["ServerBackend / queue / orchestrator"]
 
     runner["process_one_fa_file()\nfa_pipeline.rs"]
-    fa["media resolution\n→ ensure_wav\n→ %wor / incremental reuse\n→ optional UTR\n→ FA transport\n→ traces + output"]
+    fa["admission + route decision\n→ (NeedsAudio) media resolution\n→ ensure_wav → optional UTR\n→ FA transport\n→ traces + output;\n(WithoutRecording) %wor refresh\nor pass-through, no media"]
 
     cli --> route
     route -->|no| direct
@@ -332,14 +332,21 @@ Availability reads two different facts at two moments:
    `WorkerPool::ensure_command_capabilities()` loads the command's task on the
    selected worker (`ensure_task`) and returns `LoadedCapabilities`: the task
    it loaded and the report taken after that load. Routing runs step 1 again
-   against that report. Then the forced-alignment dispatch arm, and only that
-   arm, reads the FA engine with `FaCacheNamespace::from_loaded`
+   against that report. Forced alignment is the exception: `align` is a
+   per-file command (its job carries `per-file`, and each file's language is
+   read from its own `@Languages:`), and the FA worker a file reaches is keyed
+   by that language, so there is no job-level worker to probe. The router
+   hands the FA dispatch a `FaWorkerAdmission`
+   (`runner/dispatch/fa_admission.rs`), which runs the same probe and step 1
+   per language, the first time the job reaches a file of that language, and
+   reads the FA engine with `FaCacheNamespace::from_loaded`
    (`engine_reports.rs`), because every FA cache row is namespaced by it. It
    refuses a report taken after a different task loaded (`LoadedAnotherTask`),
    an engine still unnamed after the load (`UnreportedAfterLoad`) and a worker
-   that does not support FA (`NotSupported`). No catalog field declares this
-   requirement; the arm that reads the namespace is the only place that says
-   so.
+   that does not support FA (`NotSupported`); the refusal fails every file of
+   that language by name and the job's other languages proceed. No catalog
+   field declares this requirement; the gate that reads the namespace is the
+   only place that says so.
 
 The critical implementation rule is that **startup capability state is not
 authoritative for execution**. The current server intentionally allows an

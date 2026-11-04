@@ -45,7 +45,7 @@ const FAQ: Array<{ q: string; a: string }> = [
   },
   {
     q: "Can I process files in different languages?",
-    a: "Yes, but each job processes one language at a time. Choose the language when you start a job. Batchalign supports many languages including English, Spanish, French, German, Chinese, Japanese, Korean, and Cantonese.",
+    a: "Yes. Transcribe Audio, Segment Utterances and Score Accuracy process one language per job: choose it when you start the job. Add Grammar, Align to Audio and Translate read each transcript's own @Languages header, so one job may mix languages. Batchalign supports many languages including English, Spanish, French, German, Chinese, Japanese, Korean, and Cantonese.",
   },
   {
     q: "Can I process files while others are running?",

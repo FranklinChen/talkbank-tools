@@ -42,6 +42,7 @@
 //! one `@Media` declaration admits the media/timing transition. That
 //! transition runs in exactly one place, [`FaAdmission::reconcile_output`],
 //! so it cannot fail for a reason admission already knew.
+#[cfg(test)]
 use super::FaInputDocument;
 use crate::chat_ops::ChatFile;
 use crate::error::{
@@ -313,6 +314,9 @@ impl FaWorkingDocument {
         }
     }
 
+    /// Test access to a preserved source; production reaches it through the
+    /// route (`NoRecordingRoute::PassThrough`).
+    #[cfg(test)]
     pub(crate) fn unchanged(&self) -> Option<&AdmittedSourceChat<'static>> {
         match &self.disposition {
             FaWorkingDisposition::Preserved(source) => Some(source),
@@ -320,6 +324,9 @@ impl FaWorkingDocument {
         }
     }
 
+    /// Test access to the active model; production reaches it through the
+    /// route (`ActiveAlignment::active_mut`), which has no preserved case.
+    #[cfg(test)]
     pub(crate) fn active_mut(&mut self) -> Option<&mut ActiveFaDocument> {
         match &mut self.disposition {
             FaWorkingDisposition::Preserved(_) => None,
@@ -327,9 +334,12 @@ impl FaWorkingDocument {
         }
     }
 
+    /// Test access to one attempt; production attempts come from the route's
+    /// `ActiveAlignment::attempt` and `CompleteWor::input`.
+    #[cfg(test)]
     pub(crate) fn attempt(&self) -> FaInputDocument<'_> {
         match &self.disposition {
-            FaWorkingDisposition::Preserved(source) => FaInputDocument::Preserved(source.clone()),
+            FaWorkingDisposition::Preserved(_) => FaInputDocument::Preserved,
             FaWorkingDisposition::Active(active) => FaInputDocument::Active(super::ActiveFaInput {
                 chat_file: active.file.clone(),
                 admission: active.admission.clone(),
@@ -354,6 +364,165 @@ impl ActiveFaDocument {
         let mut result = run(&mut self.file).await?;
         self.anchors.superseded_by(result.take_anchors());
         Ok(result)
+    }
+}
+
+/// Whether the user asked for the file to be aligned again from its
+/// recording, even where its `%wor` is complete.
+///
+/// Read from the forced-alignment cache policy at the one place the route is
+/// decided: `--override-media-cache` (or `--override-media-cache-tasks
+/// forced_alignment`) skips cached FA evidence to recompute it, and a file
+/// whose timing would otherwise be refreshed from `%wor` is recomputed too.
+/// Until 2026-11-03 the flag did not reach a complete `%wor` file at all: the
+/// refresh ran before any cache was consulted, so nothing could ask for a
+/// re-alignment of such a file short of deleting its `%wor` by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RealignmentRequest {
+    /// Reuse complete retained timing; read the recording only where words
+    /// are untimed.
+    NotRequested,
+    /// Align from the recording whatever the file already carries.
+    Requested,
+}
+
+impl From<crate::params::CachePolicy> for RealignmentRequest {
+    fn from(policy: crate::params::CachePolicy) -> Self {
+        match policy {
+            crate::params::CachePolicy::SkipCache => Self::Requested,
+            crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
+                Self::NotRequested
+            }
+        }
+    }
+}
+
+/// Where one file's alignment goes, decided once at admission: whether the
+/// recording is read at all.
+///
+/// The three routes are three types, so a function that needs audio takes a
+/// resolved recording by type and the two that do not cannot be handed one.
+/// Media resolution used to run before this decision for every file, so a
+/// complete `%wor` file or a declared no-op whose recording was not where the
+/// search looked failed although nothing on its route reads audio.
+pub(crate) enum AlignRoute {
+    /// Nothing on this route reads audio: the file task for it holds no
+    /// recording, by type.
+    WithoutRecording(NoRecordingRoute),
+    /// Words to time, or a re-alignment asked for: the recording is required,
+    /// and alignment runs in full, in part, or incrementally against a prior.
+    NeedsAudio(ActiveAlignment),
+}
+
+/// The two routes that finish a file without opening its recording.
+pub(crate) enum NoRecordingRoute {
+    /// `@Options: NoAlign`: the source is returned byte for byte. No worker
+    /// request either.
+    PassThrough(AdmittedSourceChat<'static>),
+    /// Every alignable word already carries reusable `%wor` and no
+    /// re-alignment was asked for: the bullets are refreshed from it. No
+    /// worker request either.
+    RefreshOnly(CompleteWor),
+}
+
+impl AlignRoute {
+    /// Decide the route from the admitted working document and whether
+    /// re-alignment was asked for. A declared `--before` prior is read and
+    /// attached afterwards, on the audio route alone
+    /// ([`ActiveAlignment::with_prior`]): a complete `%wor` file is refreshed
+    /// whether or not a prior was declared, since there is nothing to align
+    /// and so nothing for the prior to contribute, and the prior is not even
+    /// read for it.
+    pub(crate) fn decide(model: FaWorkingDocument, realign: RealignmentRequest) -> Self {
+        let FaWorkingDocument {
+            disposition,
+            main_bullets,
+        } = model;
+        let active = match disposition {
+            FaWorkingDisposition::Preserved(source) => {
+                return Self::WithoutRecording(NoRecordingRoute::PassThrough(source));
+            }
+            FaWorkingDisposition::Active(active) => active,
+        };
+        match realign {
+            RealignmentRequest::NotRequested
+                if crate::chat_ops::fa::has_reusable_wor_timing(&active.file) =>
+            {
+                Self::WithoutRecording(NoRecordingRoute::RefreshOnly(CompleteWor {
+                    document: active,
+                    main_bullets,
+                }))
+            }
+            RealignmentRequest::NotRequested | RealignmentRequest::Requested => {
+                Self::NeedsAudio(ActiveAlignment {
+                    document: active,
+                    main_bullets,
+                    before: None,
+                })
+            }
+        }
+    }
+}
+
+/// Proof that a file's every alignable word carries reusable `%wor` timing
+/// and no re-alignment was asked for. Issued only by [`AlignRoute::decide`].
+pub(crate) struct CompleteWor {
+    document: ActiveFaDocument,
+    main_bullets: crate::chat_ops::fa::MainBulletAuthority,
+}
+
+impl CompleteWor {
+    /// The attempt the refresh works on: a copy of the admitted model with its
+    /// admission, as every attempt at an active file is.
+    pub(crate) fn input(&self) -> super::ActiveFaInput<'_> {
+        super::ActiveFaInput {
+            chat_file: self.document.file.clone(),
+            admission: self.document.admission.clone(),
+            main_bullets: self.main_bullets.clone(),
+            anchors: &self.document.anchors,
+        }
+    }
+}
+
+/// An active file whose alignment needs the recording, with the prior it is
+/// aligned against when one was declared. Issued only by
+/// [`AlignRoute::decide`]; the file task holds one across retries.
+pub(crate) struct ActiveAlignment {
+    document: ActiveFaDocument,
+    main_bullets: crate::chat_ops::fa::MainBulletAuthority,
+    before: Option<super::RetainedFaPrior>,
+}
+
+impl ActiveAlignment {
+    /// Attach the admitted `--before` prior: the run is incremental.
+    pub(crate) fn with_prior(mut self, prior: super::RetainedFaPrior) -> Self {
+        self.before = Some(prior);
+        self
+    }
+
+    /// The admitted model, for a stage that reads it before an attempt.
+    pub(crate) fn document(&self) -> &ChatFile {
+        &self.document.file
+    }
+
+    /// The model, for the UTR pre-pass to mutate.
+    pub(crate) fn active_mut(&mut self) -> &mut ActiveFaDocument {
+        &mut self.document
+    }
+
+    /// The declared prior, when the run is incremental.
+    pub(crate) fn before(&self) -> Option<&super::RetainedFaPrior> {
+        self.before.as_ref()
+    }
+
+    /// One attempt at the file: a copy of the admitted model with its admission.
+    pub(crate) fn attempt(&self) -> super::ActiveFaInput<'_> {
+        super::ActiveFaInput {
+            chat_file: self.document.file.clone(),
+            admission: self.document.admission.clone(),
+            main_bullets: self.main_bullets.clone(),
+            anchors: &self.document.anchors,
+        }
     }
 }
 
@@ -714,6 +883,7 @@ mod tests {
             crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
             "test",
             &crate::engine_reports::FaCacheNamespace::for_test("test"),
+            crate::types::results::RecordingRead::Read,
         );
         let admitted = admission
             .finish(output)
@@ -749,6 +919,7 @@ mod tests {
                 crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
                 "test",
                 &crate::engine_reports::FaCacheNamespace::for_test("test"),
+                crate::types::results::RecordingRead::Read,
             );
             assert!(
                 matches!(
@@ -773,6 +944,7 @@ mod tests {
             crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
             "test",
             &crate::engine_reports::FaCacheNamespace::for_test("test"),
+            crate::types::results::RecordingRead::Read,
         );
         pending_attempt
             .admission
@@ -1116,6 +1288,7 @@ mod tests {
             crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
             "test",
             &crate::engine_reports::FaCacheNamespace::for_test("test"),
+            crate::types::results::RecordingRead::Read,
         );
         let Err(refused) = active.admission.finish(output) else {
             panic!("a linked output with no timing cannot be written");
@@ -1285,5 +1458,73 @@ mod tests {
             let media = linked.as_chat_file().media_header().expect("linked media");
             assert_eq!(media.status, None, "{case:?}: the result is linked");
         }
+    }
+
+    /// Where a file's alignment goes is decided once, from the admitted
+    /// document and the request: a complete `%wor` file is refreshed without
+    /// the recording, the same file under a re-alignment request needs it,
+    /// a partly timed file needs it, and a declared no-op is passed through.
+    #[test]
+    fn the_route_is_decided_at_admission_from_the_document_and_the_request() {
+        const COMPLETE: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}0_500\u{15}\n\
+%wor:\thello \u{15}0_250\u{15} world \u{15}250_500\u{15} .\n\
+@End\n";
+        const PARTLY: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}0_500\u{15}\n\
+%wor:\thello \u{15}0_200\u{15} world \u{15}200_500\u{15} .\n\
+*CHI:\tmore words here .\n\
+@End\n";
+        const NO_ALIGN: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n@Options:\tNoAlign\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+*CHI:\thello world .\n\
+@End\n";
+        let read = |text: &str| read_named(text).expect("the fixture is admitted");
+
+        assert!(matches!(
+            AlignRoute::decide(read(COMPLETE), RealignmentRequest::NotRequested),
+            AlignRoute::WithoutRecording(NoRecordingRoute::RefreshOnly(_))
+        ));
+        assert!(
+            matches!(
+                AlignRoute::decide(read(COMPLETE), RealignmentRequest::Requested),
+                AlignRoute::NeedsAudio(_)
+            ),
+            "a re-alignment request reads the recording whatever the file carries"
+        );
+        assert!(matches!(
+            AlignRoute::decide(read(PARTLY), RealignmentRequest::NotRequested),
+            AlignRoute::NeedsAudio(_)
+        ));
+        assert!(matches!(
+            AlignRoute::decide(read(NO_ALIGN), RealignmentRequest::NotRequested),
+            AlignRoute::WithoutRecording(NoRecordingRoute::PassThrough(_))
+        ));
+    }
+
+    /// The request is read from the FA cache policy: skipping the cache is
+    /// the one way to ask for a complete file to be aligned again.
+    #[test]
+    fn a_realignment_request_is_the_skip_cache_policy() {
+        use crate::params::CachePolicy;
+        assert_eq!(
+            RealignmentRequest::from(CachePolicy::SkipCache),
+            RealignmentRequest::Requested
+        );
+        assert_eq!(
+            RealignmentRequest::from(CachePolicy::UseCache),
+            RealignmentRequest::NotRequested
+        );
+        assert_eq!(
+            RealignmentRequest::from(CachePolicy::RequireCache),
+            RealignmentRequest::NotRequested
+        );
     }
 }

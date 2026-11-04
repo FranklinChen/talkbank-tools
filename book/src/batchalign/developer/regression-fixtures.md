@@ -61,9 +61,16 @@ budgets and final complete timing remain separate admissions; contradictory or
 over-budget search bounds are refused rather than clipped into convenient crops.
 
 The `utr-debug` research report is schema 8. Existing complete candidate
-envelopes retain their previous shape. Partial-order envelopes explicitly carry
-`floor_ms`, nullable `ceiling_ms` and `scope.kind = "order_corridor"`; a null
-ceiling is a recording-bound search obligation, not a made-up timestamp.
+envelopes retain their previous shape. Partial-order envelopes carry
+`scope.kind = "order_corridor"` and a `floor` and `ceiling` object, each
+tagged by `kind`: `preceding_measured` / `following_measured` with the edge's
+`ms` and the `utterance` that supplied it, `file_start` / `file_end` when no
+measured utterance lies on that side (a recording-bound search obligation, not
+a made-up timestamp), `marked_overlap_unbounded` on a floor when the searched
+utterance's own overlap marker withholds it, and `following_overlaps` on a
+ceiling naming the marked utterance that stops the chain of following
+measurements (2026-11-03;
+before this they carried a bare `floor_ms` and a nullable `ceiling_ms`).
 
 UTR hint coverage is an intermediate observation, not the alignment output
 contract. A withheld hint must not prevent FA from searching the words' actual

@@ -8,11 +8,16 @@
 //! 5. Serialize projected CHAT + CSV metrics
 //!
 //! Gold file convention: for each `FILE.cha`, expects `FILE.gold.cha` in the
-//! same directory. Files ending in `.gold.cha` are skipped.
+//! same directory, falling back to `template.gold.cha` there. Files ending in
+//! `.gold.cha` are skipped. The pairing and reading live in
+//! `execution::kernel`; this module takes admitted documents.
+//!
+//! No language crosses into this module: the main transcript's own
+//! `@Languages:` header decides its morphotag, inside the morphosyntax
+//! pipeline, as for `morphotag`.
 
 use std::path::Path;
 
-use crate::api::LanguageCode3;
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use crate::pipeline::PipelineServices;
 
@@ -21,7 +26,6 @@ use crate::chat_ops::{DependentTier, Header, Line};
 use crate::error::ServerError;
 use crate::params::MorphosyntaxParams;
 use crate::pipeline::post_validate::{PostValidated, UtteranceCensus};
-use crate::text_batch::TextBatchFileInput;
 use batchalign_transform::compare::{
     CompareMetricsCsvTable, clear_comparison, inject_comparison, project_gold_structurally,
 };
@@ -208,16 +212,16 @@ fn build_comparison_artifacts_from_proof(
     ComparisonArtifacts::build(main, reference)
 }
 
-enum ComparisonMain<'a> {
-    Source(&'a str),
-    /// A constructed main transcript, admitted by its type.
-    Constructed(crate::pipeline::post_validate::PostValidated),
-}
-
+/// Morphotag a constructed main transcript (admitted by its type) and build
+/// the comparison from the result.
+///
+/// It took a `ComparisonMain::{Source(&str), Constructed(PostValidated)}`
+/// until the only `Source` caller, the dead batch entry point, was removed;
+/// and a `_lang` nobody read, since the morphosyntax pipeline resolves the
+/// language per file from the transcript's own `@Languages:` header.
 async fn build_comparison_artifacts(
-    main: ComparisonMain<'_>,
+    main: PostValidated,
     reference: AdmittedComparisonReference,
-    _lang: &LanguageCode3,
     services: PipelineServices<'_>,
     mwt: &MwtDict,
 ) -> Result<ComparisonArtifacts, ServerError> {
@@ -247,20 +251,11 @@ async fn build_comparison_artifacts(
     // the gate refuses. What the command writes is the comparison artifact, and
     // that gets its own proof in the materializers below.
     let registry = services.pool.stanza_registry();
-    let parsed = match main {
-        ComparisonMain::Source(text) => crate::pipeline::morphosyntax::ParsedFile::parse(
-            text,
-            mor_params.policy.ca_policy,
-            &registry,
-        )?,
-        ComparisonMain::Constructed(output) => {
-            crate::pipeline::morphosyntax::ParsedFile::from_output(
-                output,
-                mor_params.policy.ca_policy,
-                &registry,
-            )?
-        }
-    };
+    let parsed = crate::pipeline::morphosyntax::ParsedFile::from_output(
+        main,
+        mor_params.policy.ca_policy,
+        &registry,
+    )?;
     let morphotagged_main =
         crate::pipeline::morphosyntax::run_admitted_morphosyntax(parsed, services, &mor_params)
             .await?
@@ -369,35 +364,6 @@ fn apply_media_header_from_main(
     );
 }
 
-/// Process a single CHAT file through the compare pipeline.
-///
-/// Returns the released compare outputs for the current projected-reference
-/// workflow materialization.
-///
-/// Steps:
-/// 1. Completely admit the retained reference.
-/// 2. Admit and run morphosyntax on `main_text` (regenerating %mor/%gra).
-/// 3. Build the comparison bundle from main vs gold.
-/// 4. Materialize the projected reference-side output.
-pub(crate) async fn process_compare(
-    main_text: &str,
-    gold_text: &str,
-    lang: &LanguageCode3,
-    services: PipelineServices<'_>,
-    mwt: &MwtDict,
-) -> Result<CompareMaterializedOutputs, ServerError> {
-    materialize_released(
-        build_comparison_artifacts(
-            ComparisonMain::Source(main_text),
-            AdmittedComparisonReference::admit(gold_text)?,
-            lang,
-            services,
-            mwt,
-        )
-        .await?,
-    )
-}
-
 /// Materialize compare outputs from morphotag's own PROOF of the main
 /// transcript.
 ///
@@ -416,35 +382,12 @@ pub(crate) fn process_compare_morphotagged_main(
 
 /// Continue benchmark comparison from its admitted constructed transcript.
 pub(crate) async fn process_compare_constructed_main(
-    main: crate::pipeline::post_validate::PostValidated,
+    main: PostValidated,
     reference: AdmittedComparisonReference,
-    lang: &LanguageCode3,
     services: PipelineServices<'_>,
     mwt: &MwtDict,
 ) -> Result<MainAnnotatedCompareOutputs, ServerError> {
-    materialize_main_annotated(
-        build_comparison_artifacts(
-            ComparisonMain::Constructed(main),
-            reference,
-            lang,
-            services,
-            mwt,
-        )
-        .await?,
-    )
-}
-
-/// Derive the gold file path from a main file path.
-///
-/// Convention: `FILE.cha` -> `FILE.gold.cha` (in the same directory).
-pub fn gold_path_for(main_path: &str) -> String {
-    let p = Path::new(main_path);
-    let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-    let parent = p.parent().unwrap_or_else(|| Path::new(""));
-    parent
-        .join(format!("{stem}.gold.cha"))
-        .to_string_lossy()
-        .to_string()
+    materialize_main_annotated(build_comparison_artifacts(main, reference, services, mwt).await?)
 }
 
 /// Derive the directory-level template gold path for a main file path.
@@ -462,61 +405,6 @@ pub fn template_gold_path_for(main_path: &str) -> String {
 /// Returns `true` if the filename is a gold reference file (ends with `.gold.cha`).
 pub fn is_gold_file(filename: &str) -> bool {
     filename.ends_with(".gold.cha")
-}
-
-/// Process multiple CHAT files through the compare pipeline.
-///
-/// For each `(filename, chat_text)`:
-/// 1. Skip `.gold.cha` files
-/// 2. Look up the companion gold file
-/// 3. Run morphosyntax + compare
-/// 4. Return `(filename, Ok(outputs) | Err(error_msg))`
-#[allow(dead_code)]
-pub(crate) async fn process_compare_batch(
-    files: &[TextBatchFileInput],
-    lang: &LanguageCode3,
-    services: PipelineServices<'_>,
-    mwt: &MwtDict,
-    read_gold_fn: &dyn Fn(&str) -> Option<String>,
-) -> Vec<(String, Result<CompareMaterializedOutputs, String>)> {
-    let mut results = Vec::with_capacity(files.len());
-
-    for file in files {
-        let filename = file.filename.as_ref();
-        let chat_text = file.chat_text.as_ref();
-        // Skip gold files: they're companions, not inputs
-        if is_gold_file(filename) {
-            continue;
-        }
-
-        let gold_filename = gold_path_for(filename);
-        let template_gold_filename = template_gold_path_for(filename);
-        let gold_text =
-            match read_gold_fn(&gold_filename).or_else(|| read_gold_fn(&template_gold_filename)) {
-                Some(text) => text,
-                None => {
-                    results.push((
-                        file.filename.to_string(),
-                        Err(format!(
-                            "No gold .cha file found for comparison. \
-                         main: {filename}, expected: {gold_filename} or {template_gold_filename}"
-                        )),
-                    ));
-                    continue;
-                }
-            };
-
-        match process_compare(chat_text, &gold_text, lang, services, mwt).await {
-            Ok(result) => {
-                results.push((file.filename.to_string(), Ok(result)));
-            }
-            Err(e) => {
-                results.push((file.filename.to_string(), Err(e.to_string())));
-            }
-        }
-    }
-
-    results
 }
 
 #[cfg(test)]
@@ -556,16 +444,6 @@ mod tests {
         }
         lines.push("@End".to_string());
         lines.join("\n")
-    }
-
-    #[test]
-    fn gold_path_derivation() {
-        assert_eq!(gold_path_for("test.cha"), "test.gold.cha");
-        assert_eq!(
-            gold_path_for("/data/corpus/01DM.cha"),
-            "/data/corpus/01DM.gold.cha"
-        );
-        assert_eq!(gold_path_for("dir/sub/file.cha"), "dir/sub/file.gold.cha");
     }
 
     #[test]

@@ -8,7 +8,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-import unicodedata
 from collections.abc import Callable, Generator
 from copy import deepcopy
 from dataclasses import dataclass
@@ -33,9 +32,16 @@ from batchalign.worker._pipeline_cache import (
 )
 from batchalign.worker._types_v2 import (
     MorphosyntaxPipelineV2,
+    UdFeatureNameRepairKindV2,
+    UdFeatureNameRepairV2,
     UdFeatureRepairKindV2,
+    UdFeatureRepairV2,
+    UdLemmaRepairKindV2,
+    UdLemmaRepairV2,
     UdRelationRepairKindV2,
+    UdRelationRepairV2,
 )
+from batchalign_core import is_padding_value, is_punctuation_lemma, repair_feats
 
 if TYPE_CHECKING:
     from batchalign.inference._tokenizer_realign import TokenizerContext
@@ -392,22 +398,13 @@ UD_DEPREL_ALIASES: dict[str, str] = {
 # name. Stanza's Italian model writes `Verbform=Fin` (lower-case f) on verbs
 # such as the `da` of `dammela` (verified against stanza 1.14.0 and 1.15.0,
 # 2026-10-01). Every consumer looks for `VerbForm`, so the verb read as having
-# no form at all. The value is untouched: only the name is respelled, so the
-# analysis Stanza made is the analysis that arrives.
+# no form at all. The value is untouched: only the name is respelled. The
+# respelling is still a rewrite of what the model said, so it is reported
+# (``FeatureNameRepair``) like every other repair; until it was, it was the one
+# rewrite the file's ``ud_repairs=`` could not count.
 UD_FEATURE_NAME_ALIASES: dict[str, str] = {
     "Verbform": "VerbForm",
 }
-
-
-def _canonical_feature_names(feats: str | None) -> str | None:
-    """``feats`` with every known misspelled feature name respelled."""
-    if not feats:
-        return feats
-    pairs = []
-    for pair in feats.split("|"):
-        name, sep, value = pair.partition("=")
-        pairs.append(UD_FEATURE_NAME_ALIASES.get(name, name) + sep + value)
-    return "|".join(pairs)
 
 
 class UdWord(BaseModel, extra="allow"):
@@ -522,15 +519,6 @@ def _override_pos_with_pycantonese(
 # ---------------------------------------------------------------------------
 
 
-def _is_bogus_lemma(text: str, lemma: str) -> bool:
-    """Detect when Stanza returns a lemma that's pure punctuation for a word."""
-    if text == lemma or not lemma:
-        return False
-    text_has_letters = any(unicodedata.category(c).startswith("L") for c in text)
-    lemma_all_punct = all(unicodedata.category(c).startswith(("P", "S")) for c in lemma)
-    return text_has_letters and lemma_all_punct
-
-
 # The Python wire owner supplies the vocabulary; inference cannot add a third
 # copy beside the Rust schema and its Python boundary model.
 RelationRepairKind = UdRelationRepairKindV2
@@ -570,13 +558,13 @@ class RelationRepair:
             )
 
     def wire(self) -> JSONObject:
-        """The repair as the Rust side reads it (``UdRelationRepairV2``)."""
-        return {
-            "kind": self.kind.value,
-            "word": self.word,
-            "from_relation": self.from_relation,
-            "to_relation": self.to_relation,
-        }
+        """The repair as the Rust side reads it: the wire model, with its tag."""
+        return UdRelationRepairV2(
+            kind=self.kind,
+            word=self.word,
+            from_relation=self.from_relation,
+            to_relation=self.to_relation,
+        ).model_dump(mode="json")
 
 
 def _repair(
@@ -616,7 +604,9 @@ def _repaired_relation(deprel: str, word: str) -> tuple[str, RelationRepair | No
     than reaching the transcript, but the degradation is now a value the
     caller carries to the server, which counts it into the file's provenance.
     """
-    if deprel.startswith("<") and deprel.endswith(">"):
+    # Rust's one test of padding (``PaddingValue::admit``), the same one the
+    # server's admission refuses an unrepaired relation by.
+    if is_padding_value(deprel):
         return _repair(RelationRepairKind.PAD_RELATION, word, deprel, "dep")
 
     head, sep, subtype = deprel.partition(":")
@@ -657,13 +647,13 @@ class FeatureRepair:
     removed_value: str
 
     def wire(self) -> JSONObject:
-        """The repair as the Rust side reads it (``UdFeatureRepairV2``)."""
-        return {
-            "kind": self.kind.value,
-            "word": self.word,
-            "feature": self.feature,
-            "removed_value": self.removed_value,
-        }
+        """The repair as the Rust side reads it: the wire model, with its tag."""
+        return UdFeatureRepairV2(
+            kind=self.kind,
+            word=self.word,
+            feature=self.feature,
+            removed_value=self.removed_value,
+        ).model_dump(mode="json")
 
 
 def _repaired_features(
@@ -680,8 +670,6 @@ def _repaired_features(
     """
     if not feats:
         return feats, ()
-    from batchalign_core import repair_feats
-
     kept, removed = repair_feats(feats)
     repairs: list[FeatureRepair] = []
     for name, value in removed:
@@ -702,8 +690,129 @@ def _repaired_features(
     return kept, tuple(repairs)
 
 
-UdRepair = RelationRepair | FeatureRepair
-"""Every repair a worker reports: a relation rewritten or a feature value removed."""
+# The Python wire owner supplies the feature-name and lemma vocabularies too.
+FeatureNameRepairKind = UdFeatureNameRepairKindV2
+LemmaRepairKind = UdLemmaRepairKindV2
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureNameRepair:
+    """One feature name respelled, as a value to count.
+
+    Carries the word and both spellings: once the analysis is injected, the
+    name Stanza wrote exists nowhere else. Refuses a respelling that changed
+    nothing, so no count can be inflated by a no-op.
+    """
+
+    kind: FeatureNameRepairKind
+    word: str
+    from_name: str
+    to_name: str
+
+    def __post_init__(self) -> None:
+        if self.from_name == self.to_name:
+            raise ValueError(
+                f"a repair must change the feature name, but {self.from_name!r} "
+                f"was recorded as respelled to itself"
+            )
+
+    def wire(self) -> JSONObject:
+        """The repair as the Rust side reads it: the wire model, with its tag."""
+        return UdFeatureNameRepairV2(
+            kind=self.kind,
+            word=self.word,
+            from_name=self.from_name,
+            to_name=self.to_name,
+        ).model_dump(mode="json")
+
+
+def _respelled_feature_names(
+    feats: str | None, word: str
+) -> tuple[str | None, tuple[FeatureNameRepair, ...]]:
+    """``feats`` with every known misspelled feature name respelled, and one
+    repair per name respelled. Values are never touched."""
+    if not feats:
+        return feats, ()
+    pairs = []
+    repairs: list[FeatureNameRepair] = []
+    for pair in feats.split("|"):
+        name, sep, value = pair.partition("=")
+        respelled = UD_FEATURE_NAME_ALIASES.get(name, name)
+        if respelled != name:
+            L.warning(
+                "morphotag: Stanza spelled feature %r of word %r; respelling it %r",
+                name,
+                word,
+                respelled,
+            )
+            repairs.append(
+                FeatureNameRepair(
+                    kind=FeatureNameRepairKind.FEATURE_NAME_ALIAS,
+                    word=word,
+                    from_name=name,
+                    to_name=respelled,
+                )
+            )
+        pairs.append(respelled + sep + value)
+    return "|".join(pairs), tuple(repairs)
+
+
+@dataclass(frozen=True, slots=True)
+class LemmaRepair:
+    """One lemma replaced by its word's surface form, as a value to count.
+
+    Built only from Rust's test (``batchalign_core.is_punctuation_lemma``,
+    the same test the server's UD word admission refuses an unrepaired lemma
+    by), so the worker never classifies a lemma itself. The lemma applied is
+    the word, so only the lemma Stanza produced is carried.
+    """
+
+    kind: LemmaRepairKind
+    word: str
+    from_lemma: str
+
+    def __post_init__(self) -> None:
+        # The same test at the mint as at the server's admission, so a repair
+        # the predicate does not bear out cannot exist, here or on the wire.
+        if not is_punctuation_lemma(self.word, self.from_lemma):
+            raise ValueError(
+                f"a lemma repair replaces a punctuation-only lemma, but "
+                f"{self.from_lemma!r} is not one for {self.word!r}"
+            )
+
+    def wire(self) -> JSONObject:
+        """The repair as the Rust side reads it: the wire model, with its tag."""
+        return UdLemmaRepairV2(
+            kind=self.kind, word=self.word, from_lemma=self.from_lemma
+        ).model_dump(mode="json")
+
+
+def _repaired_lemma(text: str, lemma: str) -> tuple[str, LemmaRepair | None]:
+    """The lemma to apply for *text*, and the repair if one was needed.
+
+    The ONE place a lemma is rewritten, on either side of the wire: the
+    server refuses an unrepaired punctuation lemma rather than repairing it
+    again (it used to, under a predicate of its own, and the count could
+    only ever see the worker's). Stanza occasionally lemmatizes a lettered
+    word to punctuation alone (``bonjour`` to ``...``, ``哎呀`` to ``》``);
+    the surface form stands in, and the replacement is reported.
+    """
+    if not is_punctuation_lemma(text, lemma):
+        return lemma, None
+    L.warning(
+        "morphotag: Stanza returned punctuation-only lemma %r for word %r; applying the surface form",
+        lemma,
+        text,
+    )
+    return text, LemmaRepair(
+        kind=LemmaRepairKind.PUNCTUATION_LEMMA, word=text, from_lemma=lemma
+    )
+
+
+UdRepair = RelationRepair | FeatureRepair | FeatureNameRepair | LemmaRepair
+"""Every repair a worker reports: a relation rewritten, a feature value
+removed, a feature name respelled or a lemma replaced. Each knows its own
+wire form, so the analysis sends them as one list."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,7 +825,7 @@ class _RowRepair:
 
 @dataclass(frozen=True, slots=True, init=False)
 class RepairedSentence:
-    """One Stanza sentence, validated, with its relations and features repaired.
+    """One Stanza sentence, validated, with its lemmas, features and relations repaired.
 
     THE REPAIR IS THE CONSTRUCTOR, and it is the only one. This type is built
     from raw Stanza words and from nothing else, so a repaired sentence cannot
@@ -755,19 +864,20 @@ class RepairedSentence:
 
             validated = UdWord.model_validate(raw)
 
-            if not isinstance(validated.id, list) and _is_bogus_lemma(
-                validated.text, validated.lemma
-            ):
-                L.warning(
-                    "Stanza returned bogus lemma %r for word %r, falling back to surface form",
-                    validated.lemma,
-                    validated.text,
-                )
-                validated.lemma = validated.text
+            # A multi-word token's range row carries no lemma of its own (the
+            # components carry the analysis), so only a syntactic word's lemma
+            # is judged. The server's admission draws the same line.
+            if not isinstance(validated.id, list):
+                lemma, lemma_repair = _repaired_lemma(validated.text, validated.lemma)
+                if lemma_repair is not None:
+                    validated.lemma = lemma
+                    repairs.append(_RowRepair(position, lemma_repair))
 
-            feats, feature_repairs = _repaired_features(
-                _canonical_feature_names(validated.feats), validated.text
+            respelled, name_repairs = _respelled_feature_names(
+                validated.feats, validated.text
             )
+            repairs.extend(_RowRepair(position, entry) for entry in name_repairs)
+            feats, feature_repairs = _repaired_features(respelled, validated.text)
             validated.feats = feats
             repairs.extend(_RowRepair(position, entry) for entry in feature_repairs)
 
@@ -905,18 +1015,10 @@ def _analysis(
     """
     if stanza_version is None:
         return ItemFailed(error=_NO_STANZA_VERSION_ERROR)
-    # Each repair goes to the wire list its kind belongs to; exhaustive, so a
-    # third kind of repair cannot be added without deciding where it is sent.
-    relation_repairs: list[WorkerJSONValue] = []
-    feature_repairs: list[WorkerJSONValue] = []
-    for repair in sentence.repairs:
-        match repair:
-            case RelationRepair():
-                relation_repairs.append(repair.wire())
-            case FeatureRepair():
-                feature_repairs.append(repair.wire())
-            case _ as unreachable:
-                assert_never(unreachable)
+    # One list for every kind of repair: each value writes its own tagged
+    # wire form, so adding a kind means adding a type that knows its tag,
+    # never deciding here which list it goes to.
+    repairs: list[WorkerJSONValue] = [repair.wire() for repair in sentence.repairs]
     return ItemProduced(
         result={
             "kind": "analyzed",
@@ -926,8 +1028,7 @@ def _analysis(
                 "lang": lang,
                 "pipeline": pipeline.value,
             },
-            "repairs": relation_repairs,
-            "feature_repairs": feature_repairs,
+            "repairs": repairs,
         }
     )
 

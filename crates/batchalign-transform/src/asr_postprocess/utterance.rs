@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use super::chunking::SegmentedChunk;
 use super::han_script::NormalizationChangedLength;
 use super::{
     AsrNormalizedText, AsrOutput, AsrPipelineSnapshot, AsrTextLanguage, AsrWord, ENDING_PUNCT,
@@ -130,12 +131,26 @@ pub fn chunk_monologues_with_snapshot(
 }
 
 /// Retokenize prepared chunks into utterances using punctuation boundaries.
-pub fn utterances_from_prepared_chunks(
-    chunks: Vec<super::PreparedMonologueChunk>,
+///
+/// Chunks no boundary model cut: each ends as its words do.
+pub fn utterances_from_prepared_chunks(chunks: Vec<PreparedMonologueChunk>) -> Vec<Utterance> {
+    utterances_from_segmented_chunks(chunks.into_iter().map(SegmentedChunk::uncut))
+}
+
+/// Retokenize the pieces a boundary model cut into utterances using
+/// punctuation boundaries, closing each piece's last utterance, when the
+/// recognizer left it open, with the end its cut predicted.
+pub fn utterances_from_segmented_chunks(
+    pieces: impl IntoIterator<Item = SegmentedChunk>,
 ) -> Vec<Utterance> {
     let mut utterances = Vec::new();
-    for chunk in chunks {
-        utterances.extend(retokenize(chunk.speaker, chunk.words));
+    for piece in pieces {
+        let (chunk, predicted_end) = piece.into_parts();
+        let trailing = match predicted_end {
+            Some(kind) => SynthesisCause::ModelBoundary(kind),
+            None => SynthesisCause::NoMark,
+        };
+        utterances.extend(retokenize(chunk.speaker, chunk.words, trailing));
     }
     utterances
 }
@@ -246,10 +261,15 @@ fn normalize_punct(word: &str) -> &str {
 /// becomes its [`UtteranceEnd`], never one of its words: a CHAT terminator
 /// is observed, and `...` or `(.)`, which CHAT cannot write as a terminator,
 /// is a synthesized end naming the mark. A chunk that ends without one is
-/// closed with a synthesized end too. A mark with no words before it (a
-/// second mark in a row, or one opening the chunk) closes nothing and emits
-/// no utterance.
-pub(super) fn retokenize(speaker: SpeakerIndex, words: Vec<AsrWord>) -> Vec<Utterance> {
+/// closed with a synthesized end too, `trailing`: no mark, or the terminator
+/// the boundary model predicted where it cut this chunk. A mark with no words
+/// before it (a second mark in a row, or one opening the chunk) closes nothing
+/// and emits no utterance.
+pub(super) fn retokenize(
+    speaker: SpeakerIndex,
+    words: Vec<AsrWord>,
+    trailing: SynthesisCause,
+) -> Vec<Utterance> {
     let mut utterances = Vec::new();
     let mut buf: Vec<AsrWord> = Vec::new();
 
@@ -272,6 +292,8 @@ pub(super) fn retokenize(speaker: SpeakerIndex, words: Vec<AsrWord>) -> Vec<Utte
                 words: std::mem::take(&mut buf),
                 end: mark.into_end(),
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             });
         }
     }
@@ -290,8 +312,10 @@ pub(super) fn retokenize(speaker: SpeakerIndex, words: Vec<AsrWord>) -> Vec<Utte
         utterances.push(Utterance {
             speaker,
             words: buf,
-            end: UtteranceEnd::Synthesized(SynthesisCause::NoMark),
+            end: UtteranceEnd::Synthesized(trailing),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         });
     }
 

@@ -469,12 +469,46 @@ fn parse_diarization_speaker_count(
     crate::options::DiarizationSpeakerCount::try_from(count).map_err(|error| error.to_string())
 }
 
+/// `--overwrite` at the Clap boundary, for the commands whose results land
+/// beside their inputs under a new name (`transcribe` writes `<media>.cha`
+/// next to the recording; `benchmark`, `diarize` and `compare` likewise
+/// generate files that are not the input). Without it, or an explicit `-o`,
+/// a result that would replace an existing file is refused before anything is
+/// submitted. The field is private: the flag is readable only as the
+/// [`Overwrite`] authority it mints, through [`OverwriteFlag::authority`].
+///
+/// Not flattened into `CommonOpts`: on `align`, `morphotag` and the other
+/// commands that rewrite the file they were given it would be a flag that
+/// changes nothing, and an accepted no-op flag is a silent default of its own.
+///
+/// [`Overwrite`]: crate::cli::output::Overwrite
+#[derive(Args, Debug, Clone, Default)]
+pub struct OverwriteFlag {
+    /// Replace a result file that already exists beside its input (for
+    /// example an earlier `<media>.cha`). Without this flag, or an explicit
+    /// `-o DIR`, such an invocation is refused before anything is submitted
+    /// or paid for.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    overwrite: bool,
+}
+
+impl OverwriteFlag {
+    /// The authority the flag grants, if it was given.
+    pub fn authority(&self) -> Option<crate::cli::output::Overwrite> {
+        self.overwrite.then(crate::cli::output::Overwrite::by_flag)
+    }
+}
+
 /// Arguments for the `transcribe` command.
 #[derive(Args, Debug, Clone)]
 pub struct TranscribeArgs {
     /// Shared file I/O options.
     #[command(flatten)]
     pub common: CommonOpts,
+
+    /// `--overwrite`: replace an existing `<media>.cha` beside the recording.
+    #[command(flatten)]
+    pub overwrite: OverwriteFlag,
 
     /// ASR engine selection (flag, legacy alias, BA2 switches).
     #[command(flatten)]
@@ -512,18 +546,25 @@ pub struct TranscribeArgs {
     #[arg(long)]
     pub utseg_fallback_stanza: bool,
 
-    /// Language: a 3-letter ISO code, `auto` to detect, or a code-switched
-    /// pair such as `eng,spa`, primary language first (Rev.AI's
-    /// English/Spanish model only).
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// The recording's language, required: a 3-letter ISO 639-3 code such as
+    /// `eng` or `yue`, `auto` to let the recognizer detect one language for
+    /// the whole file, or a code-switched pair such as `eng,spa`, primary
+    /// language first. There is no default language: a recording transcribed
+    /// under a language nobody chose is a silent error, so the flag must be
+    /// written, and detection is an explicit `auto`.
+    #[arg(long, required = true, value_name = "CODE|auto")]
+    pub lang: crate::api::AsrLanguageRequest,
 
     /// Expected number of speakers. NOT a worker count: see `--workers`.
     /// No short flag by design; the book explains why `-n` was removed.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..))]
     pub num_speakers: u32,
 
-    /// Infer the speaker count instead of supplying an exact count (Rev.AI).
+    /// Let the speaker engine infer the count instead of supplying one.
+    /// Accepted by Rev.AI's own diarization and by every dedicated
+    /// `--speaker-engine`; refused only with `--asr-engine tencent` and no
+    /// `--diarization enabled`, since Tencent's integrated diarization must
+    /// be given the count.
     #[arg(long, conflicts_with = "num_speakers")]
     pub auto_speakers: bool,
 
@@ -693,20 +734,20 @@ pub struct CorefArgs {
 }
 
 /// Arguments for the `compare` command.
+///
+/// No `--lang`: compare morphotags each main transcript under that file's own
+/// `@Languages:` header, as `morphotag` does, and the flag it used to take
+/// reached the worker gateway and was discarded there. No `--num-speakers`:
+/// compare reads transcripts, and the count went only into the job record.
 #[derive(Args, Debug, Clone)]
 pub struct CompareArgs {
     /// Shared file I/O options.
     #[command(flatten)]
     pub common: CommonOpts,
 
-    /// Language (3-letter ISO code).
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
-
-    /// Expected number of speakers. NOT a worker count: see `--workers`.
-    /// No short flag by design; the book explains why `-n` was removed.
-    #[arg(long, default_value_t = 2)]
-    pub num_speakers: u32,
+    /// `--overwrite`: replace an existing `.compare.csv` beside the transcript.
+    #[command(flatten)]
+    pub overwrite: OverwriteFlag,
 
     /// Merge abbreviations in output.
     #[arg(long, conflicts_with = "no_merge_abbrev")]
@@ -724,9 +765,9 @@ pub struct UtsegArgs {
     #[command(flatten)]
     pub common: CommonOpts,
 
-    /// Language (3-letter ISO code).
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// Language (3-letter ISO 639-3 code, or `auto`). Defaults to `eng`.
+    #[arg(long, default_value = "eng", value_name = "CODE|auto")]
+    pub lang: crate::api::LanguageSelection,
 
     /// Expected number of speakers. NOT a worker count: see `--workers`.
     /// No short flag by design; the book explains why `-n` was removed.
@@ -757,6 +798,10 @@ pub struct BenchmarkArgs {
     #[command(flatten)]
     pub common: CommonOpts,
 
+    /// `--overwrite`: replace existing benchmark results beside the recording.
+    #[command(flatten)]
+    pub overwrite: OverwriteFlag,
+
     /// ASR engine selection (flag, legacy alias, BA2 switches).
     ///
     /// The same surface `transcribe` has. It previously advertised three of the
@@ -766,9 +811,9 @@ pub struct BenchmarkArgs {
     #[command(flatten)]
     pub asr: AsrSelectionArgs,
 
-    /// Language (3-letter ISO code).
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// Language (3-letter ISO 639-3 code, or `auto`). Defaults to `eng`.
+    #[arg(long, default_value = "eng", value_name = "CODE|auto")]
+    pub lang: crate::api::LanguageSelection,
 
     /// Expected number of speakers. NOT a worker count: see `--workers`.
     /// No short flag by design; the book explains why `-n` was removed.
@@ -815,9 +860,9 @@ pub struct OpensmileArgs {
           value_parser = ["eGeMAPSv02", "eGeMAPSv01b", "GeMAPSv01b", "ComParE_2016"])]
     pub feature_set: String,
 
-    /// Language (3-letter ISO code).
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// Language (3-letter ISO 639-3 code, or `auto`). Defaults to `eng`.
+    #[arg(long, default_value = "eng", value_name = "CODE|auto")]
+    pub lang: crate::api::LanguageSelection,
 
     /// Server media bank name.
     #[arg(long)]
@@ -834,6 +879,10 @@ pub struct DiarizeArgs {
     /// Shared file-I/O options (input media paths, output directory).
     #[command(flatten)]
     pub common: CommonOpts,
+
+    /// `--overwrite`: replace an existing `.turns.json` beside the recording.
+    #[command(flatten)]
+    pub overwrite: OverwriteFlag,
 
     /// Speaker diarization engine. The paid pyannoteAI path is opt-in.
     #[arg(
@@ -854,10 +903,12 @@ pub struct DiarizeArgs {
     #[arg(long, value_name = "PAR0=CHI,PAR1=MOT")]
     pub speaker_map: Option<crate::options::SpeakerTrackMapping>,
 
-    /// Language (3-letter ISO code). Worker-pool selection only;
-    /// diarization itself is language-independent.
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// Language, required: a 3-letter ISO 639-3 code such as `eng`, or
+    /// `auto`. Worker-pool selection only; diarization itself is
+    /// language-independent. There is no default: the language is recorded
+    /// in the job and must be the one the operator chose.
+    #[arg(long, required = true, value_name = "CODE|auto")]
+    pub lang: crate::api::LanguageSelection,
 }
 
 /// Read one `<start_ms>-<end_ms>:<label>` enrollment argument.
@@ -948,10 +999,11 @@ pub struct SpeakerIdentifyArgs {
     #[arg(long, default_value_t = documented_permutation_seed())]
     pub permutation_seed: u64,
 
-    /// Language (3-letter ISO code). Worker-pool selection only; speaker
-    /// embedding itself is language-independent.
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// Language (3-letter ISO 639-3 code, or `auto`). Worker-pool selection
+    /// only; speaker embedding itself is language-independent. Defaults to
+    /// `eng`.
+    #[arg(long, default_value = "eng", value_name = "CODE|auto")]
+    pub lang: crate::api::LanguageSelection,
 }
 
 /// The documented count, read from its one owner so the help text cannot
@@ -1018,9 +1070,9 @@ pub struct AvqiArgs {
     /// Output directory.
     pub output_dir: std::path::PathBuf,
 
-    /// Language (3-letter ISO code).
-    #[arg(long, default_value = "eng")]
-    pub lang: String,
+    /// Language (3-letter ISO 639-3 code, or `auto`). Defaults to `eng`.
+    #[arg(long, default_value = "eng", value_name = "CODE|auto")]
+    pub lang: crate::api::LanguageSelection,
 }
 
 /// ASR engine choice for the `setup` command.
@@ -1095,10 +1147,6 @@ pub struct BenchArgs {
     /// Dataset label for structured output.
     #[arg(long)]
     pub dataset: Option<String>,
-
-    /// Number of workers to use.
-    #[arg(long)]
-    pub workers: Option<usize>,
 
     /// Use cache for benchmark runs (default is to bypass cache).
     #[arg(long)]
@@ -1361,15 +1409,27 @@ pub struct ServeStartArgs {
     pub foreground: bool,
 
     /// Maximum concurrent files per job. Overrides the `max_workers_per_job`
-    /// value from `server.yaml`. 0 = auto-tune.
+    /// value from `server.yaml`. A positive count; leave it out for auto-tune.
     #[arg(long)]
-    pub workers: Option<usize>,
+    pub workers: Option<crate::api::WorkerCap>,
 
     /// Inference timeout in seconds for audio tasks (ASR, FA, speaker).
     /// Increase for very long recordings. Default: 1800 (30 minutes). Must be
     /// positive; leave it out for the built-in ceiling.
     #[arg(long)]
     pub timeout: Option<crate::api::PositiveSeconds>,
+}
+
+impl ServeStartArgs {
+    /// The settings this server is started with, built once from `--workers`
+    /// and `--timeout`: applied to its config in the foreground, forwarded to
+    /// the child otherwise.
+    pub fn runtime(&self) -> crate::cli::daemon::RequestedRuntime {
+        crate::cli::daemon::RequestedRuntime {
+            workers: self.workers,
+            timeout: self.timeout,
+        }
+    }
 }
 
 /// Arguments for `serve status`.
@@ -1900,7 +1960,7 @@ pub struct TranscribeReplayRunArgs {
     pub lang: String,
     /// Expected speaker count used for CHAT participant capacity.
     #[arg(long, default_value_t = 2)]
-    pub num_speakers: usize,
+    pub num_speakers: u32,
     /// Apply each manifest's canonical speaker turns before segmentation.
     #[arg(long)]
     pub diarize: bool,
@@ -1934,10 +1994,11 @@ pub enum TranscribeReplayUtsegPolicy {
     WorkerDeclared,
     /// Suppress only an earlier true boundary when two true boundaries are
     /// adjacent, preserving a boundary before a capitalized onset.
+    ///
+    /// Exact repeated n-grams are preserved for CHAT retrace recognition on
+    /// every policy, by the pre-CHAT split itself, so the former
+    /// `...PreserveExactRetracesV1` choice no longer exists.
     SuppressEarlierAdjacentBoundariesV1,
-    /// Apply the boundary-only adjacency policy while preserving exact
-    /// repeated n-grams for CHAT retrace recognition.
-    SuppressEarlierAdjacentBoundariesPreserveExactRetracesV1,
 }
 
 /// Explicit pass topology for controlled offline transcribe replay.

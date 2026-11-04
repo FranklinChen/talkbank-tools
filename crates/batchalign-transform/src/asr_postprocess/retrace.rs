@@ -30,14 +30,6 @@ impl ExactRetraceAnalysis {
             .copied()
             .unwrap_or(false)
     }
-
-    /// Original word indices before which a split is protected.
-    pub fn protected_split_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.protected_splits_before_words
-            .iter()
-            .enumerate()
-            .filter_map(|(index, protected)| protected.then_some(index))
-    }
 }
 
 /// Analyze the exact repeated n-grams recognized by BA3's CHAT cleanup.
@@ -45,25 +37,33 @@ impl ExactRetraceAnalysis {
 /// Punctuation is excluded from n-gram comparison. A detected repetition
 /// protects every split inside the complete repeated span, including the seam
 /// between copies, so segmentation cannot erase the evidence before cleanup.
-pub fn analyze_exact_retraces(words: &[String], lang: &str) -> ExactRetraceAnalysis {
+///
+/// Generic over the word's spelling so a caller holding typed words borrows
+/// their text rather than copying it: this runs over every chunk of every
+/// transcript.
+pub fn analyze_exact_retraces<S: AsRef<str>>(words: &[S], lang: &str) -> ExactRetraceAnalysis {
     let min_ngram = if lang == "yue" || lang == "zho" { 2 } else { 1 };
     let content_indices: Vec<_> = words
         .iter()
         .enumerate()
-        .filter(|(_, word)| !is_punct_or_terminator(word))
+        .filter(|(_, word)| !is_punct_or_terminator(word.as_ref()))
         .map(|(index, _)| index)
         .collect();
     let mut retraced_words = vec![false; words.len()];
     let mut protected_splits_before_words = vec![false; words.len()];
 
-    for n in min_ngram..content_indices.len() {
+    // Two copies of an n-gram need 2n content words, so no longer n-gram can
+    // repeat; the loop used to run n up to the word count, doing nothing
+    // past the half.
+    for n in min_ngram..=content_indices.len() / 2 {
         let mut begin = 0;
         while begin + n < content_indices.len() {
             let mut root = begin;
             while root + 2 * n <= content_indices.len() {
                 let next_matches = (0..n).all(|offset| {
                     words[content_indices[begin + offset]]
-                        .eq_ignore_ascii_case(&words[content_indices[root + n + offset]])
+                        .as_ref()
+                        .eq_ignore_ascii_case(words[content_indices[root + n + offset]].as_ref())
                 });
                 if !next_matches {
                     break;
@@ -115,7 +115,8 @@ mod tests {
 
     #[test]
     fn unrelated_words_have_no_protected_splits() {
-        let analysis = analyze_exact_retraces(&words(&["one", "two", "three"]), "eng");
-        assert_eq!(analysis.protected_split_indices().count(), 0);
+        let analysis = analyze_exact_retraces(&["one", "two", "three"], "eng");
+        assert!((0..3).all(|index| !analysis.protects_split_before(index)));
+        assert!((0..3).all(|index| !analysis.is_retraced_word(index)));
     }
 }

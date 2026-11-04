@@ -143,6 +143,85 @@ pub enum FaStrategy {
     /// reader of the evidence can tell which utterances were aligned in pieces
     /// rather than in one request, and how many.
     WindowSplitAtAnchors(SplitWindow),
+    /// An untimed utterance's words were located by an order corridor between
+    /// its measured neighbours, and this is the window admitted for them with
+    /// where each of its edges came from.
+    ///
+    /// Not a review item: nothing was changed. Recorded so the evidence says
+    /// why a request covered the audio it did, and why a refused window was
+    /// as long as it was (the refusal follows it, on the same line).
+    SearchCorridor(SearchCorridor),
+}
+
+/// The search window an order corridor gave an untimed utterance, with the
+/// provenance of each edge.
+///
+/// Plain `u64` and `usize` for the same reason as [`RefusedWindow`]: this
+/// crate cannot see batchalign's time and ordinal newtypes, and the wire form
+/// is numbers. The [`std::fmt::Display`] impl is the single source of the
+/// human reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchCorridor {
+    /// Start of the admitted window, in file milliseconds.
+    pub start_ms: u64,
+    /// End of the admitted window, in file milliseconds.
+    pub end_ms: u64,
+    /// Where the corridor's lower edge came from.
+    pub floor: CorridorBound,
+    /// Where its upper edge came from.
+    pub ceiling: CorridorBound,
+}
+
+/// One edge of a search corridor, as the evidence records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorridorBound {
+    /// No measured utterance on that side: the recording's own edge.
+    RecordingEdge,
+    /// The searched utterance is marked as overlapping the turn before it,
+    /// so no preceding measurement bounds its start (a floor only; its own
+    /// marker says nothing about its end).
+    MarkedOverlapUnbounded,
+    /// The next utterance is marked as overlapping the one before it; the
+    /// chain of following measurements stops there.
+    FollowingOverlaps {
+        /// Zero-based ordinal, among main tiers, of the marked utterance.
+        utterance: usize,
+    },
+    /// A measured utterance's edge.
+    Measured {
+        /// The edge, in file milliseconds.
+        ms: u64,
+        /// Zero-based ordinal, among main tiers, of the utterance measured.
+        utterance: usize,
+    },
+}
+
+impl std::fmt::Display for SearchCorridor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "search window {}ms-{}ms from the order corridor; floor: {}; ceiling: {}",
+            self.start_ms, self.end_ms, self.floor, self.ceiling
+        )
+    }
+}
+
+impl std::fmt::Display for CorridorBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RecordingEdge => f.write_str("the recording's edge"),
+            Self::MarkedOverlapUnbounded => {
+                f.write_str("unbounded, this utterance is marked as overlapping")
+            }
+            Self::FollowingOverlaps { utterance } => write!(
+                f,
+                "unbounded, utterance {utterance} is marked as overlapping"
+            ),
+            Self::Measured { ms, utterance } => {
+                write!(f, "{ms}ms from utterance {utterance}'s measurement")
+            }
+        }
+    }
 }
 
 /// An over-budget utterance window that was aligned as several pieces.
@@ -363,6 +442,7 @@ impl FaStrategy {
             Self::LocalizationUnavailable => "localization_unavailable",
             Self::WindowRefused(_) => "window_refused",
             Self::WindowSplitAtAnchors(_) => "window_split_at_anchors",
+            Self::SearchCorridor(_) => "search_corridor",
             Self::WordsTimingDropped => "words_timing_dropped",
             Self::NarrowBulletRescued => "narrow_bullet_rescued",
             Self::WordsClampedToKeptBullet => "words_clamped_to_kept_bullet",
@@ -433,6 +513,11 @@ pub enum MonotonicityStrategy {
     EndClampedInterleavedWords,
     /// Bullet timing stripped because monotonicity could not be restored.
     TimingStripped,
+    /// The utterance's measured start preceded the greatest earlier start,
+    /// and the transcriber had marked it as overlapping the previous
+    /// utterance (`+<`): its start was raised to that earlier start and the
+    /// words with extent after it were kept, instead of stripping them all.
+    StartRaisedToPrecedingStart,
     /// Two utterance bullets the input carried conflict (one overlaps or
     /// starts before the other) and the run was told to keep given bullets
     /// (`align --main-bullets keep`), so both were left exactly as given and
@@ -452,6 +537,7 @@ impl MonotonicityStrategy {
             Self::EndClampedBoundaryFromWords => "end_clamped_boundary_from_words",
             Self::EndClampedInterleavedWords => "end_clamped_interleaved_words",
             Self::TimingStripped => "timing_stripped",
+            Self::StartRaisedToPrecedingStart => "start_raised_to_preceding_start",
             Self::KeptBulletLeftUnresolved => "kept_bullet_left_unresolved",
             Self::YieldedToKeptBullet => "yielded_to_kept_bullet",
         }

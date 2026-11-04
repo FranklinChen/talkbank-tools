@@ -1,7 +1,7 @@
 # Audio-Task Cache
 
 **Status:** Current
-**Last updated:** 2026-10-01 20:24 EDT
+**Last updated:** 2026-11-03 15:36 EST
 
 Batchalign caches **audio-task results** (forced alignment, UTR ASR, raw Rev
 transcript evidence, dedicated transcribe speaker evidence, and media
@@ -286,9 +286,23 @@ recipe revision.
 ### `RevProviderMediaDigest`
 
 Rev evidence hashes the complete inference-media file that BA3 would upload to
-Rev. The semantic key adds requested language, expected speaker count, Rev
-request-policy revision, provider/model alias, and evidence schema. No path,
-mtime, API credential, temporary upload URL, or Rev job ID participates.
+Rev. The semantic key adds the upload's presentation (preparation recipe,
+declared media type and multipart file name, all decided by the container
+ffprobe reads in the bytes, never by the extension), requested language,
+expected speaker count, Rev request-policy revision, provider/model alias, and
+evidence schema. No path, mtime, API credential, temporary upload URL, or Rev
+job ID participates. The same bytes under another file name key the same; a
+change in what the provider is told about them is a new identity.
+
+Beside the evidence, under the same task and namespace, a request may hold a
+**pending-job record** at `rev-asr-pending-job-<request key>`: the Rev job id,
+the language it was submitted under and why the wait ended (deadline, or the
+transient poll budget), written when a paid job's wait ended before its
+transcript. An evidence lookup never reads it; a miss does, and the authorized
+run then resumes that job instead of uploading again. The record is removed
+when the job's transcript is committed or rejected, or when Rev.AI's verdict on
+the resumed job is terminal. A record this build cannot read, or one whose
+fingerprint is another request's, is refused by name rather than ignored.
 
 ### `CacheTaskName`
 

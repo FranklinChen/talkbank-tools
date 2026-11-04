@@ -55,13 +55,8 @@ pub async fn start(
     if let Some(ref host) = args.host {
         cfg.host = host.clone();
     }
-    if let Some(workers) = args.workers {
-        // `--workers N` is always an explicit override.
-        cfg.max_workers_per_job = Some(workers as u32);
-    }
-    if let Some(timeout) = args.timeout {
-        cfg.audio_task_timeout_s = Some(timeout);
-    }
+    // `--workers N` and `--timeout S` are explicit overrides of the config.
+    args.runtime().apply_to(&mut cfg);
 
     if cfg.media_roots.is_empty() && cfg.media_mappings.is_empty() {
         eprintln!(
@@ -204,14 +199,8 @@ pub async fn start(
         for _ in 0..verbose {
             cmd.arg("-v");
         }
-        // Forward workers to the background server process.
-        if let Some(workers) = args.workers {
-            cmd.args(["--workers", &workers.to_string()]);
-        }
-        // Forward timeout to the background server process.
-        if let Some(timeout) = args.timeout {
-            cmd.args(["--timeout", &timeout.to_string()]);
-        }
+        // Forward `--workers`/`--timeout` to the background server process.
+        cmd.args(args.runtime().serve_start_args());
 
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(log_file);

@@ -121,7 +121,8 @@ mod tests {
             },
             dispatch: RunnerDispatchConfig {
                 command: ReleasedCommand::Compare,
-                lang: LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
+                // Compare is a per-file command; no job-level language.
+                lang: LanguageSpec::PerFile,
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Compare(CompareOptions {
                     common: CommonOptions::default(),

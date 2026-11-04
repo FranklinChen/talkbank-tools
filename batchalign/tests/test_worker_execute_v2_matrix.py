@@ -693,7 +693,6 @@ def test_text_execute_v2_rejects_result_count_mismatch(
                     "pipeline": "standard",
                 },
                 "repairs": [],
-                "feature_repairs": [],
             },
             MorphosyntaxResultV2,
             id="morphosyntax",
@@ -783,7 +782,6 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "raw_sentences": {},
                 "model": _MODEL,
                 "repairs": [],
-                "feature_repairs": [],
             },
             id="morphosyntax-raw_sentences",
         ),
@@ -793,7 +791,6 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "kind": "analyzed",
                 "raw_sentences": [],
                 "repairs": [],
-                "feature_repairs": [],
             },
             id="morphosyntax-missing-model",
         ),
@@ -802,19 +799,24 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
         # item, which is the shape that kept relation rewrites in the log only.
         pytest.param(
             "morphosyntax",
-            {
-                "kind": "analyzed",
-                "raw_sentences": [],
-                "model": _MODEL,
-                "feature_repairs": [],
-            },
+            {"kind": "analyzed", "raw_sentences": [], "model": _MODEL},
             id="morphosyntax-missing-repairs",
         ),
-        # Likewise for the feature values a host removed.
+        # A repair is closed in two steps: the field it rewrote, and that
+        # field's own reason. Both are refused when unknown, and so is a
+        # reason of another field, and a repair whose claim the one predicate
+        # does not bear out (a lemma repair of a real lemma).
         pytest.param(
             "morphosyntax",
-            {"kind": "analyzed", "raw_sentences": [], "model": _MODEL, "repairs": []},
-            id="morphosyntax-missing-feature-repairs",
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
+                "model": _MODEL,
+                "repairs": [
+                    {"field": "category", "kind": "unknown_category", "word": "ne"}
+                ],
+            },
+            id="morphosyntax-unknown-repair-field",
         ),
         pytest.param(
             "morphosyntax",
@@ -822,8 +824,7 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "kind": "analyzed",
                 "raw_sentences": [],
                 "model": _MODEL,
-                "repairs": [{"kind": "transposed", "word": "ne"}],
-                "feature_repairs": [],
+                "repairs": [{"field": "relation", "kind": "transposed", "word": "ne"}],
             },
             id="morphosyntax-unknown-repair-kind",
         ),
@@ -833,9 +834,9 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "kind": "analyzed",
                 "raw_sentences": [],
                 "model": _MODEL,
-                "repairs": [],
-                "feature_repairs": [
+                "repairs": [
                     {
+                        "field": "feature_value",
                         "kind": "truncated_feature",
                         "word": "ne",
                         "feature": "Case",
@@ -850,9 +851,25 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
             {
                 "kind": "analyzed",
                 "raw_sentences": [],
+                "model": _MODEL,
+                "repairs": [
+                    {
+                        "field": "lemma",
+                        "kind": "punctuation_lemma",
+                        "word": "bonjour",
+                        "from_lemma": "bon",
+                    }
+                ],
+            },
+            id="morphosyntax-lemma-repair-of-a-real-lemma",
+        ),
+        pytest.param(
+            "morphosyntax",
+            {
+                "kind": "analyzed",
+                "raw_sentences": [],
                 "model": {**_MODEL, "stanza_version": ""},
                 "repairs": [],
-                "feature_repairs": [],
             },
             id="morphosyntax-blank-model-version",
         ),
@@ -863,7 +880,6 @@ _MODEL = {"stanza_version": "1.99.0", "lang": "eng", "pipeline": "standard"}
                 "raw_sentences": [],
                 "model": {**_MODEL, "pipeline": "retokenize"},
                 "repairs": [],
-                "feature_repairs": [],
             },
             id="morphosyntax-unknown-pipeline",
         ),

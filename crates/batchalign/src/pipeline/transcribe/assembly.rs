@@ -58,6 +58,28 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
     // stay verbatim, which is this pipeline's standing policy: what the
     // speaker actually said is a human's call, not the pipeline's.
     report_language_invalid_words(&ctx, &transcript.language_invalid);
+    report_dropped_tokens(&ctx, &transcript.description.utterances);
+    // Which described utterances keep a window-seam copy, by their ordinal
+    // among the utterances that will be WRITTEN: a described utterance with
+    // no word writes comments in its place, not a main tier, so it is not
+    // counted. Located in the built document below.
+    let seam_holders: Vec<(talkbank_model::UtteranceIdx, asr_postprocess::SeamAmbiguity)> = {
+        let mut written = 0usize;
+        let mut holders = Vec::new();
+        for desc in &transcript.description.utterances {
+            let writes_a_line = match &desc.body {
+                build_chat::UtteranceBody::Words { words, .. } => !words.is_empty(),
+                build_chat::UtteranceBody::Text { .. } => true,
+            };
+            if writes_a_line {
+                for seam in &desc.seam_ambiguities {
+                    holders.push((talkbank_model::UtteranceIdx::new(written), seam.clone()));
+                }
+                written += 1;
+            }
+        }
+        holders
+    };
     let desc = transcript.description;
 
     let built = build_chat::build_chat(desc).map_err(|error| match error {
@@ -77,6 +99,11 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
     report_synthesized_terminators(&ctx, &built.synthesized_ends);
     let synthesized_terminators = std::num::NonZeroUsize::new(built.synthesized_ends.len());
     let mut chat_file = built.into_file();
+    // A seam the recognizer's windows could not reconcile by evidence is in
+    // the transcript as a comment; it is also the job's business, as the one
+    // shortfall this stage can record, so the file finishes diagnosed and a
+    // reader of the job knows to look. Located in the document just built.
+    let shortfalls = window_seam_shortfalls(&chat_file, &seam_holders)?;
     // Inject processing provenance comment. It also counts the utterances
     // assembly closed with a terminator this pipeline added, which their `.`
     // cannot say itself; a later utseg split's cuts are utseg's to record.
@@ -84,7 +111,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
     let provenance = crate::provenance::transcribe_provenance(
         &resolved_lang,
         &asr,
-        ctx.opts.diarize,
+        ctx.opts.speakers.dedicated().is_some(),
         ctx.opts.write_wor,
         ctx.state.word_segmenter.as_ref(),
         synthesized_terminators,
@@ -123,11 +150,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
         chat_file,
         crate::api::ReleasedCommand::Transcribe,
     );
-    let filename = ctx
-        .audio_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+    let filename = audio_filename(&ctx);
     ctx.dumper.dump_post_asr_chat(filename, document.as_str());
     Ok(ctx.map_state(|state| match document {
         crate::pipeline::post_validate::ProducedOutput::Admitted(document) => {
@@ -135,7 +158,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
                 asr: state.asr,
                 document,
                 speaker_assignments: state.speaker_assignments,
-                shortfalls: Vec::new(),
+                shortfalls,
             })
         }
         crate::pipeline::post_validate::ProducedOutput::Diagnosed(document) => {
@@ -151,6 +174,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
                 asr: state.asr,
                 document,
                 speaker_assignments: state.speaker_assignments,
+                shortfalls,
             })
         }
     }))
@@ -169,6 +193,102 @@ struct LanguageInvalidWordRecord<'a> {
     /// untranscribed marker).
     codes: Vec<&'a str>,
     messages: Vec<&'a str>,
+}
+
+/// The recording's file name, as the run's debug artifacts are keyed by it.
+/// One spelling of the fallback, so the three dumps beside the transcript
+/// cannot land under different names.
+fn audio_filename<'a, S, P: TranscribePlan>(ctx: &TranscribePipelineContext<'a, S, P>) -> &'a str {
+    ctx.audio_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+}
+
+/// One dropped recognizer token, in the shape written to the run's debug
+/// artifacts: the same record the transcript carries as a `%com` (or an
+/// `@Comment` where an utterance kept no word), keyed by its utterance.
+#[derive(serde::Serialize)]
+struct DroppedTokenRecord<'a> {
+    utterance: usize,
+    speaker: &'a str,
+    /// The provider's surface, verbatim.
+    text: &'a str,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    /// Exactly the comment the transcript carries for it.
+    comment: String,
+}
+
+/// The shortfall that reports every window seam the reconciler settled by
+/// rule: none when there was none, one record naming them otherwise.
+///
+/// Each record is located in the built document (position among its
+/// utterances and main tier as written), the way every other first-N record
+/// is, so the job's account and the transcript's `%com` lines name the same
+/// utterances. An ordinal the document does not hold is an internal fault
+/// (`ServerError::UtteranceLocation`), never an invented position.
+fn window_seam_shortfalls(
+    chat_file: &crate::chat_ops::ChatFile,
+    holders: &[(talkbank_model::UtteranceIdx, asr_postprocess::SeamAmbiguity)],
+) -> Result<Vec<Shortfall>, ServerError> {
+    if holders.is_empty() {
+        return Ok(Vec::new());
+    }
+    let seams = holders.len() as u64;
+    let first_seams = holders
+        .iter()
+        .take(crate::api::FileOutputDiagnostics::FIRST_FINDINGS)
+        .map(|(ordinal, seam)| {
+            Ok(crate::api::WindowSeamRecord {
+                location: crate::api::UtteranceLocator::of(chat_file, *ordinal)?.into(),
+                seam_ms: seam.seam_ms(),
+                text: seam.text().to_owned(),
+                dropped_from_window: seam.dropped_from().as_usize() as u64,
+            })
+        })
+        .collect::<Result<Vec<_>, crate::api::UtteranceNotInDocument>>()?;
+    Ok(vec![Shortfall::WindowSeamAmbiguous { seams, first_seams }])
+}
+
+/// Narrate, and durably record, every recognizer token the sanitizer dropped
+/// because CHAT cannot hold any prefix of it.
+///
+/// The transcript itself carries each one as a comment beside the utterance
+/// that lost it (the record travels on the utterance, so the two cannot
+/// disagree); this is the run-level account of the same records, beside the
+/// language-invalid words, for a reader of the job rather than the file.
+fn report_dropped_tokens<S, P: TranscribePlan>(
+    ctx: &TranscribePipelineContext<'_, S, P>,
+    utterances: &[build_chat::UtteranceDesc],
+) {
+    let records: Vec<DroppedTokenRecord<'_>> = utterances
+        .iter()
+        .enumerate()
+        .flat_map(|(utterance, desc)| {
+            desc.dropped_tokens
+                .iter()
+                .map(move |token| DroppedTokenRecord {
+                    utterance,
+                    speaker: desc.speaker.as_str(),
+                    text: token.text(),
+                    start_ms: token.start_ms(),
+                    end_ms: token.end_ms(),
+                    comment: token.comment_text(),
+                })
+        })
+        .collect();
+    if records.is_empty() {
+        return;
+    }
+    let filename = audio_filename(ctx);
+    tracing::warn!(
+        %filename,
+        dropped_tokens = records.len(),
+        "transcript emitted without recognizer tokens CHAT cannot hold; each is named in a \
+         comment beside its utterance"
+    );
+    ctx.dumper.dump_dropped_tokens(filename, &records);
 }
 
 /// Say how many utterances end with a terminator this pipeline added.
@@ -237,11 +357,7 @@ fn report_language_invalid_words<S, P: TranscribePlan>(
     codes.sort_unstable();
     codes.dedup();
 
-    let filename = ctx
-        .audio_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown");
+    let filename = audio_filename(ctx);
     tracing::warn!(
         %filename,
         refused_words = records.len(),

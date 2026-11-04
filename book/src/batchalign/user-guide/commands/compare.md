@@ -27,9 +27,6 @@ Text-only, no audio involved.
 # Compare a corpus (each FILE.cha must have FILE.gold.cha alongside it)
 batchalign3 compare corpus/ -o compared/
 
-# Override language
-batchalign3 compare corpus/ -o out/ --lang eng
-
 # Use the remote server
 batchalign3 --server http://your-server:8001 compare corpus/ -o out/
 ```
@@ -79,14 +76,20 @@ flowchart TD
 | `-o`, `--output DIR` | Output directory |
 | `--file-list FILE` | Read input paths from a text file |
 | `--in-place` | Explicit in-place flag |
+| `--overwrite` | Replace an existing `.compare.csv` beside the transcript. The transcript itself is rewritten in place without authority; the CSV is a new file, so an existing one is refused before anything is submitted unless this flag or `-o DIR` is given. |
 
 ### compare options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--lang CODE` | `eng` | 3-letter ISO language code |
-| `--num-speakers N` | `2` | Number of speakers |
 | `--merge-abbrev` | off | Merge abbreviations in the output |
+
+`compare` takes no `--lang`: like `morphotag`, it reads each main transcript's
+language from that file's own `@Languages:` header when it morphotags it, so a
+mixed corpus needs no per-run flag. (The `--lang` it used to accept reached the
+worker gateway and was discarded there; it only labelled the job record.) It
+takes no `--num-speakers` either: it reads transcripts, and the count went only
+into the job record.
 
 Use `--override-media-cache` (global flag) when you need to force fresh
 morphosyntax on the main transcript before scoring.

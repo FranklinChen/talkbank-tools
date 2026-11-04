@@ -67,6 +67,7 @@ impl AudioFileTask for ReportedTask {
             false,
             false,
             crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
+            crate::provenance::AlignTiming::Aligned,
         );
         crate::provenance::inject_provenance(&mut document, &stamp)?;
         let text = batchalign_transform::serialize::to_chat_string(&document);

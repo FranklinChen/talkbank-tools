@@ -460,8 +460,6 @@ mod tests {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
                 crate::transcribe::TranscribeAsrPlan::from_request(
                     AsrBackend::Worker(crate::transcribe::AsrWorkerMode::LocalWhisperV2),
-                    false,
-                    1,
                     &std::collections::BTreeMap::new(),
                     &LanguageSpec::Resolved(LanguageCode3::eng()),
                 )
@@ -470,8 +468,7 @@ mod tests {
                 crate::params::UtsegFallbackPolicy::Refuse,
             )
             .unwrap(),
-            diarize: false,
-            speaker_backend: None,
+            speakers: crate::transcribe::SpeakerPlan::for_test(1, None),
             with_morphosyntax: false,
             cache_policies: crate::transcribe::TranscribeCachePolicies::uniform(
                 crate::params::CachePolicy::UseCache,

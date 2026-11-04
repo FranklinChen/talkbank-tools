@@ -12,7 +12,6 @@ use super::domain::{
     ContentType, DisplayPath, HealthStatus, JobId, LanguageSpec, MachineTime, MemoryMb, NodeId,
     NonNegativeSeconds, ReleasedCommand,
 };
-use super::request::default_lang;
 use super::status::{FileProgressStage, FileStatusKind, JobStatus};
 
 // ---------------------------------------------------------------------------
@@ -688,6 +687,19 @@ pub enum OutputShortfallRecord {
         #[cfg_attr(feature = "server", schema(value_type = Vec<StoredUtteranceLocation>))]
         first_held_out: Vec<StoredUtteranceLocation>,
     },
+    /// The recognizer's decode windows disagreed about a repeated observation
+    /// at a seam, and the reconciler kept one copy by rule (the earlier
+    /// window's) rather than by evidence. The transcript carries every other
+    /// word; each seam is marked with a `%com` on the utterance that keeps the
+    /// copy, for review. Whole recordings were refused for this until
+    /// 2026-11-03.
+    WindowSeamAmbiguous {
+        /// How many seams were reconciled by rule, at least one.
+        seams: u64,
+        /// The first of them, in recording order, at most
+        /// [`FileOutputDiagnostics::FIRST_FINDINGS`].
+        first_seams: Vec<WindowSeamRecord>,
+    },
     /// Forced alignment left required words untimed. The measured timing
     /// was written; these words are in the transcript without bullets.
     TimingIncomplete {
@@ -739,6 +751,9 @@ impl OutputShortfallRecord {
             Self::SecondaryMorphologyIncomplete {
                 spans, first_spans, ..
             } => listed(first_spans, *spans, "span(s) with L2 placeholders"),
+            Self::WindowSeamAmbiguous { seams, first_seams } => {
+                listed(first_seams, *seams, "seam(s) reconciled by rule")
+            }
             Self::UtrUnavailable { .. }
             | Self::MorphologyProvenanceIncomplete { .. }
             | Self::StageSkipped { .. }
@@ -1191,7 +1206,8 @@ pub enum UntimedCauseRecord {
     LocalizationUnavailable,
     /// Requests covered it and no positive interval resulted for these
     /// words. The counts are what those requests yielded, from the run's
-    /// own group evidence.
+    /// own group evidence. A word whose interval the run measured and then
+    /// removed is never here: it is [`Self::Removed`].
     Requested {
         /// Requests that returned timing evidence (a worker's answer, the
         /// cache, a replayed response, or reused `%wor`).
@@ -1201,6 +1217,30 @@ pub enum UntimedCauseRecord {
         /// Word ranges left unrequested: an anchored piece whose window
         /// could not be sent.
         unrequested: u64,
+    },
+    /// The run measured intervals for words of this utterance and removed
+    /// them itself while enforcing timing order (a start regression strip,
+    /// a same-speaker end clamp, or a yield to a kept bullet), so the words
+    /// are untimed because of the finalizer, not because no interval was
+    /// measured. Each removal names the rule, the boundary it enforced and
+    /// every interval it took away, recorded at the moment it did so.
+    Removed {
+        /// Every finalization effect that removed timing from this
+        /// utterance, in the order the run applied them; at least one, each
+        /// with at least one interval.
+        removals: Vec<crate::types::traces::WordTimingRemovalTrace>,
+    },
+    /// The run refreshed the file's bullets from its complete `%wor` without
+    /// opening the recording, and removed this utterance's retained timing
+    /// while enforcing timing order (it was backward). Nothing in such a run
+    /// could measure the words again, so they need a run with the recording:
+    /// a `batchalign3 align` with the recording present re-times them, since
+    /// the stripped `%wor` leaves the file partly timed.
+    NeedsRecording {
+        /// Every finalization effect that removed the retained timing, in
+        /// the order the run applied them; at least one, each with at least
+        /// one interval.
+        removals: Vec<crate::types::traces::WordTimingRemovalTrace>,
     },
     /// No grouping decision names it and no request covered it: the run
     /// recorded nothing that explains its untimed words.
@@ -1424,6 +1464,30 @@ impl std::fmt::Display for UntimedCauseRecord {
                 "no positive interval in the final output ({answered} answered, {unaligned} \
                  unaligned, {unrequested} unrequested)"
             ),
+            // Each removal renders itself; several are joined so a reader
+            // sees every rule that touched the utterance.
+            Self::Removed { removals } => {
+                for (position, removal) in removals.iter().enumerate() {
+                    if position > 0 {
+                        f.write_str("; ")?;
+                    }
+                    removal.fmt(f)?;
+                }
+                Ok(())
+            }
+            Self::NeedsRecording { removals } => {
+                f.write_str(
+                    "retained %wor timing removed as out of order while refreshing bullets with \
+                     no recording read; these words need a run with the recording (",
+                )?;
+                for (position, removal) in removals.iter().enumerate() {
+                    if position > 0 {
+                        f.write_str("; ")?;
+                    }
+                    removal.fmt(f)?;
+                }
+                f.write_str(")")
+            }
             Self::Unrecorded => f.write_str("no cause recorded"),
         }
     }
@@ -1514,7 +1578,48 @@ impl std::fmt::Display for OutputShortfallRecord {
                 "timing incomplete: {untimed_words} of {required_words} words in \
                  {untimed_utterances} utterance(s) have no timing and were written without it"
             ),
+            Self::WindowSeamAmbiguous {
+                seams,
+                first_seams: _,
+            } => write!(
+                f,
+                "{seams} recognizer window seam(s) reconciled by rule: a repeated observation \
+                 at each was kept once (the earlier window's copy) and marked with a %com on \
+                 its utterance for review"
+            ),
         }
+    }
+}
+
+/// One window seam the reconciler settled by rule, as the job reports it.
+///
+/// Locates the utterance that keeps the copy the way every other first-N
+/// record does: its position among the written utterances and its main tier
+/// as written, so a reader of the job finds the `%com` the transcript carries
+/// at the same place.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct WindowSeamRecord {
+    /// Where the utterance that keeps the copy is.
+    #[serde(flatten)]
+    pub location: StoredUtteranceLocation,
+    /// Where the seam is in the recording, in milliseconds.
+    pub seam_ms: i64,
+    /// The repeated text, as the recognizer emitted it.
+    pub text: String,
+    /// The decode window whose copy was dropped, counting from 0.
+    pub dropped_from_window: u64,
+}
+
+impl std::fmt::Display for WindowSeamRecord {
+    /// One line a reader can act on: the utterance as written, then the seam
+    /// and the text whose later copy was dropped.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}   (seam at {} ms: repeated \"{}\" kept once, window {} copy dropped)",
+            self.location, self.seam_ms, self.text, self.dropped_from_window
+        )
     }
 }
 
@@ -1753,6 +1858,10 @@ impl FileOutputDiagnostics {
                     "{untimed_words} of {required_words} words in {untimed_utterances} \
                  utterance(s) have no word timing"
                 )),
+                OutputShortfallRecord::WindowSeamAmbiguous { seams, .. } => parts.push(format!(
+                    "{seams} recognizer window seam(s) kept a repeated observation once, \
+                     marked %com for review"
+                )),
             }
         }
         if stages > 0 {
@@ -1817,8 +1926,9 @@ pub struct JobInfo {
     #[cfg_attr(feature = "server", schema(value_type = serde_json::Value))]
     pub options: CommandOptions,
     /// Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
-    /// code-switched pair such as `"eng,spa"`.
-    #[serde(default = "default_lang")]
+    /// code-switched pair such as `"eng,spa"`. Always written by the server;
+    /// a record without one is malformed and refused at deserialization
+    /// rather than read as English.
     pub lang: LanguageSpec,
     /// Client's original input directory path, used for display in the
     /// dashboard and CLI output.  May be empty for content-mode submissions.
@@ -1933,8 +2043,9 @@ pub struct JobListItem {
     /// Batchalign command (e.g. "morphotag", "align").
     pub command: ReleasedCommand,
     /// Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
-    /// code-switched pair such as `"eng,spa"`.
-    #[serde(default = "default_lang")]
+    /// code-switched pair such as `"eng,spa"`. Always written by the server;
+    /// a record without one is malformed and refused at deserialization
+    /// rather than read as English.
     pub lang: LanguageSpec,
     /// Client's original input directory path, for display.
     #[serde(default)]
@@ -2460,6 +2571,7 @@ mod tests {
             "job_id": "abc-123",
             "status": "running",
             "command": "morphotag",
+            "lang": "per-file",
             "options": {"command": "morphotag", "retokenize": false, "skipmultilang": false, "merge_abbrev": false},
             "total_files": 2,
             "completed_files": 0,

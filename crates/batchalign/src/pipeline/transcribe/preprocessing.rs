@@ -27,18 +27,30 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
 
     let resolved_lang = ctx.state.language.clone();
     let PostprocessedSpeech {
-        utterances,
+        mut utterances,
         speaker_assignments,
         word_segmenter,
     } = process_asr_with_prechat_segmentation(&mut ctx, &asr_output, &resolved_lang).await?;
     // The engine returned words and post-processing kept no utterance from
     // them. Its own empty-chunk path returns an empty Vec here, so without
-    // this the emptiness travelled on to CHAT assembly unremarked.
-    if utterances.is_empty() {
+    // this the emptiness travelled on to CHAT assembly unremarked. An
+    // utterance that kept only the record of its dropped tokens is not a
+    // kept utterance either: it has no words to write.
+    if utterances
+        .iter()
+        .all(|utterance| utterance.words.is_empty())
+    {
         return Err(ServerError::EmptyTranscription(
             EmptyTranscription::Postprocess,
         ));
     }
+    // The recognizer's window seams it settled by rule go on the utterance
+    // that keeps each copy, now that the utterances exist. Retokenization
+    // rewrites words but keeps their timing, which is what the record is
+    // placed by; see `asr_postprocess::seam`. Refused only with no utterance
+    // at all, which the emptiness check above has already excluded.
+    crate::transcribe::place_response_seams(&mut utterances, &ctx.state.response)
+        .map_err(|unplaced| ServerError::Validation(unplaced.to_string()))?;
     info!(
         num_utterances = utterances.len(),
         "Post-processing complete, building CHAT"
@@ -108,20 +120,50 @@ pub(crate) fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Ve
         .collect()
 }
 
-pub(crate) fn apply_prechat_assignments(
-    chunks: &[PreparedMonologueChunk],
+/// Cut each prepared chunk as its admitted prediction says, after analyzing
+/// the chunk's exact repetitions: a cut that would separate the copies of
+/// one is not made, so retrace detection, which runs per piece afterwards,
+/// still sees both copies (`yeah I [/] I went .`, never `yeah I .` and
+/// `I went .`).
+///
+/// The analysis is the only way to the split
+/// ([`asr_postprocess::RetraceAnalyzedChunk::analyze`] mints the state
+/// [`asr_postprocess::RetraceAnalyzedChunk::split`] consumes), so this path
+/// cannot cut before it. Each piece carries the terminator its cut predicted.
+pub(crate) fn apply_prechat_segmentations(
+    chunks: Vec<PreparedMonologueChunk>,
     predictions: &[crate::utseg::AdmittedUtsegPrediction],
-) -> Vec<PreparedMonologueChunk> {
-    chunks
-        .iter()
-        .zip(predictions.iter())
-        .flat_map(|(chunk, prediction)| {
-            asr_postprocess::split_prepared_chunk_by_assignments(
-                chunk,
-                &prediction.response().assignments,
-            )
-        })
-        .collect()
+    lang: &str,
+) -> Result<Vec<asr_postprocess::SegmentedChunk>, ServerError> {
+    // One prediction per chunk, by position: a `zip` would drop whichever
+    // side is longer without a word.
+    if chunks.len() != predictions.len() {
+        return Err(ServerError::Validation(format!(
+            "pre-CHAT segmentation returned {} predictions for {} chunks",
+            predictions.len(),
+            chunks.len()
+        )));
+    }
+    let mut pieces = Vec::new();
+    for (chunk_index, (chunk, prediction)) in chunks.into_iter().zip(predictions.iter()).enumerate()
+    {
+        let split = asr_postprocess::RetraceAnalyzedChunk::analyze(chunk, lang)
+            .split(prediction.segmentation())
+            .map_err(|error| {
+                ServerError::Validation(format!(
+                    "pre-CHAT segmentation of chunk {chunk_index} is not the chunk's: {error}"
+                ))
+            })?;
+        if !split.suppressed_cuts_before_words.is_empty() {
+            info!(
+                chunk = chunk_index,
+                before_words = ?split.suppressed_cuts_before_words,
+                "kept the copies of an exact repetition in one utterance against a model boundary"
+            );
+        }
+        pieces.extend(split.pieces);
+    }
+    Ok(pieces)
 }
 
 struct PostprocessedSpeech {
@@ -289,7 +331,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
         transcribe_cancellation(),
     )
     .await?;
-    let split_chunks = apply_prechat_assignments(&prepared_chunks, &predictions);
+    let split_chunks = apply_prechat_segmentations(prepared_chunks, &predictions, &lang_str)?;
     let indexed_items: Vec<_> = items.iter().cloned().enumerate().collect();
     let evidence = UtsegEvidenceTrace::from_predictions(
         UtsegEvidencePhase::PreChat,
@@ -306,7 +348,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
                 ctx.audio_path.display()
             ))
         })?;
-    let mut utterances = asr_postprocess::utterances_from_prepared_chunks(split_chunks);
+    let mut utterances = asr_postprocess::utterances_from_segmented_chunks(split_chunks);
     asr_postprocess::finalize_utterances(&mut utterances, &lang_str);
     if let Some(s) = ctx.asr_pipeline_snapshot.as_mut() {
         s.final_utterances = utterances.clone();
@@ -376,6 +418,143 @@ pub(super) fn prepare_asr_chunks_with_snapshot(
         language.rules(),
         snapshot,
     ))
+}
+
+#[cfg(test)]
+mod prechat_segmentation_tests {
+    use super::*;
+    use crate::types::worker_v2::{
+        BoundaryProbabilityMicrosV2, HubCommitV2, UtsegAdjacencyPolicyRevisionV2,
+        UtsegBoundaryActionV2, UtsegBoundaryModelEvidenceV2, UtsegNormalizationRevisionV2,
+        UtsegWordBoundaryEvidenceV2,
+    };
+    use crate::utseg::{UtsegPredictionOrigin, admit_prediction};
+    use batchalign_transform::asr_postprocess::{AsrWord, SpeakerIndex};
+
+    /// The chunk a recognizer's unpunctuated words make, timed in order.
+    fn chunk(words: &[&str]) -> PreparedMonologueChunk {
+        PreparedMonologueChunk {
+            speaker: SpeakerIndex(0),
+            words: words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| AsrWord::new(*w, Some(i as i64 * 100), Some(i as i64 * 100 + 90)))
+                .collect(),
+        }
+    }
+
+    /// An admitted boundary-model prediction for `words` whose model placed
+    /// `action` after each word named in `boundaries`, exactly as the worker
+    /// declares one: applied actions equal to raw ones, assignments derived
+    /// from them, admitted through the one constructor.
+    fn admitted(
+        words: &[&str],
+        boundaries: &[(usize, UtsegBoundaryActionV2)],
+    ) -> crate::utseg::AdmittedUtsegPrediction {
+        let word_evidence: Vec<_> = (0..words.len())
+            .map(|index| {
+                let action = boundaries
+                    .iter()
+                    .find(|(at, _)| *at == index)
+                    .map_or(UtsegBoundaryActionV2::Ordinary, |(_, action)| *action);
+                UtsegWordBoundaryEvidenceV2::Classified {
+                    raw_action: action,
+                    applied_action: action,
+                    boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(900_000)
+                        .expect("fixture probability"),
+                }
+            })
+            .collect();
+        // The assignments the worker derives from its applied actions.
+        let assignments = batchalign_types::segmentation::UtteranceSegmentation::from_boundaries(
+            word_evidence.iter().map(|evidence| match evidence {
+                UtsegWordBoundaryEvidenceV2::Classified { applied_action, .. } => {
+                    applied_action.boundary()
+                }
+                UtsegWordBoundaryEvidenceV2::NormalizationOmission
+                | UtsegWordBoundaryEvidenceV2::ModelShortCircuit => None,
+            }),
+        )
+        .into_assignments();
+        let evidence = UtsegBoundaryModelEvidenceV2 {
+            model_id: "talkbank/utterance-boundary".to_owned(),
+            model_revision: HubCommitV2::try_from("0123456789abcdef0123456789abcdef01234567")
+                .expect("fixture commit"),
+            normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
+            adjacency_policy_revision:
+                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
+            word_evidence,
+        };
+        let request = UtsegBatchItem {
+            words: words.iter().map(|w| (*w).to_owned()).collect(),
+            text: words.join(" "),
+        };
+        admit_prediction(
+            &request,
+            assignments,
+            UtsegPredictionOrigin::BoundaryModel(&evidence),
+        )
+        .expect("a worker-declared prediction is admitted")
+    }
+
+    /// The written CHAT of the pre-CHAT pass over one chunk and its
+    /// prediction: cut, retokenize, finalize, build, serialize.
+    fn written_chat(
+        chunk: &PreparedMonologueChunk,
+        prediction: &crate::utseg::AdmittedUtsegPrediction,
+    ) -> String {
+        let pieces = apply_prechat_segmentations(
+            vec![chunk.clone()],
+            std::slice::from_ref(prediction),
+            "eng",
+        )
+        .expect("the prediction is the chunk's");
+        let mut utterances = asr_postprocess::utterances_from_segmented_chunks(pieces);
+        asr_postprocess::finalize_utterances(&mut utterances, "eng");
+        let transcript =
+            batchalign_transform::build_chat::NamedAsrUtterances::numbered(&utterances)
+                .into_transcript(&["eng".to_owned()], None, false)
+                .expect("transcript");
+        let built = batchalign_transform::build_chat::build_chat(transcript.description)
+            .expect("CHAT builds")
+            .into_file();
+        batchalign_transform::serialize::to_chat_string(&built)
+    }
+
+    /// RED FIRST: a model boundary after the first `I` of `yeah I I went`
+    /// cut the chunk before retrace detection ran, so the repetition's copies
+    /// were in different utterances and no `[/]` was written. The split now
+    /// consumes the retrace analysis and keeps the copies together.
+    #[test]
+    fn a_model_boundary_inside_a_repetition_does_not_strand_the_retrace() {
+        let words = ["yeah", "I", "I", "went"];
+        let chat = written_chat(
+            &chunk(&words),
+            &admitted(&words, &[(1, UtsegBoundaryActionV2::PeriodBoundary)]),
+        );
+        assert!(chat.contains("*PAR0:\tYeah I [/] I went ."), "{chat}");
+    }
+
+    /// A model boundary writes the terminator it predicted on the utterance
+    /// it closes (`?`, `!`), and the words after the last prediction end
+    /// with a period. Until 2026-11-03 every cut wrote `.`.
+    #[test]
+    fn a_model_boundary_writes_the_terminator_it_predicted() {
+        let words = ["what", "did", "you", "do", "okay", "yeah", "fine"];
+        let chat = written_chat(
+            &chunk(&words),
+            &admitted(
+                &words,
+                &[
+                    (3, UtsegBoundaryActionV2::QuestionBoundary),
+                    (5, UtsegBoundaryActionV2::ExclamationBoundary),
+                ],
+            ),
+        );
+        assert!(chat.contains("*PAR0:\tWhat did you do ?"), "{chat}");
+        assert!(chat.contains("*PAR0:\tOkay yeah !"), "{chat}");
+        assert!(chat.contains("*PAR0:\tFine ."), "{chat}");
+    }
 }
 
 #[cfg(test)]

@@ -331,7 +331,7 @@ async fn dispatch_no_server() {
     // contains job-level error reports, not a crash.
     let result = batchalign::cli::dispatch::dispatch(
         batchalign::cli::dispatch::DispatchRequest {
-            lang: "eng",
+            lang: LanguageSpec::Resolved(LanguageCode3::eng()),
             num_speakers: 1,
             input_kind: InputKind::Chat,
             server_arg: None,
@@ -343,16 +343,17 @@ async fn dispatch_no_server() {
             bank: None,
             subdir: None,
             lexicon: None,
-            use_tui: false,
-            open_dashboard: false,
+            progress: batchalign::cli::args::Progress::Plain,
+            dashboard: batchalign::cli::args::Dashboard::Closed,
             force_cpu: false,
             allow_mps: false,
             no_server: false,
             before: None,
-            workers: None,
-            timeout: None,
+            runtime: batchalign::cli::daemon::RequestedRuntime::NONE,
             sequential: false,
             memory_tier: None,
+            overwrite: None,
+            execution: batchalign::cli::dispatch::Execution::Submit,
         },
         &batchalign::config::RuntimeLayout::from_state_dir(state_dir),
     )

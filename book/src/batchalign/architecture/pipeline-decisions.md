@@ -203,7 +203,6 @@ classDiagram
         +worker_policy
         +local_policy
         +worker_assignments
-        +suppressed_split_indices
     }
     AdmittedUtsegPrediction *-- UtsegBoundaryModelEvidenceV2
     UtsegBoundaryModelEvidenceV2 *-- UtsegWordBoundaryEvidenceV2
@@ -212,8 +211,13 @@ classDiagram
 
 The raw action and fixed-point boundary probability are model evidence. The
 applied action is policy output. A locally replayed policy receives its own
-receipt, including exact-retrace protections, so an experiment never presents
-a heuristic decision as a fresh model prediction.
+receipt, so an experiment never presents a heuristic decision as a fresh
+model prediction. Admission returns the decision as an `UtteranceSegmentation`
+(group per word, `SegmentEnds`: a terminator per cut, or unstated), so the terminator the model
+predicted at each cut travels with the assignments into both splits.
+Exact-retrace protection is no longer a receipt line: the pre-CHAT split
+itself refuses to cut inside a repetition, on every policy
+(`RetraceAnalyzedChunk`, utterance-segmentation reference).
 
 ### Coreference
 

@@ -82,8 +82,7 @@ mod tests {
 
     use super::*;
     use crate::api::{
-        CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
-        ReleasedCommand,
+        CorrelationId, DisplayPath, JobId, LanguageSpec, NumSpeakers, ReleasedCommand,
     };
     use crate::execution::worker_gateway::MorphotagRuntimeOptions;
     use crate::options::{CommandOptions, CommonOptions, CorefOptions};
@@ -106,7 +105,6 @@ mod tests {
         async fn morphotag_for_compare(
             &self,
             _chat_text: &str,
-            _lang: &LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>

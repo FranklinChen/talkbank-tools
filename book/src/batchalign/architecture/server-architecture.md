@@ -733,7 +733,16 @@ The state file, the handshake and the worker registry are all written through
 temporary file beside the target, flushed, renamed over it, and the directory
 synced on Unix. The comparison reports
 and the debug and evaluation artifacts use the same writer (`Existing::Keep`
-where an existing artifact must not be replaced).
+where an existing artifact must not be replaced). So does every CHAT, CSV and
+evidence text output a command produces, through its `write_text_artifact`:
+the runner's `publish_text` in `recipe_runner/runtime.rs` (per-file targets
+and the consolidated `compare.csv`), the CLI's copy-back `write_result` in
+`cli/output.rs` and merge-verify's deliverables have no truncating write
+left. The `Audience` names who the file is for: `Owner` for state and debug
+files (`0600`, written exactly where named), `UmaskDefault` for a path the
+user named (default mode, an existing leaf symlink written through). See
+[command I/O](../reference/command-io.md) for what this means for an
+in-place run.
 
 Each daemon profile (main, sidecar) has a start lock, a file lock held as a
 `DaemonStartLock` value in `crates/batchalign/src/cli/daemon.rs` (over the
@@ -756,9 +765,25 @@ record named an exited process and was removed), `NotRunning` or
 `Unreadable`.
 
 The daemon path reads `server.yaml` once, where the CLI loads it, and is
-handed that `ServerConfig` with a `DaemonRequest` (the device switches,
-`--workers` as a `NumWorkers`, `--timeout` as a `PositiveSeconds`): the port
-request, the verbosity and the device settings all come from it.
+handed that `ServerConfig` with a `DaemonRequest` (the device switches and a
+`RequestedRuntime`: `--workers` as a `WorkerCap`, `--timeout` as a
+`PositiveSeconds`, each absent when not passed): the port request, the
+verbosity and the device settings all come from it.
+
+The `RequestedRuntime` is built once from the command line and is the one
+value that is applied to a config (`apply_to`), forwarded to a spawned
+child (`serve_start_args`), recorded in `daemon.json` (flattened as `workers`
+and `audio_task_timeout_s`) and held against that record when a daemon is
+reused (`reconcile`, a `RuntimeReconciliation::{Matches, Differs}`). Both
+settings are fixed at a server's startup and the server has no request that
+changes them, so `Differs` is a `RuntimeRefusal` (exit code 2) naming both
+runtimes, and a server with no record (found by its handshake only, held on
+the fixed port with no state file, probed outside the daemon flow, or named
+by `--server`) refuses any invocation that passed either flag
+(`RuntimeRefusal::Unrecorded`). The reuse decision is `admit_reuse`, shared
+by the two routes a running main daemon is found by: its handshake (the
+CLI's own daemon publishes to the same `main` slot a `serve start` does, so
+`detect_manual_server` sees it first) and its `daemon.json`.
 
 The handshake is the running server's own record, and only it removes it
 while it runs: `ServerHandshake::publish_listening` writes this process's

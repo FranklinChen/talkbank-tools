@@ -738,21 +738,35 @@ pub enum ProviderDiarizationV2 {
     },
 }
 
+impl AsrBackendV2 {
+    /// Whether this recognizer separates speakers itself when asked to, into
+    /// a count it is given. The ONE table of integrated diarization: the
+    /// request builder derives what to ask the provider from it, and the
+    /// control plane's speaker plan reads it to refuse a count the provider
+    /// cannot take (none of these infers the count on this wire). Exhaustive,
+    /// so a new backend must say which it is.
+    #[must_use]
+    pub const fn separates_speakers(self) -> bool {
+        match self {
+            Self::HkTencent | Self::Revai => true,
+            Self::LocalWhisper
+            | Self::WhisperHub
+            | Self::HkAliyun
+            | Self::HkFunaudio
+            | Self::HkQwen => false,
+        }
+    }
+}
+
 impl ProviderDiarizationV2 {
     /// Derive separation from the backend's output contract and the expected count.
     /// A count alone cannot promise a capability the selected adapter lacks.
     #[must_use]
     pub fn for_backend(backend: AsrBackendV2, num_speakers: NumSpeakers) -> Self {
-        match backend {
-            AsrBackendV2::HkTencent | AsrBackendV2::Revai => {
-                SeparatedSpeakersV2::try_from(num_speakers)
-                    .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers })
-            }
-            AsrBackendV2::LocalWhisper
-            | AsrBackendV2::WhisperHub
-            | AsrBackendV2::HkAliyun
-            | AsrBackendV2::HkFunaudio
-            | AsrBackendV2::HkQwen => Self::NotRequested,
+        match backend.separates_speakers() {
+            true => SeparatedSpeakersV2::try_from(num_speakers)
+                .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers }),
+            false => Self::NotRequested,
         }
     }
 

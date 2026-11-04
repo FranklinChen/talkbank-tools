@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::AudioPositionSeconds;
+use crate::api::{AudioPositionSeconds, RevAiJobId};
 
 /// Status of a Rev.AI transcription job.
 ///
@@ -27,8 +27,9 @@ pub enum JobStatus {
 /// A Rev.AI job returned by submission or polling endpoints.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Job {
-    /// Rev.AI-assigned job identifier.
-    pub id: String,
+    /// Rev.AI-assigned job identifier, admitted non-empty as the reply is
+    /// read: a reply naming no job cannot start a wait.
+    pub id: RevAiJobId,
     /// Current lifecycle state for the job.
     pub status: JobStatus,
     /// Human-readable failure detail for terminal failures.
@@ -252,8 +253,8 @@ pub enum LangIdJobStatus {
 /// A Rev.AI language identification job returned by submission or polling.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LangIdJob {
-    /// Rev.AI-assigned job identifier.
-    pub id: String,
+    /// Rev.AI-assigned job identifier, admitted non-empty as the reply is read.
+    pub id: RevAiJobId,
     /// Current lifecycle state.
     pub status: LangIdJobStatus,
     /// Human-readable failure detail for terminal failures.

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::api::{ContentType, FileProvenance, ResultContent};
-use crate::cli::output::{PlannedOutputPath, ResultDestination};
+use crate::cli::output::{PlannedOutputPath, ResultDestination, WriteDecision};
 use axum::{
     Router,
     body::Body,
@@ -76,6 +76,8 @@ fn destinations(root: &std::path::Path) -> ResultDestinations {
                 path: PlannedOutputPath::already_planned(&root.join("recording.wav")).unwrap(),
                 root: OutputRoot::admit(root).unwrap(),
                 content_type: ContentType::Wav,
+                decision: WriteDecision::Fresh,
+                source: root.join("recording.mp3"),
             },
         )]
         .into(),
@@ -148,6 +150,8 @@ async fn mp3_delivery_uses_the_admitted_mpeg_media_type() {
                     .unwrap(),
                 root: OutputRoot::admit(root.path()).unwrap(),
                 content_type: ContentType::Mp3,
+                decision: WriteDecision::Fresh,
+                source: root.path().join("recording.wav"),
             },
         )]
         .into(),

@@ -7,7 +7,9 @@
 
 use crate::revai::FetchedRevAsrEvidence;
 
-use crate::revai::{RevAiClient, SubmitOptions, Transcript, TranscriptResult};
+use crate::revai::{
+    Awaited, PollPolicy, RevAiClient, SubmitOptions, SubmittedJob, Transcript, TranscriptResult,
+};
 use batchalign_transform::asr_postprocess::{
     AdmittedInterval, AsrElement, AsrElementKind, AsrMonologue, AsrOutput, AsrRawText, SpeakerIndex,
 };
@@ -18,8 +20,9 @@ use crate::error::ServerError;
 use crate::transcribe::{AsrResponse, AsrToken};
 
 use super::{
-    AuthorizedRevEvidenceRun, CompletedRevAsrEvidence, RejectedRevLanguageEvidence,
-    RevAsrEvidenceInference, RevAsrInferenceOutcome, VerifiedRevProviderMedia, load_revai_api_key,
+    AuthorizedRevEvidenceRun, ClassifiedRevTranscript, CompletedRevAsrEvidence,
+    RejectedRevLanguageEvidence, RevAsrEvidenceInference, RevAsrInferenceOutcome, RevJobRoute,
+    UnfinishedRevSubmission, VerifiedRevProviderMedia, load_revai_api_key,
 };
 use crate::types::revai_language::{RevLanguage, RevOptionSupport};
 
@@ -29,6 +32,10 @@ use crate::types::revai_language::{RevLanguage, RevOptionSupport};
 /// For detection, runs Rev.AI Language Identification first and submits the
 /// language it names; when that fails or names nothing we map, submits
 /// `"auto"` and reads the detected language from the completed job.
+///
+/// A run whose route is [`RevJobRoute::Resume`] uploads nothing: an earlier
+/// run's job is still Rev.AI's, and this one waits for it under the same
+/// policy and classifies the transcript under the language that run submitted.
 async fn infer_revai_evidence(
     run: AuthorizedRevEvidenceRun,
 ) -> Result<RevAsrInferenceOutcome, ServerError> {
@@ -41,69 +48,122 @@ async fn infer_revai_evidence(
             .map_err(|error| ServerError::Persistence(error.to_string()))?;
         let lang = run.requested_language;
         let num_speakers = run.expected_speakers;
-        // When auto-detecting, run Rev.AI Language Identification first.
-        // This is a separate API (~5-30s) that identifies the spoken language
-        // from audio features: far more accurate than text-based trigram
-        // detection, especially for code-switched bilingual audio.
-        let effective_lang = match lang.request() {
-            crate::api::AsrLanguageRequest::One(_) | crate::api::AsrLanguageRequest::Pair(_) => {
-                lang.clone()
+        let (awaited, effective_lang) = match run.route {
+            RevJobRoute::Submit => {
+                let effective_lang = effective_language(&api_key, &media, &lang)?;
+                // NOT `Validation(error.to_string())`. A provider failure is
+                // neither a malformed request nor a string: the typed
+                // conversion keeps the retryable/terminal verdict the control
+                // plane needs.
+                let awaited =
+                    fetch_revai_transcript(&api_key, &media, &effective_lang, num_speakers)
+                        .map_err(ServerError::from)?;
+                (awaited, effective_lang)
             }
-            crate::api::AsrLanguageRequest::Detect => {
+            RevJobRoute::Resume(pending) => {
+                info!(
+                    job = %pending.job,
+                    effective_language = %pending.effective_language,
+                    "Resuming the wait for a Rev.AI job an earlier run left unfinished"
+                );
                 let client = RevAiClient::new(api_key.as_str())?;
-                match client.identify_language_bytes_blocking(
-                    &media.bytes,
-                    &media.upload_file_name,
-                    media.upload_mime,
-                    30,
-                ) {
-                    Ok(langid_result) => {
-                        let detected = &langid_result.top_language;
-                        info!(
-                            detected_language = %detected,
-                            confidence = langid_result.language_confidences.first()
-                                .map(|c| c.confidence).unwrap_or(0.0),
-                            "Rev.AI Language ID detected language"
-                        );
-                        match RevLanguage::identified(detected) {
-                            Some(identified) => identified,
-                            None => {
-                                tracing::warn!(
-                                    detected = %detected,
-                                    "Rev.AI Language ID named a language BA3 does not map; \
-                                     submitting for transcription-level detection"
-                                );
-                                lang.clone()
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "Rev.AI Language ID failed; falling back to transcription-level auto"
-                        );
-                        lang.clone()
-                    }
-                }
+                let awaited = client
+                    .resume_transcription_blocking(
+                        SubmittedJob::named(pending.job),
+                        PollPolicy::TRANSCRIPTION,
+                    )
+                    .map_err(ServerError::from)?;
+                (awaited, pending.effective_language)
             }
         };
-
-        // NOT `Validation(error.to_string())`. A provider failure is neither a
-        // malformed request nor a string: the typed conversion keeps the
-        // retryable/terminal verdict the control plane needs.
-        let result = fetch_revai_transcript(&api_key, &media, &effective_lang, num_speakers)
-            .map_err(ServerError::from)?;
+        let result = match awaited {
+            Awaited::Ready(result) => result,
+            Awaited::Unfinished(job) => {
+                return Ok(RevAsrInferenceOutcome::Unfinished(
+                    UnfinishedRevSubmission {
+                        job,
+                        effective_language: effective_lang,
+                    },
+                ));
+            }
+        };
         let (transcript_evidence, detected_language) = result.into_parts();
 
-        Ok(classify_language_response(
+        Ok(RevAsrInferenceOutcome::from(classify_language_response(
             transcript_evidence,
             lang,
             effective_lang,
             detected_language,
-        ))
+        )))
     })
     .await
     .map_err(|error| ServerError::Validation(format!("Rev.AI task join error: {error}")))?
+}
+
+/// The language a fresh submission is made under.
+///
+/// One language or a pair is submitted as requested. Under detection, Rev.AI
+/// Language Identification runs first (a separate API, seconds to half a
+/// minute, reading audio features: far more accurate than text-based trigram
+/// detection, especially for code-switched audio) and the language it names is
+/// submitted; when it fails, names nothing BA3 maps, or does not finish within
+/// its wait, the submission is `auto` and the detected language is read from
+/// the completed job.
+fn effective_language(
+    api_key: &super::RevAiApiKey,
+    media: &VerifiedRevProviderMedia,
+    lang: &RevLanguage,
+) -> Result<RevLanguage, ServerError> {
+    match lang.request() {
+        crate::api::AsrLanguageRequest::One(_) | crate::api::AsrLanguageRequest::Pair(_) => {
+            Ok(lang.clone())
+        }
+        crate::api::AsrLanguageRequest::Detect => {
+            let client = RevAiClient::new(api_key.as_str())?;
+            match client.identify_language_bytes_blocking(
+                &media.bytes,
+                &media.upload_file_name,
+                media.upload_mime,
+                PollPolicy::LANGUAGE_ID,
+            ) {
+                Ok(Awaited::Ready(langid_result)) => {
+                    let detected = &langid_result.top_language;
+                    info!(
+                        detected_language = %detected,
+                        confidence = langid_result.language_confidences.first()
+                            .map(|c| c.confidence).unwrap_or(0.0),
+                        "Rev.AI Language ID detected language"
+                    );
+                    match RevLanguage::identified(detected) {
+                        Some(identified) => Ok(identified),
+                        None => {
+                            tracing::warn!(
+                                detected = %detected,
+                                "Rev.AI Language ID named a language BA3 does not map; \
+                                 submitting for transcription-level detection"
+                            );
+                            Ok(lang.clone())
+                        }
+                    }
+                }
+                Ok(Awaited::Unfinished(unfinished)) => {
+                    tracing::warn!(
+                        %unfinished,
+                        "Rev.AI Language ID did not finish within its wait; \
+                         falling back to transcription-level auto"
+                    );
+                    Ok(lang.clone())
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Rev.AI Language ID failed; falling back to transcription-level auto"
+                    );
+                    Ok(lang.clone())
+                }
+            }
+        }
+    }
 }
 
 /// Language rejection must return the fetched bytes to the durable boundary.
@@ -111,18 +171,22 @@ async fn infer_revai_evidence(
 ///
 /// One language or a pair is what the transcript is in, as requested.
 /// Detection resolves only to a language Rev.AI itself reported.
+///
+/// The return type names exactly the two things a fetched transcript can be;
+/// the wider [`RevAsrInferenceOutcome`] also holds an unfinished job, which a
+/// transcript in hand can never be.
 pub(super) fn classify_language_response(
     transcript_evidence: super::types::RevTranscriptEvidence,
     requested_language: RevLanguage,
     effective_language: RevLanguage,
     detected_language: Option<String>,
-) -> RevAsrInferenceOutcome {
+) -> ClassifiedRevTranscript {
     match effective_language.resolve(detected_language.as_deref()) {
-        Some(resolved_language) => RevAsrInferenceOutcome::Fetched(FetchedRevAsrEvidence {
+        Some(resolved_language) => ClassifiedRevTranscript::Admitted(FetchedRevAsrEvidence {
             transcript_evidence,
             resolved_language,
         }),
-        None => RevAsrInferenceOutcome::UnresolvedLanguage(RejectedRevLanguageEvidence {
+        None => ClassifiedRevTranscript::UnresolvedLanguage(RejectedRevLanguageEvidence {
             transcript_evidence,
             requested_language,
             effective_language,
@@ -222,12 +286,16 @@ impl<'t> AdmittedRevTranscript<'t> {
 /// Production can reach this paid boundary only after the durable evidence
 /// cache authorizes a miss or an explicit refresh. The verified artifact keeps
 /// the bytes hashed for that decision identical to the bytes uploaded here.
+///
+/// The wait is bounded by [`PollPolicy::TRANSCRIPTION`]; a job it does not
+/// see finish comes back as `Awaited::Unfinished`, by name, for the evidence
+/// cache to record.
 pub(super) fn fetch_revai_transcript(
     api_key: &super::RevAiApiKey,
     media: &VerifiedRevProviderMedia,
     lang: &RevLanguage,
     num_speakers: Option<NumSpeakers>,
-) -> crate::revai::Result<TranscriptResult> {
+) -> crate::revai::Result<Awaited<TranscriptResult>> {
     let client = RevAiClient::new(api_key.as_str())?;
     let options = rev_submit_options(lang, num_speakers, &media.metadata);
     client.transcribe_bytes_blocking(
@@ -235,7 +303,7 @@ pub(super) fn fetch_revai_transcript(
         &media.upload_file_name,
         media.upload_mime,
         &options,
-        30,
+        PollPolicy::TRANSCRIPTION,
     )
 }
 
@@ -324,6 +392,7 @@ fn transcript_to_asr_response(
     }
 
     AsrResponse {
+        seam_ambiguities: Vec::new(),
         tokens,
         lang: lang.clone(),
         source_monologues: Some(transcript_to_asr_output(admitted).monologues),
@@ -491,12 +560,12 @@ mod tests {
         ))
         .expect("Rev.AI takes English/Spanish");
         match classify_language_response(evidence(), pair.clone(), pair, Some("en/es".into())) {
-            RevAsrInferenceOutcome::Fetched(completed) => assert_eq!(
+            ClassifiedRevTranscript::Admitted(completed) => assert_eq!(
                 completed.resolved_language.to_string(),
                 "spa,eng",
                 "the requested order is the transcript's order"
             ),
-            RevAsrInferenceOutcome::UnresolvedLanguage(_) => panic!("a pair is always resolved"),
+            ClassifiedRevTranscript::UnresolvedLanguage(_) => panic!("a pair is always resolved"),
         }
         match classify_language_response(
             evidence(),
@@ -504,10 +573,10 @@ mod tests {
             RevLanguage::detect(),
             Some("es".into()),
         ) {
-            RevAsrInferenceOutcome::Fetched(completed) => {
+            ClassifiedRevTranscript::Admitted(completed) => {
                 assert_eq!(completed.resolved_language.to_string(), "spa");
             }
-            RevAsrInferenceOutcome::UnresolvedLanguage(_) => panic!("Rev.AI reported Spanish"),
+            ClassifiedRevTranscript::UnresolvedLanguage(_) => panic!("Rev.AI reported Spanish"),
         }
     }
 

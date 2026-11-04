@@ -46,20 +46,33 @@ fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
         AsrBackend::RustRevAi
     );
     assert_eq!(plan.base_options.expected_speakers(), None);
-    // A persisted job bypasses HTTP validation, but cannot bypass plan admission.
-    let mut invalid = job.clone();
-    invalid.dispatch.options = serde_json::from_value(serde_json::json!({
+    // A persisted job bypasses HTTP validation, but cannot bypass plan
+    // admission. An automatic count with a recognizer that labels no speakers
+    // is admissible (nothing needs the count); one with a recognizer whose
+    // integrated diarization must be given the count, and that is the run's
+    // one speaker engine (no `diarize`), is refused by name.
+    let mut whisper = job.clone();
+    whisper.dispatch.options = serde_json::from_value(serde_json::json!({
         "command": "transcribe", "auto_speakers": true,
         "engine_overrides": {"asr": "whisper"}
     }))
     .unwrap();
+    let whisper_plan = TranscribeDispatchPlan::from_job(&whisper, &test_policy())
+        .expect("an automatic count is not the recognizer's to refuse");
+    assert_eq!(whisper_plan.base_options.expected_speakers(), None);
+    let mut tencent = job.clone();
+    tencent.dispatch.options = serde_json::from_value(serde_json::json!({
+        "command": "transcribe", "auto_speakers": true,
+        "engine_overrides": {"asr": "tencent"}
+    }))
+    .unwrap();
     assert!(matches!(
-        TranscribeDispatchPlan::from_job(&invalid, &test_policy()),
-        Err(DispatchPlanRefusal::AsrPolicy(
-            crate::transcribe::TranscribeAsrPlanError::UnsupportedAutomaticCount
+        TranscribeDispatchPlan::from_job(&tencent, &test_policy()),
+        Err(DispatchPlanRefusal::SpeakerPolicy(
+            crate::transcribe::SpeakerPlanError::AutoCountUnsupported { .. }
         ))
     ));
-    assert!(plan.base_options.speaker_backend.is_some());
+    assert!(plan.base_options.speakers.dedicated().is_some());
     assert!(plan.base_options.write_wor);
     assert_eq!(
         plan.base_options.cache_policies.rev_asr,
@@ -169,9 +182,9 @@ fn transcribe_plan_reads_runtime_flags_and_speaker_override() {
         plan.base_options.plan.asr().backend(),
         AsrBackend::Worker(AsrWorkerMode::HkAliyunV2)
     ));
-    assert!(plan.base_options.diarize);
+    assert!(plan.base_options.speakers.dedicated().is_some());
     assert_eq!(
-        plan.base_options.speaker_backend,
+        plan.base_options.speakers.dedicated(),
         Some(SpeakerBackendV2::PyannoteAi)
     );
     assert_eq!(
@@ -212,9 +225,9 @@ fn transcribe_s_plan_defaults_to_pyannote_ai_precision_2() {
         plan.base_options.plan.asr().backend(),
         AsrBackend::RustRevAi
     ));
-    assert!(plan.base_options.diarize);
+    assert!(plan.base_options.speakers.dedicated().is_some());
     assert_eq!(
-        plan.base_options.speaker_backend,
+        plan.base_options.speakers.dedicated(),
         Some(SpeakerBackendV2::PyannoteAi)
     );
     assert_eq!(
@@ -527,7 +540,7 @@ fn transcribe_s_plan_honors_explicit_local_pyannote_override() {
         TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe_s plan");
 
     assert_eq!(
-        plan.base_options.speaker_backend,
+        plan.base_options.speakers.dedicated(),
         Some(SpeakerBackendV2::Pyannote)
     );
 }

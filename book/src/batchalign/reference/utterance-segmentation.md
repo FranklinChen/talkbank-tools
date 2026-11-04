@@ -1,7 +1,7 @@
 # Utterance Segmentation
 
 **Status:** Current
-**Last updated:** 2026-10-24 19:19 EDT
+**Last updated:** 2026-11-03 14:16 EST
 
 Utterance segmentation splits continuous ASR output into individual utterances
 for CHAT transcription. This is a critical step, CHAT requires one utterance
@@ -77,10 +77,21 @@ prepared ASR chunks without round-tripping through ad hoc sentence strings.
 
 The six semantic actions are ordinary, capitalized onset, period boundary,
 question boundary, exclamation boundary, and comma. Only the three boundary
-actions advance the assignment group. Current postprocessing suppresses the
-earlier action whenever two adjacent words both have any non-ordinary action;
-the retained evidence records raw and applied actions separately so this
-policy can be evaluated without rerunning the model.
+actions advance the assignment group, and each names the terminator the
+utterance it closes is written with: admission turns the evidence into an
+`UtteranceSegmentation` (`crates/batchalign-types/src/segmentation.rs`), a
+group per word plus `SegmentEnds`: the terminator `Predicted` at each cut
+(`Period | Question | Exclamation`) and after the last word when the model
+predicted one there, or `Unstated` for a segmenter that predicts none. Both
+passes write the predicted kind (`what did you do ?`). Until 2026-11-03 the
+kind was reduced to "a boundary" when assignments were derived and every cut
+wrote `.`. A segmenter that states no terminator (Stanza constituency, a
+worker returning bare assignments) says so with `Unstated`, written as a
+period, rather than defaulting to one.
+Current postprocessing suppresses the earlier action whenever two adjacent
+words both have any non-ordinary action; the retained evidence records raw
+and applied actions separately so this policy can be evaluated without
+rerunning the model.
 
 The distinction is material. A controlled local replay over 598 retained
 English source monologues and 15,141 words found 267 action differences between
@@ -211,22 +222,59 @@ Before splitting:
    mark as its end (`UtteranceEnd::Observed`), not as a word
 2. If a word **ends with** an ending mark → split the word, flush likewise
 3. If no ending mark is found, or the mark is not a CHAT terminator (`...`,
-   `(.)`) → the utterance's end is `UtteranceEnd::Synthesized`, written as `.`
-   and counted in the file's provenance stamp, so it is never mistaken for the
-   recognizer's punctuation
+   `(.)`) → the utterance's end is `UtteranceEnd::Synthesized`, counted in
+   the file's provenance stamp so it is never mistaken for the recognizer's
+   punctuation. It is written as `.`, except that a piece the boundary model
+   cut ends with the terminator the model predicted there
+   (`SynthesisCause::ModelBoundary`, `?` or `!` as predicted)
 4. Trailing morphological punctuation (‡, „, ,) is stripped before flush
 
 ### Long Turn Splitting
 
-Before punctuation-based retokenization, monologues longer than 300 words are
-split into chunks of 300. BA3 also applies a long-pause fallback split before
-retokenization, but only in a narrow case: a gap of at least 800 ms whose
-next word is one of a fixed list of English sentence starters (`and`, `so`,
-`what`, and so on: `LONG_PAUSE_SENTENCE_STARTERS` in
+Before punctuation-based retokenization, a monologue longer than 300 words is
+cut into chunks of at most about 300 words, each cut placed where
+retokenization divides anyway: after the last word within the limit that ends
+an utterance, else before the last word within the limit, and never before
+punctuation (a chunk runs past the limit rather than begin with a comma).
+Until 2026-10-21 the cut fell every 300 items wherever that landed, which
+added boundaries nobody spoke and once produced an utterance beginning with a
+comma (E259); see `turn_cut` in
+`crates/batchalign-transform/src/asr_postprocess/chunking.rs`. BA3 also
+applies a long-pause fallback split before retokenization, but only in a
+narrow case: a gap of at least 800 ms whose next word is one of a fixed list
+of English sentence starters (`and`, `so`, `what`, and so on:
+`LONG_PAUSE_SENTENCE_STARTERS` in
 `crates/batchalign-transform/src/asr_postprocess/mod.rs`). It never fires for
 Chinese, Cantonese or other non-English text, so for those languages a long
 unpunctuated run is split only by the utterance model (where one exists) and
-by the 300-word cap.
+by the 300-word limit.
+
+### Pre-CHAT boundaries and exact repetitions
+
+The pre-CHAT pass cuts prepared chunks before retokenization, disfluency
+marking and retrace detection run on the pieces. A model boundary that fell
+between the two copies of an exact repetition (`yeah I | I went`) therefore
+put them in different utterances, where retrace detection could not see the
+pair and no `[/]` was written. The cut now consumes a retrace-analyzed state:
+`RetraceAnalyzedChunk::analyze` runs the same exact repeated n-gram analysis
+cleanup later encodes as `[/]`, and `split` refuses to cut inside a
+repetition, keeping the copies in one utterance (`Yeah I [/] I went .`) and
+reporting the suppressed cut in the log. The analysis is the only route to
+the split, so the production path cannot cut before it. The retained
+evidence still records the model's own assignments; `eval utseg-replay`
+recomputes the same suppression from the same words. The former offline
+policy `ReapplyBoundaryModelPreservingExactRetraces`, which was the only way
+to this guard, is gone with it; see the retrace-detection reference.
+
+```mermaid
+flowchart LR
+    C["PreparedMonologueChunk"] -->|"RetraceAnalyzedChunk::analyze(lang)"| A["RetraceAnalyzedChunk"]
+    S["UtteranceSegmentation\n(assignments + SegmentEnds)"] --> X
+    A -->|"split(segmentation)"| X["PrechatSplit"]
+    X --> P["SegmentedChunk pieces\n(each with its predicted end)"]
+    X --> R["suppressed cuts\n(inside a repetition)"]
+    P -->|"retokenize, finalize"| U["Utterances\n(ModelBoundary ends keep ?/!)"]
+```
 
 ## Stanza Utterance Segmentation (CHAT-text path)
 
@@ -262,6 +310,23 @@ contexts presented after CHAT construction. Offline evaluation therefore
 distinguishes an actual one-pass topology from policy isolation that retains
 both passes while changing only the pre- or post-CHAT decoder policy. See the
 developer transcribe reference for the four typed replay choices.
+
+A post-CHAT split's children are finished by BA3 after Chatter's
+`UtteranceSplitPlan` rebuilds them (`split_source` in
+`crates/batchalign-transform/src/utseg.rs`): every child but the last ends
+with the terminator the segmentation predicted at the cut after it (the
+plan's period stands when the ends are `Unstated`), the last child keeps the parent's own
+terminator, and a partitioned `%wor` tier is given the same terminator as its
+main tier. For a file whose `@Languages` names English first
+(`SplitChildOrthography::EnglishInitial`), every non-first child's first
+capitalizable word is capitalized under the same rule the pre-CHAT pass
+applies to every utterance (markers, fillers, fragments, retrace copies and
+letter forms skipped), on the main tier and on the corroborating `%wor` word.
+Until 2026-11-03 every non-last child was written with `.` and every
+non-first child began lowercase. The pinned Chatter (v0.34.0) split plan has
+no way to take a terminator per child, which is why the terminator is set
+after the split; the next Chatter release's plan accepts it per child
+boundary and replaces that half of the transition.
 
 The second pass also has to project timing onto its new children. BA3 permits
 `%wor` partitioning only after equal policy-selected counts pass canonical

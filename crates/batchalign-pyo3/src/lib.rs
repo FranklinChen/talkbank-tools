@@ -80,6 +80,26 @@ fn repair_feats(feats: &str) -> (Option<String>, Vec<(String, String)>) {
     )
 }
 
+/// The worker's lemma test, decided in Rust
+/// (`batchalign_types::worker_v2::is_punctuation_lemma`): whether `lemma` is
+/// punctuation only for a word `text` that has letters, so the worker
+/// replaces exactly the lemma the server would refuse and never classifies a
+/// lemma itself.
+#[pyfunction]
+fn is_punctuation_lemma(text: &str, lemma: &str) -> bool {
+    batchalign_types::worker_v2::is_punctuation_lemma(text, lemma)
+}
+
+/// The worker's padding test, decided in Rust
+/// (`batchalign_types::worker_v2::PaddingValue::admit`): whether `value` is
+/// model padding (`<PAD>`, `<UNK>`), the test the server's feature admission
+/// and relation admission apply, so the worker rewrites exactly the relation
+/// the server would refuse and never classifies a label itself.
+#[pyfunction]
+fn is_padding_value(value: &str) -> bool {
+    batchalign_types::worker_v2::PaddingValue::admit(value).is_some()
+}
+
 /// batchalign_core: Rust worker runtime for batchalign3.
 #[pymodule]
 fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -164,6 +184,11 @@ fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // What counts as model padding in a feature value, from the one Rust
     // test the server's FEATS admission and repair deserialization use.
     m.add_function(wrap_pyfunction!(repair_feats, m)?)?;
+    // Likewise what counts as a punctuation-only lemma, from the one Rust
+    // test the server's UD word admission and lemma-repair deserialization
+    // use.
+    m.add_function(wrap_pyfunction!(is_punctuation_lemma, m)?)?;
+    m.add_function(wrap_pyfunction!(is_padding_value, m)?)?;
 
     // Every processor a Stanza catalog entry can ship, in Rust's order: the
     // closed set the server's registry parses a worker's catalog report by.

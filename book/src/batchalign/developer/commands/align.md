@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-03 23:37 EST
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -90,10 +90,19 @@ required word retains a positive interval, or `FaCompletion::Partial` with an
 `UntimedAccount` naming each utterance with untimed words, the words, and the
 cause (`WindowRefused`, carrying the refused window grouping recorded;
 `NotPlaced`, a run grouping could place in no request; `LocalizationUnavailable`;
-`Requested`, counting what the requests that covered the utterance yielded
-from the run's group evidence; or `Unrecorded`, when no decision names it and
-no request covered it, said as such rather than given a cause the run did not
-observe).
+`Removed`, carrying every `WordTimingRemovalTrace` the finalizer recorded for
+the utterance, each the closed `RemovalEffectTrace` that removed measured
+word timing and the intervals it removed; `Requested`, counting what the
+requests that covered the utterance yielded from the run's group evidence;
+or `Unrecorded`, when no decision names it and no request covered it, said
+as such rather than given a cause the run did not observe). The removals are
+read first, from `FaResult::timing_decisions` through
+`FaTimingDecisionTrace::word_timing_removal`, which names every effect that
+cannot remove word timing and yields a removal only when the effect removed
+at least one measured interval, so a word the run answered and then removed
+is never described by the request counts. The intervals themselves are
+captured at the strip: `strip_utterance_timing` returns `StrippedTiming {
+words_dropped }`, which every stripping `MonotonicityEffect` carries.
 Both carry a second, separate account: the `ExclusionAccount` of every
 utterance the transcript marks as not speech in the recording (`[+ diary]`),
 made after admission checked that the output gave none of them timing (a
@@ -235,10 +244,12 @@ FA group keys are BLAKE3 hashes over:
 - for onset-only engines, the text/healing mode that affects parsed timings
 
 The cache backend namespaces that key by task (`forced_alignment`) and the FA
-engine the selected worker reported, admitted at the capability gate and
-carried as `FaCacheNamespace` byte for byte, so evidence cached by earlier
-builds stays admissible. A worker that supports FA but names no engine cannot
-align: the job fails naming the task rather than inventing a namespace.
+engine the worker keyed by the file's declared language reported, admitted at
+the per-language capability gate (`FaWorkerAdmission`, once per language per
+job) and carried as `FaCacheNamespace` byte for byte, so evidence cached by
+earlier builds stays admissible. A worker that supports FA but names no engine
+cannot align: every file of that language fails naming the task rather than
+inventing a namespace.
 Word-interval keys carry
 `model_score_v1`: this intentionally retires historical interval entries that
 deserialize correctly but predate score retention. Whisper has no interval
@@ -281,8 +292,9 @@ same evidence, not create a new inference identity.
 
 `MainBulletPolicy` is not part of that value: the dispatch binds it to the
 input's own bullets at the single parse (`MainBulletAuthority::bind`, before
-the UTR pre-pass can write bullets of its own), carries the result in
-`FaInputDocument`, and each path pairs it with the projection policy in one
+the UTR pre-pass can write bullets of its own), carries the result with the
+model through the route decision (`FaWorkingDocument`, then `CompleteWor` or
+`ActiveAlignment`), and each path pairs it with the projection policy in one
 `FaProjection` that every projection entry point takes. See the
 forced-alignment reference, "Kept main bullets", for what each phase does with
 a kept bullet and the proofs that order them.
@@ -304,11 +316,13 @@ itself. It returns the utterances it touched, and `run_fa_from_ast` folds
 them into the SAME `FaApplied` write phase that this run's fresh injections
 use, via `FaApplied::also_touched`, so their `%wor` (when requested) is
 written once, after `EndOverlapPolicy` resolves, never before. The
-all-reusable fast path (no grouping, no inference) is the same: it rebuilds
-directly from the existing admitted `%wor` timings via
-`refresh_reusable_alignment`, then reaches the write phase through
-`projection_without_injection_with_touched` rather than a bare
-`finalize_without_injection` with a separate write. The explicit projection
+all-reusable path (no grouping, no inference) keeps the same phase order but
+is no longer a fast path inside `run_fa_from_ast`: since 2026-11-03 it is its
+own route, `refresh_from_complete_wor`, selected by `AlignRoute::decide` at
+admission and run with no recording resolved. It rebuilds directly from the
+existing admitted `%wor` timings via `refresh_reusable_alignment`, then
+reaches the write phase through `projection_without_injection_with_touched`
+rather than a bare `finalize_without_injection` with a separate write. The explicit projection
 policy applies only after evidence collection. The option does not force a
 fully reusable document back through raw-cache replay. A cache-required
 development experiment caught and refused an early version that rebuilt before
@@ -677,6 +691,10 @@ fail-closed when requested and includes:
   so a refused window is data rather than prose in `reason`;
 - `split_window` on each `window_split_at_anchors` decision (schema 6): the
   utterance window, the budget and the piece count;
+- `search_corridor` on each `search_corridor` decision (schema 10): the window
+  an order corridor gave an untimed utterance and the provenance of each of its
+  edges (a measured neighbour's edge with its utterance, the recording's edge,
+  or the overlap marker that withheld the bound);
 - fallback events and post-validation violations.
 
 Cache hits and worker replies arrive out of order and per REQUEST (dispatch

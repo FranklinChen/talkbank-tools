@@ -264,39 +264,73 @@ fn ud_pair_value_reads_one_key_among_several() {
     assert_eq!(ud_pair_value(None, "SpaceAfter"), None);
 }
 
-#[test]
-fn bogus_lemma_detection_matches_expected_cases() {
-    assert!(is_bogus_lemma("hello", "."));
-    assert!(is_bogus_lemma("world", ","));
-    assert!(is_bogus_lemma("cat", "\u{2013}"));
-    assert!(!is_bogus_lemma("hello", "hello"));
-    assert!(!is_bogus_lemma("hello", ""));
-    assert!(!is_bogus_lemma(".", "."));
-    assert!(!is_bogus_lemma(",", "--"));
-    assert!(!is_bogus_lemma("running", "run"));
-    assert!(!is_bogus_lemma("cats", "cat"));
-}
-
-#[test]
-fn validate_and_clean_fixes_pad_deprel_and_bogus_lemma() {
-    let mut word = UdWord::try_from(UdWordAnalysis {
-        id: UdId::Single(1),
-        text: "hello".to_string(),
-        lemma: ".".to_string(),
+/// One analysis record for the admission tests below: a syntactic word
+/// (`UdId::Single`) with the given lemma and relation, no features.
+fn analysis(id: UdId, text: &str, lemma: &str, deprel: &str) -> UdWordAnalysis {
+    UdWordAnalysis {
+        id,
+        text: text.to_string(),
+        lemma: lemma.to_string(),
         upos: UdPunctable::Value(UniversalPos::Intj),
         xpos: None,
         feats: None,
         head: 0,
-        deprel: "<pad>".to_string(),
+        deprel: deprel.to_string(),
         deps: None,
         misc: None,
-    })
-    .expect("test analysis carries no padding feature");
+    }
+}
 
-    validate_and_clean(&mut word);
+/// RED FIRST: the server used to REPAIR a punctuation-only lemma a second
+/// time (`validate_and_clean`), after the worker had already repaired and
+/// reported it, with a predicate of its own that disagreed with the worker's.
+/// The worker is the one repair site; the server's admission refuses an
+/// unrepaired lemma instead of rewriting it, as it does a padding feature.
+#[test]
+fn ud_admission_refuses_an_unrepaired_punctuation_lemma() {
+    let refused = UdWord::try_from(analysis(UdId::Single(1), "hello", ".", "root"));
+    assert!(
+        matches!(
+            refused,
+            Err(UdWordAdmissionError::PunctuationLemma { ref word, ref lemma })
+                if word == "hello" && lemma == "."
+        ),
+        "{refused:?}"
+    );
+    // The surface form itself, a real lemma, or punctuation lemmatized as
+    // itself are all admitted: only a lettered word with a symbol-only
+    // lemma is the defect.
+    for (text, lemma) in [
+        ("hello", "hello"),
+        ("running", "run"),
+        (".", "."),
+        (",", "--"),
+    ] {
+        assert!(
+            UdWord::try_from(analysis(UdId::Single(1), text, lemma, "root")).is_ok(),
+            "{text:?} / {lemma:?}"
+        );
+    }
+    // A multi-word token's range row carries the worker's empty lemma, which
+    // is no repair target: the components carry the analysis.
+    assert!(UdWord::try_from(analysis(UdId::Range(1, 2), "du", "", "dep")).is_ok());
+}
 
-    assert_eq!(word.lemma, "hello");
-    assert_eq!(word.deprel, "dep");
+/// RED FIRST: likewise for a padding relation (`<pad>`), which the server
+/// silently rewrote to `dep` after the worker had reported its own
+/// `pad_relation` repair, so the two could never be told apart.
+#[test]
+fn ud_admission_refuses_an_unrepaired_padding_relation() {
+    let refused = UdWord::try_from(analysis(UdId::Single(1), "hello", "hello", "<pad>"));
+    assert!(
+        matches!(
+            refused,
+            Err(UdWordAdmissionError::PaddingRelation { ref word, ref relation })
+                if word == "hello" && relation == "<pad>"
+        ),
+        "{refused:?}"
+    );
+    assert!(UdWord::try_from(analysis(UdId::Single(1), "hello", "hello", "root")).is_ok());
 }
 
 #[test]

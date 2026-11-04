@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
 use async_trait::async_trait;
 
-use crate::api::LanguageCode3;
 use crate::cache::UtteranceCache;
 use crate::error::ServerError;
 use crate::infer_retry::Cancellation;
@@ -49,10 +48,13 @@ pub(crate) trait WorkerGateway: Send + Sync {
     /// until 2026-09-16, and the document was parsed back out of it by a
     /// LENIENT parser that admits what the validating one refuses, with the
     /// parse errors warned about and dropped.
+    ///
+    /// No language: the transcript's own `@Languages:` header decides, inside
+    /// the morphosyntax pipeline, as for `morphotag`. A job-level code used to
+    /// be passed here and discarded.
     async fn morphotag_for_compare(
         &self,
         chat_text: &str,
-        lang: &LanguageCode3,
         mwt: &MwtDict,
         cancellation: Cancellation<'_>,
     ) -> Result<PostValidated, ServerError>;
@@ -141,7 +143,6 @@ impl WorkerGateway for PooledWorkerGateway {
     async fn morphotag_for_compare(
         &self,
         chat_text: &str,
-        _lang: &LanguageCode3,
         mwt: &MwtDict,
         cancellation: Cancellation<'_>,
     ) -> Result<PostValidated, ServerError> {

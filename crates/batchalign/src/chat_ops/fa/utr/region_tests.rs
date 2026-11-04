@@ -505,8 +505,16 @@ fn interior_only_evidence_bounds_search_between_proved_neighbours_without_a_hint
         "gamma",
         "delta"
       ],
-      "floor_ms": 200,
-      "ceiling_ms": 780,
+      "floor": {
+        "kind": "preceding_measured",
+        "ms": 200,
+        "utterance": 0
+      },
+      "ceiling": {
+        "kind": "following_measured",
+        "ms": 780,
+        "utterance": 2
+      },
       "scope": {
         "kind": "order_corridor"
       }
@@ -733,5 +741,220 @@ fn a_search_inconsistency_is_reported_in_the_evidence_with_its_fields() {
       }
     ]
     "#
+    );
+}
+
+/// A recording of a stated length, for the corridor tests below.
+fn recording(ms: u64) -> crate::chat_ops::fa::coordinates::Recording {
+    crate::chat_ops::fa::coordinates::Recording::of_duration(crate::chat_ops::fa::coordinates::Ms(
+        ms,
+    ))
+    .expect("test recordings are non-empty")
+}
+
+/// The over-budget refusals among a grouping's decisions.
+fn over_budget_refusals(
+    grouped: &crate::chat_ops::fa::Grouping,
+) -> Vec<&batchalign_transform::decisions::RefusedWindow> {
+    use batchalign_transform::decisions::{DecisionStrategy, FaStrategy, RefusedWindow};
+    grouped
+        .decisions
+        .iter()
+        .filter_map(|decision| match &decision.strategy {
+            DecisionStrategy::Fa(FaStrategy::WindowRefused(
+                refused @ RefusedWindow::OverBudget { .. },
+            )) => Some(refused),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The fixture behind the corridor tests: a heard first turn, an unheard
+/// one-word acknowledgement by the other speaker, and a heard third turn
+/// beginning `third_start_ms` into the recording. Only the acknowledgement
+/// has no token, so its word can only be searched for; with two speakers the
+/// region is planned by the joint (interleaving) producer, whose episode
+/// model lets the acknowledgement interleave with either neighbour, so no
+/// required word bounds it below. Each heard word is a 250 ms token, 300 ms
+/// apart from the next, from its turn's start.
+fn unheard_acknowledgement(third_start_ms: u64) -> (ChatFile, Vec<AsrTimingToken>) {
+    let turns = vec![
+        Turn {
+            speaker: "PAR",
+            words: vec!["alpha".into(), "beta".into(), "gamma".into()],
+            start_ms: 1_000,
+            end_ms: 1_900,
+            timed: false,
+        },
+        Turn {
+            speaker: "INV",
+            words: vec!["mm".into()],
+            start_ms: third_start_ms - 1_000,
+            end_ms: third_start_ms - 500,
+            timed: false,
+        },
+        Turn {
+            speaker: "PAR",
+            words: vec!["delta".into(), "epsilon".into(), "zeta".into()],
+            start_ms: third_start_ms,
+            end_ms: third_start_ms + 900,
+            timed: false,
+        },
+    ];
+    let tokens = heard(&turns)
+        .into_iter()
+        .filter(|token| token.text != "mm")
+        .collect();
+    (chat(&turns), tokens)
+}
+
+/// RED FIRST: the unheard acknowledgement sits between two turns whose words
+/// were heard. Its search corridor used to start at 0 beside the measured
+/// first turn, so in a long recording the window exceeded the engine budget
+/// and the word was refused before any request; the one such word a
+/// listener checked was there, inside the corridor the preceding measured
+/// edge would have given. The corridor now runs from the first turn's last
+/// heard token to the third turn's first heard token, each named, and the
+/// utterance is requested where it was refused: the over-budget refusal
+/// count on this file drops from one to none.
+#[test]
+fn an_unheard_utterance_between_measured_neighbours_is_searched_between_their_edges() {
+    let (mut document, tokens) = unheard_acknowledgement(15_000);
+    let result = inject_spaced(&mut document, &tokens);
+    assert_eq!(bullets(&document)[1], None, "an unheard word gets no hint");
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    insta::assert_json_snapshot!(plan.search_envelopes[1], @r#"
+    {
+      "words": [
+        "mm"
+      ],
+      "floor": {
+        "kind": "preceding_measured",
+        "ms": 1600,
+        "utterance": 0
+      },
+      "ceiling": {
+        "kind": "following_measured",
+        "ms": 15250,
+        "utterance": 2
+      },
+      "scope": {
+        "kind": "order_corridor"
+      }
+    }
+    "#);
+    let anchors = AnchorIndex::from_plan(plan);
+    let grouped =
+        crate::chat_ops::fa::group_utterances(&document, 15_000, &recording(60_000), &anchors);
+    assert!(
+        over_budget_refusals(&grouped).is_empty(),
+        "a 13650 ms corridor fits the 15000 ms budget: {:?}",
+        grouped.decisions
+    );
+    assert!(
+        grouped.groups.iter().any(|group| group
+            .utterance_indices()
+            .contains(&talkbank_model::UtteranceIdx::new(1))),
+        "the acknowledgement is requested"
+    );
+    // The request evidence names the window and where each edge came from.
+    let corridors: Vec<_> = grouped
+        .decisions
+        .iter()
+        .filter_map(|decision| match &decision.strategy {
+            batchalign_transform::decisions::DecisionStrategy::Fa(
+                batchalign_transform::decisions::FaStrategy::SearchCorridor(_),
+            ) => Some((
+                decision.line_idx.raw(),
+                decision.needs_review,
+                decision.reason.as_str(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        corridors,
+        vec![(
+            8,
+            false,
+            "search window 1600ms-15250ms from the order corridor; floor: 1600ms from \
+             utterance 0's measurement; ceiling: 15250ms from utterance 2's measurement"
+        )]
+    );
+}
+
+/// With no measured utterance before it, the corridor floor is the file's
+/// start, and says so, rather than a 0 that could mean either.
+#[test]
+fn an_unheard_utterance_with_nothing_measured_before_it_searches_from_the_file_start() {
+    let turns = vec![
+        Turn {
+            speaker: "INV",
+            words: vec!["mm".into()],
+            start_ms: 500,
+            end_ms: 900,
+            timed: false,
+        },
+        Turn {
+            speaker: "PAR",
+            words: vec!["alpha".into(), "beta".into(), "gamma".into()],
+            start_ms: 3_000,
+            end_ms: 3_900,
+            timed: false,
+        },
+    ];
+    let tokens: Vec<AsrTimingToken> = heard(&turns)
+        .into_iter()
+        .filter(|token| token.text != "mm")
+        .collect();
+    let mut document = chat(&turns);
+    let result = inject_spaced(&mut document, &tokens);
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    insta::assert_json_snapshot!(plan.search_envelopes[0], @r#"
+    {
+      "words": [
+        "mm"
+      ],
+      "floor": {
+        "kind": "file_start"
+      },
+      "ceiling": {
+        "kind": "following_measured",
+        "ms": 3250,
+        "utterance": 1
+      },
+      "scope": {
+        "kind": "order_corridor"
+      }
+    }
+    "#);
+}
+
+/// A corridor that is still longer than the budget once bounded is refused
+/// by name, with the bounded window as its figures: the floor narrows the
+/// search, it never clips it to fit.
+#[test]
+fn a_bounded_corridor_over_the_budget_is_still_refused_by_name() {
+    let (mut document, tokens) = unheard_acknowledgement(18_000);
+    let result = inject_spaced(&mut document, &tokens);
+    let UtrAlignmentEvidence::Global { plan } = result.alignment() else {
+        panic!("global plan");
+    };
+    let anchors = AnchorIndex::from_plan(plan);
+    let grouped =
+        crate::chat_ops::fa::group_utterances(&document, 15_000, &recording(60_000), &anchors);
+    assert_eq!(
+        over_budget_refusals(&grouped),
+        vec![
+            &batchalign_transform::decisions::RefusedWindow::OverBudget {
+                start_ms: 1_600,
+                end_ms: 18_250,
+                budget_ms: 15_000,
+            }
+        ]
     );
 }

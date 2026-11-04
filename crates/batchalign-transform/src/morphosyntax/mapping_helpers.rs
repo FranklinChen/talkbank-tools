@@ -1,6 +1,6 @@
 //! Helper functions for sentence-level UD-to-CHAT mapping.
 
-use super::mor_word::map_ud_mor_word;
+use super::mor_word::{Classified, TagMarker, map_ud_mor_word};
 use crate::morphosyntax::{
     ChunkProvenance, MappedItem, MappingContext, MappingError, UdWord, is_clitic,
 };
@@ -33,14 +33,20 @@ pub fn provenance_for_ud_word(ud: &UdWord) -> Result<ChunkProvenance, MappingErr
 }
 
 /// One UD word mapped to a one-chunk `%mor` item with its provenance.
+///
+/// Where a top-level token is classified: a tag marker is written by
+/// [`TagMarker::mor`], every other token by the generic word path, which
+/// takes only the `Lexical` the classifier minted. The marker keeps the
+/// relation the model gave it, so its `%gra` is unchanged.
 pub(crate) fn map_ud_word_item(
     ud: &UdWord,
     ctx: &MappingContext,
 ) -> Result<MappedItem, MappingError> {
-    Ok(MappedItem::word(
-        map_ud_mor_word(ud, ctx)?,
-        provenance_for_ud_word(ud)?,
-    ))
+    let mor = match TagMarker::classify(ud) {
+        Classified::Marker(marker) => marker.mor(ctx),
+        Classified::Lexical(word) => map_ud_mor_word(word, ctx)?,
+    };
+    Ok(MappedItem::word(mor, provenance_for_ud_word(ud)?))
 }
 
 /// Assemble multiple UD tokens into a single CHAT MOR with clitics, each
@@ -61,6 +67,14 @@ pub fn assemble_mors(
         .iter()
         .chain(&components[main_idx + 1..])
         .try_fold(map_ud_word_item(main, ctx)?, |item, comp| {
-            Ok(item.with_post_clitic(map_ud_mor_word(comp, ctx)?, provenance_for_ud_word(comp)?))
+            // A separator cannot be a clitic: the one place a marker could
+            // still reach a `%mor` item, refused by name.
+            let word = match TagMarker::classify(comp) {
+                Classified::Marker(marker) => {
+                    return Err(MappingError::TagMarkerAsClitic { marker });
+                }
+                Classified::Lexical(word) => word,
+            };
+            Ok(item.with_post_clitic(map_ud_mor_word(word, ctx)?, provenance_for_ud_word(comp)?))
         })
 }

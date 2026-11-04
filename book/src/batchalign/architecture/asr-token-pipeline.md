@@ -305,9 +305,13 @@ The Python adapter also checks that the sequence covers the prepared waveform.
 Rust reconciles these observations before monotone fitting. Equal text is a
 duplicate candidate only when both complete spans lie within shared source
 audio and intersect one another. Disjoint repetitions and words with missing
-timestamps are retained. Multiple or crossing matches refuse the response as
-ambiguous instead of choosing a deletion. Shared observations anchor the
-remaining word order, including untimed words between anchors. This is a
+timestamps are retained. Multiple or crossing matches cannot be attributed by
+evidence: the earlier window's copies are kept, the later window's is dropped,
+and the decision travels as a `SeamAmbiguity` on the `AsrResponse`, placed on
+the utterance that keeps the copy, written there as a `%com`, and reported to
+the job as the `window_seam_ambiguous` shortfall (the file finishes
+diagnosed); until 2026-11-03 such a match refused the whole response. Shared observations
+anchor the remaining word order, including untimed words between anchors. This is a
 conservative observation rule, not proof that model timestamps are acoustically
 correct. The Whisper UTR producer revision (`utr-asr-open-begin-v5`, see the
 [UTR ASR cache](../reference/forced-alignment.md#utr-asr-cache)) excludes all

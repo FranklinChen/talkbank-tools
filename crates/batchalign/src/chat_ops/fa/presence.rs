@@ -87,7 +87,10 @@ pub(crate) fn strip_off_record_timing(chat_file: &mut ChatFile) -> StrippedOffRe
                 if carries_timing(utterance) {
                     stripped.timed_utterances += 1;
                 }
-                super::orchestrate::strip_utterance_timing(utterance);
+                // The words of an utterance not in the recording owe no
+                // timing, so what the strip removed is not a loss to report.
+                let super::orchestrate::StrippedTiming { words_dropped: _ } =
+                    super::orchestrate::strip_utterance_timing(utterance);
             }
         }
     }

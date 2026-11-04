@@ -44,19 +44,20 @@ mod units;
 #[cfg(test)]
 mod partial_partition_tests;
 use input::FaAdmission;
-#[cfg(test)]
-pub(crate) use input::read_fa_source;
 pub(crate) use input::{
-    FaWorkingDocument, OutstandingTiming, ReconciledOutput, read_fa_source_named,
+    ActiveAlignment, AlignRoute, CompleteWor, NoRecordingRoute, OutstandingTiming,
+    RealignmentRequest, ReconciledOutput, read_fa_source_named,
 };
+#[cfg(test)]
+pub(crate) use input::{FaWorkingDocument, read_fa_source};
 
 use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::{
     BulletRepairPolicy, WordTiming, apply_fa_results_with_projection_policy,
     expand_bullets_for_edge_fillers, finalize_without_injection, find_reusable_utterance_indices,
-    group_utterances, has_reusable_wor_timing, projection_without_injection_with_touched,
-    refresh_reusable_alignment, refresh_reusable_utterances, rescue_narrow_bullets,
+    group_utterances, projection_without_injection_with_touched, refresh_reusable_alignment,
+    refresh_reusable_utterances, rescue_narrow_bullets,
     strip_wor_from_monotonicity_stripped_utterances,
 };
 use crate::engine_reports::FaCacheNamespace;
@@ -69,7 +70,7 @@ use tracing::info;
 use crate::chat_ops::fa::Grouping;
 use crate::error::ServerError;
 use crate::runner::util::ProgressSender;
-use crate::types::results::{FaOutput, FaResult};
+use crate::types::results::{FaOutput, FaResult, RecordingRead};
 use units::{DispatchUnit, FaDispatchInputs, resolve_group_timings};
 
 /// What forced alignment runs with: the shared pool and cache, plus the
@@ -126,6 +127,9 @@ impl FaAdmission {
                     timing_decisions: Vec::new(),
                     gap_healing,
                     fallback_events: Vec::new(),
+                    // A pass-through reads nothing, and times nothing either,
+                    // so the account this feeds never sees a removal.
+                    recording: RecordingRead::NotRead,
                 },
                 document,
             },
@@ -584,8 +588,14 @@ impl<'a> FaCacheUnitAdmission<'a> {
 // ---------------------------------------------------------------------------
 
 /// An attempt produced only by the source-admitted working document.
+///
+/// Production decides the route at admission (`AlignRoute::decide`) and hands
+/// each entry point the attempt type it takes; tests still read a working
+/// document's attempt this way to reach an active input directly.
+#[cfg(test)]
 pub(crate) enum FaInputDocument<'a> {
-    Preserved(batchalign_transform::AdmittedSourceChat<'static>),
+    /// A declared no-op; tests only ask whether the fixture is one.
+    Preserved,
     Active(ActiveFaInput<'a>),
 }
 
@@ -628,7 +638,9 @@ pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -
 /// sole serialization boundary and decides which evidence to persist.
 ///
 /// Algorithm outline:
-/// 1. Consume the already source-admitted active or preserved disposition.
+/// 1. Consume the active attempt (a preserved source and a complete `%wor`
+///    file never reach this entry: `AlignRoute::decide` routes them away at
+///    admission).
 /// 2. Group utterances into FA windows.
 /// 3. Resolve cache hits/misses per group.
 /// 4. Send miss groups through the FA worker transport adapter.
@@ -637,24 +649,13 @@ pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -
 /// 7. Hand the draft to `FaAdmission::finish`: media/timing transition, then
 ///    full post-validation.
 pub(crate) async fn run_fa_from_ast(
-    document: FaInputDocument<'_>,
+    active: ActiveFaInput<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
     services: FaServices<'_>,
     fa_params: &FaParams,
     progress: Option<&ProgressSender>,
 ) -> Result<AdmittedFaResult, ServerError> {
-    let active = match document {
-        FaInputDocument::Preserved(source) => {
-            return Ok(FaAdmission::pass_through(
-                source,
-                fa_params.gap_healing,
-                fa_params.engine.as_wire_name(),
-                services.cache_namespace,
-            ));
-        }
-        FaInputDocument::Active(active) => active,
-    };
     let ActiveFaInput {
         mut chat_file,
         admission,
@@ -677,53 +678,10 @@ pub(crate) async fn run_fa_from_ast(
     let projection =
         crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
 
-    // 1e. Cheap rerun path: if the file already has complete, reusable `%wor`
-    // timing, rebuild main-tier bullets and optionally regenerate `%wor`
-    // without sending audio back through FA.
-    if has_reusable_wor_timing(&chat_file) {
-        info!("FA fast path: reusing existing %wor timing");
-        // Mechanical refresh only (no `%wor` write): the touched utterances
-        // are folded into the SAME `FaApplied` write phase that runs
-        // monotonicity below, so `%wor` (when requested) is always written
-        // after same-speaker overlaps are resolved, never before (2026-09-01
-        // review, item 2).
-        let touched = refresh_reusable_alignment(&mut chat_file, fa_params.existing_wor_boundaries);
-
-        // A previous run may have written backward `%wor` timestamps (e.g.
-        // APROCSA 2256_T4.cha: UTR anchor drift placed utterances from task N
-        // into task N-1's audio window).  Without these two steps, every re-run
-        // reconstructs the backward main-tier bullet from the stale `%wor`
-        // data, and the E362 violation persists indefinitely.
-        //
-        // Step 1: strip backward main-tier bullets.
-        let finalized = projection_without_injection_with_touched(projection, write_wor, touched)
-            .then_finalize(
-                &mut chat_file,
-                BulletRepairPolicy::from(fa_params.bullet_repair),
-            )
-            .map_err(kept_bullets_failed)?;
-        if fa_params.bullet_repair {
-            tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied");
-        }
-        // Step 2: remove `%wor` from stripped utterances so the next run goes
-        // through full FA rather than reconstructing the backward bullet again.
-        strip_wor_from_monotonicity_stripped_utterances(&mut chat_file, finalized.monotonicity());
-
-        let written = crate::chat_ops::fa::retain_decision_evidence(
-            &mut chat_file,
-            crate::chat_ops::fa::FaDecisions::without_injection(Vec::new(), Vec::new(), finalized),
-        );
-
-        return admission.finish(
-            FaResult::without_groups(
-                chat_file,
-                fa_params.gap_healing,
-                fa_params.engine.as_wire_name(),
-                services.cache_namespace,
-            )
-            .with_written_decisions(written),
-        );
-    }
+    // A file whose every alignable word already carries reusable `%wor` never
+    // reaches this entry: `AlignRoute::decide` sends it to
+    // [`refresh_from_complete_wor`] at admission, before any recording is
+    // resolved. This path is reached with the recording in hand.
 
     // 1f. Per-utterance partial reuse: when some (but not all) utterances have
     // clean %wor, refresh those and track them so their FA groups can be skipped.
@@ -731,8 +689,18 @@ pub(crate) async fn run_fa_from_ast(
     // `apply_fa_results_with_projection_policy` below via `also_touched`, so
     // their `%wor` is (re)written from the SAME post-monotonicity state as
     // everything that run injected fresh (2026-09-01 review, item 2).
+    //
+    // A re-alignment request (`--override-media-cache`, read from the same
+    // cache policy the route decision reads) reuses nothing: every utterance is
+    // grouped and sent, so the file's `%wor` is recomputed from the recording
+    // rather than refreshed from itself. Without this, a complete file routed
+    // here by the request would have every group answered from its own `%wor`
+    // and no request made, the refresh in all but name.
     let mut partially_reused_touched: Vec<crate::chat_ops::UtteranceIdx> = Vec::new();
-    let reusable_indices = find_reusable_utterance_indices(&chat_file);
+    let reusable_indices = match RealignmentRequest::from(fa_params.cache_policy) {
+        RealignmentRequest::NotRequested => find_reusable_utterance_indices(&chat_file),
+        RealignmentRequest::Requested => std::collections::HashSet::new(),
+    };
     if !reusable_indices.is_empty() {
         info!(
             reusable = reusable_indices.len(),
@@ -836,6 +804,7 @@ pub(crate) async fn run_fa_from_ast(
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
                 services.cache_namespace,
+                RecordingRead::Read,
             )
             .with_written_decisions(written),
         );
@@ -934,11 +903,116 @@ pub(crate) async fn run_fa_from_ast(
         timing_decisions,
         gap_healing: fa_params.gap_healing,
         fallback_events,
+        recording: RecordingRead::Read,
     })
 }
 
 mod incremental;
 pub(crate) use incremental::{RetainedFaPrior, process_fa_incremental};
+
+impl NoRecordingRoute {
+    /// Finish the file on this route: a declared no-op is returned exactly as
+    /// it was admitted, byte for byte; a complete-`%wor` file is refreshed
+    /// from its own timing ([`refresh_from_complete_wor`]). No recording is
+    /// read and no worker request is made on either. The namespace names the
+    /// FA engine the file's worker reported, which the result's cache rows
+    /// (none here) and its `fa=` stamp are written under.
+    pub(crate) fn run(
+        &self,
+        fa_params: &FaParams,
+        cache_namespace: &FaCacheNamespace,
+    ) -> Result<AdmittedFaResult, ServerError> {
+        match self {
+            Self::PassThrough(source) => Ok(FaAdmission::pass_through(
+                source.clone(),
+                fa_params.gap_healing,
+                fa_params.engine.as_wire_name(),
+                cache_namespace,
+            )),
+            Self::RefreshOnly(complete) => {
+                refresh_from_complete_wor(complete, cache_namespace, fa_params)
+            }
+        }
+    }
+
+    /// Where this route's timing came from, as its stamp says it.
+    pub(crate) fn timing(&self) -> crate::provenance::AlignTiming {
+        match self {
+            Self::PassThrough(_) => crate::provenance::AlignTiming::Preserved,
+            Self::RefreshOnly(_) => crate::provenance::AlignTiming::RefreshedFromWor,
+        }
+    }
+}
+
+/// Refresh a file whose every alignable word already carries reusable `%wor`
+/// timing: rebuild the main-tier bullets from it and optionally regenerate
+/// `%wor`, with no recording read and no worker request made.
+///
+/// Reached only through [`CompleteWor`], the proof `AlignRoute::decide`
+/// issues at admission, so the aligning entry points never see such a file
+/// and this one never sees any other. Until 2026-11-03 this was a fast path
+/// inside `run_fa_from_ast`, reached only after the recording had been
+/// resolved, converted and probed; a complete `%wor` file whose recording was
+/// absent therefore failed although nothing here reads audio.
+///
+/// A previous run may have written backward `%wor` timestamps (UTR anchor
+/// drift placing utterances from task N into task N-1's audio window), and
+/// without the two steps below every re-run reconstructed the backward
+/// main-tier bullet from the stale `%wor`, so the E362 violation persisted
+/// indefinitely. Step 1 strips the backward main-tier bullets; step 2 removes
+/// `%wor` from the stripped utterances. Those utterances leave this run
+/// untimed, and because the run read no audio, the completion account names
+/// them as needing a run with the recording (`RecordingRead::NotRead`).
+pub(crate) fn refresh_from_complete_wor(
+    complete: &CompleteWor,
+    cache_namespace: &FaCacheNamespace,
+    fa_params: &FaParams,
+) -> Result<AdmittedFaResult, ServerError> {
+    let ActiveFaInput {
+        mut chat_file,
+        admission,
+        main_bullets,
+        anchors: _,
+    } = complete.input();
+    info!("FA refresh route: reusing existing %wor timing, no recording read");
+    let write_wor = if is_ca(&chat_file) {
+        info!("@Options: CA detected: suppressing %wor generation");
+        false
+    } else {
+        fa_params.wor_tier.should_write()
+    };
+    let projection =
+        crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
+    // Mechanical refresh only (no `%wor` write): the touched utterances are
+    // folded into the SAME `FaApplied` write phase that runs monotonicity
+    // below, so `%wor` (when requested) is always written after same-speaker
+    // overlaps are resolved, never before (2026-09-01 review, item 2).
+    let touched = refresh_reusable_alignment(&mut chat_file, fa_params.existing_wor_boundaries);
+    let finalized = projection_without_injection_with_touched(projection, write_wor, touched)
+        .then_finalize(
+            &mut chat_file,
+            BulletRepairPolicy::from(fa_params.bullet_repair),
+        )
+        .map_err(kept_bullets_failed)?;
+    if fa_params.bullet_repair {
+        tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied");
+    }
+    strip_wor_from_monotonicity_stripped_utterances(&mut chat_file, finalized.monotonicity());
+    let written = crate::chat_ops::fa::retain_decision_evidence(
+        &mut chat_file,
+        crate::chat_ops::fa::FaDecisions::without_injection(Vec::new(), Vec::new(), finalized),
+    );
+    admission.finish(
+        FaResult::without_groups(
+            chat_file,
+            fa_params.gap_healing,
+            fa_params.engine.as_wire_name(),
+            cache_namespace,
+            RecordingRead::NotRead,
+        )
+        .with_written_decisions(written),
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -967,7 +1041,7 @@ mod tests {
         let source = read_fa_source(ALIGNED).expect("the source is completely valid");
         match source.attempt() {
             FaInputDocument::Active(active) => active.admission,
-            FaInputDocument::Preserved(_) => panic!("fixture must use active alignment"),
+            FaInputDocument::Preserved => panic!("fixture must use active alignment"),
         }
     }
 
@@ -979,6 +1053,7 @@ mod tests {
             WordGapHealing::PreserveMeasured,
             "test_engine",
             &FaCacheNamespace::for_test("test-build"),
+            RecordingRead::NotRead,
         )
     }
 
@@ -1162,6 +1237,159 @@ mod tests {
         ));
     }
 
+    /// The parameters of an ordinary align run that asked for no re-alignment
+    /// and no bullet repair, so what the finalizer does to a backward
+    /// utterance is the start-regression strip and nothing else.
+    fn refresh_params() -> FaParams {
+        FaParams {
+            gap_healing: WordGapHealing::Heal,
+            whisper_text: crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
+            existing_wor_boundaries: crate::chat_ops::fa::ExistingWorBoundaryPolicy::Preserve,
+            end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy::ClampAllAdjacent,
+            main_bullets: crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
+            engine: crate::types::engines::FaEngineName::Wave2Vec,
+            cache_policy: crate::types::params::CachePolicy::UseCache,
+            wor_tier: crate::types::params::WorTierPolicy::Include,
+            bullet_repair: false,
+            review_level: crate::chat_ops::fa::ReviewLevel::None,
+        }
+    }
+
+    /// The refresh route's proof for `source`, which the test knows is a
+    /// complete-`%wor` file.
+    fn complete_wor(source: &str, params: &FaParams) -> CompleteWor {
+        let read = read_fa_source_named(
+            source,
+            talkbank_model::model::TranscriptName::for_path(std::path::Path::new("sample.cha")),
+            crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
+        )
+        .expect("the fixture is admitted");
+        match AlignRoute::decide(read, RealignmentRequest::from(params.cache_policy)) {
+            AlignRoute::WithoutRecording(NoRecordingRoute::RefreshOnly(complete)) => complete,
+            AlignRoute::WithoutRecording(NoRecordingRoute::PassThrough(_)) => {
+                panic!("the fixture is aligned, not preserved")
+            }
+            AlignRoute::NeedsAudio(_) => panic!("the fixture's %wor is complete"),
+        }
+    }
+
+    /// A file whose every alignable word carries reusable `%wor` is refreshed
+    /// with no recording anywhere (the refresh takes none, by signature: a
+    /// namespace and the parameters), its timing stands, and its stamp says
+    /// where the timing came from.
+    #[test]
+    fn a_complete_wor_file_is_refreshed_without_the_recording_and_says_so() {
+        const COMPLETE: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}0_500\u{15}\n\
+%wor:\thello \u{15}0_250\u{15} world \u{15}250_500\u{15} .\n\
+@End\n";
+        let namespace = FaCacheNamespace::for_test("test-fa-wave-v1");
+        let params = refresh_params();
+        let complete = complete_wor(COMPLETE, &params);
+
+        let AlignedOutput {
+            document,
+            shortfalls,
+            exclusions: _,
+        } = refresh_from_complete_wor(&complete, &namespace, &params)
+            .expect("a complete %wor file is refreshed")
+            .into_document();
+        assert!(shortfalls.is_empty(), "{shortfalls:?}");
+        let stamped = document
+            .with_provenance_injected(&crate::provenance::align_provenance(
+                &crate::api::LanguageCode3::eng(),
+                &namespace,
+                &crate::provenance::UtrContribution::NotRun,
+                false,
+                false,
+                params.main_bullets,
+                crate::provenance::AlignTiming::RefreshedFromWor,
+            ))
+            .expect("the stamp keeps the document admitted");
+        let text = stamped.as_str();
+        assert!(text.contains("timing=refreshed_from_wor"), "{text}");
+        assert!(
+            text.contains("%wor:\thello \u{15}0_250\u{15} world \u{15}250_500\u{15} ."),
+            "{text}"
+        );
+    }
+
+    /// The refresh strips a retained utterance whose `%wor` timing runs
+    /// backward (the start regression the finalizer enforces: an earlier run
+    /// wrote stale `%wor` behind a main bullet that stands in order, the shape
+    /// of the UTR anchor-drift incident) and removes its `%wor`, and because
+    /// the run read no audio, the completion account names those words as
+    /// needing a run with the recording, not as a measurement that came out
+    /// empty. The file is written, diagnosed.
+    #[test]
+    fn a_backward_utterance_stripped_on_the_refresh_route_is_named_as_needing_the_recording() {
+        const BACKWARD: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
+@Participants:\tCHI Target_Child\n\
+@ID:\teng|test|CHI|||||Target_Child|||\n\
+@Media:\tsample, audio\n\
+*CHI:\thello world . \u{15}1000_1500\u{15}\n\
+%wor:\thello \u{15}1000_1250\u{15} world \u{15}1250_1500\u{15} .\n\
+*CHI:\tagain . \u{15}1500_2000\u{15}\n\
+%wor:\tagain \u{15}0_500\u{15} .\n\
+@End\n";
+        let namespace = FaCacheNamespace::for_test("test-fa-wave-v1");
+        let params = refresh_params();
+        let complete = complete_wor(BACKWARD, &params);
+
+        let AlignedOutput {
+            document,
+            shortfalls,
+            exclusions: _,
+        } = refresh_from_complete_wor(&complete, &namespace, &params)
+            .expect("the file is written with the stripped utterance named")
+            .into_document();
+        let [
+            crate::api::OutputShortfallRecord::TimingIncomplete {
+                untimed_utterances: 1,
+                first_untimed,
+                ..
+            },
+        ] = shortfalls.as_slice()
+        else {
+            panic!("one timing shortfall, got {shortfalls:?}");
+        };
+        let [stripped] = first_untimed.as_slice() else {
+            panic!("one untimed utterance, got {first_untimed:?}");
+        };
+        assert!(
+            matches!(
+                &stripped.cause,
+                crate::api::StoredUntimedCause::Written(
+                    crate::api::UntimedCauseRecord::NeedsRecording { .. }
+                )
+            ),
+            "the cause names the recording, got {:?}\n{}\n{shortfalls:?}",
+            stripped.cause,
+            document.as_str()
+        );
+        assert!(
+            stripped
+                .cause
+                .to_string()
+                .contains("need a run with the recording"),
+            "{}",
+            stripped.cause
+        );
+        let text = document.as_str();
+        assert!(
+            text.contains("*CHI:\tagain .\n"),
+            "the stripped utterance is untimed: {text}"
+        );
+        assert_eq!(
+            text.matches("%wor:").count(),
+            1,
+            "its %wor is removed: {text}"
+        );
+    }
+
     /// Run the real FA entry point on `source` against a real 300 s
     /// recording, with a pool that has no workers: every case using it is
     /// decided without inference. Unsupported untimed utterances have no
@@ -1217,8 +1445,11 @@ mod tests {
             talkbank_model::model::TranscriptName::for_path(std::path::Path::new("sample.cha")),
             crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
         )?;
+        let FaInputDocument::Active(active) = source.attempt() else {
+            panic!("the fixture is aligned, not preserved");
+        };
         run_fa_from_ast(
-            source.attempt(),
+            active,
             &audio,
             &crate::api::LanguageCode3::eng(),
             services,
@@ -1415,7 +1646,7 @@ mod tests {
             .expect("a never-aligned source is admitted");
             match working.attempt() {
                 FaInputDocument::Active(active) => active.admission,
-                FaInputDocument::Preserved(_) => panic!("a never-aligned source is aligned"),
+                FaInputDocument::Preserved => panic!("a never-aligned source is aligned"),
             }
         };
         for (declared, written) in [

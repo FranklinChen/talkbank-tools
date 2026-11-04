@@ -510,6 +510,29 @@ not contain is not written.
 | NOUN, PROPN | `noun\|`, `propn\|` | Gender (not `Com`), Number unless `Sing`, Case, PronType, French `Apm` |
 | others | `adp\|`, `intj\|`, `cconj\|`, `sconj\|`, ... | (none) |
 
+**Tag-marker separators.** The payload keeps CHAT's vocative marker `‡`
+(U+2021) and tag marker `„` (U+201E) as items (see "Separator Word Counter
+Sync" below), so the model sees and echoes them as punctuation tokens. Such a
+token is classified once, by its surface text (`mor_word.rs`:
+`TagMarker::classify`, into `Classified::Marker(TagMarker)` or
+`Classified::Lexical`), and its `%mor` item is written by `TagMarker::mor`
+alone; the generic word path takes only the `Lexical` the classifier minted,
+so it cannot be given a marker and no second spelling of one can arise there
+(a marker arriving as a component of a multi-word token is refused by name,
+`MappingError::TagMarkerAsClitic`, and fails that utterance's mapping). This
+classifies the model's echo of our token; the resting shape is the role
+decided where the word is born, as special forms are (`WordRole`), which
+needs Chatter's extractor to carry the separator kind on the extracted word. The spelling itself is `punct|‡` and `punct|„` today (`cm|‡`
+and `cm|„` in Japanese, where the generic path wrote every `PUNCT` token's
+category as `cm`), PENDING Franklin's decision (O5a) between that and CLAN's
+`beg|beg` / `end|end`; whichever is chosen edits that one function and the
+test that pins it (`tag_marker_spelling_is_pending_o5a`). One difference
+from before: the generic path took the category from the model's UPOS for the
+marker token, so a model that tagged a marker `SYM` or `X` would have written
+`x|‡`; the marker's category no longer depends on what the model called it. The marker keeps the relation the
+model gave it in `%gra`. The comma, also a tag-marker separator in CHAT, is
+written `cm|cm` by the punctuation branch and is not a `TagMarker`.
+
 A feature handler emits `Suffix` values, and a `Suffix` is one of: a feature
 value as the word holds it (`Suffix::Feature`), a fixed rendering of one
 (`reflx`, a lowercased Hebrew binyan), a mark from a curated word table
@@ -763,12 +786,15 @@ UD-to-CHAT mapping happens in Rust (section 5 above).
   ]],
   "model": {"stanza_version": "1.13.0", "lang": "ita", "pipeline": "standard"},
   "repairs": [
-    {"kind": "relation_alias", "word": "ne",
+    {"field": "relation", "kind": "relation_alias", "word": "ne",
      "from_relation": "iob", "to_relation": "iobj"}
-  ],
-  "feature_repairs": []
+  ]
 }
 ```
+
+`repairs` is ONE list of every repair the worker made inside the sentences,
+each entry tagged by the `field` it rewrote (`relation`, `feature_value`,
+`feature_name`, `lemma`; `UdRepairV2`) with that field's own `kind` inside. The sections below describe each field's repairs.
 
 Two things the worker adds to Stanza's sentences, both at the worker boundary
 and both documented with their defects in
@@ -776,7 +802,8 @@ and both documented with their defects in
 
 - **Feature names are respelled** where Stanza misspells them
   (`UD_FEATURE_NAME_ALIASES`; Italian `Verbform` becomes `VerbForm`). Only the
-  name changes, never the value, and it is not reported as a repair.
+  name changes, never the value; the respelling is reported as a
+  `feature_name` repair (see below).
 - **English `-ing` nouns carry their verb reading** in UD MISC as
   `VerbReadingLemma=<lemma>`, from Stanza's own lemmatizer asked for the VERB
   reading (`_english_verb_reading.py`). The Rust copula rescue (Defect 1) reads
@@ -785,7 +812,7 @@ and both documented with their defects in
 
 The other two kinds carry no analysis: `{"kind": "no_words"}` for an utterance
 with no words (no model ran, so it names none), and `{"kind": "failed",
-"error": "..."}` for an item whose file fails with that message. All four
+"error": "..."}` for an item whose file fails with that message. All three
 fields of `analyzed` are required, with no defaults: an analysis that could not
 name its model, or that left "repaired nothing" indistinguishable from "does
 not report repairs", is exactly the shape that hid these facts before.
@@ -794,9 +821,11 @@ not report repairs", is exactly the shape that hid these facts before.
 
 Stanza does not guarantee that `deprel` is a Universal Dependencies relation.
 `RepairedSentence` (in `inference/morphosyntax.py`) is the boundary that fixes
-that, and it reports what it fixed instead of only logging it. Four repairs
-exist, named identically on both sides of the wire
-(`RelationRepairKind` / `UdRelationRepairKindV2`):
+that, and it reports what it fixed instead of only logging it. Four relation
+repairs exist, named identically on both sides of the wire
+(`RelationRepairKind` / `UdRelationRepairKindV2`), plus a fifth the dependency
+graph makes when it takes back the appended terminator cue
+(`cue_root_promotion`):
 
 | Kind | Trigger | Applied |
 |---|---|---|
@@ -828,8 +857,8 @@ Two properties are worth knowing before changing any of this:
 Stanza-trained models also emit padding as a FEATS value (`Case=<PAD>`),
 which is no value of any UD feature. The same constructor, `RepairedSentence`, removes every
 padding value and reports each removal (`FeatureRepair` /
-`UdFeatureRepairV2`, carried in the analyzed item's `feature_repairs` beside
-its relation `repairs`):
+`UdFeatureRepairV2`, a `feature_value` entry of the analyzed item's
+`repairs`):
 
 | Kind | Trigger | Applied |
 |---|---|---|
@@ -847,9 +876,58 @@ reported repair of anything that is not padding. The Rust FEATS admission
 applies the same test and refuses a value that arrives unrepaired, so a
 padding value cannot be represented in `WordFeatures`.
 
-Rust collects both kinds of repair per file (`AppliedAnalyses`, beside the
-models) and writes their total into the morphotag provenance comment as
-`ud_repairs=`; see [Provenance](../architecture/provenance.md).
+### Feature name repair
+
+Stanza's Italian model spells one feature name wrong (`Verbform=Fin`, verified
+on 1.14.0 and 1.15.0), and every consumer looks for `VerbForm`. The worker
+respells the name (`UD_FEATURE_NAME_ALIASES`) and reports it
+(`FeatureNameRepair` / `UdFeatureNameRepairV2`, a `feature_name` entry):
+
+| Kind | Trigger | Applied |
+|---|---|---|
+| `feature_name_alias` | a known misspelling of a UD feature name (`Verbform`) | the UD name (`VerbForm`); the value is untouched |
+
+Until it was reported, this was the one rewrite the file's `ud_repairs=`
+could not count. A repair that changed nothing is refused by its constructor.
+
+### Lemma repair
+
+Stanza occasionally lemmatizes a word that has letters to punctuation alone
+(`bonjour` as `...`, a CJK word as `》`), which is no lemma of that word. The
+worker applies the surface form and reports it (`LemmaRepair` /
+`UdLemmaRepairV2`, a `lemma` entry):
+
+| Kind | Trigger | Applied |
+|---|---|---|
+| `punctuation_lemma` | a lettered word whose lemma is made only of characters that are neither letters nor digits nor whitespace (punctuation, symbols, marks); not an empty lemma, not the surface form, not a punctuation word lemmatized as itself | the word's surface form |
+
+What a punctuation lemma is has one definition, Rust's
+`is_punctuation_lemma` (`batchalign-types`), which the worker calls as
+`batchalign_core.is_punctuation_lemma`: the worker never classifies a lemma
+itself. A reported lemma repair is admitted through the same test where the
+response is deserialized, so a worker cannot report replacing a lemma that was
+no punctuation lemma of its word. A multi-word token's range row (whose lemma
+is empty by construction) is never judged.
+
+This repair used to run TWICE: once in the worker, logged but not reported, and
+once more in Rust (`validate_and_clean`, on every word the raw Stanza parser
+admitted), under a second predicate that disagreed with the worker's at the
+edges; a padding relation was likewise rewritten to `dep` on both sides. The
+Rust pass is gone. The server's UD word admission (`TryFrom<UdWordAnalysis>
+for UdWord`, `UdWordAdmissionError`) refuses an analysis that still carries a
+padding relation or a punctuation-only lemma, naming the word, exactly as it
+refuses an unrepaired padding feature: the worker is the one repair site, and
+a repaired value cannot be represented in a `UdWord`.
+
+### What is counted
+
+Rust collects every repair per file in one list (`AppliedAnalyses`, beside the
+models), writes their total into the morphotag provenance comment as
+`ud_repairs=`, and logs the tally by kind (`feature_name_alias=1
+pad_feature_value=1 pad_relation=1 punctuation_lemma=1`); see
+[Provenance](../architecture/provenance.md). The total counts every field,
+because the list is counted whole: a kind the worker reports cannot be a kind
+the count forgot.
 
 ### Worker-side batch inference (`worker/_infer_hosts.py` + `inference/morphosyntax.py`)
 
@@ -868,7 +946,8 @@ The worker-side morphosyntax host wraps Stanza to conform to this interface:
    of that group with a typed reason; none of them gets an empty analysis
 6. Per item: remove the appended terminator, apply the PyCantonese POS
    override where the variant says so, then build `RepairedSentence`, which
-   validates every word and repairs its relation
+   validates every word and repairs its lemma, feature names, feature values
+   and relation, reporting each repair
 7. Return one tagged item per payload item, each analysis naming its model and
    carrying its repairs
 

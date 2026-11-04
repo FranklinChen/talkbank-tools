@@ -11,6 +11,11 @@
 //!   outside the intended tree (e.g. `../../../etc/passwd`).
 //! - **Parent directory creation**: intermediate directories are created
 //!   automatically so callers do not need to pre-create nested output trees.
+//! - **Atomic text writes**: a text result replaces its destination through
+//!   `crate::atomic_file::write_text_artifact` (write beside, fsync, rename),
+//!   never a truncating write, because without `-o` the destination is the
+//!   user's only copy of the `.cha`. Binary results keep their own streamed,
+//!   digest-checked, new-only publication in `binary`.
 //!
 //! Roots and already-rooted destinations are separate types. Admission resolves
 //! existing symlinks without creating directories; writing rechecks containment
@@ -44,6 +49,101 @@ struct ResultDestination {
     path: PlannedOutputPath,
     root: OutputRoot,
     content_type: ContentType,
+    /// How this destination was decided at admission, kept so a plan can say
+    /// what the run will do to the filesystem before it runs.
+    decision: WriteDecision,
+    /// The submitted source this result belongs to.
+    source: PathBuf,
+}
+
+/// One admitted destination as a plan reads it: what will be written where,
+/// for which source, and what that does to the file already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannedDestination<'a> {
+    /// The exact result name the server will return.
+    pub name: &'a str,
+    /// The planned path on this machine.
+    pub path: &'a Path,
+    /// The result's kind.
+    pub content_type: ContentType,
+    /// What writing it does to the file at the path.
+    pub decision: WriteDecision,
+    /// The submitted source it belongs to.
+    pub source: &'a Path,
+}
+
+/// Authority to replace a file that already exists at a generated destination:
+/// a planned output that is not the submitted source itself (for `transcribe`,
+/// the `<media>.cha` beside the recording).
+///
+/// Minted in exactly two places, and nowhere else: the `--overwrite` flag
+/// ([`Overwrite::by_flag`], called by the argument layer) and an explicit
+/// output directory (inside [`ResultDestinations::admit`], privately: a user
+/// who named a directory for results asked for that directory's contents to be
+/// the results). A command that rewrites the file it was given needs no
+/// authority; that destination is [`WriteDecision::RewritesSource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Overwrite(OverwriteGrant);
+
+/// Which of the two sources granted an [`Overwrite`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverwriteGrant {
+    /// `--overwrite` on the command line.
+    Flag,
+    /// `-o DIR`: the results were asked for under that directory.
+    OutputDirectory,
+}
+
+impl Overwrite {
+    /// The authority `--overwrite` grants. The argument layer is the only
+    /// caller: a flag the user typed is the one place this may come from
+    /// outside admission.
+    pub(crate) fn by_flag() -> Self {
+        Self(OverwriteGrant::Flag)
+    }
+
+    /// The authority an explicit output directory grants, minted only by
+    /// admission when `-o` was given.
+    fn by_output_directory() -> Self {
+        Self(OverwriteGrant::OutputDirectory)
+    }
+
+    /// What granted it, as the plan prints it.
+    pub fn granted_by(self) -> &'static str {
+        match self.0 {
+            OverwriteGrant::Flag => "--overwrite",
+            OverwriteGrant::OutputDirectory => "the output directory",
+        }
+    }
+}
+
+/// What admission decided one text destination means for the file at its
+/// path. Decided once, before anything is submitted, so a run never discovers
+/// at copy-back that it is about to replace a file nobody asked it to.
+///
+/// A binary export is not represented: it is new-only, refused at admission
+/// when anything is at its path (see `binary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteDecision {
+    /// Nothing is at the path; the result will create it.
+    Fresh,
+    /// The destination is the submitted source: the command rewrites the file
+    /// it was given (`align`, `morphotag` and the other in-place commands).
+    RewritesSource,
+    /// A file is there and the result will replace it, under this authority.
+    Replace(Overwrite),
+}
+
+impl std::fmt::Display for WriteDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fresh => f.write_str("new file"),
+            Self::RewritesSource => f.write_str("rewrites the input"),
+            Self::Replace(authority) => {
+                write!(f, "replaces an existing file ({})", authority.granted_by())
+            }
+        }
+    }
 }
 
 impl ResultDestinations {
@@ -72,12 +172,45 @@ impl ResultDestinations {
         Ok(common)
     }
 
+    /// What admission decided for one planned result, by its exact name.
+    pub fn write_decision(&self, name: &str) -> Option<WriteDecision> {
+        self.artifacts.get(name).map(|artifact| artifact.decision)
+    }
+
+    /// Every admitted destination, ordered by source then name, so a plan
+    /// prints the same way twice. A projection: it grants no write.
+    pub fn planned(&self) -> Vec<PlannedDestination<'_>> {
+        let mut planned: Vec<PlannedDestination<'_>> = self
+            .artifacts
+            .iter()
+            .map(|(name, artifact)| PlannedDestination {
+                name: name.as_str(),
+                path: &artifact.path.0,
+                content_type: artifact.content_type,
+                decision: artifact.decision,
+                source: &artifact.source,
+            })
+            .collect();
+        planned.sort_by(|a, b| (a.source, a.name).cmp(&(b.source, b.name)));
+        planned
+    }
+
+    /// Admit every destination, deciding once what the run will do to the
+    /// file at each path. A text destination that is not a submitted source
+    /// and already exists needs an [`Overwrite`]: `overwrite` carries the
+    /// flag's, and `out_dir` grants its own. Without either, the refusal is
+    /// here, before any job, provider call or model run, so nothing is paid
+    /// for a file that will not be written.
     pub(super) fn admit(
         options: &crate::options::CommandOptions,
         inputs: &[PlannedServerInput],
         out_dir: Option<&Path>,
+        overwrite: Option<Overwrite>,
     ) -> Result<Self, CliError> {
         let explicit_root = out_dir.map(OutputRoot::admit).transpose()?;
+        // `-o DIR` is itself an authority: the user asked for DIR's contents
+        // to be these results. The flag wins the display when both are given.
+        let authority = overwrite.or(explicit_root.is_some().then(Overwrite::by_output_directory));
         let mut artifacts = HashMap::new();
         let mut destinations: HashMap<PathBuf, PathBuf> = HashMap::new();
         let mut names: HashMap<String, PathBuf> = HashMap::new();
@@ -110,7 +243,7 @@ impl ResultDestinations {
                 })?;
                 let path = PlannedOutputPath::already_planned(&parent.join(basename))?;
                 let identity = path.checked_under(&root)?;
-                if output.content_type.is_binary() {
+                let decision = if output.content_type.is_binary() {
                     if sources.contains(&identity) {
                         return Err(CliError::InvalidArgument(
                             "an audio export would replace a submitted source".into(),
@@ -126,7 +259,28 @@ impl ResultDestinations {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(error) => return Err(error.into()),
                     }
-                }
+                    WriteDecision::Fresh
+                } else if sources.contains(&identity) {
+                    // The command was given this file and rewrites it; that
+                    // is what the command is, not something to authorize.
+                    WriteDecision::RewritesSource
+                } else {
+                    match std::fs::symlink_metadata(&path.0) {
+                        Ok(_) => match authority {
+                            Some(authority) => WriteDecision::Replace(authority),
+                            None => {
+                                return Err(CliError::ExistingOutput {
+                                    destination: path.0.clone(),
+                                    input: input.source().to_path_buf(),
+                                });
+                            }
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            WriteDecision::Fresh
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
                 if let Some(first) =
                     destinations.insert(identity.clone(), input.source().to_path_buf())
                 {
@@ -149,6 +303,8 @@ impl ResultDestinations {
                         path,
                         root: root.clone(),
                         content_type: output.content_type,
+                        decision,
+                        source: input.source().to_path_buf(),
                     },
                 );
             }
@@ -342,7 +498,12 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     out
 }
 
-/// Write a single file result to the output directory.
+/// Write a single text file result to its admitted destination, replacing
+/// whatever is there, atomically. Whether anything may be there was decided
+/// at admission ([`WriteDecision`]): an in-place job's destination is its
+/// input, an existing file was authorized by `--overwrite` or `-o`, and a
+/// fresh destination may since have been written by the daemon in paths
+/// mode, where the copy-back and the run share a filesystem.
 ///
 /// Only the producer-admitted exact name and content type permit a write.
 ///
@@ -374,7 +535,7 @@ pub fn write_result(
     planned.path.checked_under(&planned.root)?;
     let root = OutputRoot::prepare(planned.root.as_path())?;
     let destination = planned.path.clone().verified_under(&root)?;
-    std::fs::write(&destination, content)?;
+    crate::atomic_file::write_text_artifact(&destination, content)?;
     Ok(true)
 }
 

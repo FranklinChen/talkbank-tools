@@ -37,6 +37,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 pub use duration::{AudioDuration, DurationBasis, StatingContainer, WalkReason};
+pub use header::MediaContainer;
 
 use super::tools::{MediaTool, MediaToolError};
 
@@ -159,6 +160,19 @@ impl MediaProbe {
                 self.walked(walk, reason)
             }
         }
+    }
+
+    /// Which container the file is in, by its header: the demuxer ffprobe
+    /// selects for it, among the ones this crate has measured. One header
+    /// read, never a walk, and never the file's extension, which can say
+    /// anything. A file with no audio stream or an unmeasured demuxer is
+    /// refused by name.
+    pub async fn container(&self) -> Result<MediaContainer, ProbeError> {
+        let header = MediaTool::Ffprobe
+            .run_async(self.args(HEADER_ENTRIES))
+            .await;
+        self.answer::<header::HeaderAnswer>(header)?
+            .container(&self.input())
     }
 
     /// How long the audio runs, for a caller already on a blocking thread

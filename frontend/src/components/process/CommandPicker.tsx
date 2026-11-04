@@ -18,8 +18,8 @@ interface CommandLabels {
 /** The command selects its language policy; a text-NLP command cannot carry a
  * job-level language selector. These are the launcher's supported commands. */
 export type CommandDef = CommandLabels & (
-  | { id: "morphotag" | "translate"; language: "per-file"; input: "transcripts" }
-  | { id: "align" | "utseg"; language: "job"; input: "transcripts" }
+  | { id: "morphotag" | "translate" | "align"; language: "per-file"; input: "transcripts" }
+  | { id: "utseg"; language: "job"; input: "transcripts" }
   | { id: "transcribe" | "benchmark"; language: "job"; input: "recordings" }
 );
 
@@ -48,7 +48,7 @@ export const COMMANDS: CommandDef[] = [
     id: "align",
     label: "Align to Audio",
     description: "Estimate word timing in a transcript using its audio; review the inferred timing before relying on it",
-    language: "job",
+    language: "per-file",
     input: "transcripts",
   },
   {

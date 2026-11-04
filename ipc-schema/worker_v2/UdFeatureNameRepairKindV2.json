@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdFeatureNameRepairKindV2",
+  "description": "Why a Universal Dependencies feature name a worker received from Stanza is not the name in the analysis it returned. Closed: a worker cannot report a feature name repair not named here.",
+  "oneOf": [
+    {
+      "type": "string",
+      "const": "feature_name_alias"
+    }
+  ]
+}

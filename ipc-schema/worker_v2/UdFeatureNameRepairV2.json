@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdFeatureNameRepairV2",
+  "description": "One feature name a worker respelled inside an analysis it returned.\n\nThe worker is the only witness, as for every repair: the misspelled name\nis not in the analysis the server receives. Stanza's Italian model writes\n`Verbform=Fin`, which every consumer of `VerbForm` would read as no form\nat all; respelling it is a rewrite of what the model said, so it is\nreported like one.",
+  "type": "object",
+  "properties": {
+    "from_name": {
+      "description": "The name the model produced, verbatim (`Verbform`).",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Which repair this is.",
+      "$ref": "#/$defs/UdFeatureNameRepairKindV2"
+    },
+    "to_name": {
+      "description": "The UD name applied in its place (`VerbForm`).",
+      "type": "string"
+    },
+    "word": {
+      "description": "Surface form of the word the feature belongs to.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "word",
+    "from_name",
+    "to_name"
+  ],
+  "$defs": {
+    "UdFeatureNameRepairKindV2": {
+      "description": "Why a Universal Dependencies feature name a worker received from Stanza is not the name in the analysis it returned. Closed: a worker cannot report a feature name repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "feature_name_alias"
+        }
+      ]
+    }
+  }
+}

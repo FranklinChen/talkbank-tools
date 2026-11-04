@@ -194,7 +194,7 @@ language of the file is that proof's sibling.
 | The file's primary `@Languages` (`FileLanguage::resolve`, at parse) | the pool's registry | refuses |
 | Each outstanding utterance's effective language (`DispatchPlan::admit`) | the file's proof (`AnalysisUnavailable::of_sibling`); a gap refuses | cannot arise |
 | Secondary (L2) `@s` spans (`dispatch_secondary_l2`) | the file's proof; a language without a pipeline is an exclusion (`L2|xxx`, reported unsupported) | cannot arise |
-| Submission (`validate_language_with_registry`, job-level languages of compare and utseg, each by its own requirement) | the registry in hand; early refusal naming the languages that are available | skipped; the job meets the registry after its capability probe |
+| Submission (`validate_language_with_registry`, the job-level language of utseg by its own requirement; compare is per file, like morphotag, and meets the registry per file) | the registry in hand; early refusal naming the languages that are available | skipped; the job meets the registry after its capability probe |
 | Utseg dispatch (`UtsegRoute::admit`, after the capability probe) | the pool's registry, for the Stanza route only | refuses the job |
 | Transcribe's post-CHAT segmentation (`post_chat_route`, once recognition names the language, known or auto-detected) | the pool's registry, for the Stanza route only; a refusal is not applied, recorded as a `stage_not_applied` shortfall | not applied, recorded the same way |
 | Transcribe's morphosyntax (`prepare_tail`, a known language) | the pool's registry; a gap is not applied, recorded as a `stage_not_applied` shortfall | runs it; its own admission refuses and records a shortfall |

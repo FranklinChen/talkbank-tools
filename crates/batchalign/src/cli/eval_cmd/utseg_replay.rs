@@ -48,7 +48,7 @@ use crate::cli::eval_cmd::InputIdentity;
 use crate::provenance::{GeneratedComment, UnparseableStamp, recognize_generated_comment};
 use crate::utseg::{
     AdmittedUtsegPrediction, apply_utseg_document, collect_utseg_batch_items,
-    integrate_admitted_assignments,
+    integrate_admitted_segmentations,
 };
 use crate::utseg_evidence::{
     AdmittedUtsegEvidence, AdmittedUtsegEvidenceItem, UtsegEvidenceAdmissionError,
@@ -928,9 +928,10 @@ fn replay_post_chat(
     let bound = bind(&collected, items)?;
 
     let utterances_before = chat.utterances().count();
-    let mut assignments: HashMap<usize, Vec<usize>> = HashMap::new();
-    integrate_admitted_assignments(&mut assignments, &collected, bound.as_slice());
-    apply_utseg_document(&mut chat, &assignments)?;
+    let mut segmentations: HashMap<usize, batchalign_types::segmentation::UtteranceSegmentation> =
+        HashMap::new();
+    integrate_admitted_segmentations(&mut segmentations, &collected, bound.as_slice());
+    apply_utseg_document(&mut chat, &segmentations)?;
     let utterances_after = chat.utterances().count();
 
     let recomputed = comparison_basis(&chat, "reapplied segmentation")?;
@@ -1000,9 +1001,20 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
             .collect();
     let bound = bind(&collected, items)?;
 
-    let split = crate::pipeline::transcribe::apply_prechat_assignments(&chunks, bound.as_slice());
-    let mut utterances = asr_postprocess::utterances_from_prepared_chunks(split);
+    let prepared_chunks = chunks.len();
+    let split = crate::pipeline::transcribe::apply_prechat_segmentations(
+        chunks,
+        bound.as_slice(),
+        lang.as_ref(),
+    )
+    .map_err(|error| UtsegReplayRefusal::Rebuild(error.to_string()))?;
+    let mut utterances = asr_postprocess::utterances_from_segmented_chunks(split);
     asr_postprocess::finalize_utterances(&mut utterances, lang.as_ref());
+    // The retained response's window-seam records, placed as transcribe
+    // placed them, so a seam comment in the retained transcript is reproduced
+    // rather than counted as a segmentation difference.
+    crate::transcribe::place_response_seams(&mut utterances, &response)
+        .map_err(|unplaced| UtsegReplayRefusal::Rebuild(unplaced.to_string()))?;
 
     let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
         .into_transcript(&[lang.to_string()], args.media_name.as_deref(), args.wor)
@@ -1027,7 +1039,7 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
         build: crate::build_hash(),
         pass: ReplayPass::PreAsr {
             asr_response: response_artifact.identity(),
-            prepared_chunks: chunks.len(),
+            prepared_chunks,
             utterances: utterances.len(),
             language_invalid_words,
         },
@@ -1141,7 +1153,7 @@ mod tests {
     /// Evidence for `INPUT` recording `assignments`, in the shape a run writes.
     fn evidence_json(assignments: &[usize]) -> String {
         json!({
-            "schema_version": 4,
+            "schema_version": 5,
             "phase": "post_chat",
             "language": "eng",
             "items": [{
@@ -1164,7 +1176,10 @@ mod tests {
         let (mut chat, errors) = parse_lenient(&parser, INPUT);
         assert!(errors.is_empty(), "fixture must parse cleanly");
         let mut map = HashMap::new();
-        map.insert(0, assignments);
+        map.insert(
+            0,
+            batchalign_types::segmentation::UtteranceSegmentation::unstated(assignments),
+        );
         apply_utseg_document(&mut chat, &map).expect("admitted replay split");
         to_chat_string(&chat)
     }
@@ -1243,7 +1258,7 @@ mod tests {
     fn evidence_from_an_older_schema_is_refused_by_name() {
         let retained = retained_output(vec![0, 0, 1, 1, 1]);
         let legacy =
-            evidence_json(&[0, 0, 1, 1, 1]).replace("\"schema_version\":4", "\"schema_version\":2");
+            evidence_json(&[0, 0, 1, 1, 1]).replace("\"schema_version\":5", "\"schema_version\":2");
         // The substitution is the whole fixture. If the writer's shape changes
         // and this stops matching, the "legacy" artifact would still be current
         // and readable, and the test would quietly prove nothing instead of
@@ -1257,7 +1272,7 @@ mod tests {
         let refusal = report.expect_err("an unreadable schema must refuse, never compare");
         let rendered = refusal.to_string();
         assert!(
-            rendered.contains("schema 2") && rendered.contains("schema 4"),
+            rendered.contains("schema 2") && rendered.contains("schema 5"),
             "the refusal must name both schemas, got: {rendered}"
         );
     }

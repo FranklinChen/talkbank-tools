@@ -14,8 +14,12 @@ from __future__ import annotations
 import pytest
 
 from batchalign.inference.morphosyntax import (
+    FeatureNameRepair,
+    FeatureNameRepairKind,
     FeatureRepair,
     FeatureRepairKind,
+    LemmaRepair,
+    LemmaRepairKind,
     RelationRepair,
     RelationRepairKind,
     RepairedSentence,
@@ -361,8 +365,12 @@ def test_valid_ud_relations_pass_through_untouched() -> None:
         )
 
 
-def test_misspelled_feature_name_is_respelled_and_its_value_kept() -> None:
-    """Stanza's Italian `Verbform=Fin` must reach Rust as `VerbForm=Fin`."""
+def test_misspelled_feature_name_is_respelled_and_reported() -> None:
+    """Stanza's Italian `Verbform=Fin` must reach Rust as `VerbForm=Fin`.
+
+    The respelling used to be the one rewrite that was applied and never
+    reported, so a file's ``ud_repairs=`` could not count it.
+    """
     sentence = RepairedSentence(
         [
             {
@@ -380,8 +388,112 @@ def test_misspelled_feature_name_is_respelled_and_its_value_kept() -> None:
         sentence.words[0]["feats"]
         == "Mood=Ind|Number=Sing|Person=2|Tense=Imp|VerbForm=Fin"
     )
-    # A spelling repair is not a relation repair and is not reported as one.
-    assert sentence.repairs == ()
+    assert sentence.repairs == (
+        FeatureNameRepair(
+            kind=FeatureNameRepairKind.FEATURE_NAME_ALIAS,
+            word="da",
+            from_name="Verbform",
+            to_name="VerbForm",
+        ),
+    )
+
+
+def test_a_feature_name_repair_cannot_record_a_respelling_that_changed_nothing() -> (
+    None
+):
+    with pytest.raises(ValueError, match="must change the feature name"):
+        FeatureNameRepair(
+            kind=FeatureNameRepairKind.FEATURE_NAME_ALIAS,
+            word="da",
+            from_name="VerbForm",
+            to_name="VerbForm",
+        )
+
+
+def test_punctuation_lemma_is_replaced_by_the_surface_form_and_reported() -> None:
+    """A lettered word lemmatized to punctuation alone takes its surface form.
+
+    The replacement is reported like every other repair; it used to be a
+    log line on this side and a second, silent rewrite on the Rust side.
+    The test is Rust's (``batchalign_core.is_punctuation_lemma``), the same
+    one the server's admission refuses an unrepaired lemma by.
+    """
+    sentence = RepairedSentence(
+        [
+            {
+                "id": 1,
+                "text": "bonjour",
+                "lemma": "...",
+                "upos": "INTJ",
+                "head": 0,
+                "deprel": "root",
+            },
+            # A range row's empty lemma is no repair target.
+            {"id": [2, 3], "text": "au"},
+            {
+                "id": 2,
+                "text": "à",
+                "lemma": "à",
+                "upos": "ADP",
+                "head": 1,
+                "deprel": "case",
+            },
+            {
+                "id": 3,
+                "text": "le",
+                "lemma": "le",
+                "upos": "DET",
+                "head": 1,
+                "deprel": "det",
+            },
+        ]
+    )
+    assert sentence.words[0]["lemma"] == "bonjour"
+    assert sentence.words[1]["lemma"] == ""
+    assert sentence.repairs == (
+        LemmaRepair(
+            kind=LemmaRepairKind.PUNCTUATION_LEMMA, word="bonjour", from_lemma="..."
+        ),
+    )
+
+
+def test_a_lemma_repair_cannot_record_a_real_lemma() -> None:
+    """The mint applies Rust's test, as the server's admission does."""
+    with pytest.raises(ValueError, match="punctuation-only lemma"):
+        LemmaRepair(
+            kind=LemmaRepairKind.PUNCTUATION_LEMMA, word="bonjour", from_lemma="bon"
+        )
+
+
+def test_every_kind_of_repair_writes_its_own_tagged_wire_form() -> None:
+    """One repair of each kind on one sentence, sent as ONE tagged list.
+
+    The wire tag (``field``) comes from the Python wire owner's vocabulary,
+    so a kind the Rust side does not know cannot be spelled here.
+    """
+    sentence = RepairedSentence(
+        [
+            {
+                "id": 1,
+                "text": "da",
+                "lemma": "...",
+                "upos": "VERB",
+                "feats": "Case=<PAD>|Verbform=Fin",
+                "head": 0,
+                "deprel": "iob",
+            }
+        ]
+    )
+    wire = [repair.wire() for repair in sentence.repairs]
+    assert [(entry["field"], entry["kind"]) for entry in wire] == [
+        ("lemma", "punctuation_lemma"),
+        ("feature_name", "feature_name_alias"),
+        ("feature_value", "pad_feature_value"),
+        ("relation", "relation_alias"),
+    ]
+    assert sentence.words[0]["lemma"] == "da"
+    assert sentence.words[0]["feats"] == "VerbForm=Fin"
+    assert sentence.words[0]["deprel"] == "iobj"
 
 
 def test_feature_names_already_in_ud_spelling_pass_through() -> None:

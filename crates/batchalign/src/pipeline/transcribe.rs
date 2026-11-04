@@ -18,8 +18,8 @@ use std::path::Path;
 use tracing::info;
 
 use crate::api::{
-    AsrLanguageRequest, LanguageCode3, NumSpeakers, ReportedEngineName, StageRefusalRecord,
-    TranscriptLanguage, WorkerLanguage,
+    AsrLanguageRequest, LanguageCode3, ReportedEngineName, StageRefusalRecord, TranscriptLanguage,
+    WorkerLanguage,
 };
 use crate::error::{EmptyTranscription, OutputAdmissionRefusal, ServerError};
 use crate::params::MorphosyntaxParams;
@@ -117,6 +117,9 @@ struct ChatDiagnosed {
     asr: Recognized,
     document: crate::pipeline::post_validate::DiagnosedOutput,
     speaker_assignments: SpeakerAssignmentOutcome,
+    /// What assembly itself recorded (a window seam reconciled by rule), to
+    /// which the skipped and held-out stages below add theirs.
+    shortfalls: Vec<Shortfall>,
 }
 
 /// The admitted document after the last optional stage. Every stage ends in
@@ -418,7 +421,7 @@ fn prepare_tail<P: TranscribePlan>(
         }
     };
     let total = 4
-        + usize::from(opts.diarize)
+        + usize::from(opts.speakers.dedicated().is_some())
         + usize::from(post_chat.is_some())
         + usize::from(morphosyntax.runs());
     (
@@ -512,7 +515,7 @@ pub(crate) async fn run_transcribe_pipeline_with_legacy_replay<'a>(
         let recognized = Recognized::admit(response, language, identity, &opts.plan)?;
         let mut ctx = TranscribePipelineContext::new(&audio_path, services, opts, DebugDumper::new(debug_dir),
             UtsegEvidenceSink::new(debug_dir), execution, recognized);
-        if opts.diarize {
+        if opts.speakers.dedicated().is_some() {
             ctx.speaker_segments = Some(replay.speaker_segments().ok_or_else(|| ServerError::Validation(
                 format!("replay {} requested diarization but its manifest has no speaker-turn artifact", replay.recording_id())
             ))?.to_vec());
@@ -527,7 +530,7 @@ async fn finish_transcribe<P: TranscribePlan>(
     tail: TranscribeTail,
     mut progress: TranscribeProgress,
 ) -> Result<CompletedTranscribePipeline, ServerError> {
-    if ctx.opts.diarize {
+    if ctx.opts.speakers.dedicated().is_some() {
         progress
             .run(
                 StageId::SpeakerDiarization,
@@ -562,8 +565,8 @@ async fn finish_transcribe<P: TranscribePlan>(
             asr,
             document,
             speaker_assignments,
+            mut shortfalls,
         }) => {
-            let mut shortfalls = Vec::new();
             // Utterance segmentation works utterance by utterance, so it
             // refuses only the utterances the findings belong to: when they
             // can be confined to some utterances, every other one is
@@ -734,11 +737,17 @@ fn progress_stage_for_stage(stage: StageId) -> FileStage {
 /// returned first-pass speaker labels. The default non-diarized Rev path still
 /// uses ASR labels directly; this helper only governs the opt-in `--diarize`
 /// stage.
-fn should_run_dedicated_speaker_diarization(
+/// The dedicated speaker engine to run after recognition, if any: the plan's,
+/// when recognition produced something to attribute. An empty response has no
+/// words to label, so no engine runs for it.
+fn dedicated_diarization_to_run(
+    speakers: crate::transcribe::SpeakerPlan,
     response: &AsrResponse,
-    speaker_backend: Option<SpeakerBackendV2>,
-) -> bool {
-    !response.tokens.is_empty() && speaker_backend.is_some()
+) -> Option<SpeakerBackendV2> {
+    match response.tokens.is_empty() {
+        true => None,
+        false => speakers.dedicated(),
+    }
 }
 
 /// Decide the transcript's language(s) for CHAT headers and NLP dispatch.
@@ -1172,7 +1181,7 @@ use inference::{stage_asr_infer, stage_speaker_diarization};
 use preprocessing::prepare_asr_chunks_with_snapshot;
 use preprocessing::stage_asr_postprocess;
 pub(crate) use preprocessing::{
-    apply_prechat_assignments, build_prechat_utseg_items, prepare_asr_chunks,
+    apply_prechat_segmentations, build_prechat_utseg_items, prepare_asr_chunks,
 };
 #[cfg(test)]
 mod tests;

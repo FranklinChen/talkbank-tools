@@ -1,7 +1,7 @@
 # transcribe: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-05 13:57 EDT
+**Last updated:** 2026-11-03 15:36 EST
 
 Implementation guide for the `transcribe` command. For user-facing
 documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe.md).
@@ -26,10 +26,12 @@ documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe
 | Speaker evidence cache | `crates/batchalign/src/transcribe/evidence_cache.rs` | Separate raw/derived identities and envelopes, per-key lease, typed miss authorization, durable commits, fakeable inference boundary |
 | Shared speaker operation | `crates/batchalign/src/transcribe/infer.rs`: `resolve_speaker_evidence_for_audio()` | Constructs the exact request/model identity and owns cache-or-infer resolution for both integrated `transcribe` and standalone `diarize` |
 | Standalone dispatch plan | `crates/batchalign/src/runner/dispatch/plan.rs`: `MediaAnalysisDispatchPlan::Diarize` | Carries an already-resolved backend, optional expected count, and cache policy; execution cannot invent or change them |
+| Speaker plan | `crates/batchalign/src/transcribe/types.rs`: `SpeakerPlan`, `SpeakerCount`, `SpeakerSeparation` | `SpeakerCount::admit` (`Known(NonZeroU8)` or `Auto`) and `SpeakerPlan::admit` run once at submission and again at dispatch, against the pair (separation, count): a dedicated diarizer with a count of one is refused; with a dedicated diarizer the recognizer is asked for no separation of its own (`NotRequested`) whatever the count, since the dedicated engine's labels replace the recognizer's and that engine infers an `Auto` count; `Auto` is refused only by a recognizer that is the run's one speaker engine and whose integrated diarization must be given the count (`AsrBackendV2::separates_speakers`, the one table). The plan carries the derived `ProviderDiarizationV2` the worker request is handed; the ASR plan holds no count |
 | Same-job turn retention | `crates/batchalign/src/runner/debug_dumper.rs`: `dump_speaker_turns()` | When `--debug-dir` is set, writes the exact dedicated turns used by transcribe or returns a typed failure |
 | Canonical turns schema | `crates/batchalign/src/runner/dispatch/diarize_turns.rs` | Serializes chatter-compatible turns with backend-derived provenance |
 | ASR worker IPC | `batchalign/inference/asr.py` | Python-hosted ASR engines; Rev is Rust-owned |
-| Raw Rev evidence cache | `crates/batchalign/src/revai/evidence_cache.rs` | Provider-media identity, exact transcript JSON or typed legacy envelope, miss authorization, durable commit, fakeable Rev boundary |
+| Raw Rev evidence cache | `crates/batchalign/src/revai/evidence_cache.rs` | Provider-media identity, exact transcript JSON or typed legacy envelope, miss authorization (submit, or resume a recorded unfinished job), durable commit, pending-job record, fakeable Rev boundary |
+| Rev job wait | `crates/batchalign/src/revai/poll.rs` | Typestate `SubmittedJob -> Polling -> PollEnd`: a `PollPolicy` (deadline, transient budget, interval schedule) is the only way to start a wait; a transient poll failure consumes budget, a terminal one ends the wait, and an unfinished job comes back by name (`Awaited::Unfinished`) for the cache to record. Failure verdicts come from `RevAiError::classify`, the client's one table. Tested at the socket against `revai/scripted_server.rs` with a virtual clock |
 | Speaker worker IPC | `batchalign/inference/speaker.py`: `infer_speaker_prepared_audio()` | Exhaustive dispatch over pyannoteAI, local Pyannote, and NeMo, returning a backend-specific evidence variant |
 | Local Pyannote graph | `batchalign/inference/local_pyannote_model.json` + `pyannote_local.py` | One validated manifest pins the pipeline, segmentation, and embedding commits; Rust hashes the same manifest into the evidence revision |
 | pyannoteAI adapter | `batchalign/inference/pyannote_ai.py` | Typed prepare, upload, submit, complete lifecycle for Precision-2 exclusive diarization |
@@ -245,7 +247,10 @@ CHAT assembly**:
   3. Call `infer_utseg_predictions_with_policy()` to get admitted per-chunk
      boundaries and retain their typed inference source, model evidence, and
      any local-policy receipt
-  4. Apply `split_prepared_chunk_by_assignments()` to split chunks at boundaries
+  4. Apply `apply_prechat_segmentations()`: each chunk is analyzed for exact
+     repetitions (`RetraceAnalyzedChunk::analyze`) and then cut at the
+     admitted segmentation's boundaries, except inside a repetition; each
+     piece carries the terminator its cut predicted
   5. When `--debug-dir` is enabled, atomically persist the versioned
      `pre_chat` evidence before it can be erased to assignments
   6. Convert to final utterances and finalize

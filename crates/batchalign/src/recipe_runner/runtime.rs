@@ -168,23 +168,29 @@ fn staged_output_path(
         .to_owned()
 }
 
-async fn write_text_file(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, content).await
+/// The daemon's one route from an output path to bytes on disk:
+/// `crate::atomic_file::write_text_artifact`, on a blocking thread because it
+/// syncs. Every per-file target here and the kernel's consolidated
+/// `compare.csv` come through it, so no runner path truncates a user's file
+/// before refilling it. The path and content are copied for the blocking
+/// task, as `tokio::fs::write` copied the content.
+pub(crate) async fn publish_text(path: &Path, content: &str) -> std::io::Result<()> {
+    let path = path.to_path_buf();
+    let content = content.to_owned();
+    crate::blocking::spawn_in_span(move || crate::atomic_file::write_text_artifact(&path, &content))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
-/// One CHAT-output destination for a single file in a job: enough
-/// state to derive both the primary on-disk write path and the staged
-/// copy. Bundling the (filesystem, file_index, display_path) triple
-/// gives all the writers a single typed seam, and lets future
-/// per-target preconditions (e.g., paths_mode-aware skip logic) attach
-/// in one place rather than at every callsite.
+/// One text-output destination (CHAT, CSV sidecar or evidence document) for
+/// a single file in a job: enough state to derive both the primary on-disk
+/// write path and the staged copy. Bundling the (filesystem, file_index,
+/// display_path) triple gives all the writers a single typed seam. The paths
+/// it derives are private: the only way bytes reach them is [`publish_text`].
 pub(crate) struct ChatOutputTarget<'a> {
-    pub filesystem: &'a RunnerFilesystemConfig,
-    pub file_index: usize,
-    pub display_path: &'a DisplayPath,
+    filesystem: &'a RunnerFilesystemConfig,
+    file_index: usize,
+    display_path: &'a DisplayPath,
 }
 
 impl<'a> ChatOutputTarget<'a> {
@@ -219,11 +225,11 @@ pub(crate) async fn write_text_output_artifact(
     content: &str,
 ) -> std::io::Result<()> {
     let write_path = target.primary_path();
-    write_text_file(&write_path, content).await?;
+    publish_text(&write_path, content).await?;
 
     let staged_path = target.staged_path();
     if staged_path != write_path {
-        write_text_file(&staged_path, content).await?;
+        publish_text(&staged_path, content).await?;
     }
 
     Ok(())
@@ -258,6 +264,9 @@ pub(crate) async fn write_text_output_artifact(
 /// - Existing bytes differ in any other content (a stamp field such as an
 ///   engine, `%mor`, `%gra`, `%wor`, the stamp of a command the recipe does
 ///   not compose, anything else) → write.
+///
+/// A skipped write touches nothing; a performed one goes through
+/// [`publish_text`].
 ///
 /// The primary write_path and the staged output path are evaluated
 /// independently. In the common paths_mode layout the staged copy lives
@@ -315,12 +324,12 @@ async fn write_chat_if_meaningful_diff(
                 // could contribute; the gate cannot possibly fire and
                 // there is no point reading the existing file just to
                 // compare. Write through.
-                return write_text_file(path, candidate).await;
+                return publish_text(path, candidate).await;
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // First run: file does not exist yet. Write through.
-            return write_text_file(path, candidate).await;
+            return publish_text(path, candidate).await;
         }
         Err(error) => return Err(error),
     }
@@ -337,12 +346,12 @@ async fn write_chat_if_meaningful_diff(
                 // do not write.
                 return Ok(());
             }
-            write_text_file(path, candidate).await
+            publish_text(path, candidate).await
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // Race: file existed at metadata time but is gone now.
             // Treat as first-run and write through.
-            write_text_file(path, candidate).await
+            publish_text(path, candidate).await
         }
         Err(error) => Err(error),
     }
@@ -374,6 +383,25 @@ mod tests {
         RunnerJobSnapshot,
     };
 
+    /// A paths-mode job whose one input is `<root>/input/sample.cha`, whose
+    /// requested output is `host_out`, and whose staging tree is
+    /// `<root>/jobs/job-1`: the shape every writer test here uses.
+    fn paths_mode_filesystem(root: &Path, host_out: &Path) -> RunnerFilesystemConfig {
+        let client = |path: PathBuf| {
+            batchalign_types::paths::ClientPath::new(path.to_string_lossy().to_string())
+        };
+        RunnerFilesystemConfig {
+            paths_mode: true,
+            source_paths: vec![client(root.join("input/sample.cha"))],
+            output_paths: vec![client(host_out.to_path_buf())],
+            before_paths: Vec::new(),
+            staging_dir: batchalign_types::paths::ServerPath::from(root.join("jobs/job-1")),
+            media_mapping: Default::default(),
+            media_subdir: Default::default(),
+            source_dir: client(root.join("input")),
+        }
+    }
+
     fn runner_snapshot(
         command: ReleasedCommand,
         pending_files: Vec<PendingJobFile>,
@@ -388,7 +416,8 @@ mod tests {
             },
             dispatch: RunnerDispatchConfig {
                 command,
-                lang: LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
+                // Compare is a per-file command; no job-level language.
+                lang: LanguageSpec::PerFile,
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Compare(CompareOptions {
                     common: CommonOptions::default(),
@@ -641,25 +670,7 @@ mod tests {
     async fn write_text_output_artifact_keeps_staged_copy_for_paths_mode() {
         let root = tempfile::tempdir().expect("tempdir");
         let host_out = root.path().join("host/output/sample.cha");
-        let filesystem = RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![batchalign_types::paths::ClientPath::new(
-                root.path()
-                    .join("input/sample.cha")
-                    .to_string_lossy()
-                    .to_string(),
-            )],
-            output_paths: vec![batchalign_types::paths::ClientPath::new(
-                host_out.to_string_lossy().to_string(),
-            )],
-            before_paths: Vec::new(),
-            staging_dir: batchalign_types::paths::ServerPath::from(root.path().join("jobs/job-1")),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: batchalign_types::paths::ClientPath::new(
-                root.path().join("input").to_string_lossy().to_string(),
-            ),
-        };
+        let filesystem = paths_mode_filesystem(root.path(), &host_out);
 
         let display = DisplayPath::from("nested/sample.cha");
         let target = ChatOutputTarget::new(&filesystem, 0, &display);
@@ -709,27 +720,9 @@ mod tests {
 @End
 ";
         std::fs::write(&host_out, original).unwrap();
+        let before = std::fs::metadata(&host_out).expect("metadata before");
 
-        let staging_dir = root.path().join("jobs/job-1");
-        let filesystem = RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![batchalign_types::paths::ClientPath::new(
-                root.path()
-                    .join("input/sample.cha")
-                    .to_string_lossy()
-                    .to_string(),
-            )],
-            output_paths: vec![batchalign_types::paths::ClientPath::new(
-                host_out.to_string_lossy().to_string(),
-            )],
-            before_paths: Vec::new(),
-            staging_dir: batchalign_types::paths::ServerPath::from(staging_dir.clone()),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: batchalign_types::paths::ClientPath::new(
-                root.path().join("input").to_string_lossy().to_string(),
-            ),
-        };
+        let filesystem = paths_mode_filesystem(root.path(), &host_out);
 
         // Same content as `original` except for the stamp's name (legacy
         // `ba3` to `fc-ba3`) and its timestamp: the fields are identical.
@@ -762,6 +755,46 @@ mod tests {
             after, original,
             "primary output bytes must be unchanged when only the provenance differs"
         );
+        // A skip is a skip: the atomic writer was not reached, so the file was
+        // not replaced by a staged copy of the same bytes (its modification
+        // time would churn and corpus tooling would see a touched file).
+        let after = std::fs::metadata(&host_out).expect("metadata after");
+        assert_eq!(
+            after.modified().expect("mtime after"),
+            before.modified().expect("mtime before"),
+            "a stamp-only rerun must not touch the file"
+        );
+    }
+
+    /// The in-place output path is the user's only copy of the file, and the
+    /// writer reaches the atomic primitive rather than rewriting it: the path
+    /// names a new inode afterwards (a truncating write keeps the inode).
+    /// `atomic_file`'s own tests prove what a new inode implies.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_text_output_artifact_replaces_the_previous_file_rather_than_rewriting_it() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_out = root.path().join("host/output/sample.cha");
+        std::fs::create_dir_all(host_out.parent().unwrap()).unwrap();
+        std::fs::write(&host_out, "@UTF8\n@Begin\n*CHI:\told .\n@End\n").unwrap();
+        let old_inode = std::fs::metadata(&host_out).expect("metadata").ino();
+        let filesystem = paths_mode_filesystem(root.path(), &host_out);
+
+        let display = DisplayPath::from("sample.cha");
+        let target = ChatOutputTarget::new(&filesystem, 0, &display);
+        write_text_output_artifact(&target, "@UTF8\n@Begin\n*CHI:\tnew .\n@End\n")
+            .await
+            .expect("write output");
+
+        assert_eq!(
+            std::fs::read_to_string(&host_out).expect("host output"),
+            "@UTF8\n@Begin\n*CHI:\tnew .\n@End\n"
+        );
+        assert_ne!(
+            std::fs::metadata(&host_out).expect("metadata").ino(),
+            old_inode
+        );
     }
 
     /// Real `%mor` content change must still write through. The gate is
@@ -780,26 +813,7 @@ mod tests {
 ";
         std::fs::write(&host_out, original).unwrap();
 
-        let staging_dir = root.path().join("jobs/job-1");
-        let filesystem = RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![batchalign_types::paths::ClientPath::new(
-                root.path()
-                    .join("input/sample.cha")
-                    .to_string_lossy()
-                    .to_string(),
-            )],
-            output_paths: vec![batchalign_types::paths::ClientPath::new(
-                host_out.to_string_lossy().to_string(),
-            )],
-            before_paths: Vec::new(),
-            staging_dir: batchalign_types::paths::ServerPath::from(staging_dir.clone()),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: batchalign_types::paths::ClientPath::new(
-                root.path().join("input").to_string_lossy().to_string(),
-            ),
-        };
+        let filesystem = paths_mode_filesystem(root.path(), &host_out);
 
         // Different `%mor` content: a legitimate result update.
         let candidate = "\
@@ -832,26 +846,7 @@ mod tests {
         let host_out = root.path().join("host/output/sample.cha");
         // Note: target file does NOT exist yet.
 
-        let staging_dir = root.path().join("jobs/job-1");
-        let filesystem = RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![batchalign_types::paths::ClientPath::new(
-                root.path()
-                    .join("input/sample.cha")
-                    .to_string_lossy()
-                    .to_string(),
-            )],
-            output_paths: vec![batchalign_types::paths::ClientPath::new(
-                host_out.to_string_lossy().to_string(),
-            )],
-            before_paths: Vec::new(),
-            staging_dir: batchalign_types::paths::ServerPath::from(staging_dir.clone()),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: batchalign_types::paths::ClientPath::new(
-                root.path().join("input").to_string_lossy().to_string(),
-            ),
-        };
+        let filesystem = paths_mode_filesystem(root.path(), &host_out);
 
         let candidate = "\
 @Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng ; lang=eng | 2026-05-08T02:52:17-04:00]

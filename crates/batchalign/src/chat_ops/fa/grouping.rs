@@ -11,7 +11,7 @@ use super::coordinates::{FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
 use super::presence::RecordingPresence;
 use super::split::{AnchoredSplit, NonEmptyWords, OverBudgetWindow, Pieces};
-use super::utr::AnchorIndex;
+use super::utr::{AnchorIndex, CorridorCeiling, CorridorFloor, SearchProvenance};
 use super::{FaWord, TimeSpan};
 
 /// A group of utterances clustered for FA, and the audio it is aligned against.
@@ -426,6 +426,26 @@ pub fn group_utterances(
             continue;
         };
         let span = localized.span;
+        // The request evidence of a searched utterance: where its window came
+        // from, recorded before admission so a refused corridor is explained
+        // beside its refusal and an admitted one beside its request.
+        if let Localization::Searched(SearchProvenance::OrderCorridor { floor, ceiling }) =
+            localized.localization
+        {
+            let corridor = batchalign_transform::decisions::SearchCorridor {
+                start_ms: span.start_ms,
+                end_ms: span.end_ms,
+                floor: floor.into(),
+                ceiling: ceiling.into(),
+            };
+            decisions.push(DecisionRecord::new_and_trace(
+                line_idx,
+                utt.main.speaker.as_str().to_owned(),
+                DecisionStrategy::Fa(FaStrategy::SearchCorridor(corridor)),
+                corridor.to_string(),
+                false,
+            ));
+        }
         let window = match GroupWindow::admit(&localized, budget, recording) {
             Ok(window) => window,
             Err(refusal) => {
@@ -546,6 +566,49 @@ pub fn group_utterances(
 struct LocalizedUtterance {
     words: NonEmptyWords,
     span: TimeSpan,
+    /// Where `span` came from, for the request evidence.
+    localization: Localization,
+}
+
+/// How an utterance's span was localized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Localization {
+    /// The transcript supplied a bullet.
+    SuppliedBullet,
+    /// Utterance timing recovery admitted a search window for its words.
+    Searched(SearchProvenance),
+}
+
+/// The corridor's edges as the decision record carries them. The decisions
+/// crate cannot see this crate's types, so each edge is restated in plain
+/// numbers by one exhaustive match per side; the utterance is its zero-based
+/// ordinal among main tiers, as `utterance_idx` is throughout the evidence.
+impl From<CorridorFloor> for batchalign_transform::decisions::CorridorBound {
+    fn from(floor: CorridorFloor) -> Self {
+        match floor {
+            CorridorFloor::FileStart => Self::RecordingEdge,
+            CorridorFloor::MarkedOverlapUnbounded => Self::MarkedOverlapUnbounded,
+            CorridorFloor::PrecedingMeasured(bound) => Self::Measured {
+                ms: bound.ms,
+                utterance: bound.utterance.index(),
+            },
+        }
+    }
+}
+
+impl From<CorridorCeiling> for batchalign_transform::decisions::CorridorBound {
+    fn from(ceiling: CorridorCeiling) -> Self {
+        match ceiling {
+            CorridorCeiling::FileEnd => Self::RecordingEdge,
+            CorridorCeiling::FollowingOverlaps { utterance } => Self::FollowingOverlaps {
+                utterance: utterance.index(),
+            },
+            CorridorCeiling::FollowingMeasured(bound) => Self::Measured {
+                ms: bound.ms,
+                utterance: bound.utterance.index(),
+            },
+        }
+    }
 }
 
 impl LocalizedUtterance {
@@ -556,24 +619,34 @@ impl LocalizedUtterance {
         anchors: &AnchorIndex,
         recording: &Recording,
     ) -> Option<Self> {
-        let span = match source
+        let (span, localization) = match source
             .main
             .content
             .bullet
             .as_ref()
             .and_then(talkbank_model::BulletState::as_parsed)
         {
-            Some(bullet) => TimeSpan::new(bullet.timing.start_ms, bullet.timing.end_ms),
-            None => anchors.search_window(
-                utterance,
-                words.as_slice(),
-                // Permit evidence anywhere in the recording, not only inside
-                // a guessed crop. This is a containment bound, never a fallback.
-                TimeSpan::new(0, recording.duration().get()),
-                recording,
-            )?,
+            Some(bullet) => (
+                TimeSpan::new(bullet.timing.start_ms, bullet.timing.end_ms),
+                Localization::SuppliedBullet,
+            ),
+            None => {
+                let window = anchors.search_window(
+                    utterance,
+                    words.as_slice(),
+                    // Permit evidence anywhere in the recording, not only inside
+                    // a guessed crop. This is a containment bound, never a fallback.
+                    TimeSpan::new(0, recording.duration().get()),
+                    recording,
+                )?;
+                (window.span, Localization::Searched(window.provenance))
+            }
         };
-        Some(Self { words, span })
+        Some(Self {
+            words,
+            span,
+            localization,
+        })
     }
 }
 

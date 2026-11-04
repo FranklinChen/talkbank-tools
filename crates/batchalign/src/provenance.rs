@@ -199,6 +199,11 @@ enum StampField {
     MainBullets,
     ProvenanceIncomplete,
     Retokenize,
+    /// Written by `align` only when its bullets were refreshed from a complete
+    /// `%wor` with no recording read (`timing=refreshed_from_wor`); absent
+    /// when words were aligned against audio, as `utr=` is absent when no
+    /// recovery ran.
+    Timing,
     UdRepairs,
     Utr,
     UtrUnavailable,
@@ -221,6 +226,7 @@ impl StampField {
             Self::MainBullets => "main_bullets",
             Self::ProvenanceIncomplete => "provenance_incomplete",
             Self::Retokenize => "retokenize",
+            Self::Timing => "timing",
             Self::UdRepairs => "ud_repairs",
             Self::Utr => "utr",
             Self::UtrUnavailable => "utr_unavailable",
@@ -1124,7 +1130,7 @@ struct StampedMorphotagRecord {
     /// Every engine name the stamps record. A stamp with no `engine=` field
     /// names nothing.
     engines: EngineNames,
-    /// How many UD repairs (relations and feature values) the stamps record.
+    /// How many UD repairs (of every kind) the stamps record.
     /// A stamp with no `ud_repairs=` field records none, which is what the
     /// grammar's absence means. A stamp written by a build older than the field records none
     /// too, and is indistinguishable from one that repaired nothing: the
@@ -1180,13 +1186,32 @@ fn stamped_morphotag_record(
     Ok(record)
 }
 
+/// Where an align run's word timing came from, as its stamp says it.
+///
+/// One value per route (`crate::fa::AlignRoute`), so the stamp cannot claim a
+/// source the route did not have. Only the refresh writes a field: a reader
+/// of an align stamp without `timing=` is reading a run that aligned against
+/// audio, as every align stamp before 2026-11-03 was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlignTiming {
+    /// Words were aligned against the recording (in full, in part, or
+    /// incrementally).
+    Aligned,
+    /// Bullets were refreshed from a complete `%wor`; no recording was read.
+    RefreshedFromWor,
+    /// A declared no-op: no stamp is written at all, so no field is either.
+    Preserved,
+}
+
 /// Build a provenance comment for align: `fa=` is the FA engine the selected
 /// worker reported (also the FA cache namespace), `utr=` names the timing
-/// recovery engine when a recovery pass ran, and `main_bullets=` records
+/// recovery engine when a recovery pass ran, `main_bullets=` records
 /// whether the input's utterance bullets were kept (`keep`) or derived from
-/// the aligned words (`derive`). The last is always written, the default
-/// included: a reader must not have to know which value is the default to
-/// tell whether an output's bullets are the input's.
+/// the aligned words (`derive`), and `timing=refreshed_from_wor` says the run
+/// read no recording and refreshed the bullets from the file's own complete
+/// `%wor`. `main_bullets=` is always written, the default included: a reader
+/// must not have to know which value is the default to tell whether an
+/// output's bullets are the input's.
 pub(crate) fn align_provenance(
     lang: &LanguageCode3,
     fa: &FaCacheNamespace,
@@ -1194,6 +1219,7 @@ pub(crate) fn align_provenance(
     wor: bool,
     incremental: bool,
     main_bullets: crate::chat_ops::fa::MainBulletPolicy,
+    timing: AlignTiming,
 ) -> ProvenanceComment {
     let comment = ProvenanceComment::new(ReleasedCommand::Align)
         .field(StampField::Fa, StampFieldValue::from(fa.name()))
@@ -1202,6 +1228,13 @@ pub(crate) fn align_provenance(
             StampField::MainBullets,
             StampFieldValue(StampSafeText::from_static(main_bullets.stamp_name())),
         );
+    let comment = match timing {
+        AlignTiming::Aligned | AlignTiming::Preserved => comment,
+        AlignTiming::RefreshedFromWor => comment.field(
+            StampField::Timing,
+            StampFieldValue(StampSafeText::from_static("refreshed_from_wor")),
+        ),
+    };
     let comment = match utr.completed_engine() {
         None => comment,
         Some(engine) => comment.field(StampField::Utr, StampFieldValue::from(engine.stamp_name())),
@@ -1736,8 +1769,6 @@ mod tests {
             .expect("engine is implemented");
         crate::transcribe::types::TranscribeAsrPlan::from_request(
             backend,
-            false,
-            1,
             extras,
             &crate::api::LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
         )
@@ -2248,8 +2279,6 @@ mod tests {
         assert!(matches!(
             TranscribeAsrPlan::from_request(
                 backend,
-                false,
-                1,
                 &extras,
                 &crate::api::LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
             ),
@@ -2549,16 +2578,13 @@ mod tests {
     }
 
     /// One relation repair, as a worker reports it.
-    fn a_repair(
-        from_relation: &str,
-        to_relation: &str,
-    ) -> crate::types::worker_v2::UdRelationRepairV2 {
-        crate::types::worker_v2::UdRelationRepairV2 {
+    fn a_repair(from_relation: &str, to_relation: &str) -> crate::types::worker_v2::UdRepairV2 {
+        crate::types::worker_v2::UdRepairV2::Relation(crate::types::worker_v2::UdRelationRepairV2 {
             kind: crate::types::worker_v2::UdRelationRepairKindV2::RelationAlias,
             word: "ne".to_owned(),
             from_relation: from_relation.to_owned(),
             to_relation: to_relation.to_owned(),
-        }
+        })
     }
 
     /// A run that repaired relations counts them; one that repaired none
@@ -2842,6 +2868,7 @@ mod tests {
             false,
             false,
             derive,
+            AlignTiming::Aligned,
         )
         .format();
         assert!(
@@ -2864,6 +2891,7 @@ mod tests {
             false,
             false,
             derive,
+            AlignTiming::Aligned,
         )
         .format();
         assert!(
@@ -2885,6 +2913,7 @@ mod tests {
             false,
             false,
             crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
+            AlignTiming::Aligned,
         )
         .format();
         assert!(kept.contains("main_bullets=keep"), "{kept}");

@@ -239,6 +239,22 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
     use args::{Commands, CommonOpts};
     use std::io::IsTerminal;
 
+    // `--dry-run` plans a job. A command with no job to plan (serve, jobs,
+    // doctor, ...) would accept the flag and change nothing, which is a
+    // silent default of its own, so it is refused by name instead. "Has a
+    // job" is read from the one owner of that question: a processing command
+    // is one that builds typed options.
+    if let args::RequestedExecution::PlanOnly = cli.global.dry_run.resolve()
+        && !matches!(
+            args::build_typed_options(&cli.command, &cli.global),
+            Ok(Some(_))
+        )
+    {
+        return Err(error::CliError::InvalidArgument(
+            "--dry-run plans a processing command's job; this command submits none".into(),
+        ));
+    }
+
     match &cli.command {
         #[cfg(feature = "server")]
         Commands::Serve(args) => match &args.action {
@@ -377,6 +393,7 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
             let profile = CommonOpts::command_profile(cmd);
             let common = args::common_opts(cmd);
 
+            let mut unresolved_inputs = Vec::new();
             let (inputs, out_dir) = match cmd {
                 Commands::Opensmile(a) => (vec![a.input_dir.clone()], Some(a.output_dir.clone())),
                 Commands::Avqi(a) => (vec![a.input_dir.clone()], Some(a.output_dir.clone())),
@@ -399,17 +416,41 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
                         Some(list) => resolve::InputSource::FileList(list),
                         None => resolve::InputSource::Paths(&c.paths),
                     };
-                    let resolved =
-                        resolve::resolve_inputs(source, c.output.as_deref(), c.in_place)?;
-                    (resolved.inputs.into_paths(), resolved.output_dir)
+                    // A run stops at the first input that does not exist; a
+                    // plan reports every such input and describes the rest.
+                    match cli.global.dry_run.resolve() {
+                        args::RequestedExecution::Submit => {
+                            let resolved =
+                                resolve::resolve_inputs(source, c.output.as_deref(), c.in_place)?;
+                            (resolved.inputs.into_paths(), resolved.output_dir)
+                        }
+                        args::RequestedExecution::PlanOnly => {
+                            let (resolved, missing) = resolve::resolve_inputs_for_plan(
+                                source,
+                                c.output.as_deref(),
+                                c.in_place,
+                            )?;
+                            unresolved_inputs = missing;
+                            (resolved.inputs.into_paths(), resolved.output_dir)
+                        }
+                    }
                 }
             };
 
-            if !matches!(cmd, Commands::Convert(_))
-                && let Some(ref od) = out_dir
-            {
-                std::fs::create_dir_all(od)?;
-            }
+            // The plan writes nothing, not even the output directory.
+            let execution = match cli.global.dry_run.resolve() {
+                args::RequestedExecution::Submit => {
+                    if !matches!(cmd, Commands::Convert(_))
+                        && let Some(ref od) = out_dir
+                    {
+                        std::fs::create_dir_all(od)?;
+                    }
+                    dispatch::Execution::Submit
+                }
+                args::RequestedExecution::PlanOnly => {
+                    dispatch::Execution::PlanOnly { unresolved_inputs }
+                }
+            };
 
             // The cross-argument check happens INSIDE `build_typed_options`,
             // once, and its failure arrives here as a typed error rather than
@@ -430,6 +471,7 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
             let lexicon = args::extract_lexicon(cmd);
 
             let before = args::extract_before(cmd);
+            let overwrite = args::extract_overwrite(cmd);
 
             dispatch::dispatch(
                 dispatch::DispatchRequest {
@@ -443,16 +485,17 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
                     bank,
                     subdir,
                     lexicon,
-                    use_tui: cli.global.use_tui(),
-                    open_dashboard: cli.global.use_open_dashboard(),
+                    progress: cli.global.progress.resolve(),
+                    dashboard: cli.global.dashboard.resolve(),
                     force_cpu: cli.global.force_cpu,
                     allow_mps: cli.global.allow_mps,
                     no_server: cli.global.no_server,
                     before,
-                    workers: cli.global.workers,
-                    timeout: cli.global.timeout,
+                    runtime: cli.global.runtime(),
                     sequential: cli.global.sequential,
                     memory_tier: cli.global.memory_tier,
+                    overwrite,
+                    execution,
                 },
                 &crate::config::RuntimeLayout::from_env(),
             )
@@ -483,5 +526,23 @@ mod tests {
         assert!(
             matches!(error, CliError::InvalidArgument(message) if message.contains("--engine-overrides"))
         );
+    }
+
+    /// `--dry-run` plans a job; a command with no job to plan is refused by
+    /// name rather than accepting a flag that changes nothing.
+    #[tokio::test]
+    async fn dry_run_is_refused_for_a_command_with_no_job_to_plan() {
+        for args in [
+            vec!["batchalign3", "--dry-run", "version"],
+            vec!["batchalign3", "--dry-run", "serve", "status"],
+            vec!["batchalign3", "jobs", "--dry-run"],
+        ] {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            let error = run_command(cli).await.unwrap_err();
+            assert!(
+                matches!(&error, CliError::InvalidArgument(message) if message.contains("--dry-run")),
+                "{args:?}: {error}"
+            );
+        }
     }
 }

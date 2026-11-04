@@ -196,6 +196,39 @@
         "description": "Display path for a file within a job: either a bare basename\n(`\"sample.cha\"`) for single-file input or a relative forward-slash path\n(`\"PWA/TYO_a1.cha\"`) for directory input with subdirectories.\n\nBackslashes are normalized to forward slashes on construction so the value\nis platform-independent regardless of whether the CLI ran on Windows.\n\nThis type replaces the former `FileName` which incorrectly rejected path\nseparators during deserialization even though the system routinely carries\nrelative paths.",
         "type": "string"
       },
+      "DroppedWordTimingTrace": {
+        "description": "Wire form of `chat_ops::fa::orchestrate::DroppedWordTiming`: a word whose\ntiming was thrown away entirely, past the clamp bound, with the extent\nit lost.",
+        "properties": {
+          "end_ms": {
+            "description": "End of the extent that was lost.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_ms": {
+            "description": "Start of the extent that was lost.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/WordTierTrace",
+            "description": "Which tier this word's dropped timing lived on."
+          },
+          "word_index": {
+            "description": "This word's position among the words visited on its own tier, in\ndocument order.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "word_index",
+          "tier",
+          "start_ms",
+          "end_ms"
+        ],
+        "type": "object"
+      },
       "EngineReportAdmissionError": {
         "description": "Why a worker's capability report was refused at admission.\n\nA blank or separator-bearing name and an unknown task key cannot reach this\npoint: [`ReportedEngineName`] and [`InferTask`] refuse them while the wire\nreport is deserialized.\n\nAlso a wire type: `/health` returns it for a worker key whose latest report\nwas refused, so an operator sees why that worker is not used.",
         "oneOf": [
@@ -1218,7 +1251,7 @@
           },
           "lang": {
             "$ref": "#/components/schemas/LanguageSpec",
-            "description": "Job language: a resolved ISO 639-3 code, `\"auto\"`, `\"per-file\"`, or a\ncode-switched pair such as `\"eng,spa\"`."
+            "description": "Job language: a resolved ISO 639-3 code, `\"auto\"`, `\"per-file\"`, or a\ncode-switched pair such as `\"eng,spa\"`. Always written by the server;\na record without one is malformed and refused at deserialization\nrather than read as English."
           },
           "last_cancelled_at": {
             "oneOf": [
@@ -1311,6 +1344,7 @@
           "status",
           "command",
           "options",
+          "lang",
           "total_files",
           "completed_files",
           "submitted_at"
@@ -1396,7 +1430,7 @@
           },
           "lang": {
             "$ref": "#/components/schemas/LanguageSpec",
-            "description": "Job language: a resolved ISO 639-3 code, `\"auto\"`, `\"per-file\"`, or a\ncode-switched pair such as `\"eng,spa\"`."
+            "description": "Job language: a resolved ISO 639-3 code, `\"auto\"`, `\"per-file\"`, or a\ncode-switched pair such as `\"eng,spa\"`. Always written by the server;\na record without one is malformed and refused at deserialization\nrather than read as English."
           },
           "next_eligible_at": {
             "oneOf": [
@@ -1453,6 +1487,7 @@
           "job_id",
           "status",
           "command",
+          "lang",
           "total_files",
           "completed_files",
           "submitted_at"
@@ -1556,7 +1591,7 @@
           },
           "lang": {
             "$ref": "#/components/schemas/LanguageSpec",
-            "description": "Job language: a 3-letter ISO code, `\"auto\"` for ASR-driven detection,\n`\"per-file\"`, or a code-switched pair such as `\"eng,spa\"`."
+            "description": "Job language: a 3-letter ISO code, `\"auto\"` for ASR-driven detection,\n`\"per-file\"`, or a code-switched pair such as `\"eng,spa\"`.\n\nRequired. A submission that omits it is refused at deserialization\n(serde names the missing field) rather than run as English: the field\ndefaulted to `eng` until 2026-11-03, so a client that forgot it had its\nrecording transcribed, or its workers selected, as English with nothing\nsaid. Every client sends one: the CLI requires `--lang` on the commands\nthat take it and writes `per-file` for the rest\n(`cli::args::CommandProfile`), and the dashboard does the same\n(`frontend/src/components/process/jobPlan.ts`)."
           },
           "media_files": {
             "description": "Media filenames for the server to resolve from media_roots (transcribe only).",
@@ -1605,6 +1640,7 @@
         },
         "required": [
           "command",
+          "lang",
           "options"
         ],
         "type": "object"
@@ -2134,6 +2170,36 @@
             "type": "object"
           },
           {
+            "description": "The recognizer's decode windows disagreed about a repeated observation\nat a seam, and the reconciler kept one copy by rule (the earlier\nwindow's) rather than by evidence. The transcript carries every other\nword; each seam is marked with a `%com` on the utterance that keeps the\ncopy, for review. Whole recordings were refused for this until\n2026-11-03.",
+            "properties": {
+              "first_seams": {
+                "description": "The first of them, in recording order, at most\n[`FileOutputDiagnostics::FIRST_FINDINGS`].",
+                "items": {
+                  "$ref": "#/components/schemas/WindowSeamRecord"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "window_seam_ambiguous"
+                ],
+                "type": "string"
+              },
+              "seams": {
+                "description": "How many seams were reconciled by rule, at least one.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "seams",
+              "first_seams",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forced alignment left required words untimed. The measured timing\nwas written; these words are in the transcript without bullets.",
             "properties": {
               "first_untimed": {
@@ -2522,6 +2588,228 @@
         ],
         "type": "string"
       },
+      "RemovalEffectTrace": {
+        "description": "The finalization rules that can remove a word's measured timing, and\nnothing else: a closed set, so a removal cannot name an effect that moves\nonly a bullet (`end_clamped_coverage_only`, `end_clamped_boundary_from_words`)\nor trims a word without dropping it.\n\nEach variant carries what a reader needs to find the conflict in the\ntranscript: the boundary the utterance collided with and the line that\nsupplied it. The full effect, with both utterances' ordinals and\nspeakers, stays in [`FaTimelineTrace::timing_decisions`].",
+        "oneOf": [
+          {
+            "description": "Pass 1: the utterance's measured start preceded the greatest start\naccepted before it, and the whole utterance's timing was stripped.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "start_regression_stripped"
+                ],
+                "type": "string"
+              },
+              "preceding_line_idx": {
+                "description": "Index into `ChatFile.lines` of the utterance that supplied it.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "preceding_speaker": {
+                "description": "Speaker on that line.",
+                "type": "string"
+              },
+              "preceding_start_ms": {
+                "description": "The greatest preceding start, which this one fell below.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "utterance_start_ms": {
+                "description": "The utterance's own measured start, the one that regressed.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "utterance_start_ms",
+              "preceding_start_ms",
+              "preceding_line_idx",
+              "preceding_speaker",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Pass 1: the utterance's measured start preceded the greatest start\naccepted before it, and the utterance carries the `+<` overlap marker,\nso its start was raised to that preceding start; the words whose\nmeasured interval ended at or before it lost their timing.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "start_regression_raised"
+                ],
+                "type": "string"
+              },
+              "preceding_line_idx": {
+                "description": "Index into `ChatFile.lines` of the utterance that supplied it.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "preceding_speaker": {
+                "description": "Speaker on that line.",
+                "type": "string"
+              },
+              "preceding_start_ms": {
+                "description": "The greatest preceding start: the utterance's new start.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "utterance_start_ms": {
+                "description": "The utterance's own measured start, the one that regressed.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "words_trimmed": {
+                "description": "The words cut to begin at the new start, with what they lost:\ncarried here so the account can say by how much the first kept\nword was trimmed beside the words that were dropped.",
+                "items": {
+                  "$ref": "#/components/schemas/TrimmedWordTimingTrace"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "utterance_start_ms",
+              "preceding_start_ms",
+              "preceding_line_idx",
+              "preceding_speaker",
+              "words_trimmed",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Pass 2: the next same-speaker utterance starts at or before this one,\nso clamping its end there would leave it no extent; the whole\nutterance's timing was stripped.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "zero_duration_clamp_stripped"
+                ],
+                "type": "string"
+              },
+              "next_line_idx": {
+                "description": "Index into `ChatFile.lines` of the utterance that supplied it.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "next_start_ms": {
+                "description": "The next same-speaker start, at or before `utterance_start_ms`.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "utterance_start_ms": {
+                "description": "The utterance's own measured start.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "utterance_start_ms",
+              "next_start_ms",
+              "next_line_idx",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Pass 2: the utterance's end was clamped to the next same-speaker\nstart and every word at or past that bound lost its timing.",
+            "properties": {
+              "bound_ms": {
+                "description": "The next same-speaker start, now this utterance's end.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "end_clamped_interleaved_words"
+                ],
+                "type": "string"
+              },
+              "next_line_idx": {
+                "description": "Index into `ChatFile.lines` of the utterance that supplied it.",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bound_ms",
+              "next_line_idx",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Under `--main-bullets keep`: no valid bullet could remain beside a\nkept neighbour's fixed boundary, so the utterance's timing was\nstripped.",
+            "properties": {
+              "kept_boundary_ms": {
+                "description": "The kept boundary it could not fit beside.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kept_line_idx": {
+                "description": "Index into `ChatFile.lines` of the kept utterance.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kept_speaker": {
+                "description": "Speaker on the kept utterance.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "yielded_to_kept_bullet_stripped"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kept_boundary_ms",
+              "kept_line_idx",
+              "kept_speaker",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Under `--main-bullets keep`: the utterance's start moved forward to a\nkept neighbour's end and the leading words wholly before it lost\ntheir timing.",
+            "properties": {
+              "kept_end_ms": {
+                "description": "The kept end the start moved to.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kept_line_idx": {
+                "description": "Index into `ChatFile.lines` of the kept utterance.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kept_speaker": {
+                "description": "Speaker on the kept utterance.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "yielded_to_kept_end_leading_words_dropped"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kept_end_ms",
+              "kept_line_idx",
+              "kept_speaker",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "RepoRelativePath": {
         "description": "A path relative to a data repo root (e.g. `\"French/Newcastle/Photos/13\"`).\n\nValid on any machine that has the repo cloned, but must be combined\nwith a server root path to produce a [`ServerPath`] for I/O.",
         "type": "string"
@@ -2878,6 +3166,53 @@
         ],
         "type": "object"
       },
+      "TrimmedWordTimingTrace": {
+        "description": "Wire form of `chat_ops::fa::orchestrate::TrimmedWordTiming`: a word a\nclamp cut to a shorter positive extent, with the extent it had and the\nextent it kept (schema 10). The word still carries `start_ms..end_ms` in\nthe written file; the record exists so a reader can see what was cut\nwithout diffing two files.",
+        "properties": {
+          "end_ms": {
+            "description": "End of the extent it kept.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "measured_end_ms": {
+            "description": "End of the extent the word had before the cut.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "measured_start_ms": {
+            "description": "Start of the extent the word had before the cut.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_ms": {
+            "description": "Start of the extent it kept.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/WordTierTrace",
+            "description": "Which tier this word's timing lives on."
+          },
+          "word_index": {
+            "description": "This word's position among the words visited on its own tier, in\ndocument order.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "word_index",
+          "tier",
+          "measured_start_ms",
+          "measured_end_ms",
+          "start_ms",
+          "end_ms"
+        ],
+        "type": "object"
+      },
       "UntimedCauseRecord": {
         "description": "Why an utterance's words have no timing: the causes this build writes.",
         "oneOf": [
@@ -2932,7 +3267,7 @@
             "type": "object"
           },
           {
-            "description": "Requests covered it and no positive interval resulted for these\nwords. The counts are what those requests yielded, from the run's\nown group evidence.",
+            "description": "Requests covered it and no positive interval resulted for these\nwords. The counts are what those requests yielded, from the run's\nown group evidence. A word whose interval the run measured and then\nremoved is never here: it is [`Self::Removed`].",
             "properties": {
               "answered": {
                 "description": "Requests that returned timing evidence (a worker's answer, the\ncache, a replayed response, or reused `%wor`).",
@@ -2963,6 +3298,52 @@
               "answered",
               "unaligned",
               "unrequested",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run measured intervals for words of this utterance and removed\nthem itself while enforcing timing order (a start regression strip,\na same-speaker end clamp, or a yield to a kept bullet), so the words\nare untimed because of the finalizer, not because no interval was\nmeasured. Each removal names the rule, the boundary it enforced and\nevery interval it took away, recorded at the moment it did so.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "removed"
+                ],
+                "type": "string"
+              },
+              "removals": {
+                "description": "Every finalization effect that removed timing from this\nutterance, in the order the run applied them; at least one, each\nwith at least one interval.",
+                "items": {
+                  "$ref": "#/components/schemas/WordTimingRemovalTrace"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "removals",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run refreshed the file's bullets from its complete `%wor` without\nopening the recording, and removed this utterance's retained timing\nwhile enforcing timing order (it was backward). Nothing in such a run\ncould measure the words again, so they need a run with the recording:\na `batchalign3 align` with the recording present re-times them, since\nthe stripped `%wor` leaves the file partly timed.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "needs_recording"
+                ],
+                "type": "string"
+              },
+              "removals": {
+                "description": "Every finalization effect that removed the retained timing, in\nthe order the run applied them; at least one, each with at least\none interval.",
+                "items": {
+                  "$ref": "#/components/schemas/WordTimingRemovalTrace"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "removals",
               "kind"
             ],
             "type": "object"
@@ -3036,6 +3417,69 @@
           "fallback"
         ],
         "type": "string"
+      },
+      "WindowSeamRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StoredUtteranceLocation",
+            "description": "Where the utterance that keeps the copy is."
+          },
+          {
+            "properties": {
+              "dropped_from_window": {
+                "description": "The decode window whose copy was dropped, counting from 0.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "seam_ms": {
+                "description": "Where the seam is in the recording, in milliseconds.",
+                "format": "int64",
+                "type": "integer"
+              },
+              "text": {
+                "description": "The repeated text, as the recognizer emitted it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "seam_ms",
+              "text",
+              "dropped_from_window"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "One window seam the reconciler settled by rule, as the job reports it.\n\nLocates the utterance that keeps the copy the way every other first-N\nrecord does: its position among the written utterances and its main tier\nas written, so a reader of the job finds the `%com` the transcript carries\nat the same place."
+      },
+      "WordTierTrace": {
+        "description": "Wire form of `chat_ops::fa::WordTier`: which representation a word's\ntiming lived on. Spelled `main_tier` / `wor` on the wire, as the former\nstring field was, so no artifact changes shape; the enum is what lets a\nreader match on it without comparing strings.",
+        "enum": [
+          "main_tier",
+          "wor"
+        ],
+        "type": "string"
+      },
+      "WordTimingRemovalTrace": {
+        "description": "One finalization effect's removal of measured word timing from one\nutterance: which rule removed it, and every interval it removed.\n\nThis is the cause the completion account gives a word the run itself\nuntimed ([`crate::api::UntimedCauseRecord::Removed`]), so it is a wire\nrecord: it is stored in the file's diagnostics and shown in the report.\nBuilt only by [`FaTimingDecisionTrace::word_timing_removal`], from the\neffect the finalizer recorded at the moment it removed the timing, and\nonly when that effect removed at least one measured interval, so a\nrecord never says \"removed\" about an utterance that had no word timing\nto lose.",
+        "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/RemovalEffectTrace",
+            "description": "The finalization rule that removed the timing, with the boundary it\nenforced."
+          },
+          "measured": {
+            "description": "The measured word intervals it removed, in word order within each\ntier, main tier first; at least one.",
+            "items": {
+              "$ref": "#/components/schemas/DroppedWordTimingTrace"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "effect",
+          "measured"
+        ],
+        "type": "object"
       },
       "WorkerCapabilityAdmission": {
         "description": "What the server decided about one worker key's latest capability report.",

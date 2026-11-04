@@ -5,8 +5,10 @@
 
 The batchalign3 web dashboard is a real-time monitoring interface for watching
 job progress, inspecting worker state, and tracking system resource usage.
-It opens automatically in your browser when you submit a job (unless you pass
-`--no-open-dashboard`).
+It opens in your browser once, on the submission that starts the local daemon;
+later submissions reuse the daemon and leave the open page alone. Pass
+`--open-dashboard` to open a submission's page anyway, or
+`--no-open-dashboard` to never open one.
 
 ## Accessing the Dashboard
 
@@ -19,11 +21,14 @@ http://localhost:8000/dashboard
 Replace `localhost:8000` with the server's address if running remotely (e.g.,
 `http://your-server:8001/dashboard`).
 
-The CLI opens the dashboard automatically when you submit a job:
+The CLI opens the dashboard when a submission starts the daemon, and on
+request:
 
 ```bash
 batchalign3 transcribe corpus/ -o output/ --lang eng
-# ↑ browser opens to /dashboard/jobs/<job-id>
+# ↑ browser opens to /dashboard/jobs/<job-id> if this run started the daemon
+batchalign3 --open-dashboard transcribe corpus/ -o output/ --lang eng
+# ↑ opens this job's page whether or not the daemon was already running
 ```
 
 To suppress the browser auto-open:

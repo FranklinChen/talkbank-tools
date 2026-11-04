@@ -101,6 +101,86 @@ pub(super) struct ObservedWordTiming {
 struct RequiredWordSearchBounds {
     preceding_floor_ms: u64,
     following_ceiling_ms: u64,
+    /// The utterance the required word belongs to, for the bound's provenance.
+    utterance: super::UtrUtteranceOrdinal,
+}
+
+/// What one measured utterance offers its neighbours as corridor bounds:
+/// its retained bullet when it has one, else the hull of the provider tokens
+/// proved to its words, each read at the token's outer edge (a bound is
+/// never a boundary invented inside a token). A bullet dominates: an
+/// utterance with one takes no token into its hull.
+#[derive(Debug, Clone, Copy)]
+enum MeasuredEdges {
+    /// The transcript's own bullet.
+    Bullet(ObservedWordTiming),
+    /// The tokens proved to the utterance's words, which bound its edges from
+    /// inside: an unproved first or last word may lie beyond them.
+    TokenHull {
+        /// The start of the latest proved token.
+        latest_start_ms: u64,
+        /// The end of the earliest proved token.
+        earliest_end_ms: u64,
+    },
+}
+
+impl MeasuredEdges {
+    fn of_token(timing: ObservedWordTiming) -> Self {
+        Self::TokenHull {
+            latest_start_ms: timing.start_ms,
+            earliest_end_ms: timing.end_ms,
+        }
+    }
+
+    /// The edges with one more proved token of the same utterance; a bullet
+    /// absorbs it.
+    fn with_token(self, timing: ObservedWordTiming) -> Self {
+        match self {
+            Self::Bullet(bullet) => Self::Bullet(bullet),
+            Self::TokenHull {
+                latest_start_ms,
+                earliest_end_ms,
+            } => Self::TokenHull {
+                latest_start_ms: latest_start_ms.max(timing.start_ms),
+                earliest_end_ms: earliest_end_ms.min(timing.end_ms),
+            },
+        }
+    }
+
+    /// A lower bound on where an unmarked successor can begin: the bullet's
+    /// end, or the start of the latest proved token (every word of this
+    /// utterance ends after that token begins).
+    fn after_end_ms(self) -> u64 {
+        match self {
+            Self::Bullet(bullet) => bullet.end_ms,
+            Self::TokenHull {
+                latest_start_ms, ..
+            } => latest_start_ms,
+        }
+    }
+
+    /// A lower bound on where this utterance itself begins, when its
+    /// measurement gives one: a bullet's start. A token hull gives none,
+    /// since an unproved first word may precede it. Carried through
+    /// unmeasured turns, whose own starts can be no earlier.
+    fn at_start_ms(self) -> Option<u64> {
+        match self {
+            Self::Bullet(bullet) => Some(bullet.start_ms),
+            Self::TokenHull { .. } => None,
+        }
+    }
+
+    /// An upper bound on where an unmarked predecessor can end: the bullet's
+    /// start, or the end of the earliest proved token (every word of this
+    /// utterance begins before that token ends).
+    fn before_start_ms(self) -> u64 {
+        match self {
+            Self::Bullet(bullet) => bullet.start_ms,
+            Self::TokenHull {
+                earliest_end_ms, ..
+            } => earliest_end_ms,
+        }
+    }
 }
 
 impl AdmittedUtrWordMatch {
@@ -667,33 +747,136 @@ impl<'source> UtrLexicalStream<'source> {
                     }));
             }
         }
-        let mut floors = vec![0; source.len()];
-        let mut previous = std::collections::BTreeMap::<&str, u64>::new();
+        use super::search::{CorridorCeiling, CorridorFloor, MeasuredBound};
+        // Whether an utterance is marked as overlapping the turn before it.
+        let marked = |info: &super::UtrUtteranceInfo| info.has_lazy_overlap || info.has_ca_overlap;
+        // The same speaker's retained chain: a speaker cannot overlap himself,
+        // so his previous retained end bounds this turn below and his next
+        // retained start bounds it above. Each bound names the utterance it
+        // was read from.
+        let mut floors = vec![None::<MeasuredBound>; source.len()];
+        let mut previous = std::collections::BTreeMap::<&str, MeasuredBound>::new();
         for (ordinal, info) in source.iter().enumerate() {
-            floors[ordinal] = previous.get(info.speaker.as_str()).copied().unwrap_or(0);
-            if !info.has_lazy_overlap
-                && !info.has_ca_overlap
+            floors[ordinal] = previous.get(info.speaker.as_str()).copied();
+            if !marked(info)
                 && let Some(timing) = info.retained_timing
             {
+                let bound = MeasuredBound {
+                    ms: timing.end_ms,
+                    utterance: super::UtrUtteranceOrdinal(ordinal),
+                };
                 previous
                     .entry(info.speaker.as_str())
-                    .and_modify(|end| *end = (*end).max(timing.end_ms))
-                    .or_insert(timing.end_ms);
+                    .and_modify(|end| *end = end.later(bound))
+                    .or_insert(bound);
             }
         }
-        let mut ceilings = vec![None; source.len()];
-        let mut following = std::collections::BTreeMap::<&str, u64>::new();
+        let mut ceilings = vec![None::<MeasuredBound>; source.len()];
+        let mut following = std::collections::BTreeMap::<&str, MeasuredBound>::new();
         for (ordinal, info) in source.iter().enumerate().rev() {
             ceilings[ordinal] = following.get(info.speaker.as_str()).copied();
-            if !info.has_lazy_overlap
-                && !info.has_ca_overlap
+            if !marked(info)
                 && let Some(timing) = info.retained_timing
             {
+                let bound = MeasuredBound {
+                    ms: timing.start_ms,
+                    utterance: super::UtrUtteranceOrdinal(ordinal),
+                };
                 following
                     .entry(info.speaker.as_str())
-                    .and_modify(|start| *start = (*start).min(timing.start_ms))
-                    .or_insert(timing.start_ms);
+                    .and_modify(|start| *start = start.earlier(bound))
+                    .or_insert(bound);
             }
+        }
+        // What each utterance's measurement offers its neighbours: its
+        // retained bullet, else the hull of the provider tokens proved to its
+        // words. `None` for an utterance nothing measured.
+        let mut edges = vec![None::<MeasuredEdges>; source.len()];
+        for (ordinal, info) in source.iter().enumerate() {
+            edges[ordinal] = info.retained_timing.map(MeasuredEdges::Bullet);
+        }
+        for matched in &admitted {
+            let ordinal = matched.matched().word.utterance_index.index();
+            let timing = matched.token_timing();
+            edges[ordinal] = Some(edges[ordinal].map_or_else(
+                || MeasuredEdges::of_token(timing),
+                |measured| measured.with_token(timing),
+            ));
+        }
+        // Document order (2026-11-03). An utterance NOT marked as overlapping
+        // the turn before it begins after that turn ends, so the nearest
+        // measured utterance before it bounds its start: the floor an unheard
+        // acknowledgement between two heard turns used to lack, which let its
+        // corridor start at 0 and exceed the engine budget. The two carried
+        // bounds are lower bounds on the START of the next utterance: one for
+        // an unmarked successor (after the current turn's end), one for a
+        // marked successor (no earlier than the current turn's own start), so
+        // the bound survives an unmeasured turn in between. For one marked
+        // turn the latter holds by the marker itself (a turn that overlaps its
+        // predecessor ends no earlier than the predecessor starts); for two or
+        // more consecutive unmeasured marked turns it rests on CHAT's
+        // start-order rule, which a measured `+<` start can violate (see the
+        // start-regression raise in `orchestrate.rs`), so the bound is only as
+        // good as the written order there. A marked utterance takes no
+        // document-order floor of its own: its marker says it begins while
+        // the previous turn is still going, and a listened case began before
+        // that turn's start, so neither of the previous turn's edges may cut
+        // the search.
+        let mut document_floors = vec![CorridorFloor::FileStart; source.len()];
+        let mut for_unmarked = CorridorFloor::FileStart;
+        let mut for_marked = CorridorFloor::FileStart;
+        for (ordinal, info) in source.iter().enumerate() {
+            let own_start = if marked(info) {
+                for_marked
+            } else {
+                for_unmarked
+            };
+            document_floors[ordinal] = if marked(info) {
+                CorridorFloor::MarkedOverlapUnbounded
+            } else {
+                for_unmarked
+            };
+            let utterance = super::UtrUtteranceOrdinal(ordinal);
+            match edges[ordinal] {
+                Some(measured) => {
+                    for_unmarked = CorridorFloor::PrecedingMeasured(MeasuredBound {
+                        ms: measured.after_end_ms(),
+                        utterance,
+                    });
+                    for_marked = match measured.at_start_ms() {
+                        Some(ms) => {
+                            CorridorFloor::PrecedingMeasured(MeasuredBound { ms, utterance })
+                        }
+                        None => own_start,
+                    };
+                }
+                None => {
+                    for_unmarked = own_start;
+                    for_marked = own_start;
+                }
+            }
+        }
+        // The mirror, backwards: every utterance ends before an unmarked next
+        // turn begins (its own marker speaks only of the turn before it), so
+        // the nearest measured utterance after it bounds its end, unless that
+        // next turn is itself marked as overlapping, which stops the chain by
+        // name.
+        let mut document_ceilings = vec![CorridorCeiling::FileEnd; source.len()];
+        let mut carried = CorridorCeiling::FileEnd;
+        for (ordinal, info) in source.iter().enumerate().rev() {
+            document_ceilings[ordinal] = carried;
+            let utterance = super::UtrUtteranceOrdinal(ordinal);
+            carried = if marked(info) {
+                CorridorCeiling::FollowingOverlaps { utterance }
+            } else {
+                match edges[ordinal] {
+                    Some(measured) => CorridorCeiling::FollowingMeasured(MeasuredBound {
+                        ms: measured.before_start_ms(),
+                        utterance,
+                    }),
+                    None => carried,
+                }
+            };
         }
         let onset_ordered_search = self.onset_ordered_search();
         let envelope = |ordinal: usize, info: &super::UtrUtteranceInfo| {
@@ -704,8 +887,11 @@ impl<'source> UtrLexicalStream<'source> {
             {
                 return None;
             }
-            let (floor, ceiling) = if info.has_lazy_overlap || info.has_ca_overlap {
-                (0, None)
+            // The same speaker's chain is withheld from a marked overlap, as
+            // it always was; the document-order floor already is, and the
+            // document-order ceiling applies to every utterance.
+            let (speaker_floor, speaker_ceiling) = if marked(info) {
+                (None, None)
             } else {
                 (floors[ordinal], ceilings[ordinal])
             };
@@ -718,34 +904,50 @@ impl<'source> UtrLexicalStream<'source> {
                 let ordered = onset_ordered_search.as_ref()?;
                 let corridor = analysis.search_corridor(ordinal)?;
                 let candidate_bounds = |required| ordered.required_bounds(required);
-                let before = corridor
-                    .preceding_required()
-                    .filter_map(candidate_bounds)
-                    .map(|b| b.preceding_floor_ms)
-                    .max()
-                    .unwrap_or(0);
-                let after = corridor
-                    .following_required()
-                    .filter_map(candidate_bounds)
-                    .map(|b| b.following_ceiling_ms)
-                    .min();
-                let ceiling = match (ceiling, after) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
+                // Each source may only narrow the corridor: document order is
+                // the base, and the speaker's own chain and the obligatory
+                // words fold onto it.
+                let floor = speaker_floor
+                    .into_iter()
+                    .chain(
+                        corridor
+                            .preceding_required()
+                            .filter_map(candidate_bounds)
+                            .map(|bounds| MeasuredBound {
+                                ms: bounds.preceding_floor_ms,
+                                utterance: bounds.utterance,
+                            }),
+                    )
+                    .fold(document_floors[ordinal], CorridorFloor::raised_to);
+                let ceiling = speaker_ceiling
+                    .into_iter()
+                    .chain(
+                        corridor
+                            .following_required()
+                            .filter_map(candidate_bounds)
+                            .map(|bounds| MeasuredBound {
+                                ms: bounds.following_ceiling_ms,
+                                utterance: bounds.utterance,
+                            }),
+                    )
+                    .fold(document_ceilings[ordinal], CorridorCeiling::lowered_to);
                 return Some(super::search::FaSearchEnvelope::order_corridor(
                     info.words().to_vec(),
-                    floor.max(before),
+                    floor,
                     ceiling,
                 ));
             }
+            // A complete candidate hull is checked for containment against the
+            // speaker's own chain only: its words were heard, and where they
+            // were heard is the evidence, so another speaker's measurement
+            // does not override it as it bounds an unheard search.
             let range = ranges[ordinal]?;
             super::search::FaSearchEnvelope::interleaved(
                 info.words().to_vec(),
                 range.start_ms,
                 range.end_ms,
-                floor,
-                ceiling,
+                speaker_floor.map_or(0, |bound| bound.ms),
+                speaker_ceiling.map(|bound| bound.ms),
             )
         };
         let selection = super::UtrMatchSelection {
@@ -788,10 +990,12 @@ impl OnsetOrderedLexicalSearch<'_, '_> {
                 let bounds = RequiredWordSearchBounds {
                     preceding_floor_ms: timing.start_ms,
                     following_ceiling_ms: timing.end_ms,
+                    utterance: super::UtrUtteranceOrdinal(matched.utterance_index()),
                 };
                 Some(Some(range.map_or(bounds, |old| RequiredWordSearchBounds {
                     preceding_floor_ms: old.preceding_floor_ms.min(timing.start_ms),
                     following_ceiling_ms: old.following_ceiling_ms.max(timing.end_ms),
+                    utterance: old.utterance,
                 })))
             })
             .flatten()

@@ -290,10 +290,20 @@ construction, was their only producer. Inside `findings`:
   described below; `cause` is `{"kind": "window_refused",
   "window": ...}` with the refused window grouping recorded,
   `{"kind": "not_placed"}` when grouping could place it in no request,
-  `{"kind": "localization_unavailable"}`, `{"kind": "requested", "answered",
-  "unaligned", "unrequested"}` counting what the requests covering it
-  yielded, or `{"kind": "unrecorded"}` when nothing the run recorded explains
-  it; `{"kind": "no_usable_timing"}` is read from older records only). The complete account, every untimed word, is logged once.
+  `{"kind": "localization_unavailable"}`, `{"kind": "removed", "removals":
+  [{"effect": {"kind": ...}, "measured": [...]}]}` when the run measured the
+  words' intervals and removed them while enforcing timing order (each
+  `effect` is one of `start_regression_stripped`, `start_regression_raised`
+  (which also lists the `words_trimmed` to the raised start),
+  `zero_duration_clamp_stripped`, `end_clamped_interleaved_words`,
+  `yielded_to_kept_bullet_stripped` and
+  `yielded_to_kept_end_leading_words_dropped`, with the boundary it enforced
+  and the line index that supplied it; each `measured` entry is a
+  `{word_index, tier, start_ms, end_ms}` interval the effect removed),
+  `{"kind": "requested", "answered", "unaligned", "unrequested"}` counting
+  what the requests covering it yielded, or `{"kind": "unrecorded"}` when
+  nothing the run recorded explains it; `{"kind": "no_usable_timing"}` is
+  read from older records only). The complete account, every untimed word, is logged once.
 
 The database column holds the record's own JSON (`to_column_json` is
 `serde_json::to_value(self)`), so its field list is written once.

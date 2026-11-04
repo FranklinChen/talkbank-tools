@@ -57,11 +57,12 @@ pub use self::main_bullets::{
 pub(crate) use self::orchestrate::WrittenFaDecisions;
 pub use self::orchestrate::{
     DroppedWordTiming, FaApplied, FaDecisions, FaFinalized, KeptBulletYield, MonotonicityEffect,
-    MonotonicityResult, OverlapEdge, WordTier, apply_fa_results_with_projection_policy,
-    finalize_without_injection, has_reusable_wor_timing_for_utterance,
-    projection_without_injection_with_touched, refresh_existing_alignment_for_utterance,
-    refresh_reusable_alignment, refresh_reusable_utterances, retain_decision_evidence,
-    strip_timing_from_content, strip_wor_from_monotonicity_stripped_utterances,
+    MonotonicityResult, OverlapEdge, TrimmedWordTiming, WordTier,
+    apply_fa_results_with_projection_policy, finalize_without_injection,
+    has_reusable_wor_timing_for_utterance, projection_without_injection_with_touched,
+    refresh_existing_alignment_for_utterance, refresh_reusable_alignment,
+    refresh_reusable_utterances, retain_decision_evidence, strip_timing_from_content,
+    strip_wor_from_monotonicity_stripped_utterances,
 };
 pub use self::split::{AnchoredPart, AnchoredPiece, AnchoredSplit, Pieces, UnavailablePiece};
 // `#[cfg(test)]` (2026-09-01 review, item 12): test-fixture conveniences with
@@ -936,6 +937,20 @@ pub struct FaInferItem {
     pub window: FaWindow,
     /// Whisper input shaping. No output projection policy reaches inference.
     pub whisper_text: WhisperTextMode,
+}
+
+/// Whether the transcriber marked `utterance` as overlapping the utterance
+/// before it: its main tier begins with the `+<` ("lazy overlap precedes")
+/// linker. The one reading of that marker in this crate (the model exposes
+/// it only as an entry in the tier's linker list); utterance timing recovery
+/// and Pass 1's start-regression resolution both decide by it.
+pub(crate) fn overlaps_previous_utterance(utterance: &Utterance) -> bool {
+    utterance
+        .main
+        .content
+        .linkers
+        .iter()
+        .any(|linker| linker.kind == talkbank_model::model::LinkerKind::LazyOverlapPrecedes)
 }
 
 // ---------------------------------------------------------------------------

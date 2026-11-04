@@ -443,7 +443,7 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     // without a model" or "neither result nor error" case left to reject.
     let mut ud_responses = Vec::with_capacity(result.items.len());
     for (i, item_result) in result.items.into_iter().enumerate() {
-        let (raw_sentences, model, repairs, feature_repairs) = match item_result {
+        let (raw_sentences, model, repairs) = match item_result {
             MorphosyntaxItemResultV2::Failed { error } => {
                 ud_responses.push(Err(error));
                 continue;
@@ -456,12 +456,11 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
                 raw_sentences,
                 model,
                 repairs,
-                feature_repairs,
-            } => (raw_sentences, model, repairs, feature_repairs),
+            } => (raw_sentences, model, repairs),
         };
         match parse_raw_stanza_output(&raw_sentences) {
             Ok(ud) => ud_responses.push(
-                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs, feature_repairs)
+                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs)
                     .map_err(|error| format!("worker item {i}: {error}")),
             ),
             Err(error) => {

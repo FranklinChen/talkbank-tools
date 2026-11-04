@@ -296,40 +296,26 @@ pub struct MorphosyntaxModelIdentityV2 {
     pub pipeline: MorphosyntaxPipelineV2,
 }
 
-/// The morphosyntax pipeline variant that analyzed an item. Closed: a new
-/// variant must be named here before a worker can report it.
-///
-/// Each variant has ONE name, [`Self::wire_name`]. The serde form, the JSON
-/// Schema constants and the name a provenance stamp writes
-/// ([`Self::stamp_name`]) are all read from it, so they cannot drift apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MorphosyntaxPipelineV2 {
-    /// Stanza on the transcript's own tokens.
-    Standard,
-    /// Stanza's neural tokenizer re-segmenting Mandarin text.
-    MandarinRetokenize,
-    /// Stanza with PyCantonese part-of-speech tags replacing Stanza's.
-    CantonesePycantonesePos,
+closed_wire_enum! {
+    /// The morphosyntax pipeline variant that analyzed an item. Closed: a new
+    /// variant must be named here before a worker can report it.
+    ///
+    /// Each variant has ONE name, [`Self::wire_name`]. The serde form, the JSON
+    /// Schema constants and the name a provenance stamp writes
+    /// ([`Self::stamp_name`]) are all read from it, so they cannot drift apart.
+    pub enum MorphosyntaxPipelineV2 {
+        unknown = "morphosyntax pipeline",
+        schema = "The morphosyntax pipeline variant that analyzed an item. Closed: a new variant must be named here before a worker can report it.",
+        /// Stanza on the transcript's own tokens.
+        Standard => "standard",
+        /// Stanza's neural tokenizer re-segmenting Mandarin text.
+        MandarinRetokenize => "mandarin_retokenize",
+        /// Stanza with PyCantonese part-of-speech tags replacing Stanza's.
+        CantonesePycantonesePos => "cantonese_pycantonese_pos",
+    }
 }
 
 impl MorphosyntaxPipelineV2 {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 3] = [
-        Self::Standard,
-        Self::MandarinRetokenize,
-        Self::CantonesePycantonesePos,
-    ];
-
-    /// The variant's one name: its wire form, its schema constant, and the
-    /// text a provenance stamp writes for it.
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::MandarinRetokenize => "mandarin_retokenize",
-            Self::CantonesePycantonesePos => "cantonese_pycantonese_pos",
-        }
-    }
-
     /// The name as stamp-safe text. Each arm is checked at compile time.
     pub fn stamp_name(self) -> crate::domain::StampSafeText {
         use crate::domain::StampSafeText;
@@ -345,118 +331,31 @@ impl MorphosyntaxPipelineV2 {
     }
 }
 
-impl serde::Serialize for MorphosyntaxPipelineV2 {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.wire_name())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for MorphosyntaxPipelineV2 {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let name = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
-        Self::ALL
-            .into_iter()
-            .find(|pipeline| pipeline.wire_name() == name)
-            .ok_or_else(|| {
-                serde::de::Error::custom(format!("unknown morphosyntax pipeline {name:?}"))
-            })
-    }
-}
-
-impl schemars::JsonSchema for MorphosyntaxPipelineV2 {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "MorphosyntaxPipelineV2".into()
-    }
-
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let variants: Vec<serde_json::Value> = Self::ALL
-            .iter()
-            .map(|pipeline| serde_json::json!({"type": "string", "const": pipeline.wire_name()}))
-            .collect();
-        schemars::json_schema!({
-            "description": "The morphosyntax pipeline variant that analyzed an item. Closed: a new variant must be named here before a worker can report it.",
-            "oneOf": variants,
-        })
-    }
-}
-
-/// Why one Universal Dependencies relation a worker received from Stanza is
-/// not the relation it applied.
-///
-/// Closed: a rewrite a worker can make must be named here before it can be
-/// reported, so a new one cannot reach a transcript under a name nothing
-/// downstream knows. Each variant has ONE name, [`Self::wire_name`], which the
-/// serde form and the JSON Schema constants are both read from, so they cannot
-/// drift apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UdRelationRepairKindV2 {
-    /// The model emitted a padding label (`<PAD>`, `<UNK>`), which is not a
-    /// relation at all. Replaced by `dep`.
-    PadRelation,
-    /// A UD relation in the wrong case (`NSUBJ`). Lowercased.
-    RelationCase,
-    /// A known non-UD spelling of a UD relation (`iob`). Replaced by the UD
-    /// relation it means (`iobj`).
-    RelationAlias,
-    /// A label that is no UD relation and has no known equivalent. Replaced by
-    /// `dep`, which is a real UD relation.
-    UnknownRelation,
-    /// The appended cue was root and its sole lexical child became root.
-    CueRootPromotion,
-}
-
-impl UdRelationRepairKindV2 {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 5] = [
-        Self::PadRelation,
-        Self::RelationCase,
-        Self::RelationAlias,
-        Self::UnknownRelation,
-        Self::CueRootPromotion,
-    ];
-
-    /// The variant's one name: its wire form and its schema constant.
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::PadRelation => "pad_relation",
-            Self::RelationCase => "relation_case",
-            Self::RelationAlias => "relation_alias",
-            Self::UnknownRelation => "unknown_relation",
-            Self::CueRootPromotion => "cue_root_promotion",
-        }
-    }
-}
-
-impl serde::Serialize for UdRelationRepairKindV2 {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.wire_name())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for UdRelationRepairKindV2 {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let name = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
-        Self::ALL
-            .into_iter()
-            .find(|kind| kind.wire_name() == name)
-            .ok_or_else(|| serde::de::Error::custom(format!("unknown UD relation repair {name:?}")))
-    }
-}
-
-impl schemars::JsonSchema for UdRelationRepairKindV2 {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "UdRelationRepairKindV2".into()
-    }
-
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let variants: Vec<serde_json::Value> = Self::ALL
-            .iter()
-            .map(|kind| serde_json::json!({"type": "string", "const": kind.wire_name()}))
-            .collect();
-        schemars::json_schema!({
-            "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
-            "oneOf": variants,
-        })
+closed_wire_enum! {
+    /// Why one Universal Dependencies relation a worker received from Stanza is
+    /// not the relation it applied.
+    ///
+    /// Closed: a rewrite a worker can make must be named here before it can be
+    /// reported, so a new one cannot reach a transcript under a name nothing
+    /// downstream knows. Each variant has ONE name, [`Self::wire_name`], which the
+    /// serde form and the JSON Schema constants are both read from, so they cannot
+    /// drift apart.
+    pub enum UdRelationRepairKindV2 {
+        unknown = "UD relation repair",
+        schema = "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+        /// The model emitted a padding label (`<PAD>`, `<UNK>`), which is not a
+        /// relation at all. Replaced by `dep`.
+        PadRelation => "pad_relation",
+        /// A UD relation in the wrong case (`NSUBJ`). Lowercased.
+        RelationCase => "relation_case",
+        /// A known non-UD spelling of a UD relation (`iob`). Replaced by the UD
+        /// relation it means (`iobj`).
+        RelationAlias => "relation_alias",
+        /// A label that is no UD relation and has no known equivalent. Replaced by
+        /// `dep`, which is a real UD relation.
+        UnknownRelation => "unknown_relation",
+        /// The appended cue was root and its sole lexical child became root.
+        CueRootPromotion => "cue_root_promotion",
     }
 }
 
@@ -481,62 +380,20 @@ pub struct UdRelationRepairV2 {
     pub to_relation: String,
 }
 
-/// Why a feature value a worker received from Stanza is absent from the
-/// analysis it returned.
-///
-/// Closed, like [`UdRelationRepairKindV2`] and for its reason: a feature
-/// repair must be named here before a worker can report it. Each variant has
-/// ONE name, [`Self::wire_name`], read by both the serde form and the schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UdFeatureRepairKindV2 {
-    /// The model emitted padding (`<PAD>`, `<UNK>`) as a feature value, which
-    /// is no value of any feature. The padding value was removed, and the
-    /// feature with it when nothing else was left.
-    PadFeatureValue,
-}
-
-impl UdFeatureRepairKindV2 {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 1] = [Self::PadFeatureValue];
-
-    /// The variant's one name: its wire form and its schema constant.
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::PadFeatureValue => "pad_feature_value",
-        }
-    }
-}
-
-impl serde::Serialize for UdFeatureRepairKindV2 {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.wire_name())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for UdFeatureRepairKindV2 {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let name = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
-        Self::ALL
-            .into_iter()
-            .find(|kind| kind.wire_name() == name)
-            .ok_or_else(|| serde::de::Error::custom(format!("unknown UD feature repair {name:?}")))
-    }
-}
-
-impl schemars::JsonSchema for UdFeatureRepairKindV2 {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "UdFeatureRepairKindV2".into()
-    }
-
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let variants: Vec<serde_json::Value> = Self::ALL
-            .iter()
-            .map(|kind| serde_json::json!({"type": "string", "const": kind.wire_name()}))
-            .collect();
-        schemars::json_schema!({
-            "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
-            "oneOf": variants,
-        })
+closed_wire_enum! {
+    /// Why a feature value a worker received from Stanza is absent from the
+    /// analysis it returned.
+    ///
+    /// Closed, like [`UdRelationRepairKindV2`] and for its reason: a feature
+    /// repair must be named here before a worker can report it. Each variant has
+    /// ONE name, [`Self::wire_name`], read by both the serde form and the schema.
+    pub enum UdFeatureRepairKindV2 {
+        unknown = "UD feature repair",
+        schema = "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+        /// The model emitted padding (`<PAD>`, `<UNK>`) as a feature value, which
+        /// is no value of any feature. The padding value was removed, and the
+        /// feature with it when nothing else was left.
+        PadFeatureValue => "pad_feature_value",
     }
 }
 
@@ -688,6 +545,285 @@ pub struct UdFeatureRepairV2 {
     pub removed_value: PaddingValue,
 }
 
+closed_wire_enum! {
+    /// Why a feature NAME a worker received from Stanza is not the name in the
+    /// analysis it returned.
+    ///
+    /// Closed, like [`UdRelationRepairKindV2`] and for its reason. Each variant
+    /// has ONE name, [`Self::wire_name`], read by both the serde form and the
+    /// schema.
+    pub enum UdFeatureNameRepairKindV2 {
+        unknown = "UD feature name repair",
+        schema = "Why a Universal Dependencies feature name a worker received from Stanza is not the name in the analysis it returned. Closed: a worker cannot report a feature name repair not named here.",
+        /// A known misspelling of a UD feature name (`Verbform`), respelled to
+        /// the UD name (`VerbForm`). The value is untouched.
+        FeatureNameAlias => "feature_name_alias",
+    }
+}
+
+/// One feature name a worker respelled inside an analysis it returned.
+///
+/// The worker is the only witness, as for every repair: the misspelled name
+/// is not in the analysis the server receives. Stanza's Italian model writes
+/// `Verbform=Fin`, which every consumer of `VerbForm` would read as no form
+/// at all; respelling it is a rewrite of what the model said, so it is
+/// reported like one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct UdFeatureNameRepairV2 {
+    /// Which repair this is.
+    pub kind: UdFeatureNameRepairKindV2,
+    /// Surface form of the word the feature belongs to.
+    pub word: String,
+    /// The name the model produced, verbatim (`Verbform`).
+    pub from_name: String,
+    /// The UD name applied in its place (`VerbForm`).
+    pub to_name: String,
+}
+
+closed_wire_enum! {
+    /// Why a lemma a worker received from Stanza is not the lemma in the
+    /// analysis it returned.
+    ///
+    /// Closed, like [`UdRelationRepairKindV2`] and for its reason. Each variant
+    /// has ONE name, [`Self::wire_name`], read by both the serde form and the
+    /// schema.
+    pub enum UdLemmaRepairKindV2 {
+        unknown = "UD lemma repair",
+        schema = "Why a lemma a worker received from Stanza is not the lemma in the analysis it returned. Closed: a worker cannot report a lemma repair not named here.",
+        /// The model lemmatized a word that has letters to punctuation or
+        /// symbols only (`hello` to `...`, `哎呀` to `》`), which is no lemma of
+        /// that word. The surface form was applied as the lemma.
+        PunctuationLemma => "punctuation_lemma",
+    }
+}
+
+/// Whether `lemma` is a punctuation-only lemma for a word `text` that has
+/// letters: the one test of what a punctuation lemma is, which the worker's
+/// repair (`batchalign_core.is_punctuation_lemma`), the server's UD word
+/// admission and the deserialization of a reported [`UdLemmaRepairV2`] all
+/// reach, so no side keeps a predicate of its own. (Until this function
+/// existed the worker and the server each had one, and they disagreed at
+/// the edges.)
+///
+/// A lemma equal to the surface form, an empty lemma (a multi-word token's
+/// range row) and a punctuation word lemmatized as punctuation are all
+/// lemmas as the model meant them; only a lettered word with a lemma made
+/// entirely of characters that are neither letters nor digits nor whitespace
+/// nor controls (punctuation, symbols, marks) is the defect.
+pub fn is_punctuation_lemma(text: &str, lemma: &str) -> bool {
+    if text == lemma || lemma.is_empty() {
+        return false;
+    }
+    let text_has_letters = text.chars().any(char::is_alphabetic);
+    let lemma_all_punctuation = lemma
+        .chars()
+        .all(|c| !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control());
+    text_has_letters && lemma_all_punctuation
+}
+
+/// One lemma a worker replaced inside an analysis it returned, by the
+/// surface form of its word.
+///
+/// Deserialized through [`is_punctuation_lemma`]: a reported lemma repair
+/// whose lemma is not punctuation-only for its word is refused where the
+/// response is read, as a feature repair of a non-padding value is. The
+/// lemma applied is the word itself, so it is not carried twice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(try_from = "UdLemmaRepairWireV2")]
+pub struct UdLemmaRepairV2 {
+    /// Which repair this is.
+    pub kind: UdLemmaRepairKindV2,
+    /// Surface form of the word, which is also the lemma applied. Private
+    /// with `from_lemma`, so the pair exists only through [`Self::admit`]:
+    /// a struct literal cannot mint a repair the predicate did not bear out.
+    word: String,
+    /// The lemma the model produced, verbatim (`...`): punctuation-only for
+    /// `word`, by admission.
+    from_lemma: String,
+}
+
+impl UdLemmaRepairV2 {
+    /// The one constructor: a repair of `from_lemma` on `word`, admitted by
+    /// [`is_punctuation_lemma`], or the refusal naming both.
+    pub fn admit(
+        kind: UdLemmaRepairKindV2,
+        word: String,
+        from_lemma: String,
+    ) -> Result<Self, NotPunctuationLemma> {
+        if is_punctuation_lemma(&word, &from_lemma) {
+            Ok(Self {
+                kind,
+                word,
+                from_lemma,
+            })
+        } else {
+            Err(NotPunctuationLemma {
+                word,
+                lemma: from_lemma,
+            })
+        }
+    }
+
+    /// Surface form of the word, which is also the lemma applied.
+    pub fn word(&self) -> &str {
+        &self.word
+    }
+
+    /// The lemma the model produced.
+    pub fn from_lemma(&self) -> &str {
+        &self.from_lemma
+    }
+}
+
+/// The wire form of [`UdLemmaRepairV2`] before admission. Its field docs are
+/// the schema's: schemars reads the `try_from` type for the properties.
+#[derive(Deserialize, schemars::JsonSchema)]
+struct UdLemmaRepairWireV2 {
+    /// Which repair this is.
+    kind: UdLemmaRepairKindV2,
+    /// Surface form of the word, which is also the lemma applied.
+    word: String,
+    /// The lemma the model produced, verbatim (`...`): punctuation-only for
+    /// `word`, by admission.
+    from_lemma: String,
+}
+
+/// The reported lemma is not punctuation-only for its word, so no lemma
+/// repair may claim to have replaced it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a lemma repair replaces a punctuation-only lemma, but {lemma:?} is not one for {word:?}")]
+pub struct NotPunctuationLemma {
+    /// The word the repair named.
+    pub word: String,
+    /// The lemma it claimed to have replaced.
+    pub lemma: String,
+}
+
+impl TryFrom<UdLemmaRepairWireV2> for UdLemmaRepairV2 {
+    type Error = NotPunctuationLemma;
+
+    fn try_from(wire: UdLemmaRepairWireV2) -> Result<Self, Self::Error> {
+        Self::admit(wire.kind, wire.word, wire.from_lemma)
+    }
+}
+
+/// Which field of a UD word a repair rewrote: the discriminant of
+/// [`UdRepairV2`], for code that must cover every kind (a fixture per kind,
+/// a count per kind) without holding a payload.
+///
+/// Not a wire type: the `field` tag on the wire is serde's, written from
+/// [`UdRepairV2`]'s variant names, so there is no second spelling of it here
+/// to drift. [`UdRepairV2::kind`] is the one route from a repair to its kind,
+/// and its exhaustive match is what forces a new [`UdRepairV2`] variant to be
+/// named here; [`UdRepairV2::example`] forces the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UdRepairKindV2 {
+    /// A dependency relation was rewritten ([`UdRelationRepairV2`]).
+    Relation,
+    /// A feature value was removed ([`UdFeatureRepairV2`]).
+    FeatureValue,
+    /// A feature name was respelled ([`UdFeatureNameRepairV2`]).
+    FeatureName,
+    /// A lemma was replaced ([`UdLemmaRepairV2`]).
+    Lemma,
+}
+
+impl UdRepairKindV2 {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Relation,
+        Self::FeatureValue,
+        Self::FeatureName,
+        Self::Lemma,
+    ];
+}
+
+/// One repair a worker made inside an analysis it returned: which field of
+/// which word, and what changed.
+///
+/// The ONE list an analyzed item carries ([`MorphosyntaxItemResultV2::Analyzed`]):
+/// every repair site in the worker produces a value of this type and nothing
+/// else, so the provenance count that reads the list cannot miss a kind, and
+/// a repair that lives in a log line only is the shape this type exists to
+/// end. Tagged by the field repaired (`field`), with each variant's own
+/// reason (`kind`) inside, so the tag is closed in two steps: the field here,
+/// the reason in the field's own kind enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "field", rename_all = "snake_case")]
+pub enum UdRepairV2 {
+    /// A dependency relation was rewritten.
+    Relation(UdRelationRepairV2),
+    /// A feature value was removed.
+    FeatureValue(UdFeatureRepairV2),
+    /// A feature name was respelled.
+    FeatureName(UdFeatureNameRepairV2),
+    /// A lemma was replaced by its word's surface form.
+    Lemma(UdLemmaRepairV2),
+}
+
+impl UdRepairV2 {
+    /// Which field this repair rewrote.
+    pub const fn kind(&self) -> UdRepairKindV2 {
+        match self {
+            Self::Relation(_) => UdRepairKindV2::Relation,
+            Self::FeatureValue(_) => UdRepairKindV2::FeatureValue,
+            Self::FeatureName(_) => UdRepairKindV2::FeatureName,
+            Self::Lemma(_) => UdRepairKindV2::Lemma,
+        }
+    }
+
+    /// Why the field was rewritten: the variant's own reason, by its wire
+    /// name (`pad_relation`, `pad_feature_value`, `feature_name_alias`,
+    /// `punctuation_lemma`, ...). What an operator-facing tally groups by.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::Relation(repair) => repair.kind.wire_name(),
+            Self::FeatureValue(repair) => repair.kind.wire_name(),
+            Self::FeatureName(repair) => repair.kind.wire_name(),
+            Self::Lemma(repair) => repair.kind.wire_name(),
+        }
+    }
+
+    /// One repair of `kind`, as a worker would report it, for tests in this
+    /// crate and its consumers (`batchalign` counts and tallies them). The
+    /// exhaustive match is what makes a kind with no example a compile error
+    /// rather than a fixture that forgot it.
+    #[doc(hidden)]
+    pub fn example(kind: UdRepairKindV2) -> Self {
+        match kind {
+            UdRepairKindV2::Relation => Self::Relation(UdRelationRepairV2 {
+                kind: UdRelationRepairKindV2::RelationAlias,
+                word: "ne".to_owned(),
+                from_relation: "iob".to_owned(),
+                to_relation: "iobj".to_owned(),
+            }),
+            UdRepairKindV2::FeatureValue => Self::FeatureValue(UdFeatureRepairV2 {
+                kind: UdFeatureRepairKindV2::PadFeatureValue,
+                word: "кітап".to_owned(),
+                feature: "Case".to_owned(),
+                removed_value: PaddingValue::admit("<PAD>")
+                    .unwrap_or_else(|| unreachable!("<PAD> is padding by the one test of padding")),
+            }),
+            UdRepairKindV2::FeatureName => Self::FeatureName(UdFeatureNameRepairV2 {
+                kind: UdFeatureNameRepairKindV2::FeatureNameAlias,
+                word: "da".to_owned(),
+                from_name: "Verbform".to_owned(),
+                to_name: "VerbForm".to_owned(),
+            }),
+            UdRepairKindV2::Lemma => Self::Lemma(
+                UdLemmaRepairV2::admit(
+                    UdLemmaRepairKindV2::PunctuationLemma,
+                    "bonjour".to_owned(),
+                    "...".to_owned(),
+                )
+                .unwrap_or_else(|refused| {
+                    unreachable!("`...` is a punctuation lemma of `bonjour`: {refused}")
+                }),
+            ),
+        }
+    }
+}
+
 /// One morphosyntax item result returned by Python.
 ///
 /// A tagged union, so an analysis cannot exist without the model that
@@ -701,18 +837,15 @@ pub enum MorphosyntaxItemResultV2 {
         raw_sentences: Vec<serde_json::Value>,
         /// The model that produced them.
         model: MorphosyntaxModelIdentityV2,
-        /// Every relation the worker rewrote inside `raw_sentences`, in the
-        /// order it made them. Empty means it rewrote nothing.
+        /// Every repair the worker made inside `raw_sentences`, of every
+        /// kind ([`UdRepairV2`]), in the order it made them. Empty means it
+        /// repaired nothing.
         ///
         /// Required, with no serde default, for the reason the model is:
         /// a default would make "this worker reports no repairs" and "this
         /// worker does not report repairs" the same value on the wire, which
         /// is the shape that let a rewrite live only in a log line.
-        repairs: Vec<UdRelationRepairV2>,
-        /// Every feature value the worker removed from `raw_sentences`, in
-        /// the order it removed them. Empty means it removed nothing.
-        /// Required, with no serde default, for `repairs`' reason.
-        feature_repairs: Vec<UdFeatureRepairV2>,
+        repairs: Vec<UdRepairV2>,
     },
     /// The item had no words, so no model ran and there is nothing to apply.
     NoWords,
@@ -1457,6 +1590,103 @@ mod tests {
         let emptied = repair_feats("Case=<PAD>");
         assert_eq!(emptied.feats, None);
         assert_eq!(repair_feats("Case=Nom").removed, []);
+    }
+
+    /// The one lemma predicate: a lettered word whose lemma is punctuation,
+    /// symbols or marks only is the defect; the surface form itself, a real
+    /// lemma, an empty lemma and punctuation lemmatized as punctuation are
+    /// not. The CJK case is the one the worker's log line was written for.
+    #[test]
+    fn a_punctuation_lemma_is_a_symbol_only_lemma_of_a_lettered_word() {
+        for (text, lemma) in [
+            ("hello", "."),
+            ("hello", "..."),
+            ("world", ","),
+            ("cat", "\u{2013}"),
+            ("哎呀", "》"),
+        ] {
+            assert!(is_punctuation_lemma(text, lemma), "{text:?} / {lemma:?}");
+        }
+        for (text, lemma) in [
+            ("hello", "hello"),
+            ("hello", ""),
+            (".", "."),
+            (",", "--"),
+            ("running", "run"),
+            ("cats", "cat"),
+            ("123", "."),
+        ] {
+            assert!(!is_punctuation_lemma(text, lemma), "{text:?} / {lemma:?}");
+        }
+    }
+
+    /// RED FIRST: a lemma repair was a record any producer could fill. Its
+    /// admission reads the one predicate, so a worker cannot report
+    /// replacing a lemma that was no punctuation lemma of its word.
+    #[test]
+    fn a_lemma_repair_must_replace_a_punctuation_lemma() {
+        let repair = |word: &str, lemma: &str| {
+            serde_json::json!({
+                "kind": "punctuation_lemma",
+                "word": word,
+                "from_lemma": lemma,
+            })
+        };
+        let admitted: UdLemmaRepairV2 =
+            serde_json::from_value(repair("bonjour", "...")).expect("a punctuation lemma");
+        assert_eq!(admitted.from_lemma(), "...");
+        assert!(serde_json::from_value::<UdLemmaRepairV2>(repair("bonjour", "bonjour")).is_err());
+        assert!(serde_json::from_value::<UdLemmaRepairV2>(repair("bonjour", "bon")).is_err());
+        // The constructor is the same gate, so no route mints an unadmitted one.
+        let refused = UdLemmaRepairV2::admit(
+            UdLemmaRepairKindV2::PunctuationLemma,
+            "bonjour".to_owned(),
+            "bon".to_owned(),
+        )
+        .expect_err("a real lemma is no repair");
+        assert_eq!(
+            (refused.word.as_str(), refused.lemma.as_str()),
+            ("bonjour", "bon")
+        );
+    }
+
+    /// One repair of every kind, as the worker writes each: it round-trips
+    /// through its `field` tag, and `kind()`/`reason()` read the variant.
+    /// `UdRepairV2::example` is exhaustive over the kinds, so a kind without
+    /// an example is a compile error rather than a test that forgot it.
+    #[test]
+    fn one_repair_of_every_kind_round_trips_under_its_field_tag() {
+        let reasons = [
+            (UdRepairKindV2::Relation, "relation_alias"),
+            (UdRepairKindV2::FeatureValue, "pad_feature_value"),
+            (UdRepairKindV2::FeatureName, "feature_name_alias"),
+            (UdRepairKindV2::Lemma, "punctuation_lemma"),
+        ];
+        assert_eq!(reasons.len(), UdRepairKindV2::ALL.len());
+        for (kind, reason) in reasons {
+            let repair = UdRepairV2::example(kind);
+            assert_eq!(repair.kind(), kind);
+            assert_eq!(repair.reason(), reason);
+            let json = serde_json::to_value(&repair).expect("serializes");
+            assert!(json["field"].is_string(), "{json}");
+            assert_eq!(json["kind"], reason, "{json}");
+            let back: UdRepairV2 = serde_json::from_value(json).expect("round-trips");
+            assert_eq!(back, repair);
+        }
+        // An unknown field, and a known field with a reason of another
+        // field, are refused: the union is closed in both steps.
+        assert!(
+            serde_json::from_value::<UdRepairV2>(serde_json::json!({
+                "field": "category", "kind": "unknown_category", "word": "w"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UdRepairV2>(serde_json::json!({
+                "field": "lemma", "kind": "pad_relation", "word": "w", "from_lemma": "."
+            }))
+            .is_err()
+        );
     }
 
     /// WIRE FORMAT: paid pyannoteAI output crosses the worker boundary before

@@ -37,13 +37,20 @@
 use crate::decisions::LineIdx;
 use std::collections::HashMap;
 
+use batchalign_types::segmentation::{BoundaryTerminator, SegmentEnds, UtteranceSegmentation};
 use serde::{Deserialize, Serialize};
 use talkbank_model::alignment::helpers::PositionalDomain;
 use talkbank_model::model::ChatFileLines;
-use talkbank_model::model::{ChatFile, Line};
 #[cfg(test)]
-use talkbank_model::model::{Retrace, Utterance, UtteranceContent};
+use talkbank_model::model::Retrace;
+use talkbank_model::model::dependent_tier::WorItem;
+use talkbank_model::model::{
+    ChatFile, ContentStructure, DependentTier, Line, Terminator, Utterance, UtteranceContent, Word,
+    WordContent, WordText,
+};
+use talkbank_transform::utterance_split::{InvalidatedTier, SplitOutcome, UtteranceSplitPlan};
 
+use crate::asr_postprocess::{InitialCapSlot, capitalize_first, chat_terminator, initial_cap_slot};
 use crate::extract;
 use talkbank_model::SpeakerCode;
 
@@ -402,6 +409,65 @@ pub enum UtsegApplyRefusal {
     /// The supplied map refers to an utterance not present in the source.
     #[error("segmentation references absent utterance {0}")]
     UnknownUtterance(usize),
+    /// The partition rebuilt children whose boundaries the segmentation's
+    /// predicted cuts do not number, so no child could be given its end.
+    ///
+    /// An internal invariant between the admitted evidence and the shared
+    /// partition owner (both count the runs of the same assignments), named
+    /// rather than left to a silent `zip`; it goes with the Chatter release
+    /// whose plan takes the terminators per boundary and counts them itself.
+    #[error(
+        "utterance {utterance_ordinal} split into {children} children, and its segmentation \
+         predicts {cuts} cuts"
+    )]
+    CutCount {
+        /// The original source ordinal.
+        utterance_ordinal: usize,
+        /// Children the partition rebuilt.
+        children: usize,
+        /// Cuts the segmentation predicts terminators for.
+        cuts: usize,
+    },
+}
+
+/// Whether the new children of a split take an utterance-initial capital.
+///
+/// Decided once per file from its language declaration, so a split's children
+/// are written the way the pre-CHAT pass writes every utterance it makes for
+/// that language. Until 2026-11-03 no capital followed a post-CHAT split, so
+/// every non-first child began lowercase (`and he likes cake .`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitChildOrthography {
+    /// The file's primary language is English: the first capitalizable word
+    /// of every non-first child is capitalized, with the skips the pre-CHAT
+    /// pass applies (markers, fillers, fragments, retrace copies, letter
+    /// forms).
+    EnglishInitial,
+    /// Any other primary language, no `@Languages` header, or one the model
+    /// refuses: children keep their words as the source spells them.
+    AsSpoken,
+}
+
+impl SplitChildOrthography {
+    /// The orthography a file's language declaration asks for, read through
+    /// the model's one admission of `@Languages` (the same one morphotag and
+    /// WER normalization read), so an unusable header is refused here as it
+    /// is there rather than read as its first code.
+    pub fn for_file(chat_file: &ChatFile) -> Self {
+        use talkbank_model::LanguageDeclarationError;
+        match chat_file.language_declaration() {
+            Ok(codes) if codes.primary().as_str() == "eng" => Self::EnglishInitial,
+            Ok(_) | Err(LanguageDeclarationError::Absent) => Self::AsSpoken,
+            Err(
+                error @ (LanguageDeclarationError::Empty
+                | LanguageDeclarationError::Rejected
+                | LanguageDeclarationError::Repeated),
+            ) => {
+                tracing::warn!(%error, "split children keep their spelling because language metadata is unusable");
+                Self::AsSpoken
+            }
+        }
+    }
 }
 
 /// Apply all proposed splits atomically, retaining explicit tier invalidations
@@ -412,8 +478,9 @@ pub enum UtsegApplyRefusal {
 /// file for the output path to mistake for successful processing.
 pub fn apply_utseg_results(
     chat_file: &mut ChatFile,
-    assignment_map: &HashMap<usize, Vec<usize>>,
+    segmentations: &HashMap<usize, UtteranceSegmentation>,
 ) -> Result<UtsegApplied, UtsegApplyRefusal> {
+    let orthography = SplitChildOrthography::for_file(chat_file);
     let mut replacements = HashMap::new();
     let mut invalidated = Vec::new();
     // Each input utterance's first output position and child count, in
@@ -426,25 +493,15 @@ pub fn apply_utseg_results(
         let Line::Utterance(source) = line else {
             continue;
         };
-        if let Some(assignments) = assignment_map.get(&ordinal) {
-            let outcome = talkbank_transform::utterance_split::UtteranceSplitPlan::for_morphology(
-                source,
-                assignments,
-            )
-            .map_err(|source| UtsegApplyRefusal::Partition {
-                utterance_ordinal: ordinal,
-                source,
-            })?
-            .execute();
-            match outcome {
+        if let Some(segmentation) = segmentations.get(&ordinal) {
+            match split_source(source, segmentation, orthography, ordinal)? {
                 // One child: the source stands exactly as it is, with every
                 // dependent tier, so its line is not replaced.
-                talkbank_transform::utterance_split::SplitOutcome::Unchanged => {
+                FinishedSplit::Unchanged => {
                     placements.push((next_output, 1));
                     next_output += 1;
                 }
-                talkbank_transform::utterance_split::SplitOutcome::Split(split) => {
-                    let (children, losses) = split.into_parts();
+                FinishedSplit::Split { children, losses } => {
                     invalidated.extend(losses.into_iter().map(|loss| UtsegTierInvalidation {
                         utterance_ordinal: ordinal,
                         tier_index: loss.index(),
@@ -463,7 +520,7 @@ pub fn apply_utseg_results(
         ordinal += 1;
     }
     let layout = SegmentationLayout { placements };
-    if let Some(&missing) = assignment_map
+    if let Some(&missing) = segmentations
         .keys()
         .filter(|&&index| index >= ordinal)
         .min()
@@ -495,24 +552,236 @@ pub fn apply_utseg_results(
     })
 }
 
+/// What one source utterance became: itself, or finished children.
+enum FinishedSplit<'source> {
+    /// Every word named the same child; the source stands.
+    Unchanged,
+    /// Two or more children, each with its end and orthography decided, and
+    /// the dependent tiers the split could not carry.
+    Split {
+        children: Vec<Utterance>,
+        losses: Vec<InvalidatedTier<'source>>,
+    },
+}
+
+/// Admit and execute one source's partition, then finish its children.
+///
+/// Chatter's plan rebuilds the children with a period on every earlier child
+/// and the parent's terminator on the last (pinned Chatter v0.34.0 has no
+/// way to hand the plan a terminator per child), so the ends the
+/// segmentation states and the capitalization the file's language asks for
+/// are applied here, as the one transition between a rebuilt child and a
+/// line of the file. The next Chatter release's split plan takes the
+/// terminator per child boundary and replaces the terminator half of this.
+fn split_source<'source>(
+    source: &'source Utterance,
+    segmentation: &UtteranceSegmentation,
+    orthography: SplitChildOrthography,
+    ordinal: usize,
+) -> Result<FinishedSplit<'source>, UtsegApplyRefusal> {
+    let outcome = UtteranceSplitPlan::for_morphology(source, segmentation.assignments())
+        .map_err(|source| UtsegApplyRefusal::Partition {
+            utterance_ordinal: ordinal,
+            source,
+        })?
+        .execute();
+    match outcome {
+        SplitOutcome::Unchanged => Ok(FinishedSplit::Unchanged),
+        SplitOutcome::Split(split) => {
+            let (children, losses) = split.into_parts();
+            if let SegmentEnds::Predicted { cuts, .. } = segmentation.ends()
+                && cuts.len() + 1 != children.len()
+            {
+                return Err(UtsegApplyRefusal::CutCount {
+                    utterance_ordinal: ordinal,
+                    children: children.len(),
+                    cuts: cuts.len(),
+                });
+            }
+            let last = children.len() - 1;
+            let children = children
+                .into_iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    // The last child keeps the parent's own terminator, which
+                    // the plan already gave it: a prediction after the
+                    // parent's last word does not replace what the source
+                    // wrote there. An earlier child ends as the cut after it
+                    // predicted; where the segmenter stated none, the plan's
+                    // period stands as the conventional end of an utterance
+                    // nobody heard the end of.
+                    let predicted = if index == last {
+                        None
+                    } else {
+                        segmentation.cut_end(index)
+                    };
+                    finish_child(child, predicted, index, orthography)
+                })
+                .collect();
+            Ok(FinishedSplit::Split { children, losses })
+        }
+    }
+}
+
+/// The one transition from a child Chatter rebuilt to a line of the file:
+/// the terminator its cut predicted, if any, and the capital the file's
+/// orthography gives a child that begins a new utterance (every child but
+/// the first, which begins where the source did).
+fn finish_child(
+    mut child: Utterance,
+    predicted: Option<BoundaryTerminator>,
+    index: usize,
+    orthography: SplitChildOrthography,
+) -> Utterance {
+    if let Some(kind) = predicted {
+        let terminator = chat_terminator(kind, child.main.location);
+        set_child_terminator(&mut child, terminator);
+    }
+    match orthography {
+        SplitChildOrthography::EnglishInitial if index > 0 => capitalize_child_initial(&mut child),
+        SplitChildOrthography::EnglishInitial | SplitChildOrthography::AsSpoken => {}
+    }
+    child
+}
+
+/// Give a child the terminator its cut predicted, on its main tier and on the
+/// `%wor` tier the plan partitioned for it, which must describe the same
+/// utterance.
+fn set_child_terminator(child: &mut Utterance, terminator: Terminator) {
+    for tier in child.dependent_tiers.iter_mut() {
+        if let DependentTier::Wor(wor) = &mut tier.tier {
+            wor.terminator = Some(terminator.clone());
+        }
+    }
+    child.main.content.terminator = Some(terminator);
+}
+
+/// Capitalize the first word of a child that owns the utterance-initial
+/// slot, under the pre-CHAT pass's rule, on the main tier and on the `%wor`
+/// word that corroborates it (corroboration compares spellings exactly).
+fn capitalize_child_initial(child: &mut Utterance) {
+    let Some(content_index) = initial_cap_target(&child.main.content.content) else {
+        return;
+    };
+    // The `%wor` slot of that content item, read from the projection the
+    // partition itself used, before the main tier is changed; only a child
+    // that carries a `%wor` tier needs it.
+    let wor_slot = child.wor_tier().is_some().then(|| {
+        child
+            .main
+            .wor_projection()
+            .source_content()
+            .position(|source| source.index() == content_index)
+    });
+    if let Some(item) = child
+        .main
+        .content
+        .content
+        .as_mut_slice()
+        .get_mut(content_index)
+    {
+        capitalize_content_word(item);
+    }
+    let Some(Some(wor_slot)) = wor_slot else {
+        return;
+    };
+    for tier in child.dependent_tiers.iter_mut() {
+        if let DependentTier::Wor(wor) = &mut tier.tier
+            && let Some(WorItem::Word(word)) = wor
+                .items
+                .iter_mut()
+                .filter(|item| matches!(item, WorItem::Word(_)))
+                .nth(wor_slot)
+        {
+            capitalize_word(word);
+        }
+    }
+}
+
+/// The index of the content item whose word takes the utterance-initial
+/// capital, walking the items as the pre-CHAT pass walks its words: past a
+/// retrace copy and past a non-owner, stopping without a capital at a letter
+/// form, and at the first container this rule does not enter.
+fn initial_cap_target(content: &[UtteranceContent]) -> Option<usize> {
+    for (index, item) in content.iter().enumerate() {
+        let word = match item.structure() {
+            // The produced form: the spoken word of a replacement, not its
+            // target.
+            ContentStructure::Word(word) => word.words().next()?,
+            // Retrace copies precede the word the speaker concluded with,
+            // which is where the capital belongs; a leaf is not a word.
+            ContentStructure::Retrace(_) | ContentStructure::Leaf(_) => continue,
+            // A structure holding words of its own: the rule does not reach
+            // inside it, so the child keeps its spelling.
+            ContentStructure::Group(_) => return None,
+        };
+        // The word's CHAT spelling is what the pre-CHAT pass sees for the
+        // same word (`&-um`, `xxx`, `www@k`), so the same decision applies.
+        match initial_cap_slot(&word.to_chat()) {
+            InitialCapSlot::NotOwner => continue,
+            InitialCapSlot::Letters => return None,
+            InitialCapSlot::Owner => return Some(index),
+        }
+    }
+    None
+}
+
+/// Capitalize the word a content item holds: the three word spellings
+/// [`initial_cap_target`] can name (the model has no mutable counterpart of
+/// `structure`), and nothing else.
+fn capitalize_content_word(item: &mut UtteranceContent) {
+    if let UtteranceContent::Word(word) = item {
+        capitalize_word(word);
+    } else if let UtteranceContent::AnnotatedWord(annotated) = item {
+        capitalize_word(&mut annotated.inner);
+    } else if let UtteranceContent::ReplacedWord(replaced) = item {
+        capitalize_word(&mut replaced.word);
+    }
+}
+
+/// Uppercase the first character of a word's leading text element, the way
+/// `capitalize_first` treats the pre-CHAT pass's surfaces: a word whose
+/// spelling opens with anything but plain text (a shortening, a prosody
+/// mark) is left as it is.
+fn capitalize_word(word: &mut Word) {
+    let Some(WordContent::Text(text)) = word.content().as_slice().first() else {
+        return;
+    };
+    let capitalized = capitalize_first(text.as_ref());
+    if capitalized == text.as_ref() {
+        return;
+    }
+    // `capitalize_first` of a non-empty text is non-empty, so the only way
+    // `WordText::new` refuses is unreachable here; nothing is replaced then.
+    if let Ok(text) = WordText::new(capitalized) {
+        word.replace_content_at(0, WordContent::Text(text));
+    }
+}
+
 /// The shared CHAT owner also provides the morphology-domain content projection.
 pub use talkbank_transform::utterance_split::build_word_to_content_map;
 
+/// The production split of one utterance, for a test: an unstated
+/// segmentation (every cut a period) with English orthography.
 #[cfg(test)]
 fn split_utterance(utterance: Utterance, assignments: &[usize]) -> Vec<Utterance> {
-    let children = match talkbank_transform::utterance_split::UtteranceSplitPlan::for_morphology(
-        &utterance,
-        assignments,
+    split_segmented(
+        utterance,
+        &UtteranceSegmentation::unstated(assignments.to_vec()),
+        SplitChildOrthography::EnglishInitial,
     )
-    .expect("admitted test partition")
-    .execute()
-    {
-        talkbank_transform::utterance_split::SplitOutcome::Unchanged => None,
-        talkbank_transform::utterance_split::SplitOutcome::Split(split) => {
-            Some(split.into_parts().0)
-        }
-    };
-    children.unwrap_or_else(|| vec![utterance])
+}
+
+#[cfg(test)]
+fn split_segmented(
+    utterance: Utterance,
+    segmentation: &UtteranceSegmentation,
+    orthography: SplitChildOrthography,
+) -> Vec<Utterance> {
+    match split_source(&utterance, segmentation, orthography, 0).expect("admitted test partition") {
+        FinishedSplit::Unchanged => vec![utterance],
+        FinishedSplit::Split { children, .. } => children,
+    }
 }
 
 #[cfg(test)]
@@ -592,19 +861,54 @@ mod tests {
         assert_eq!(result.len(), 1);
     }
 
+    /// A split's new child begins an English utterance, so it takes the
+    /// utterance-initial capital the pre-CHAT pass gives every utterance it
+    /// makes. Until 2026-11-03 this test pinned the lowercase `and he likes
+    /// cake`, the defect.
     #[test]
     fn test_split_two_groups() {
         let chat_text =
             include_str!("../../../test-fixtures/eng_i_eat_cookies_and_he_likes_cake.cha");
         let chat = parse_chat(chat_text);
         let utt = get_utterance(&chat, 0).clone();
-        let result = split_utterance(utt, &[0, 0, 0, 1, 1, 1, 1]);
+        let result = split_utterance(utt.clone(), &[0, 0, 0, 1, 1, 1, 1]);
         assert_eq!(result.len(), 2);
 
         let out0 = result[0].to_chat_string();
         let out1 = result[1].to_chat_string();
         assert!(out0.contains("I eat cookies"), "First split: {out0}");
-        assert!(out1.contains("and he likes cake"), "Second split: {out1}");
+        assert!(out1.contains("And he likes cake"), "Second split: {out1}");
+
+        // A file in another language keeps its children as spoken.
+        let as_spoken = split_segmented(
+            utt,
+            &UtteranceSegmentation::unstated(vec![0, 0, 0, 1, 1, 1, 1]),
+            SplitChildOrthography::AsSpoken,
+        );
+        assert!(
+            as_spoken[1].to_chat_string().contains("and he likes cake"),
+            "{}",
+            as_spoken[1].to_chat_string()
+        );
+    }
+
+    /// The capital skips what the pre-CHAT rule skips (here a retrace copy;
+    /// the filler binds to the preceding child, as any non-word does) and
+    /// lands on the word the speaker concluded with.
+    #[test]
+    fn a_child_capital_skips_retrace_copies() {
+        let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
+            @Participants:\tPAR Participant\n\
+            @ID:\teng|test|PAR|||||Participant|||\n\
+            *PAR:\tokay &-um the [/] the dog ran .\n@End\n";
+        let chat = parse_chat(chat_text);
+        let utt = get_utterance(&chat, 0).clone();
+        // Mor-domain words: okay, the (kept), dog, ran; the filler and the
+        // retrace copy hold no slot.
+        let result = split_utterance(utt, &[0, 1, 1, 1]);
+        assert_eq!(result.len(), 2);
+        let second = result[1].to_chat_string();
+        assert!(second.contains("the [/] The dog ran"), "{second}");
     }
 
     /// True if a segment ENDS with a retrace, which means the split separated
@@ -752,11 +1056,14 @@ mod tests {
         let mut chat = parse_chat(chat_text);
         assert_eq!(count_utterances(&chat), 1);
 
-        let mut assignment_map = HashMap::new();
-        assignment_map.insert(0, vec![0, 0, 0, 1, 1, 1, 1]);
+        let mut segmentations = HashMap::new();
+        segmentations.insert(
+            0,
+            UtteranceSegmentation::unstated(vec![0, 0, 0, 1, 1, 1, 1]),
+        );
 
         let applied =
-            apply_utseg_results(&mut chat, &assignment_map).expect("admitted segmentation");
+            apply_utseg_results(&mut chat, &segmentations).expect("admitted segmentation");
         assert_eq!(count_utterances(&chat), 2);
         assert_eq!(applied.layout.input_utterances(), 1);
         assert_eq!(
@@ -768,7 +1075,7 @@ mod tests {
         let out0 = get_utterance(&chat, 0).to_chat_string();
         let out1 = get_utterance(&chat, 1).to_chat_string();
         assert!(out0.contains("I eat cookies"), "First: {out0}");
-        assert!(out1.contains("and he likes cake"), "Second: {out1}");
+        assert!(out1.contains("And he likes cake"), "Second: {out1}");
     }
 
     #[test]
@@ -790,7 +1097,10 @@ mod tests {
         )
         .expect("valid existing multi-utterance CHAT");
         let original = chat.to_chat_string();
-        let assignments = HashMap::from([(0, vec![0, 0, 1, 1]), (1, vec![0, 1])]);
+        let assignments = HashMap::from([
+            (0, UtteranceSegmentation::unstated(vec![0, 0, 1, 1])),
+            (1, UtteranceSegmentation::unstated(vec![0, 1])),
+        ]);
         assert!(matches!(
             apply_utseg_results(&mut chat, &assignments),
             Err(UtsegApplyRefusal::Partition {
@@ -814,8 +1124,11 @@ mod tests {
         .expect("valid existing multi-utterance CHAT");
         let before = count_utterances(&chat);
         assert!(before >= 2, "the fixture has a second utterance");
-        let applied = apply_utseg_results(&mut chat, &HashMap::from([(0, vec![0, 0, 1, 1])]))
-            .expect("admitted segmentation");
+        let applied = apply_utseg_results(
+            &mut chat,
+            &HashMap::from([(0, UtteranceSegmentation::unstated(vec![0, 0, 1, 1]))]),
+        )
+        .expect("admitted segmentation");
         assert_eq!(count_utterances(&chat), before + 1);
         assert_eq!(applied.layout.input_utterances(), before);
         assert_eq!(applied.layout.whole_output_ordinal(0), None);
@@ -842,7 +1155,10 @@ mod tests {
         )
         .expect("valid existing CHAT");
         let original = chat.to_chat_string();
-        let assignments = HashMap::from([(0, vec![0, 0, 1, 1]), (99, vec![0])]);
+        let assignments = HashMap::from([
+            (0, UtteranceSegmentation::unstated(vec![0, 0, 1, 1])),
+            (99, UtteranceSegmentation::unstated(vec![0])),
+        ]);
         assert!(matches!(
             apply_utseg_results(&mut chat, &assignments),
             Err(UtsegApplyRefusal::UnknownUtterance(99))
@@ -869,10 +1185,13 @@ mod tests {
 
         // The extraction domain includes the comma slot. Keep it with the
         // preceding child rather than inventing a shorter assignment vector.
-        let mut assignment_map = HashMap::new();
-        assignment_map.insert(0, vec![0, 0, 0, 0, 1, 1, 1, 1, 1]);
+        let mut segmentations = HashMap::new();
+        segmentations.insert(
+            0,
+            UtteranceSegmentation::unstated(vec![0, 0, 0, 0, 1, 1, 1, 1, 1]),
+        );
 
-        apply_utseg_results(&mut chat, &assignment_map).expect("admitted segmentation");
+        apply_utseg_results(&mut chat, &segmentations).expect("admitted segmentation");
 
         // Verify the split produced two utterances
         let utt_count = count_utterances(&chat);
@@ -1045,8 +1364,9 @@ mod tests {
     }
 
     /// A partitioned `%wor` tier describes its child main tier, including the
-    /// terminator. Earlier children use the splitter's period; only the final
-    /// child inherits the parent's question mark.
+    /// terminator the cut predicted on an earlier child and the capital its
+    /// first word took; only the final child inherits the parent's question
+    /// mark.
     #[test]
     fn utseg_split_keeps_child_wor_terminators_in_sync_with_main_tiers() {
         let chat_text = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -1058,8 +1378,27 @@ mod tests {
         let chat = parse_chat(chat_text);
         let parent = get_utterance(&chat, 0).clone();
 
-        let result = split_utterance(parent, &[0, 0, 1, 1]);
+        let result = split_segmented(
+            parent,
+            &UtteranceSegmentation::from_boundaries([
+                None,
+                Some(batchalign_types::segmentation::BoundaryTerminator::Exclamation),
+                None,
+                None,
+            ]),
+            SplitChildOrthography::EnglishInitial,
+        );
         assert_eq!(result.len(), 2);
+        assert!(
+            result[0].to_chat_string().contains("I eat !"),
+            "{}",
+            result[0].to_chat_string()
+        );
+        let second = result[1].to_chat_string();
+        assert!(
+            second.contains("The cookies ?") && second.contains("%wor:\tThe"),
+            "main and %wor spell the capitalized child alike: {second}"
+        );
 
         for (i, child) in result.iter().enumerate() {
             let child_wor = child
@@ -1308,11 +1647,13 @@ mod tests {
     }
 
     /// Terminator propagation: the LAST child inherits the parent's
-    /// terminator; non-last children get the default `Period`. This
-    /// preserves quote-introducer linkage (`+"/.` parent → next-utterance
-    /// `+"` quoted speech), interruption markers, and any other
-    /// non-default terminator. See spec/errors/E341_auto.md for the
-    /// `+"/.` ↔ `+"` validation pairing.
+    /// terminator, and an earlier child ends with the terminator the
+    /// segmentation predicted at its cut. This preserves quote-introducer
+    /// linkage (`+"/.` parent → next-utterance `+"` quoted speech),
+    /// interruption markers, and any other non-default terminator. See
+    /// spec/errors/E341_auto.md for the `+"/.` ↔ `+"` validation pairing.
+    /// Until 2026-11-03 this test pinned a `Period` on every non-last child
+    /// whatever the model predicted, the defect.
     #[test]
     fn utseg_split_inherits_terminator_on_last_child() {
         // Parent ends with +"/. (quote-introducer). Real shape from
@@ -1337,7 +1678,15 @@ mod tests {
             "fixture sanity: parent must end in +\"/. (non-default), got {parent_term:?}"
         );
 
-        let result = split_utterance(parent, &[0, 0, 1]);
+        let result = split_segmented(
+            parent,
+            &UtteranceSegmentation::from_boundaries([
+                None,
+                Some(batchalign_types::segmentation::BoundaryTerminator::Question),
+                None,
+            ]),
+            SplitChildOrthography::EnglishInitial,
+        );
         assert_eq!(result.len(), 2, "expected 2 children");
 
         let first_term = result[0]
@@ -1347,8 +1696,8 @@ mod tests {
             .as_ref()
             .expect("child 0 must have a terminator");
         assert!(
-            matches!(first_term, Terminator::Period { .. }),
-            "non-last child must default to Period, got {first_term:?}"
+            matches!(first_term, Terminator::Question { .. }),
+            "an earlier child ends as its cut predicted, got {first_term:?}"
         );
 
         let last_term = result[1]
@@ -1503,8 +1852,8 @@ mod tests {
         );
         // child 1: ReplacedWord preserved intact, plus "go"
         assert!(
-            s1.contains("wanna [: want to]"),
-            "child 1 should keep the ReplacedWord intact, got: {s1}"
+            s1.contains("Wanna [: want to]"),
+            "child 1 should keep the ReplacedWord intact, capitalized as its first word, got: {s1}"
         );
         assert!(s1.contains("go"), "child 1 should contain go, got: {s1}");
     }
@@ -1533,7 +1882,7 @@ mod tests {
             !s1.contains("wanna") && !s1.contains("want"),
             "child 1 should not have any ReplacedWord fragment, got: {s1}"
         );
-        assert!(s1.contains("go"), "child 1 should contain go, got: {s1}");
+        assert!(s1.contains("Go"), "child 1 should contain go, got: {s1}");
     }
 
     #[test]

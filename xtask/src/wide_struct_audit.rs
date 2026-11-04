@@ -80,6 +80,10 @@ struct NamedStructInfo {
 /// fields once `source_kind` became a projection of `io_profile`) and
 /// `TranscribeOptions` (eight, once language, backend and speaker count moved
 /// into the sealed ASR plan).
+///
+/// Dropped on 2026-11-04: `AlignAudioTask`, under the threshold once the align
+/// route was decided at admission (`AlignRoute::decide`) and the audio-reading
+/// task stopped carrying the no-recording paths.
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/cli/eval_cmd/utr_alignment.rs",
@@ -287,6 +291,16 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
                  is the literal example the repo's rule 4 gives",
     },
     WideStructAllowance {
+        path: "crates/batchalign/src/cli/dispatch/plan.rs",
+        struct_name: "PlanRequest",
+        max_fields: 13,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RefactorTarget,
+        reason: "nine of its fields are the argument list of prepare_paths_submission and \
+                 prepare_content_submission; one SubmissionInputs value taken by both preparers \
+                 and by this request removes them (routing is already one ServerRequest)",
+    },
+    WideStructAllowance {
         path: "crates/batchalign/src/cli/dispatch/mod.rs",
         struct_name: "DispatchRequest",
         max_fields: 21,
@@ -371,21 +385,13 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     },
     WideStructAllowance {
         path: "crates/batchalign/src/runner/dispatch/fa_pipeline.rs",
-        struct_name: "AlignAudioTask",
-        max_fields: 22,
-        max_bool_fields: 4,
-        disposition: WideStructDisposition::RefactorTarget,
-        reason: "forced-alignment execution bag still mixes file context, engine controls, and \
-                 output policy; it is inside the 4b audio port, so do not touch it separately",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/runner/dispatch/fa_pipeline.rs",
         struct_name: "FaFileContext",
         max_fields: 13,
         max_bool_fields: 1,
         disposition: WideStructDisposition::RefactorTarget,
-        reason: "forced-alignment per-file context still bundles several workflow concerns; \
-                 same 4b caveat as AlignAudioTask",
+        reason: "forced-alignment per-file context still bundles several workflow concerns \
+                 (UTR policy, abbreviation merge, before-file, debug dumper beside the engine \
+                 admission and media root)",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/store/job/types.rs",

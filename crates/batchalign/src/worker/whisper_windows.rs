@@ -1,16 +1,33 @@
 //! Reconcile independent observations only where their source audio overlaps.
+//!
+//! Each Whisper window is decoded on its own and shares some audio with its
+//! neighbours. A word both windows heard, at the same time, in the shared
+//! audio, is one word; the reconciler keeps it once. When it cannot tell
+//! WHICH earlier observation an incoming one repeats (two fit, or the one
+//! that fits is already claimed, or the matches cross), it keeps the earlier
+//! window's copy, drops the later window's, and records the decision as a
+//! [`SeamAmbiguity`] for the transcript and the job to carry. Until
+//! 2026-11-03 that case refused the whole recording.
 
 use std::borrow::Cow;
 
+use batchalign_transform::asr_postprocess::{SeamAmbiguity, WindowOrdinal};
 use batchalign_types::api::AudioPositionSeconds;
+use batchalign_types::interval::AdmittedInterval;
 use batchalign_types::worker_v2::{WhisperChunkSpanV2, WhisperObservationsV2};
 
+/// A window's offset put one of its observations past any audio position.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum WindowMergeRefusal {
-    #[error("Whisper window offset does not fit an audio position")]
-    Offset,
-    #[error("Whisper overlap has ambiguous repeated observations")]
-    Ambiguous,
+#[error("Whisper window offset does not fit an audio position")]
+pub(super) struct WindowMergeRefusal;
+
+/// The settled observations of a recording, and every seam decision the
+/// settling made by rule rather than by evidence.
+pub(super) struct Reconciled<'a> {
+    /// The observations in recording order, each shared word once.
+    pub(super) spans: Cow<'a, [WhisperChunkSpanV2]>,
+    /// Each repetition at a seam that was kept once, in recording order.
+    pub(super) seams: Vec<SeamAmbiguity>,
 }
 
 struct Observation {
@@ -25,9 +42,15 @@ enum SeamObservation {
 }
 
 impl Observation {
-    fn duplicates(&self, other: &Self) -> bool {
+    /// Whether `other` repeats this observation: same text, both timed, both
+    /// inside the audio the two windows share, and intersecting. Answers with
+    /// THIS observation's interval, admitted, so a caller that keeps this copy
+    /// has its place without a second look at optional fields. An interval
+    /// the admission refuses (a position beyond its range) is no authority to
+    /// remove a word either, so it answers as no duplicate.
+    fn duplicated_by(&self, other: &Self) -> Option<AdmittedInterval> {
         if self.span.text.trim() != other.span.text.trim() || self.span.text.trim().is_empty() {
-            return false;
+            return None;
         }
         let (Some(a), Some(b), Some(c), Some(d)) = (
             self.span.start_s,
@@ -36,17 +59,21 @@ impl Observation {
             other.span.end_s,
         ) else {
             // Missing timing provides no authority to remove a word.
-            return false;
+            return None;
         };
         // Strict intersection of BOTH observations and BOTH physical windows.
         // Forward timestamps alone are not evidence of a duplicate utterance.
         let shared_start = self.window_start.max(other.window_start);
         let shared_end = self.window_end.min(other.window_end);
-        a.get() >= shared_start
+        let duplicate = a.get() >= shared_start
             && c.get() >= shared_start
             && b.get() <= shared_end
             && d.get() <= shared_end
-            && a.get().max(c.get()) < b.get().min(d.get())
+            && a.get().max(c.get()) < b.get().min(d.get());
+        if !duplicate {
+            return None;
+        }
+        AdmittedInterval::admit_positions(a, b).ok()
     }
 }
 
@@ -71,23 +98,31 @@ fn interleave(left: Vec<Observation>, right: Vec<Observation>) -> Vec<Observatio
     next
 }
 
-pub(super) fn reconcile(
-    raw: &WhisperObservationsV2,
-) -> Result<Cow<'_, [WhisperChunkSpanV2]>, WindowMergeRefusal> {
+pub(super) fn reconcile(raw: &WhisperObservationsV2) -> Result<Reconciled<'_>, WindowMergeRefusal> {
     let windows = match raw {
-        WhisperObservationsV2::Monolithic(spans) => return Ok(Cow::Borrowed(spans)),
+        WhisperObservationsV2::Monolithic(spans) => {
+            return Ok(Reconciled {
+                spans: Cow::Borrowed(spans),
+                seams: Vec::new(),
+            });
+        }
         WhisperObservationsV2::Windows(windows) => windows,
     };
     let rate = f64::from(windows.sample_rate_hz().0);
     let mut merged: Vec<Observation> = Vec::new();
-    for window in windows.windows() {
+    let mut seams = Vec::new();
+    for (ordinal, window) in windows.windows().iter().enumerate() {
         let start = window.start_sample.0 as f64 / rate;
         let end = start + window.sample_count.0 as f64 / rate;
+        // The seam: the first instant this window owns, which is where the
+        // previous window's own stretch of the recording ends.
+        let seam_ms =
+            ((window.start_sample.0 + window.left_context.0) as f64 / rate * 1000.0).round() as i64;
         let shift = |bound: Option<AudioPositionSeconds>| {
             bound
                 .map(|bound| {
                     AudioPositionSeconds::try_from(start + bound.get())
-                        .map_err(|_| WindowMergeRefusal::Offset)
+                        .map_err(|_| WindowMergeRefusal)
                 })
                 .transpose()
         };
@@ -111,24 +146,33 @@ pub(super) fn reconcile(
         let mut incoming_plan = Vec::new();
         let mut previous_match = None;
         for observation in incoming {
-            let mut matches = merged
-                .iter()
-                .enumerate()
-                .filter(|(_, old)| old.duplicates(&observation))
-                .map(|(index, _)| index);
-            if let Some(index) = matches.next() {
-                if matches.next().is_some()
-                    || used[index]
-                    || previous_match.is_some_and(|previous| index <= previous)
-                {
-                    return Err(WindowMergeRefusal::Ambiguous);
-                }
-                used[index] = true;
-                previous_match = Some(index);
-                incoming_plan.push(SeamObservation::Shared(index));
-            } else {
+            let mut matches = merged.iter().enumerate().filter_map(|(index, old)| {
+                old.duplicated_by(&observation).map(|kept| (index, kept))
+            });
+            let Some((index, kept)) = matches.next() else {
                 incoming_plan.push(SeamObservation::Novel(observation));
+                continue;
+            };
+            // Two earlier observations fit this one, or the one that fits is
+            // already claimed by an earlier incoming word, or the matches
+            // cross: which observation is the repeat cannot be told from the
+            // evidence. The earlier window's copy stays, this one is dropped,
+            // and the decision is recorded for the transcript and the job.
+            let ambiguous = matches.next().is_some()
+                || used[index]
+                || previous_match.is_some_and(|previous| index <= previous);
+            if ambiguous {
+                seams.push(SeamAmbiguity::new(
+                    seam_ms,
+                    &observation.span.text,
+                    WindowOrdinal::new(ordinal),
+                    kept,
+                ));
+                continue;
             }
+            used[index] = true;
+            previous_match = Some(index);
+            incoming_plan.push(SeamObservation::Shared(index));
         }
         // Shared observations are ordered anchors. In particular an untimed
         // word between two anchors must stay between them, not drift to the
@@ -155,7 +199,8 @@ pub(super) fn reconcile(
         ));
         merged = next;
     }
-    Ok(Cow::Owned(
-        merged.into_iter().map(|item| item.span).collect(),
-    ))
+    Ok(Reconciled {
+        spans: Cow::Owned(merged.into_iter().map(|item| item.span).collect()),
+        seams,
+    })
 }

@@ -20,6 +20,22 @@ use super::traces::{
 // Forced alignment
 // ---------------------------------------------------------------------------
 
+/// Whether a forced-alignment run read the recording.
+///
+/// A fact about the run that its completion account needs: an utterance whose
+/// retained timing the finalizer removed as out of order is, on a run that
+/// read no audio (bullets refreshed from a complete `%wor`), an utterance that
+/// now needs a run WITH the recording, and the account says so by name rather
+/// than describing the removal as if a measurement stood behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordingRead {
+    /// Audio was opened: every untimed word was requested against it, or
+    /// could have been.
+    Read,
+    /// No audio was opened: nothing in this run could measure a word.
+    NotRead,
+}
+
 /// Structured result from the internal `crate::fa::run_fa_from_ast` pipeline.
 ///
 /// Two phases, one type: `FaResult<ChatFile>` is the DRAFT an FA path builds,
@@ -52,6 +68,8 @@ pub(crate) struct FaResult<O = FaOutput> {
     pub(crate) gap_healing: WordGapHealing,
     /// Engine fallback events captured during worker inference.
     pub(crate) fallback_events: Vec<FaFallbackEventTrace>,
+    /// Whether this run opened the recording at all.
+    pub(crate) recording: RecordingRead,
 }
 
 /// CHAT output whose provenance determines whether media timing was allowed to
@@ -117,7 +135,8 @@ impl FaGroupContents {
 
 impl FaResult<ChatFile> {
     /// Construct a draft for a legitimate no-group path such as complete
-    /// `%wor` reuse or a file with no alignable words.
+    /// `%wor` reuse or a file with no alignable words, saying whether the run
+    /// that built it opened the recording.
     ///
     /// Infallible: the media/timing transition belongs to `FaAdmission::finish`.
     pub(crate) fn without_groups(
@@ -125,6 +144,7 @@ impl FaResult<ChatFile> {
         gap_healing: WordGapHealing,
         engine: &str,
         cache_namespace: &crate::engine_reports::FaCacheNamespace,
+        recording: RecordingRead,
     ) -> Self {
         Self {
             output: chat_file,
@@ -135,6 +155,7 @@ impl FaResult<ChatFile> {
             timing_decisions: Vec::new(),
             gap_healing,
             fallback_events: Vec::new(),
+            recording,
         }
     }
 }
@@ -156,6 +177,7 @@ impl<O> FaResult<O> {
             timing_decisions: self.timing_decisions,
             gap_healing: self.gap_healing,
             fallback_events: self.fallback_events,
+            recording: self.recording,
         })
     }
 

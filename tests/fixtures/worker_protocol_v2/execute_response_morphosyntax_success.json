@@ -43,13 +43,13 @@
         },
         "repairs": [
           {
+            "field": "relation",
             "kind": "relation_alias",
             "word": "it",
             "from_relation": "iob",
             "to_relation": "iobj"
           }
-        ],
-        "feature_repairs": []
+        ]
       },
       {
         "kind": "no_words"

@@ -1,14 +1,12 @@
 //! Single-server dispatch: submit files to one server, poll, write results.
 
-use std::path::Path;
-
 use crate::ReleasedCommand;
-use crate::api::JobSubmission;
+use crate::api::LanguageSpec;
+use crate::cli::output::Overwrite;
 use crate::command_model::{CommandIoProfile, command_spec};
 use crate::options::CommandOptions;
 
 use crate::cli::client::{BatchalignClient, server_label};
-use crate::cli::discover::{copy_nonmatching, infer_base_dir, plan_server_inputs};
 use crate::cli::error::CliError;
 use crate::cli::progress::{BatchProgress, ProgressDisplay};
 use crate::cli::tui::TuiProgress;
@@ -20,7 +18,8 @@ use crate::cli::tui::TuiProgress;
 /// lossless path transport as an auto-discovered local daemon; any other
 /// origin receives the inputs as content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServerTransport {
+pub(super) enum ServerTransport {
+    /// A loopback server reads the inputs by path and writes beside them.
     SharedFilesystem,
     /// Transcript text over HTTP; the server needs nothing else.
     Content,
@@ -118,6 +117,11 @@ impl ServerTarget {
     pub(super) fn url(&self) -> &str {
         &self.url
     }
+
+    /// How a submission to this target travels.
+    pub(super) fn transport(&self) -> ServerTransport {
+        self.transport
+    }
 }
 
 /// Map a `TuiCancelSignal` from the rendering thread into a wire-format
@@ -146,13 +150,13 @@ fn build_tui_cancel_provenance(
     }
 }
 
-use super::helpers::{
-    classify_files, filter_files_for_command, inject_lexicon, maybe_open_dashboard,
-    order_files_for_command, poll_and_write_incrementally,
-};
-use super::paths::prepare_paths_submission;
+use super::display::{DashboardLaunch, Session, open_dashboard};
+use super::helpers::poll_and_write_incrementally;
+use super::paths::{prepare_content_submission, prepare_paths_submission};
 use super::{refuse_foreign_server_build, server_supports_command};
 use crate::cli::args::InputKind;
+use crate::cli::args::Progress;
+use crate::cli::discover::PassthroughMode;
 
 /// Submit files to a single server, poll for completion, write results.
 ///
@@ -161,7 +165,7 @@ use crate::cli::args::InputKind;
 pub(super) async fn dispatch_single_server(
     client: &BatchalignClient,
     target: &ServerTarget,
-    lang: &str,
+    lang: &LanguageSpec,
     num_speakers: u32,
     input_kind: InputKind,
     inputs: &[std::path::PathBuf],
@@ -169,8 +173,10 @@ pub(super) async fn dispatch_single_server(
     options: &CommandOptions,
     lexicon: Option<&str>,
     before: Option<&std::path::Path>,
-    use_tui: bool,
-    open_dashboard: bool,
+    progress: Progress,
+    session: Session,
+    launch: DashboardLaunch,
+    overwrite: Option<Overwrite>,
 ) -> Result<(), CliError> {
     let command = options.command();
     let server_url = target.url();
@@ -208,6 +214,8 @@ pub(super) async fn dispatch_single_server(
                 lexicon,
                 before,
                 &health.media_mapping_keys,
+                overwrite,
+                PassthroughMode::Copy,
             )?
             else {
                 eprintln!("warning: no files found for {input_kind:?} input");
@@ -224,43 +232,24 @@ pub(super) async fn dispatch_single_server(
             (prepared.submission, prepared.destinations)
         }
         ServerTransport::Content | ServerTransport::ContentResolvingAudio => {
-            let (files, outputs) =
-                crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
-            let (files, outputs) = filter_files_for_command(command, files, outputs);
-            let (files, outputs) = order_files_for_command(command, files, outputs)?;
-            let plan = plan_server_inputs(options, &files, &outputs, inputs, out_dir)?;
-
-            if let Some(od) = out_dir {
-                let mut passthrough = crate::cli::discover::PassthroughReport::default();
-                for inp in inputs {
-                    if Path::new(inp).is_dir() {
-                        let dir_report =
-                            copy_nonmatching(Path::new(inp), Path::new(od), input_kind, command)?;
-                        passthrough.extend_from(dir_report);
-                    }
-                }
-                crate::cli::discover::print_passthrough_skips(&passthrough);
-            }
-
-            let base_dir = infer_base_dir(inputs)?;
-            let source_paths = plan
-                .inputs()
-                .iter()
-                .map(|input| input.source().to_path_buf())
-                .collect::<Vec<_>>();
-            let server_names = plan
-                .inputs()
-                .iter()
-                .map(|input| input.server_name().to_owned())
-                .collect::<Vec<_>>();
-            let (file_payloads, media_file_names) = classify_files(&source_paths, &server_names)?;
-            if file_payloads.is_empty() && media_file_names.is_empty() {
+            let Some(prepared) = prepare_content_submission(
+                options,
+                lang,
+                num_speakers,
+                input_kind,
+                inputs,
+                out_dir,
+                lexicon,
+                overwrite,
+                PassthroughMode::Copy,
+            )?
+            else {
                 eprintln!("warning: no files found for {input_kind:?} input");
                 return Ok(());
-            }
+            };
+            crate::cli::discover::print_passthrough_skips(&prepared.passthrough);
 
-            let total_count = file_payloads.len() + media_file_names.len();
-            eprintln!("Found {total_count} file(s) to submit.\n");
+            eprintln!("Found {} file(s) to submit.\n", prepared.total_files);
             eprintln!("Submitting to {server_url}...");
             if let ServerTransport::ContentResolvingAudio = target.transport {
                 eprintln!(
@@ -270,31 +259,7 @@ pub(super) async fn dispatch_single_server(
                 );
             }
 
-            let mut opts = options.clone();
-            inject_lexicon(&mut opts, lexicon)?;
-            let debug_traces = opts.common().debug_dir.is_some();
-
-            (
-                JobSubmission {
-                    command,
-                    lang: crate::api::LanguageSpec::try_from(lang)
-                        .map_err(|e| CliError::InvalidArgument(format!("invalid language: {e}")))?,
-                    num_speakers: num_speakers.into(),
-                    files: file_payloads,
-                    media_files: media_file_names,
-                    media_mapping: Default::default(),
-                    media_subdir: Default::default(),
-                    source_dir: base_dir.to_string_lossy().to_string().into(),
-                    options: opts,
-                    paths_mode: false,
-                    source_paths: vec![],
-                    output_paths: vec![],
-                    display_names: vec![],
-                    debug_traces,
-                    before_paths: vec![],
-                },
-                plan.into_destinations(),
-            )
+            (prepared.submission, prepared.destinations)
         }
     };
 
@@ -306,11 +271,12 @@ pub(super) async fn dispatch_single_server(
     let dashboard_url = format!("{server_url}/dashboard/jobs/{job_id}");
     eprintln!("Dashboard: {dashboard_url}\n");
 
-    maybe_open_dashboard(&dashboard_url, open_dashboard);
+    open_dashboard(&dashboard_url, launch);
 
     // Poll and write incrementally
     if !info.status.is_terminal() {
-        if use_tui && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        // The TUI needs a terminal to draw on; a plain session gets bars.
+        if matches!((progress, session), (Progress::Tui, Session::Interactive)) {
             let (tui_progress, tui_runtime) =
                 TuiProgress::new(total_files as u64, command.as_wire_name());
             let (cancel_tx, cancel_rx) =

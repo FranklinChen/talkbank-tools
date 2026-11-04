@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::asr_model::HubCommitV2;
+use crate::segmentation::{BoundaryTerminator, UtteranceSegmentation};
 
 /// Closed label vocabulary emitted by the TalkBank utterance-boundary model.
 ///
@@ -31,11 +32,18 @@ pub enum UtsegBoundaryActionV2 {
 }
 
 impl UtsegBoundaryActionV2 {
-    fn is_boundary(self) -> bool {
-        matches!(
-            self,
-            Self::PeriodBoundary | Self::QuestionBoundary | Self::ExclamationBoundary
-        )
+    /// The terminator this action ends an utterance with, or `None` when it
+    /// ends none (an ordinary word, a capitalized onset, a comma).
+    ///
+    /// Typed rather than a `bool`: the three boundary actions differ in the
+    /// terminator they predict, and that difference is what a split writes.
+    pub fn boundary(self) -> Option<BoundaryTerminator> {
+        match self {
+            Self::PeriodBoundary => Some(BoundaryTerminator::Period),
+            Self::QuestionBoundary => Some(BoundaryTerminator::Question),
+            Self::ExclamationBoundary => Some(BoundaryTerminator::Exclamation),
+            Self::Ordinary | Self::CapitalizedOnset | Self::Comma => None,
+        }
     }
 
     fn is_nonordinary(self) -> bool {
@@ -67,7 +75,9 @@ impl UtsegAdjacencyPolicyRevisionV2 {
             Self::SuppressEarlierAdjacentNonordinaryV1 => {
                 left.is_nonordinary() && right.is_nonordinary()
             }
-            Self::SuppressEarlierAdjacentBoundariesV1 => left.is_boundary() && right.is_boundary(),
+            Self::SuppressEarlierAdjacentBoundariesV1 => {
+                left.boundary().is_some() && right.boundary().is_some()
+            }
         }
     }
 }
@@ -169,116 +179,32 @@ pub enum UtsegBoundaryEvidenceConsistencyError {
     AssignmentsMismatch,
 }
 
-/// Boundary evidence and assignments re-derived together under one requested
-/// policy.
+/// Boundary evidence and the segmentation it states, re-derived together
+/// under one requested policy.
 ///
-/// The fields are private so a caller cannot change the assignments without
-/// also changing the evidence that proves them.
+/// The fields are private so a caller cannot change the segmentation without
+/// also changing the evidence that proves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReappliedUtsegBoundaryEvidenceV2 {
     evidence: UtsegBoundaryModelEvidenceV2,
-    assignments: Vec<usize>,
-}
-
-/// Locally guarded assignments plus the boundary-model evidence they refine.
-///
-/// The evidence retains the adjacency-only decision. The private suppressed
-/// indices are the complete explanation for why the applicable assignments
-/// contain fewer splits than those raw local decisions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuardedUtsegBoundaryEvidenceV2 {
-    evidence: UtsegBoundaryModelEvidenceV2,
-    assignments: Vec<usize>,
-    suppressed_split_before_word_indices: Vec<usize>,
-}
-
-/// A baseline assignment vector cannot prove which candidate splits are new
-/// unless it is parallel to the retained evidence.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("worker assignments contain {actual} words but boundary evidence contains {expected}")]
-pub struct UtsegProtectedSplitShapeError {
-    expected: usize,
-    actual: usize,
+    segmentation: UtteranceSegmentation,
 }
 
 impl ReappliedUtsegBoundaryEvidenceV2 {
-    /// Consume the proof and return its mutually consistent wire projections.
-    pub fn into_parts(self) -> (UtsegBoundaryModelEvidenceV2, Vec<usize>) {
-        (self.evidence, self.assignments)
-    }
-
-    /// Suppress only candidate boundaries whose resulting split begins at one
-    /// of the proven protected word indices.
-    pub fn protect_splits_before(
-        self,
-        protected_word_indices: &[usize],
-        worker_assignments: &[usize],
-    ) -> Result<GuardedUtsegBoundaryEvidenceV2, UtsegProtectedSplitShapeError> {
-        if worker_assignments.len() != self.evidence.word_evidence.len() {
-            return Err(UtsegProtectedSplitShapeError {
-                expected: self.evidence.word_evidence.len(),
-                actual: worker_assignments.len(),
-            });
-        }
-        let mut suppress_after_word = vec![false; self.evidence.word_evidence.len()];
-        let mut suppressed = Vec::new();
-        for &split_before in protected_word_indices {
-            if split_before == 0 || split_before >= self.assignments.len() {
-                continue;
-            }
-            let candidate_splits =
-                self.assignments[split_before - 1] != self.assignments[split_before];
-            let worker_splits =
-                worker_assignments[split_before - 1] != worker_assignments[split_before];
-            if candidate_splits && !worker_splits {
-                suppress_after_word[split_before - 1] = true;
-                suppressed.push(split_before);
-            }
-        }
-        suppressed.sort_unstable();
-        suppressed.dedup();
-
-        let mut current_group = 0;
-        let assignments = self
-            .evidence
-            .word_evidence
-            .iter()
-            .enumerate()
-            .map(|(word_index, evidence)| {
-                let assignment = current_group;
-                if !suppress_after_word[word_index]
-                    && matches!(
-                        evidence,
-                        UtsegWordBoundaryEvidenceV2::Classified {
-                            applied_action,
-                            ..
-                        } if applied_action.is_boundary()
-                    )
-                {
-                    current_group += 1;
-                }
-                assignment
-            })
-            .collect();
-
-        Ok(GuardedUtsegBoundaryEvidenceV2 {
-            evidence: self.evidence,
-            assignments,
-            suppressed_split_before_word_indices: suppressed,
-        })
+    /// Consume the proof and return its mutually consistent parts.
+    pub fn into_parts(self) -> (UtsegBoundaryModelEvidenceV2, UtteranceSegmentation) {
+        (self.evidence, self.segmentation)
     }
 }
 
-impl GuardedUtsegBoundaryEvidenceV2 {
-    /// Consume the proof and return its evidence, applicable assignments, and
-    /// complete local suppression receipt.
-    pub fn into_parts(self) -> (UtsegBoundaryModelEvidenceV2, Vec<usize>, Vec<usize>) {
-        (
-            self.evidence,
-            self.assignments,
-            self.suppressed_split_before_word_indices,
-        )
-    }
+/// The segmentation a sequence of applied actions states: a word that was
+/// never classified ends no utterance.
+fn segmentation_of(word_evidence: &[UtsegWordBoundaryEvidenceV2]) -> UtteranceSegmentation {
+    UtteranceSegmentation::from_boundaries(word_evidence.iter().map(|evidence| match evidence {
+        UtsegWordBoundaryEvidenceV2::Classified { applied_action, .. } => applied_action.boundary(),
+        UtsegWordBoundaryEvidenceV2::NormalizationOmission
+        | UtsegWordBoundaryEvidenceV2::ModelShortCircuit => None,
+    }))
 }
 
 impl UtsegBoundaryModelEvidenceV2 {
@@ -321,23 +247,7 @@ impl UtsegBoundaryModelEvidenceV2 {
             }
         }
 
-        let mut current_group = 0;
-        let assignments = word_evidence
-            .iter()
-            .map(|evidence| {
-                let assignment = current_group;
-                if matches!(
-                    evidence,
-                    UtsegWordBoundaryEvidenceV2::Classified {
-                        applied_action,
-                        ..
-                    } if applied_action.is_boundary()
-                ) {
-                    current_group += 1;
-                }
-                assignment
-            })
-            .collect();
+        let segmentation = segmentation_of(&word_evidence);
         ReappliedUtsegBoundaryEvidenceV2 {
             evidence: Self {
                 model_id: self.model_id.clone(),
@@ -346,16 +256,21 @@ impl UtsegBoundaryModelEvidenceV2 {
                 adjacency_policy_revision: policy,
                 word_evidence,
             },
-            assignments,
+            segmentation,
         }
     }
 
     /// Prove that declared policy, applied actions, and assignments describe
     /// one decision before the evidence can enter the application pipeline.
+    ///
+    /// Returns that decision as a segmentation rather than `()`: the proof the
+    /// check establishes is the thing a split applies, and it carries what
+    /// the bare assignments cannot, the terminator the model predicted at
+    /// each cut.
     pub fn validate_assignments(
         &self,
         assignments: &[usize],
-    ) -> Result<(), UtsegBoundaryEvidenceConsistencyError> {
+    ) -> Result<UtteranceSegmentation, UtsegBoundaryEvidenceConsistencyError> {
         let classified: Vec<_> = self
             .word_evidence
             .iter()
@@ -371,7 +286,6 @@ impl UtsegBoundaryModelEvidenceV2 {
             })
             .collect();
 
-        let mut admitted_actions = vec![UtsegBoundaryActionV2::Ordinary; self.word_evidence.len()];
         for (classified_index, (word_index, raw_action, claimed_action)) in
             classified.iter().copied().enumerate()
         {
@@ -394,24 +308,16 @@ impl UtsegBoundaryModelEvidenceV2 {
                     },
                 );
             }
-            admitted_actions[word_index] = claimed_action;
         }
 
-        let mut current_group = 0;
-        let expected_assignments: Vec<_> = admitted_actions
-            .into_iter()
-            .map(|action| {
-                let assignment = current_group;
-                if action.is_boundary() {
-                    current_group += 1;
-                }
-                assignment
-            })
-            .collect();
-        if expected_assignments != assignments {
+        // Every applied action has just been shown to follow from the raw
+        // actions and the declared policy, so the segmentation they state is
+        // the worker's own decision; the claimed assignments must be it.
+        let segmentation = segmentation_of(&self.word_evidence);
+        if segmentation.assignments() != assignments {
             return Err(UtsegBoundaryEvidenceConsistencyError::AssignmentsMismatch);
         }
-        Ok(())
+        Ok(segmentation)
     }
 }
 
@@ -458,25 +364,36 @@ mod tests {
             ],
         };
 
-        let (candidate, assignments) = evidence
+        let (candidate, segmentation) = evidence
             .reapply_adjacency_policy(
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
             )
             .into_parts();
 
-        assert_eq!(assignments, vec![0, 1]);
+        assert_eq!(segmentation.assignments(), &[0, 1]);
         assert_eq!(
             candidate.adjacency_policy_revision,
             UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1
         );
-        candidate
-            .validate_assignments(&assignments)
-            .expect("reapplied evidence remains internally consistent");
+        assert_eq!(
+            candidate
+                .validate_assignments(segmentation.assignments())
+                .expect("reapplied evidence remains internally consistent"),
+            segmentation
+        );
     }
 
+    /// The segmentation admission returns carries the model's terminator at
+    /// each cut: a question boundary makes a segment that ends `?`, and the
+    /// words after the last prediction end unstated.
     #[test]
-    fn protected_split_rebuilds_assignments_without_mutating_model_evidence() {
+    fn admitted_segmentation_keeps_the_predicted_terminator_at_each_cut() {
         let probability = BoundaryProbabilityMicrosV2::try_from(900_000).expect("probability");
+        let classified = |action| UtsegWordBoundaryEvidenceV2::Classified {
+            raw_action: action,
+            applied_action: action,
+            boundary_probability_micros: probability,
+        };
         let evidence = UtsegBoundaryModelEvidenceV2 {
             model_id: "model".into(),
             model_revision: commit(),
@@ -484,70 +401,22 @@ mod tests {
             adjacency_policy_revision:
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
             word_evidence: vec![
-                UtsegWordBoundaryEvidenceV2::Classified {
-                    raw_action: UtsegBoundaryActionV2::PeriodBoundary,
-                    applied_action: UtsegBoundaryActionV2::Ordinary,
-                    boundary_probability_micros: probability,
-                },
-                UtsegWordBoundaryEvidenceV2::Classified {
-                    raw_action: UtsegBoundaryActionV2::CapitalizedOnset,
-                    applied_action: UtsegBoundaryActionV2::CapitalizedOnset,
-                    boundary_probability_micros: probability,
-                },
+                classified(UtsegBoundaryActionV2::Ordinary),
+                classified(UtsegBoundaryActionV2::QuestionBoundary),
+                UtsegWordBoundaryEvidenceV2::NormalizationOmission,
+                classified(UtsegBoundaryActionV2::Ordinary),
             ],
         };
 
-        let (candidate, assignments, suppressed) = evidence
-            .reapply_adjacency_policy(
-                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-            )
-            .protect_splits_before(&[1], &[0, 0])
-            .expect("parallel worker assignments")
-            .into_parts();
-
-        assert_eq!(assignments, vec![0, 0]);
-        assert_eq!(suppressed, vec![1]);
-        assert!(matches!(
-            candidate.word_evidence[0],
-            UtsegWordBoundaryEvidenceV2::Classified {
-                applied_action: UtsegBoundaryActionV2::PeriodBoundary,
-                ..
+        let segmentation = evidence
+            .validate_assignments(&[0, 0, 1, 1])
+            .expect("assignments follow the applied actions");
+        assert_eq!(
+            segmentation.ends(),
+            &crate::segmentation::SegmentEnds::Predicted {
+                cuts: vec![BoundaryTerminator::Question],
+                tail: None,
             }
-        ));
-    }
-
-    #[test]
-    fn protected_worker_declared_split_is_never_merged() {
-        let probability = BoundaryProbabilityMicrosV2::try_from(900_000).expect("probability");
-        let evidence = UtsegBoundaryModelEvidenceV2 {
-            model_id: "model".into(),
-            model_revision: commit(),
-            normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
-            adjacency_policy_revision:
-                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
-            word_evidence: vec![
-                UtsegWordBoundaryEvidenceV2::Classified {
-                    raw_action: UtsegBoundaryActionV2::PeriodBoundary,
-                    applied_action: UtsegBoundaryActionV2::PeriodBoundary,
-                    boundary_probability_micros: probability,
-                },
-                UtsegWordBoundaryEvidenceV2::Classified {
-                    raw_action: UtsegBoundaryActionV2::Ordinary,
-                    applied_action: UtsegBoundaryActionV2::Ordinary,
-                    boundary_probability_micros: probability,
-                },
-            ],
-        };
-
-        let (_, assignments, suppressed) = evidence
-            .reapply_adjacency_policy(
-                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-            )
-            .protect_splits_before(&[1], &[0, 1])
-            .expect("parallel worker assignments")
-            .into_parts();
-
-        assert_eq!(assignments, vec![0, 1]);
-        assert!(suppressed.is_empty());
+        );
     }
 }

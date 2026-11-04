@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use crate::ReleasedCommand;
 use crate::cli::error::CliError;
-use crate::cli::output::ResultDestinations;
+use crate::cli::output::{Overwrite, ResultDestinations};
 
 /// One immutable source/name/output-anchor relationship.
 #[derive(Debug)]
@@ -56,13 +56,16 @@ impl ServerInputPlan {
 }
 
 /// Admit discovery output before any output directory, pass-through copy or
-/// job is created. Command-owned naming covers primary artifacts and sidecars.
+/// job is created. Command-owned naming covers primary artifacts and sidecars;
+/// `overwrite` is the `--overwrite` authority, if the user gave it, for a
+/// generated destination that already exists (see `ResultDestinations::admit`).
 pub fn plan_server_inputs(
     options: &crate::options::CommandOptions,
     files: &[PathBuf],
     outputs: &[PathBuf],
     input_roots: &[PathBuf],
     out_dir: Option<&Path>,
+    overwrite: Option<Overwrite>,
 ) -> Result<ServerInputPlan, CliError> {
     if files.len() != outputs.len() {
         return Err(CliError::InvalidArgument(
@@ -87,7 +90,7 @@ pub fn plan_server_inputs(
             output_anchor: crate::cli::output::absolute_output_anchor(output)?,
         });
     }
-    let destinations = ResultDestinations::admit(options, &planned, out_dir)?;
+    let destinations = ResultDestinations::admit(options, &planned, out_dir, overwrite)?;
     Ok(ServerInputPlan {
         inputs: planned,
         destinations,
@@ -123,6 +126,7 @@ mod tests {
             &[out.join("same.cha"), out.join("same.cha")],
             &files,
             Some(&out),
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, CliError::OutputCollision { .. }));
@@ -141,6 +145,7 @@ mod tests {
             &[out.join("same.mp3"), out.join("same.wav")],
             &files,
             Some(&out),
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, CliError::OutputCollision { .. }));
@@ -158,6 +163,7 @@ mod tests {
             &files,
             &roots,
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, CliError::InputNameCollision { .. }));
@@ -173,6 +179,7 @@ mod tests {
                 &files,
                 &files[..1],
                 &files,
+                None,
                 None
             ),
             Err(CliError::InvalidArgument(_))
@@ -188,6 +195,7 @@ mod tests {
             &files,
             &files,
             &files,
+            None,
             None,
         )
         .unwrap();
@@ -228,7 +236,8 @@ mod tests {
                 &files,
                 &[out.join("same.cha"), root.path().join("alias/same.cha")],
                 &files,
-                Some(&out)
+                Some(&out),
+                None
             ),
             Err(CliError::OutputCollision { .. })
         ));

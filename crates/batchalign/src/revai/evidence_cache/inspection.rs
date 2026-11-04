@@ -42,6 +42,21 @@ impl AdmittedRevReplayRequest {
         }
     }
 
+    /// The same request as it was keyed before 2026-11-03, for reading
+    /// evidence stored under that key: the stored envelope's fingerprint is
+    /// the legacy key, so that is the key it is validated against. `None`
+    /// when the request's key never changed, so no caller can admit a
+    /// current-key envelope as legacy evidence.
+    pub(super) fn for_legacy_key(request: &RevAsrEvidenceRequest) -> Option<Self> {
+        match &request.legacy_key {
+            LegacyEvidenceKey::SameAsCurrent => None,
+            LegacyEvidenceKey::Distinct(key) => Some(Self {
+                key: key.clone(),
+                language: request.requested_language.clone(),
+            }),
+        }
+    }
+
     fn from_trace(bytes: &[u8]) -> Result<Self, RevAsrEvidenceCacheError> {
         let trace: RetainedRequestTrace = serde_json::from_slice(bytes)?;
         let refuse = |reason: &str| RevAsrEvidenceCacheError::InvalidRequest(reason.to_owned());
@@ -51,24 +66,37 @@ impl AdmittedRevReplayRequest {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
-        let recipe = RevMediaPreparationRecipe::SourceBytesLegacyAudioMpegV1;
-        let extension = trace
+        // The retained presentation must be one this build produces: the
+        // container named by the upload file name decides the recipe, type
+        // and name, and the trace must agree with all of them. A trace that
+        // declared a WAV as `audio/mpeg` (every non-MPEG upload before
+        // 2026-11-03) is a presentation no longer sent, so its evidence is
+        // not this build's identity and is refused rather than replayed.
+        let presentation = trace
             .upload_file_name
             .strip_prefix("provider-media.")
-            .filter(|ext| {
-                !ext.is_empty()
-                    && ext
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            .and_then(ProviderMediaContainer::from_upload_extension)
+            // The metadata label is cut from the digest, so the digest must
+            // be whole before a presentation is built from it.
+            .filter(|_| valid_digest(&trace.provider_media_blake3))
+            .map(|container| {
+                RevProviderPresentation::for_container(
+                    container,
+                    RevProviderMediaDigest(trace.provider_media_blake3.clone()),
+                )
             });
+        let Some(presentation) = presentation else {
+            return Err(refuse(
+                "retained presentation is incompatible with this build",
+            ));
+        };
         if trace.trace_schema_version != REV_ASR_TRACE_SCHEMA_VERSION
             || !valid_digest(&trace.source_media_blake3)
             || trace.source_media_blake3 != trace.provider_media_blake3
-            || serde_json::to_value(&trace.preparation_recipe)? != serde_json::to_value(recipe)?
-            || trace.upload_mime != recipe.upload_mime()
-            || extension.is_none()
-            || trace.upload_metadata
-                != format!("batchalign3_{}", &trace.provider_media_blake3[..16])
+            || serde_json::to_value(&trace.preparation_recipe)?
+                != serde_json::to_value(presentation.preparation_recipe)?
+            || trace.upload_mime != presentation.upload_mime
+            || trace.upload_metadata != presentation.upload_metadata
             || trace.request_policy_revision != REV_ASR_REQUEST_POLICY_REVISION
             || trace.model_revision != RevAsrModelRevision::current().as_str()
             || trace.expected_speakers == Some(0)
@@ -87,13 +115,6 @@ impl AdmittedRevReplayRequest {
         if language.to_string() != trace.requested_language {
             return Err(refuse("retained language is not canonical"));
         }
-        let presentation = RevProviderPresentation {
-            provider_media_blake3: RevProviderMediaDigest(trace.provider_media_blake3),
-            preparation_recipe: recipe,
-            upload_file_name: trace.upload_file_name,
-            upload_mime: recipe.upload_mime(),
-            upload_metadata: trace.upload_metadata,
-        };
         let revision = RevAsrModelRevision::current();
         let material = RevAsrEvidenceKeyMaterial {
             domain: "rev_asr_evidence",
@@ -347,11 +368,11 @@ mod tests {
 
     async fn fixture(root: &Path) -> (RevAsrEvidenceRequest, PathBuf, PathBuf) {
         let audio = root.join("audio.wav");
-        std::fs::write(&audio, b"synthetic media identity fixture").unwrap();
+        crate::media::probe::fixtures::write_pcm_wav(&audio, 0);
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
             &RevLanguage::admit(&AsrLanguageRequest::One(LanguageCode3::eng())).unwrap(),
-            NumSpeakers(1),
+            crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
             &RevAsrModelRevision::current(),
         )
         .await
@@ -438,8 +459,16 @@ mod tests {
         let value: Value = serde_json::from_slice(&std::fs::read(trace).unwrap()).unwrap();
         for (field, replacement) in [
             ("trace_schema_version", json!(1)),
-            ("upload_mime", json!("audio/wav")),
+            // The fixture is a WAV: the pre-2026-11-03 `audio/mpeg`
+            // declaration, and the recipe that went with it, are no longer
+            // what this build sends for one.
+            ("upload_mime", json!("audio/mpeg")),
+            (
+                "preparation_recipe",
+                json!("source_bytes_legacy_audio_mpeg_v1"),
+            ),
             ("upload_file_name", json!("original.wav")),
+            ("upload_file_name", json!("provider-media.aiff")),
             ("upload_metadata", json!("other")),
             ("request_policy_revision", json!("old")),
             ("model_revision", json!("other")),

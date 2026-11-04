@@ -4,9 +4,11 @@
 //! the aligned document and returns one of two states. Complete: every word
 //! has a positive interval. Partial: some do not, and the result carries a
 //! typed account of each utterance with untimed words, which words, and why
-//! (its audio window was refused, so no request was made; requests covered it
-//! and produced no positive interval, with what they yielded counted; or
-//! nothing this run recorded explains it, said as such). A partial result is still written:
+//! (its audio window was refused, so no request was made; the run measured
+//! their intervals and removed them itself while enforcing timing order, with
+//! the rule and every removed interval named; requests covered it and
+//! produced no positive interval, with what they yielded counted; or nothing
+//! this run recorded explains it, said as such). A partial result is still written:
 //! the timing that was measured is kept, the untimed words stay in the
 //! transcript without bullets, and the file is reported diagnosed with the
 //! account as a shortfall. Nothing here can certify a partial result as
@@ -27,7 +29,7 @@ use crate::chat_ops::fa::{collect_existing_fa_word_timings, split_compound_fille
 use crate::error::{AlignmentCompletionFailure, ServerError};
 use crate::pipeline::post_validate::PostValidated;
 use crate::types::results::FaResult;
-use crate::types::traces::RefusedWindowTrace;
+use crate::types::traces::{FaTimingDecisionTrace, RefusedWindowTrace, WordTimingRemovalTrace};
 use batchalign_transform::decisions::{DecisionStrategy, FaStrategy, LineIdx};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -283,9 +285,26 @@ pub(crate) enum UntimedCause {
     NotPlaced,
     /// No supplied timing or source-bound UTR search evidence; no request.
     LocalizationUnavailable,
+    /// The run measured these words' intervals and then removed them while
+    /// enforcing timing order. Carried from the finalizer's own effect
+    /// records (`FaResult::timing_decisions`), each made at the moment it
+    /// removed the timing, so the account cannot describe such a word as
+    /// unanswered: a removal is known before any request count is consulted.
+    /// Never empty. Carries whether the run opened the recording: on one that
+    /// did not (`RecordingRead::NotRead`, bullets refreshed from a complete
+    /// `%wor`), nothing could have measured the words again, so the account
+    /// names the recording as what they now need rather than describing the
+    /// removal as if a measurement stood behind it.
+    Removed {
+        /// Every removal, in the order the run applied them.
+        removals: Vec<crate::types::traces::WordTimingRemovalTrace>,
+        /// Whether this run opened the recording.
+        recording: crate::types::results::RecordingRead,
+    },
     /// Requests covered it, and the final document has no positive interval
-    /// for these words. What those requests yielded is counted, from the
-    /// run's own group evidence, rather than summarised as a cause.
+    /// for these words, none of which the run removed. What those requests
+    /// yielded is counted, from the run's own group evidence, rather than
+    /// summarised as a cause.
     Requested(RequestCoverage),
     /// No grouping decision names it and no request covered it: this run
     /// recorded nothing that explains its untimed words. Said as such
@@ -444,6 +463,18 @@ impl UntimedUtterance {
                 UntimedCause::LocalizationUnavailable => {
                     crate::api::UntimedCauseRecord::LocalizationUnavailable
                 }
+                UntimedCause::Removed {
+                    removals,
+                    recording: crate::types::results::RecordingRead::Read,
+                } => crate::api::UntimedCauseRecord::Removed {
+                    removals: removals.clone(),
+                },
+                UntimedCause::Removed {
+                    removals,
+                    recording: crate::types::results::RecordingRead::NotRead,
+                } => crate::api::UntimedCauseRecord::NeedsRecording {
+                    removals: removals.clone(),
+                },
                 UntimedCause::Requested(coverage) => crate::api::UntimedCauseRecord::Requested {
                     answered: coverage.answered,
                     unaligned: coverage.unaligned,
@@ -475,6 +506,21 @@ impl std::fmt::Display for UntimedAccount {
                 UntimedCause::NotPlaced => f.write_str(" (not placed)")?,
                 UntimedCause::LocalizationUnavailable => {
                     f.write_str(" (localization unavailable)")?
+                }
+                UntimedCause::Removed {
+                    removals,
+                    recording,
+                } => {
+                    f.write_str(match recording {
+                        crate::types::results::RecordingRead::Read => " (removed:",
+                        crate::types::results::RecordingRead::NotRead => {
+                            " (removed with no recording read, needs the recording:"
+                        }
+                    })?;
+                    for removal in removals {
+                        write!(f, " {removal};")?;
+                    }
+                    f.write_str(")")?
                 }
                 UntimedCause::Requested(coverage) => write!(
                     f,
@@ -698,7 +744,8 @@ impl RequiredFaTiming {
                         | FaStrategy::WordsClampedToKeptBullet
                         | FaStrategy::WordsUntimedForKeptAbsence
                         | FaStrategy::TimingProvenance
-                        | FaStrategy::WindowSplitAtAnchors(_),
+                        | FaStrategy::WindowSplitAtAnchors(_)
+                        | FaStrategy::SearchCorridor(_),
                     )
                     | DecisionStrategy::Utr(_)
                     | DecisionStrategy::Monotonicity(_)
@@ -709,6 +756,24 @@ impl RequiredFaTiming {
                 Some((decision.line_idx, cause))
             })
             .collect();
+        // The measured word timing the finalizer itself removed, per
+        // utterance, from its own effect records: every removing effect
+        // yields a removal (`word_timing_removal` names each non-removing
+        // one), so an utterance absent here lost no measured interval to
+        // the run. Read before the request counts, which cannot see a
+        // removal and used to describe its words as unanswered.
+        let mut removed: BTreeMap<UtteranceIdx, Vec<WordTimingRemovalTrace>> = BTreeMap::new();
+        for located in result
+            .result
+            .timing_decisions
+            .iter()
+            .filter_map(FaTimingDecisionTrace::word_timing_removal)
+        {
+            removed
+                .entry(UtteranceIdx::new(located.utterance_idx))
+                .or_default()
+                .push(located.removal);
+        }
         // What the requests covering each utterance yielded, from the run's
         // group evidence. An utterance no grouping decision names is
         // explained by these, or by nothing: absence here is `Unrecorded`,
@@ -764,10 +829,26 @@ impl RequiredFaTiming {
                             utterance: index,
                             words: expected.words.len(),
                             untimed: missing,
-                            cause: match (causes.get(&LineIdx::new(line)), coverage.get(&index)) {
-                                (Some(decided), _) => decided.clone(),
-                                (None, Some(requested)) => UntimedCause::Requested(*requested),
-                                (None, None) => UntimedCause::Unrecorded,
+                            // A removal is the last thing that happened to
+                            // the words' timing and a fact about these words
+                            // themselves, so it is the cause whatever
+                            // grouping decided or the requests yielded.
+                            // Each utterance is visited once, so its
+                            // removals move out of the index.
+                            cause: match (
+                                removed.remove(&index),
+                                causes.get(&LineIdx::new(line)),
+                                coverage.get(&index),
+                            ) {
+                                (Some(removals), _, _) => UntimedCause::Removed {
+                                    removals,
+                                    recording: result.result.recording,
+                                },
+                                (None, Some(decided), _) => decided.clone(),
+                                (None, None, Some(requested)) => {
+                                    UntimedCause::Requested(*requested)
+                                }
+                                (None, None, None) => UntimedCause::Unrecorded,
                             },
                         };
                         untimed.push(utterance_untimed)?;

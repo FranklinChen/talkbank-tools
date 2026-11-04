@@ -22,9 +22,10 @@
 //! proved words a valid bound.
 
 use super::UtrUtteranceInfo;
+use super::evidence::UtrUtteranceOrdinal;
 use super::evidence::{LocalRegionPlan, UtrUtteranceAlignmentEvidence};
 use super::lexical::{AdmittedUtrWordMatch, UtrLexicalStream};
-use super::search::FaSearchEnvelope;
+use super::search::{CorridorCeiling, CorridorFloor, FaSearchEnvelope, MeasuredBound};
 
 /// Proved timings one utterance contributes as a neighbour: its admitted
 /// correspondences (either strength), then its retained non-overlap bullet.
@@ -72,11 +73,13 @@ pub(super) fn bound_interior_only_searches(
     // it. `None` means no proved timing on that side: then there is no
     // bound, and no corridor (see below).
     let mut floors = Vec::with_capacity(utterances.len());
-    let mut floor: Option<u64> = None;
-    for planned in utterances.iter() {
+    let mut floor: Option<MeasuredBound> = None;
+    for (ordinal, planned) in utterances.iter().enumerate() {
         floors.push(floor);
-        let mut raise = |bound: u64| {
-            floor = Some(floor.map_or(bound, |current| current.max(bound)));
+        let utterance = UtrUtteranceOrdinal(ordinal);
+        let mut raise = |ms: u64| {
+            let bound = MeasuredBound { ms, utterance };
+            floor = Some(floor.map_or(bound, |current| current.later(bound)));
         };
         if !overlaps(planned.info)
             && let Some(timing) = planned.info.retained_timing
@@ -87,12 +90,14 @@ pub(super) fn bound_interior_only_searches(
             raise(matched.token_timing().start_ms);
         }
     }
-    let mut ceilings = vec![None::<u64>; utterances.len()];
-    let mut ceiling: Option<u64> = None;
+    let mut ceilings = vec![None::<MeasuredBound>; utterances.len()];
+    let mut ceiling: Option<MeasuredBound> = None;
     for (ordinal, planned) in utterances.iter().enumerate().rev() {
         ceilings[ordinal] = ceiling;
-        let mut lower = |bound: u64| {
-            ceiling = Some(ceiling.map_or(bound, |current| current.min(bound)));
+        let utterance = UtrUtteranceOrdinal(ordinal);
+        let mut lower = |ms: u64| {
+            let bound = MeasuredBound { ms, utterance };
+            ceiling = Some(ceiling.map_or(bound, |current| current.earlier(bound)));
         };
         if !overlaps(planned.info)
             && let Some(timing) = planned.info.retained_timing
@@ -133,13 +138,13 @@ pub(super) fn bound_interior_only_searches(
         let (Some(floor), Some(ceiling)) = (floors[ordinal], ceilings[ordinal]) else {
             continue;
         };
-        if floor > own_start || ceiling < own_end {
+        if floor.ms > own_start || ceiling.ms < own_end {
             continue;
         }
         planned.envelope = Some(FaSearchEnvelope::order_corridor(
             info.words().to_vec(),
-            floor,
-            Some(ceiling),
+            CorridorFloor::PrecedingMeasured(floor),
+            CorridorCeiling::FollowingMeasured(ceiling),
         ));
     }
 }

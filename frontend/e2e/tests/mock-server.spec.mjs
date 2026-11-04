@@ -331,7 +331,9 @@ async function startHarness(deliverSnapshot = send => send()) {
       submissions.push(submission);
       // Exercise the real command/language admission contract rather than
       // fabricating a successful job for a malformed native-client request.
-      const perFile = ["morphotag", "translate"].includes(submission.command);
+      // align and compare read each transcript's @Languages, as the server's
+      // dispatch_language::language_source decides (2026-11-03).
+      const perFile = ["morphotag", "translate", "align", "compare"].includes(submission.command);
       if (perFile !== (submission.lang === "per-file")) {
         json(res, 400, { detail: "This command must use the matching job/per-file language policy." });
         return;
@@ -1608,7 +1610,7 @@ test("desktop follows a confirmed job identity without inventing progress from i
 });
 
 for (const scenario of [
-  { command: "align", label: /Align to Audio/, input: "/input/a.cha", output: "/output/a.cha", lang: "fra" },
+  { command: "align", label: /Align to Audio/, input: "/input/a.cha", output: "/output/a.cha", lang: "per-file" },
   { command: "translate", label: /^Translate/, input: "/input/a.cha", output: "/output/a.cha", lang: "per-file" },
   { command: "utseg", label: /Segment Utterances/, input: "/input/a.cha", output: "/output/a.cha", lang: "spa" },
   { command: "benchmark", label: /Score Accuracy/, input: "/input/clip.wav", output: "/output/clip.cha", lang: "eng" },

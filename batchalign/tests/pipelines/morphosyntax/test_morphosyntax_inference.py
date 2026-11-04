@@ -7,8 +7,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from batchalign.inference.morphosyntax import (
+    LemmaRepair,
+    LemmaRepairKind,
     RepairedSentence,
-    _is_bogus_lemma,
     batch_infer_morphosyntax,
 )
 from batchalign.providers import BatchInferRequest
@@ -113,21 +114,12 @@ def _analyzed(words: list[str], lang: str) -> dict[str, Any]:
         "raw_sentences": [_raw_sentence(words)],
         "model": _model(lang),
         "repairs": [],
-        "feature_repairs": [],
     }
 
 
-def test_is_bogus_lemma_flags_punctuation_only_lemmas() -> None:
-    """Bogus-lemma detection should ignore surface matches and real empty lemmas."""
-
-    assert _is_bogus_lemma("hello", "...") is True
-    assert _is_bogus_lemma("hello", "hello") is False
-    assert _is_bogus_lemma("hello", "") is False
-    assert _is_bogus_lemma("?!", "?!") is False
-
-
 def test_repaired_sentence_falls_back_from_bogus_punctuation_lemma() -> None:
-    """Punctuation-only lemmas for lexical words should fall back to the surface form."""
+    """Punctuation-only lemmas for lexical words fall back to the surface form,
+    and the fallback is reported as a repair rather than only logged."""
 
     repaired = RepairedSentence(
         [
@@ -144,7 +136,11 @@ def test_repaired_sentence_falls_back_from_bogus_punctuation_lemma() -> None:
 
     assert repaired.words[0]["lemma"] == "bonjour"
     assert repaired.words[0]["deprel"] == "root"
-    assert repaired.repairs == ()
+    assert repaired.repairs == (
+        LemmaRepair(
+            kind=LemmaRepairKind.PUNCTUATION_LEMMA, word="bonjour", from_lemma="..."
+        ),
+    )
 
 
 def test_repaired_sentence_coerces_tuple_ids_without_touching_the_input() -> None:
@@ -697,6 +693,7 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
     # the file itself that any had happened.
     assert resp.results[0].result["repairs"] == [
         {
+            "field": "relation",
             "kind": "relation_alias",
             "word": "ne",
             "from_relation": "iob",
@@ -762,15 +759,15 @@ def test_batch_infer_morphosyntax_removes_padding_feature_values_and_reports_the
     word = result["raw_sentences"][0][0]
     assert word["feats"] == "Number=Sing", word
     assert "<PAD>" not in str(result["raw_sentences"])
-    assert result["feature_repairs"] == [
+    assert result["repairs"] == [
         {
+            "field": "feature_value",
             "kind": "pad_feature_value",
             "word": "кітап",
             "feature": "Case",
             "removed_value": "<PAD>",
         }
     ]
-    assert result["repairs"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -175,7 +175,8 @@ impl SpliceFallbackCategory {
             | MappingError::EmptyStem { .. }
             | MappingError::InvalidDeprel { .. }
             | MappingError::Sentence(_)
-            | MappingError::EmptyRangeComponents => Self::SpliceInvariantOther,
+            | MappingError::EmptyRangeComponents
+            | MappingError::TagMarkerAsClitic { .. } => Self::SpliceInvariantOther,
         }
     }
 }

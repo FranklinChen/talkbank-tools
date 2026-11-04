@@ -1,8 +1,8 @@
 use super::BuildChatError;
 use talkbank_model::Location;
 use talkbank_model::model::{
-    BracketedContent, BracketedItem, DependentTier, LanguageCode, Line, Retrace, RetraceKind,
-    Separator, Utterance, UtteranceContent, Word,
+    BracketedContent, BracketedItem, ComTier, CommentContent, DependentTier, Header, LanguageCode,
+    Line, Retrace, RetraceKind, Separator, Utterance, UtteranceContent, Word,
 };
 use talkbank_parser::TreeSitterParser;
 
@@ -26,12 +26,24 @@ pub(super) fn build_utterance_lines(
     let mut synthesized_ends = Vec::new();
 
     for utterance in &desc.utterances {
-        let built = match &utterance.body {
+        // Every record the utterance carries (lost tokens, kept seam copies),
+        // rendered once: it is written on the line, or in the line's place.
+        let comments = utterance.comment_texts();
+        let built: Vec<Line> = match &utterance.body {
             UtteranceBody::Text { text, timing } => {
                 build_text_utterance(parser, &utterance.speaker, text, *timing, primary_lang)?
+                    .into_iter()
+                    .collect()
+            }
+            // Nothing survived to write a main tier from, and CHAT refuses an
+            // empty one; what the utterance lost stands where it would have
+            // been, as comments, so the reader finds the gap in order.
+            UtteranceBody::Words { words, .. } if words.is_empty() && !comments.is_empty() => {
+                unwritten_utterance_comments(&utterance.speaker, &comments)?
             }
             UtteranceBody::Words { words, end } => {
-                let built = build_word_utterance(&utterance.speaker, words, end, desc.write_wor);
+                let built =
+                    build_word_utterance(&utterance.speaker, words, end, desc.write_wor, &comments);
                 match built {
                     Some(mut line) => {
                         apply_utterance_language_override(
@@ -47,9 +59,9 @@ pub(super) fn build_utterance_lines(
                                 speaker: utterance.speaker.clone(),
                             });
                         }
-                        Some(line)
+                        vec![line]
                     }
-                    None => None,
+                    None => Vec::new(),
                 }
             }
         };
@@ -206,6 +218,7 @@ fn build_word_utterance(
     words: &[WordDesc],
     end: &asr_postprocess::UtteranceEnd,
     write_wor: bool,
+    comments: &[String],
 ) -> Option<Line> {
     let mut content: Vec<UtteranceContent> = Vec::new();
     let mut span = UtteranceSpan::default();
@@ -261,8 +274,36 @@ fn build_word_utterance(
             .dependent_tiers
             .push(DependentTier::Wor(wor_tier).into());
     }
+    // One `%com` per record the utterance carries (a token it lost, a window
+    // seam whose copy it keeps), each rendered by the record itself, so the
+    // file says what the log said and where.
+    for comment in comments {
+        utterance.dependent_tiers.push(
+            DependentTier::Com(ComTier::from_text(Location::Unlocated, comment.clone())).into(),
+        );
+    }
 
     Some(Line::utterance(utterance))
+}
+
+/// The comments that stand in for an utterance that kept no word: one
+/// `@Comment` per record, prefixed with the speaker the line would have had,
+/// since a header line names none.
+fn unwritten_utterance_comments(
+    speaker: &str,
+    comments: &[String],
+) -> Result<Vec<Line>, BuildChatError> {
+    comments
+        .iter()
+        .map(|comment| {
+            let content = CommentContent::try_from_text(format!("{speaker}: {comment}"))
+                .map_err(|_| BuildChatError::BlankComment)?;
+            Ok(Line::header(
+                Location::Unlocated,
+                Header::Comment { content },
+            ))
+        })
+        .collect()
 }
 
 /// Push the run of retrace words starting at `start_index` (a separator

@@ -115,6 +115,21 @@ where
         .map(crate::api::PositiveSeconds::new))
 }
 
+/// Serde deserializer for an optional worker cap whose legacy `0` meant
+/// "auto-tune": absent, `null` and `0` are all `None`, and any other count is
+/// `Some`.
+///
+/// `WorkerCap` itself refuses `0`, so this is the one place the legacy
+/// spelling is still read, for a `daemon.json` written while `--workers` was
+/// a bare integer. Pair with `#[serde(default)]`, as [`zero_as_no_override`].
+pub fn zero_as_no_cap<'de, D>(deserializer: D) -> Result<Option<crate::api::WorkerCap>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?
+        .and_then(|workers| crate::api::WorkerCap::try_from(workers).ok()))
+}
+
 /// Serde deserializer for a required interval or timeout whose legacy `0`
 /// meant "the built-in default", which is `DEFAULT`. Any other count is kept.
 pub fn zero_as_default<'de, D, const DEFAULT: u64>(

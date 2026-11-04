@@ -82,8 +82,6 @@ fn test_transcribe_options_in(
         plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
             crate::transcribe::TranscribeAsrPlan::from_request(
                 AsrBackend::RustRevAi,
-                false,
-                2,
                 &std::collections::BTreeMap::new(),
                 &language,
             )
@@ -92,8 +90,7 @@ fn test_transcribe_options_in(
             UtsegFallbackPolicy::Refuse,
         )
         .unwrap(),
-        diarize: true,
-        speaker_backend,
+        speakers: crate::transcribe::SpeakerPlan::for_test(2, speaker_backend),
         with_morphosyntax: false,
         cache_policies: crate::transcribe::TranscribeCachePolicies::uniform(
             crate::params::CachePolicy::UseCache,
@@ -286,7 +283,10 @@ async fn a_known_language_the_catalog_cannot_serve_is_decided_once_and_recorded(
         ]));
     let services = PipelineServices::new(&pool, &cache);
     let dutch = LanguageCode3::try_new("nld").expect("ISO 639-3");
-    let mut opts = test_transcribe_options_in(None, dutch.into());
+    // A dedicated speaker engine, so the diarization stage counted below is
+    // one the plan actually runs. The fixture used to say `diarize: true`
+    // beside no backend, counting a stage its own gate would have skipped.
+    let mut opts = test_transcribe_options_in(Some(SpeakerBackendV2::Pyannote), dutch.into());
     opts.plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
         opts.plan.asr().clone(),
         true,

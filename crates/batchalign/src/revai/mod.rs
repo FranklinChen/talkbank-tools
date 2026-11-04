@@ -14,6 +14,9 @@ mod asr;
 mod client;
 mod credentials;
 mod evidence_cache;
+mod poll;
+#[cfg(test)]
+mod scripted_server;
 mod types;
 mod utr;
 
@@ -23,6 +26,7 @@ pub(crate) use asr::{RevAsrService, rev_evidence_to_asr_response};
 pub(crate) use client::{Result, RevAiClient, TranscriptResult, extract_timed_words};
 pub(crate) use credentials::{RevAiApiKey, load_revai_api_key};
 pub(crate) use evidence_cache::*;
+pub(crate) use poll::{Awaited, PollPolicy, SubmittedJob};
 #[cfg(test)]
 pub(crate) use types::RevTranscriptEvidence;
 pub(crate) use types::{SubmitOptions, Transcript};

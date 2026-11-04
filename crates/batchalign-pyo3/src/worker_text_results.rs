@@ -100,7 +100,7 @@ pub(crate) fn normalize_morphosyntax_result(
 mod cue_projection_tests {
     use super::*;
     use batchalign_transform::morphosyntax::{MappingContext, UdSentence, map_ud_sentence};
-    use batchalign_types::worker_v2::UdRelationRepairKindV2;
+    use batchalign_types::worker_v2::{UdRelationRepairKindV2, UdRepairV2};
 
     /// Actual Python producer output from the native cue-projection case deck.
     /// The wire and MOR/GRA boundary survive graph ownership and need a test.
@@ -117,7 +117,6 @@ mod cue_projection_tests {
                 raw_sentences,
                 model,
                 repairs,
-                feature_repairs,
             } = item
             else {
                 return Err("projected model result was not analyzed".into());
@@ -134,14 +133,15 @@ mod cue_projection_tests {
             )?;
             assert_eq!(mor.len(), 2, "two lexical tokens even with MWT components");
             assert!(gra.len() >= 3, "relations include the synthetic terminator");
-            assert!(feature_repairs.is_empty());
             if index == 0 {
                 assert!(repairs.is_empty());
             } else {
-                assert_eq!(repairs.len(), 1);
-                assert_eq!(repairs[0].kind, UdRelationRepairKindV2::CueRootPromotion);
-                assert_eq!(repairs[0].word, "beta");
-                assert_eq!(repairs[0].to_relation, "root");
+                let [UdRepairV2::Relation(repair)] = repairs.as_slice() else {
+                    return Err(format!("expected one relation repair, got {repairs:?}").into());
+                };
+                assert_eq!(repair.kind, UdRelationRepairKindV2::CueRootPromotion);
+                assert_eq!(repair.word, "beta");
+                assert_eq!(repair.to_relation, "root");
             }
         }
         assert!(

@@ -98,6 +98,20 @@ pub enum MappingError {
     /// `assemble_mors` was called with an empty component slice.
     #[error("assemble_mors called with empty components, structural bug in caller")]
     EmptyRangeComponents,
+
+    /// A tag-marker separator (`‡`, `„`) arrived as a component of a
+    /// multi-word token. A marker is a separator between words and cannot be
+    /// a clitic of one; the generic word path cannot be given a marker at all
+    /// (it takes a `Lexical`), so this is the one place a marker can still
+    /// reach a `%mor` item, and it is refused by name.
+    #[error(
+        "tag marker {} arrived as a component of a multi-word token; a separator cannot be a clitic",
+        marker.chat_text()
+    )]
+    TagMarkerAsClitic {
+        /// The marker that arrived.
+        marker: super::mor_word::TagMarker,
+    },
 }
 
 /// Controls whether the morphosyntax pipeline retokenizes using Stanza's

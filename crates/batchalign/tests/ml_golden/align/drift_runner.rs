@@ -83,11 +83,7 @@ impl FileOutcome {
 /// Run `batchalign3 align` on one staged file and evaluate the structural
 /// timing assertion against the output. A file staged without its media
 /// fails the test: an empty or partial run would pass vacuously.
-pub async fn run_one_file(
-    jobs: &LiveDirectJobClient<'_>,
-    staged: &StagedDriftFile,
-    lang: &str,
-) -> FileOutcome {
+pub async fn run_one_file(jobs: &LiveDirectJobClient<'_>, staged: &StagedDriftFile) -> FileOutcome {
     let cha_name = staged.cha_name();
 
     if staged.media_path.is_none() {
@@ -110,7 +106,8 @@ pub async fn run_one_file(
     let (info, outputs) = jobs
         .submit_paths_job(
             ReleasedCommand::Align,
-            lang,
+            // Align is per-file: each file's language is its `@Languages:`.
+            "per-file",
             vec![staged.cha_path.to_string_lossy().into_owned()],
             vec![output_path.to_string_lossy().into_owned()],
             align_options(FaEngineName::Wave2Vec, WorTierPolicy::Include),

@@ -211,7 +211,7 @@ pub enum UtteranceEndTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 10;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +242,25 @@ pub struct FaTimelineTrace {
     /// default to an empty `unrequested` list. Version 8 separates each
     /// piece's owned word range from its overlapping model context and nominal
     /// ownership window. Request endpoints are not shared acoustic cuts.
+    /// Version 9 gives every stripping effect (`start_regression_stripped`,
+    /// `zero_duration_clamp_stripped`, and a `yielded_to_kept_bullet` whose
+    /// outcome is `stripped`) a `words_dropped` list of the measured word
+    /// intervals the strip removed, the same records the end clamp already
+    /// carried, and `dropped_word_timings` includes them with the boundary
+    /// the utterance conflicted with as `bound_ms`. A version-8 artifact
+    /// lacks those lists, so it does not read as a version-9 one. Version 10
+    /// adds the `start_regression_raised` timing decision (a start
+    /// regression on a `+<` utterance raised to the preceding start instead
+    /// of stripped), with `words_dropped` and a `words_trimmed` list of the
+    /// words cut to the new start, each with its measured and kept extent;
+    /// the matching removal effect appears in `dropped_word_timings` and in
+    /// the completion account's `removed` causes. The `words_trimmed` count
+    /// on `end_clamped_interleaved_words` and on a `yielded_to_kept_bullet`
+    /// `start_moved` outcome becomes the same list. A version-9 reader has
+    /// no arm for the new kind and reads a count where a list now is. Version
+    /// 10 also adds the `search_corridor` decision and its `search_corridor`
+    /// field on the decision record: the window an order corridor gave an
+    /// untimed utterance, with the provenance of each edge.
     #[serde(default)]
     pub evidence_schema_version: u32,
     /// Forced-alignment engine selected for this run.
@@ -326,6 +345,80 @@ pub struct FaDecisionTrace {
     /// decisions, populated the same way as `refused_window`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_window: Option<SplitWindowTrace>,
+    /// The search corridor, present exactly for `search_corridor` decisions
+    /// (schema 10), populated the same way as `refused_window`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_corridor: Option<SearchCorridorTrace>,
+}
+
+/// Wire form of [`batchalign_transform::decisions::SearchCorridor`]: the
+/// window an order corridor gave an untimed utterance, with the provenance
+/// of each edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct SearchCorridorTrace {
+    /// Start of the admitted window, in file milliseconds.
+    pub start_ms: u64,
+    /// End of the admitted window, in file milliseconds.
+    pub end_ms: u64,
+    /// Where the corridor's lower edge came from.
+    pub floor: CorridorBoundTrace,
+    /// Where its upper edge came from.
+    pub ceiling: CorridorBoundTrace,
+}
+
+/// Wire form of [`batchalign_transform::decisions::CorridorBound`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CorridorBoundTrace {
+    /// No measured utterance on that side: the recording's own edge.
+    RecordingEdge,
+    /// The searched utterance is marked as overlapping the turn before it,
+    /// so no preceding measurement bounds its start (a floor only).
+    MarkedOverlapUnbounded,
+    /// The next utterance is marked as overlapping the one before it; the
+    /// chain of following measurements stops there.
+    FollowingOverlaps {
+        /// Zero-based ordinal, among main tiers, of the marked utterance.
+        utterance: usize,
+    },
+    /// A measured utterance's edge.
+    Measured {
+        /// The edge, in file milliseconds.
+        ms: u64,
+        /// Zero-based ordinal, among main tiers, of the utterance measured.
+        utterance: usize,
+    },
+}
+
+impl From<batchalign_transform::decisions::SearchCorridor> for SearchCorridorTrace {
+    fn from(corridor: batchalign_transform::decisions::SearchCorridor) -> Self {
+        let batchalign_transform::decisions::SearchCorridor {
+            start_ms,
+            end_ms,
+            floor,
+            ceiling,
+        } = corridor;
+        Self {
+            start_ms,
+            end_ms,
+            floor: floor.into(),
+            ceiling: ceiling.into(),
+        }
+    }
+}
+
+impl From<batchalign_transform::decisions::CorridorBound> for CorridorBoundTrace {
+    fn from(bound: batchalign_transform::decisions::CorridorBound) -> Self {
+        use batchalign_transform::decisions::CorridorBound;
+        match bound {
+            CorridorBound::RecordingEdge => Self::RecordingEdge,
+            CorridorBound::MarkedOverlapUnbounded => Self::MarkedOverlapUnbounded,
+            CorridorBound::FollowingOverlaps { utterance } => Self::FollowingOverlaps { utterance },
+            CorridorBound::Measured { ms, utterance } => Self::Measured { ms, utterance },
+        }
+    }
 }
 
 /// Wire form of [`batchalign_transform::decisions::SplitWindow`].
@@ -505,10 +598,15 @@ impl From<batchalign_transform::decisions::RefusedWindow> for RefusedWindowTrace
 impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
     fn from(record: batchalign_transform::decisions::DecisionRecord) -> Self {
         use batchalign_transform::decisions::{DecisionStrategy, FaStrategy};
-        let (refused_window, split_window) = match record.strategy {
-            DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => (Some(window.into()), None),
+        let (refused_window, split_window, search_corridor) = match record.strategy {
+            DecisionStrategy::Fa(FaStrategy::WindowRefused(window)) => {
+                (Some(window.into()), None, None)
+            }
             DecisionStrategy::Fa(FaStrategy::WindowSplitAtAnchors(split)) => {
-                (None, Some(split.into()))
+                (None, Some(split.into()), None)
+            }
+            DecisionStrategy::Fa(FaStrategy::SearchCorridor(corridor)) => {
+                (None, None, Some(corridor.into()))
             }
             // Every other FA strategy listed, not `Fa(_)`: a new one that
             // carries data must decide here whether the trace records it.
@@ -530,7 +628,7 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
             | DecisionStrategy::Monotonicity(_)
             | DecisionStrategy::Morphosyntax(_)
             | DecisionStrategy::Coref(_)
-            | DecisionStrategy::Utseg(_) => (None, None),
+            | DecisionStrategy::Utseg(_) => (None, None, None),
         };
         Self {
             line_idx: record.line_idx.raw(),
@@ -541,6 +639,7 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
             needs_review: record.needs_review,
             refused_window,
             split_window,
+            search_corridor,
         }
     }
 }
@@ -568,6 +667,37 @@ pub enum FaTimingDecisionTrace {
         previous_utterance_idx: usize,
         /// Speaker on the preceding line.
         previous_speaker: String,
+        /// The measured word intervals the strip removed, one record per
+        /// word and tier (schema 9).
+        words_dropped: Vec<DroppedWordTimingTrace>,
+    },
+    /// A later utterance's start went backward in document order, and the
+    /// transcriber had marked it as overlapping the previous utterance
+    /// (`+<`), so its start was raised to the preceding start and the words
+    /// with extent after it were kept (schema 10).
+    StartRegressionRaised {
+        /// Affected line index, including headers.
+        line_idx: usize,
+        /// Stable ordinal among utterances only.
+        utterance_idx: usize,
+        /// Speaker on the affected utterance.
+        speaker: String,
+        /// Measured start that regressed; written nowhere.
+        start_ms: u64,
+        /// Greatest preceding start in document order: the bullet's new start.
+        previous_start_ms: u64,
+        /// Line that supplied `previous_start_ms`.
+        previous_line_idx: usize,
+        /// Stable ordinal of the preceding utterance.
+        previous_utterance_idx: usize,
+        /// Speaker on the preceding line.
+        previous_speaker: String,
+        /// Words whose measured interval ended at or before the new start,
+        /// one record per word and tier; their timing was removed.
+        words_dropped: Vec<DroppedWordTimingTrace>,
+        /// Words straddling the new start, cut to begin there, one record
+        /// per word and tier.
+        words_trimmed: Vec<TrimmedWordTimingTrace>,
     },
     /// An earlier utterance could not be end-clamped without becoming empty.
     ZeroDurationClampStripped {
@@ -589,6 +719,9 @@ pub enum FaTimingDecisionTrace {
         next_utterance_idx: usize,
         /// Speaker on the following line.
         next_speaker: String,
+        /// The measured word intervals the strip removed, one record per
+        /// word and tier (schema 9).
+        words_dropped: Vec<DroppedWordTimingTrace>,
     },
     /// A same-speaker end overlap was resolved because only the bullet's
     /// inherited coverage overshot the next utterance's start; no measured
@@ -627,8 +760,9 @@ pub enum FaTimingDecisionTrace {
         edge: OverlapEdgeTrace,
         /// Following start used as the new end.
         clamped_to_ms: u64,
-        /// Words cut to a shorter positive extent, still keeping a timing.
-        words_trimmed: usize,
+        /// Words cut to a shorter positive extent, still keeping a timing:
+        /// one record per word and tier (a count before schema 10).
+        words_trimmed: Vec<TrimmedWordTimingTrace>,
         /// Words whose start was at or past the bound: no timing survived.
         /// One record per word (2026-09-02), not just a count: each is a
         /// MEASURED extent this run threw away, not the same fact as
@@ -671,8 +805,9 @@ pub enum KeptBulletYieldTrace {
         from_ms: u64,
         /// Start after the move.
         to_ms: u64,
-        /// Leading words cut to a shorter positive extent.
-        words_trimmed: usize,
+        /// Leading words cut to a shorter positive extent: one record per
+        /// word and tier (a count before schema 10).
+        words_trimmed: Vec<TrimmedWordTimingTrace>,
         /// Leading words that lost their timing.
         words_dropped: Vec<DroppedWordTimingTrace>,
     },
@@ -682,41 +817,96 @@ pub enum KeptBulletYieldTrace {
         start_ms: u64,
         /// End of the stripped bullet.
         end_ms: u64,
+        /// The measured word intervals the strip removed, one record per
+        /// word and tier (schema 9).
+        words_dropped: Vec<DroppedWordTimingTrace>,
     },
 }
 
 /// Wire form of `chat_ops::fa::orchestrate::DroppedWordTiming`: a word whose
 /// timing was thrown away entirely, past the clamp bound, with the extent
-/// it lost. `tier` follows the same convention as `OriginTrace::ClampedTo`'s
-/// `bound` field: a plain string rather than a nested enum, since nothing
-/// downstream of this wire boundary needs to match on it structurally.
+/// it lost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct DroppedWordTimingTrace {
     /// This word's position among the words visited on its own tier, in
     /// document order.
     pub word_index: usize,
-    /// Which tier this word's dropped timing lived on: `"main_tier"` or
-    /// `"wor"`.
-    pub tier: String,
+    /// Which tier this word's dropped timing lived on.
+    pub tier: WordTierTrace,
     /// Start of the extent that was lost.
     pub start_ms: u64,
     /// End of the extent that was lost.
     pub end_ms: u64,
 }
 
+/// Wire form of `chat_ops::fa::WordTier`: which representation a word's
+/// timing lived on. Spelled `main_tier` / `wor` on the wire, as the former
+/// string field was, so no artifact changes shape; the enum is what lets a
+/// reader match on it without comparing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WordTierTrace {
+    /// The main tier's inline word bullets.
+    MainTier,
+    /// The `%wor` tier.
+    Wor,
+}
+
+impl From<crate::chat_ops::fa::WordTier> for WordTierTrace {
+    fn from(tier: crate::chat_ops::fa::WordTier) -> Self {
+        use crate::chat_ops::fa::WordTier;
+        match tier {
+            WordTier::MainTier => Self::MainTier,
+            WordTier::Wor => Self::Wor,
+        }
+    }
+}
+
 impl From<&crate::chat_ops::fa::DroppedWordTiming> for DroppedWordTimingTrace {
     fn from(dropped: &crate::chat_ops::fa::DroppedWordTiming) -> Self {
-        use crate::chat_ops::fa::WordTier;
         Self {
             word_index: dropped.word_index,
-            tier: match dropped.tier {
-                WordTier::MainTier => "main_tier",
-                WordTier::Wor => "wor",
-            }
-            .to_owned(),
+            tier: dropped.tier.into(),
             start_ms: dropped.measured.start_ms,
             end_ms: dropped.measured.end_ms,
+        }
+    }
+}
+
+/// Wire form of `chat_ops::fa::orchestrate::TrimmedWordTiming`: a word a
+/// clamp cut to a shorter positive extent, with the extent it had and the
+/// extent it kept (schema 10). The word still carries `start_ms..end_ms` in
+/// the written file; the record exists so a reader can see what was cut
+/// without diffing two files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct TrimmedWordTimingTrace {
+    /// This word's position among the words visited on its own tier, in
+    /// document order.
+    pub word_index: usize,
+    /// Which tier this word's timing lives on.
+    pub tier: WordTierTrace,
+    /// Start of the extent the word had before the cut.
+    pub measured_start_ms: u64,
+    /// End of the extent the word had before the cut.
+    pub measured_end_ms: u64,
+    /// Start of the extent it kept.
+    pub start_ms: u64,
+    /// End of the extent it kept.
+    pub end_ms: u64,
+}
+
+impl From<&crate::chat_ops::fa::TrimmedWordTiming> for TrimmedWordTimingTrace {
+    fn from(trimmed: &crate::chat_ops::fa::TrimmedWordTiming) -> Self {
+        Self {
+            word_index: trimmed.word_index,
+            tier: trimmed.tier.into(),
+            measured_start_ms: trimmed.measured.start_ms,
+            measured_end_ms: trimmed.measured.end_ms,
+            start_ms: trimmed.kept.start_ms,
+            end_ms: trimmed.kept.end_ms,
         }
     }
 }
@@ -743,7 +933,7 @@ pub struct DroppedWordTimingRecord {
     /// Speaker code on that utterance.
     pub speaker: String,
     /// Which tier the dropped timing lived on: `"main_tier"` or `"wor"`.
-    pub tier: String,
+    pub tier: WordTierTrace,
     /// This word's position among the words on its own tier, in document
     /// order.
     pub word_index: usize,
@@ -751,70 +941,448 @@ pub struct DroppedWordTimingRecord {
     pub start_ms: u64,
     /// End of the measured extent that was lost.
     pub end_ms: u64,
-    /// The clamp bound this measurement exceeded, which is why it was cut.
+    /// The boundary this measurement conflicted with, which is why it was
+    /// removed: the clamp bound for a dropped word, or, for a word of a
+    /// stripped utterance (schema 9), the start or end the utterance could
+    /// not be ordered against ([`RemovalEffectTrace::boundary_ms`]).
     pub bound_ms: u64,
 }
 
-impl FaTimingDecisionTrace {
-    /// The word timings this one decision discarded outright.
-    ///
-    /// Written as an exhaustive match with every non-dropping variant named,
-    /// rather than a catch-all: a future effect that CAN discard a
-    /// measurement must then fail to compile here instead of silently
-    /// reporting none.
-    pub fn dropped_word_timings(&self) -> Vec<DroppedWordTimingRecord> {
+/// One finalization effect's removal of measured word timing from one
+/// utterance: which rule removed it, and every interval it removed.
+///
+/// This is the cause the completion account gives a word the run itself
+/// untimed ([`crate::api::UntimedCauseRecord::Removed`]), so it is a wire
+/// record: it is stored in the file's diagnostics and shown in the report.
+/// Built only by [`FaTimingDecisionTrace::word_timing_removal`], from the
+/// effect the finalizer recorded at the moment it removed the timing, and
+/// only when that effect removed at least one measured interval, so a
+/// record never says "removed" about an utterance that had no word timing
+/// to lose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct WordTimingRemovalTrace {
+    /// The finalization rule that removed the timing, with the boundary it
+    /// enforced.
+    pub effect: RemovalEffectTrace,
+    /// The measured word intervals it removed, in word order within each
+    /// tier, main tier first; at least one.
+    pub measured: Vec<DroppedWordTimingTrace>,
+}
+
+/// The finalization rules that can remove a word's measured timing, and
+/// nothing else: a closed set, so a removal cannot name an effect that moves
+/// only a bullet (`end_clamped_coverage_only`, `end_clamped_boundary_from_words`)
+/// or trims a word without dropping it.
+///
+/// Each variant carries what a reader needs to find the conflict in the
+/// transcript: the boundary the utterance collided with and the line that
+/// supplied it. The full effect, with both utterances' ordinals and
+/// speakers, stays in [`FaTimelineTrace::timing_decisions`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemovalEffectTrace {
+    /// Pass 1: the utterance's measured start preceded the greatest start
+    /// accepted before it, and the whole utterance's timing was stripped.
+    StartRegressionStripped {
+        /// The utterance's own measured start, the one that regressed.
+        utterance_start_ms: u64,
+        /// The greatest preceding start, which this one fell below.
+        preceding_start_ms: u64,
+        /// Index into `ChatFile.lines` of the utterance that supplied it.
+        preceding_line_idx: usize,
+        /// Speaker on that line.
+        preceding_speaker: String,
+    },
+    /// Pass 1: the utterance's measured start preceded the greatest start
+    /// accepted before it, and the utterance carries the `+<` overlap marker,
+    /// so its start was raised to that preceding start; the words whose
+    /// measured interval ended at or before it lost their timing.
+    StartRegressionRaised {
+        /// The utterance's own measured start, the one that regressed.
+        utterance_start_ms: u64,
+        /// The greatest preceding start: the utterance's new start.
+        preceding_start_ms: u64,
+        /// Index into `ChatFile.lines` of the utterance that supplied it.
+        preceding_line_idx: usize,
+        /// Speaker on that line.
+        preceding_speaker: String,
+        /// The words cut to begin at the new start, with what they lost:
+        /// carried here so the account can say by how much the first kept
+        /// word was trimmed beside the words that were dropped.
+        words_trimmed: Vec<TrimmedWordTimingTrace>,
+    },
+    /// Pass 2: the next same-speaker utterance starts at or before this one,
+    /// so clamping its end there would leave it no extent; the whole
+    /// utterance's timing was stripped.
+    ZeroDurationClampStripped {
+        /// The utterance's own measured start.
+        utterance_start_ms: u64,
+        /// The next same-speaker start, at or before `utterance_start_ms`.
+        next_start_ms: u64,
+        /// Index into `ChatFile.lines` of the utterance that supplied it.
+        next_line_idx: usize,
+    },
+    /// Pass 2: the utterance's end was clamped to the next same-speaker
+    /// start and every word at or past that bound lost its timing.
+    EndClampedInterleavedWords {
+        /// The next same-speaker start, now this utterance's end.
+        bound_ms: u64,
+        /// Index into `ChatFile.lines` of the utterance that supplied it.
+        next_line_idx: usize,
+    },
+    /// Under `--main-bullets keep`: no valid bullet could remain beside a
+    /// kept neighbour's fixed boundary, so the utterance's timing was
+    /// stripped.
+    YieldedToKeptBulletStripped {
+        /// The kept boundary it could not fit beside.
+        kept_boundary_ms: u64,
+        /// Index into `ChatFile.lines` of the kept utterance.
+        kept_line_idx: usize,
+        /// Speaker on the kept utterance.
+        kept_speaker: String,
+    },
+    /// Under `--main-bullets keep`: the utterance's start moved forward to a
+    /// kept neighbour's end and the leading words wholly before it lost
+    /// their timing.
+    YieldedToKeptEndLeadingWordsDropped {
+        /// The kept end the start moved to.
+        kept_end_ms: u64,
+        /// Index into `ChatFile.lines` of the kept utterance.
+        kept_line_idx: usize,
+        /// Speaker on the kept utterance.
+        kept_speaker: String,
+    },
+}
+
+impl RemovalEffectTrace {
+    /// The boundary the removed timing conflicted with: for a clamp the
+    /// bound the words were cut to, for a strip the start or end the
+    /// utterance could not be ordered against.
+    pub fn boundary_ms(&self) -> u64 {
         match self {
-            Self::StartRegressionStripped { .. }
-            | Self::ZeroDurationClampStripped { .. }
-            | Self::EndClampedCoverageOnly { .. }
-            | Self::EndClampedBoundaryFromWords { .. }
-            | Self::YieldedToKeptBullet {
-                outcome: KeptBulletYieldTrace::Stripped { .. },
-                ..
-            } => Vec::new(),
-            Self::YieldedToKeptBullet {
+            Self::StartRegressionStripped {
+                preceding_start_ms, ..
+            }
+            | Self::StartRegressionRaised {
+                preceding_start_ms, ..
+            } => *preceding_start_ms,
+            Self::ZeroDurationClampStripped { next_start_ms, .. } => *next_start_ms,
+            Self::EndClampedInterleavedWords { bound_ms, .. } => *bound_ms,
+            Self::YieldedToKeptBulletStripped {
+                kept_boundary_ms, ..
+            } => *kept_boundary_ms,
+            Self::YieldedToKeptEndLeadingWordsDropped { kept_end_ms, .. } => *kept_end_ms,
+        }
+    }
+}
+
+impl std::fmt::Display for WordTimingRemovalTrace {
+    /// One short factual phrase: the intervals removed, then the rule and
+    /// the boundary it enforced. Several intervals are summarised by their
+    /// count and hull.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("measured ")?;
+        match self.measured.as_slice() {
+            [] => f.write_str("nothing")?,
+            [only] => write!(f, "{}-{}", only.start_ms, only.end_ms)?,
+            several => {
+                let start = several.iter().map(|word| word.start_ms).min();
+                let end = several.iter().map(|word| word.end_ms).max();
+                write!(f, "{} intervals", several.len())?;
+                if let (Some(start), Some(end)) = (start, end) {
+                    write!(f, " {start}-{end}")?;
+                }
+            }
+        }
+        match &self.effect {
+            RemovalEffectTrace::StartRegressionStripped {
+                utterance_start_ms,
+                preceding_start_ms,
+                preceding_line_idx,
+                preceding_speaker,
+            } => write!(
+                f,
+                " removed, utterance stripped: its start {utterance_start_ms} precedes the \
+                 {preceding_speaker} start {preceding_start_ms} (line index {preceding_line_idx})"
+            ),
+            RemovalEffectTrace::StartRegressionRaised {
+                utterance_start_ms,
+                preceding_start_ms,
+                preceding_line_idx,
+                preceding_speaker,
+                words_trimmed,
+            } => {
+                write!(
+                    f,
+                    " dropped before the {preceding_speaker} start {preceding_start_ms} (line \
+                     index {preceding_line_idx}), to which the utterance's start was raised from \
+                     {utterance_start_ms} (+< overlap)"
+                )?;
+                // The main tier's trim, or the `%wor` tier's when only that
+                // tier carried the word: the same cut either way.
+                let first_kept = words_trimmed
+                    .iter()
+                    .find(|trimmed| trimmed.tier == WordTierTrace::MainTier)
+                    .or_else(|| words_trimmed.first());
+                match first_kept {
+                    Some(trimmed) => write!(
+                        f,
+                        "; first kept word trimmed {} ms",
+                        trimmed.start_ms.saturating_sub(trimmed.measured_start_ms)
+                    ),
+                    None => Ok(()),
+                }
+            }
+            RemovalEffectTrace::ZeroDurationClampStripped {
+                utterance_start_ms,
+                next_start_ms,
+                next_line_idx,
+            } => write!(
+                f,
+                " removed, utterance stripped: the same speaker's next start {next_start_ms} \
+                 (line index {next_line_idx}) is not after its start {utterance_start_ms}"
+            ),
+            RemovalEffectTrace::EndClampedInterleavedWords {
+                bound_ms,
+                next_line_idx,
+            } => write!(
+                f,
+                " dropped at the same-speaker bound {bound_ms} (line index {next_line_idx})"
+            ),
+            RemovalEffectTrace::YieldedToKeptBulletStripped {
+                kept_boundary_ms,
+                kept_line_idx,
+                kept_speaker,
+            } => write!(
+                f,
+                " removed, utterance stripped: no room beside the kept {kept_speaker} bullet's \
+                 boundary {kept_boundary_ms} (line index {kept_line_idx})"
+            ),
+            RemovalEffectTrace::YieldedToKeptEndLeadingWordsDropped {
+                kept_end_ms,
+                kept_line_idx,
+                kept_speaker,
+            } => write!(
+                f,
+                " dropped before the kept {kept_speaker} end {kept_end_ms} (line index \
+                 {kept_line_idx})"
+            ),
+        }
+    }
+}
+
+/// A [`WordTimingRemovalTrace`] with the utterance it happened to: the join
+/// the flat `dropped_word_timings` section and the completion account both
+/// need, done once where the effect is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedWordTimingRemoval {
+    /// Index into `ChatFile.lines` of the utterance that lost the timing.
+    pub line_idx: usize,
+    /// Stable ordinal among utterances only.
+    pub utterance_idx: usize,
+    /// Speaker code on that utterance.
+    pub speaker: String,
+    /// What was removed, and by which rule.
+    pub removal: WordTimingRemovalTrace,
+}
+
+impl LocatedWordTimingRemoval {
+    /// Build the removal from an effect's own fields, or `None` when the
+    /// effect removed no measured interval: the one route to a removal
+    /// record, so `measured` is never empty.
+    fn of(
+        line_idx: usize,
+        utterance_idx: usize,
+        speaker: &str,
+        effect: RemovalEffectTrace,
+        words_dropped: &[DroppedWordTimingTrace],
+    ) -> Option<Self> {
+        match words_dropped {
+            [] => None,
+            measured => Some(Self {
+                line_idx,
+                utterance_idx,
+                speaker: speaker.to_owned(),
+                removal: WordTimingRemovalTrace {
+                    effect,
+                    measured: measured.to_vec(),
+                },
+            }),
+        }
+    }
+
+    /// The flat per-word records, one per removed interval.
+    fn into_dropped_records(self) -> Vec<DroppedWordTimingRecord> {
+        let bound_ms = self.removal.effect.boundary_ms();
+        self.removal
+            .measured
+            .into_iter()
+            .map(|dropped| DroppedWordTimingRecord {
+                line_idx: self.line_idx,
+                utterance_idx: self.utterance_idx,
+                speaker: self.speaker.clone(),
+                tier: dropped.tier,
+                word_index: dropped.word_index,
+                start_ms: dropped.start_ms,
+                end_ms: dropped.end_ms,
+                bound_ms,
+            })
+            .collect()
+    }
+}
+
+impl FaTimingDecisionTrace {
+    /// The measured word timing this one decision removed, located, or
+    /// `None` when it removed none (it moved only a bullet, trimmed words
+    /// without dropping any, or stripped an utterance that had no timed
+    /// word).
+    ///
+    /// An exhaustive match with every non-removing variant named, rather
+    /// than a catch-all: a future effect that CAN remove a measurement must
+    /// then fail to compile here instead of silently reporting none.
+    pub fn word_timing_removal(&self) -> Option<LocatedWordTimingRemoval> {
+        match self {
+            Self::EndClampedCoverageOnly { .. } | Self::EndClampedBoundaryFromWords { .. } => None,
+            Self::StartRegressionStripped {
                 line_idx,
                 utterance_idx,
                 speaker,
-                outcome:
-                    KeptBulletYieldTrace::StartMoved {
-                        to_ms,
-                        words_dropped,
-                        ..
-                    },
-                ..
-            } => words_dropped
-                .iter()
-                .map(|dropped| DroppedWordTimingRecord {
-                    line_idx: *line_idx,
-                    utterance_idx: *utterance_idx,
-                    speaker: speaker.clone(),
-                    tier: dropped.tier.clone(),
-                    word_index: dropped.word_index,
-                    start_ms: dropped.start_ms,
-                    end_ms: dropped.end_ms,
-                    bound_ms: *to_ms,
-                })
-                .collect(),
+                start_ms,
+                previous_start_ms,
+                previous_line_idx,
+                previous_utterance_idx: _,
+                previous_speaker,
+                words_dropped,
+            } => LocatedWordTimingRemoval::of(
+                *line_idx,
+                *utterance_idx,
+                speaker,
+                RemovalEffectTrace::StartRegressionStripped {
+                    utterance_start_ms: *start_ms,
+                    preceding_start_ms: *previous_start_ms,
+                    preceding_line_idx: *previous_line_idx,
+                    preceding_speaker: previous_speaker.clone(),
+                },
+                words_dropped,
+            ),
+            Self::StartRegressionRaised {
+                line_idx,
+                utterance_idx,
+                speaker,
+                start_ms,
+                previous_start_ms,
+                previous_line_idx,
+                previous_utterance_idx: _,
+                previous_speaker,
+                words_dropped,
+                words_trimmed,
+            } => LocatedWordTimingRemoval::of(
+                *line_idx,
+                *utterance_idx,
+                speaker,
+                RemovalEffectTrace::StartRegressionRaised {
+                    utterance_start_ms: *start_ms,
+                    preceding_start_ms: *previous_start_ms,
+                    preceding_line_idx: *previous_line_idx,
+                    preceding_speaker: previous_speaker.clone(),
+                    words_trimmed: words_trimmed.clone(),
+                },
+                words_dropped,
+            ),
+            Self::ZeroDurationClampStripped {
+                line_idx,
+                utterance_idx,
+                speaker,
+                start_ms,
+                original_end_ms: _,
+                next_start_ms,
+                next_line_idx,
+                next_utterance_idx: _,
+                next_speaker: _,
+                words_dropped,
+            } => LocatedWordTimingRemoval::of(
+                *line_idx,
+                *utterance_idx,
+                speaker,
+                RemovalEffectTrace::ZeroDurationClampStripped {
+                    utterance_start_ms: *start_ms,
+                    next_start_ms: *next_start_ms,
+                    next_line_idx: *next_line_idx,
+                },
+                words_dropped,
+            ),
             Self::EndClampedInterleavedWords {
                 edge,
                 clamped_to_ms,
                 words_trimmed: _,
                 words_dropped,
-            } => words_dropped
-                .iter()
-                .map(|dropped| DroppedWordTimingRecord {
-                    line_idx: edge.line_idx,
-                    utterance_idx: edge.utterance_idx,
-                    speaker: edge.speaker.clone(),
-                    tier: dropped.tier.clone(),
-                    word_index: dropped.word_index,
-                    start_ms: dropped.start_ms,
-                    end_ms: dropped.end_ms,
+            } => LocatedWordTimingRemoval::of(
+                edge.line_idx,
+                edge.utterance_idx,
+                &edge.speaker,
+                RemovalEffectTrace::EndClampedInterleavedWords {
                     bound_ms: *clamped_to_ms,
-                })
-                .collect(),
+                    next_line_idx: edge.next_line_idx,
+                },
+                words_dropped,
+            ),
+            Self::YieldedToKeptBullet {
+                line_idx,
+                utterance_idx,
+                speaker,
+                kept_line_idx,
+                kept_utterance_idx: _,
+                kept_speaker,
+                kept_boundary_ms,
+                outcome,
+            } => {
+                let (effect, words_dropped) = match outcome {
+                    KeptBulletYieldTrace::Stripped {
+                        start_ms: _,
+                        end_ms: _,
+                        words_dropped,
+                    } => (
+                        RemovalEffectTrace::YieldedToKeptBulletStripped {
+                            kept_boundary_ms: *kept_boundary_ms,
+                            kept_line_idx: *kept_line_idx,
+                            kept_speaker: kept_speaker.clone(),
+                        },
+                        words_dropped,
+                    ),
+                    KeptBulletYieldTrace::StartMoved {
+                        from_ms: _,
+                        to_ms,
+                        words_trimmed: _,
+                        words_dropped,
+                    } => (
+                        RemovalEffectTrace::YieldedToKeptEndLeadingWordsDropped {
+                            kept_end_ms: *to_ms,
+                            kept_line_idx: *kept_line_idx,
+                            kept_speaker: kept_speaker.clone(),
+                        },
+                        words_dropped,
+                    ),
+                };
+                LocatedWordTimingRemoval::of(
+                    *line_idx,
+                    *utterance_idx,
+                    speaker,
+                    effect,
+                    words_dropped,
+                )
+            }
         }
+    }
+
+    /// The word timings this one decision discarded outright, flat: the
+    /// per-word view of [`Self::word_timing_removal`], empty when it removed
+    /// none.
+    pub fn dropped_word_timings(&self) -> Vec<DroppedWordTimingRecord> {
+        self.word_timing_removal()
+            .map(LocatedWordTimingRemoval::into_dropped_records)
+            .unwrap_or_default()
     }
 }
 
@@ -882,6 +1450,7 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
                 previous_line_idx,
                 previous_utterance_idx,
                 previous_speaker,
+                words_dropped,
             } => Self::StartRegressionStripped {
                 line_idx,
                 utterance_idx: utterance_idx.raw(),
@@ -891,6 +1460,39 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
                 previous_line_idx,
                 previous_utterance_idx: previous_utterance_idx.raw(),
                 previous_speaker,
+                words_dropped: words_dropped
+                    .iter()
+                    .map(DroppedWordTimingTrace::from)
+                    .collect(),
+            },
+            MonotonicityEffect::StartRegressionRaised {
+                line_idx,
+                utterance_idx,
+                speaker,
+                start_ms,
+                previous_start_ms,
+                previous_line_idx,
+                previous_utterance_idx,
+                previous_speaker,
+                words_dropped,
+                words_trimmed,
+            } => Self::StartRegressionRaised {
+                line_idx,
+                utterance_idx: utterance_idx.raw(),
+                speaker,
+                start_ms,
+                previous_start_ms,
+                previous_line_idx,
+                previous_utterance_idx: previous_utterance_idx.raw(),
+                previous_speaker,
+                words_dropped: words_dropped
+                    .iter()
+                    .map(DroppedWordTimingTrace::from)
+                    .collect(),
+                words_trimmed: words_trimmed
+                    .iter()
+                    .map(TrimmedWordTimingTrace::from)
+                    .collect(),
             },
             MonotonicityEffect::ZeroDurationClampStripped {
                 line_idx,
@@ -902,6 +1504,7 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
                 next_line_idx,
                 next_utterance_idx,
                 next_speaker,
+                words_dropped,
             } => Self::ZeroDurationClampStripped {
                 line_idx,
                 utterance_idx: utterance_idx.raw(),
@@ -912,6 +1515,10 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
                 next_line_idx,
                 next_utterance_idx: next_utterance_idx.raw(),
                 next_speaker,
+                words_dropped: words_dropped
+                    .iter()
+                    .map(DroppedWordTimingTrace::from)
+                    .collect(),
             },
             MonotonicityEffect::EndClampedCoverageOnly {
                 edge,
@@ -937,7 +1544,10 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
             } => Self::EndClampedInterleavedWords {
                 edge: edge.into(),
                 clamped_to_ms,
-                words_trimmed,
+                words_trimmed: words_trimmed
+                    .iter()
+                    .map(TrimmedWordTimingTrace::from)
+                    .collect(),
                 words_dropped: words_dropped
                     .iter()
                     .map(DroppedWordTimingTrace::from)
@@ -969,15 +1579,27 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
                     } => KeptBulletYieldTrace::StartMoved {
                         from_ms,
                         to_ms,
-                        words_trimmed,
+                        words_trimmed: words_trimmed
+                            .iter()
+                            .map(TrimmedWordTimingTrace::from)
+                            .collect(),
                         words_dropped: words_dropped
                             .iter()
                             .map(DroppedWordTimingTrace::from)
                             .collect(),
                     },
-                    crate::chat_ops::fa::KeptBulletYield::Stripped { start_ms, end_ms } => {
-                        KeptBulletYieldTrace::Stripped { start_ms, end_ms }
-                    }
+                    crate::chat_ops::fa::KeptBulletYield::Stripped {
+                        start_ms,
+                        end_ms,
+                        words_dropped,
+                    } => KeptBulletYieldTrace::Stripped {
+                        start_ms,
+                        end_ms,
+                        words_dropped: words_dropped
+                            .iter()
+                            .map(DroppedWordTimingTrace::from)
+                            .collect(),
+                    },
                 },
             },
         }
@@ -1514,7 +2136,12 @@ mod tests {
                 next_speaker: "CHI".to_string(),
             },
             clamped_to_ms: 4_000,
-            words_trimmed: 1,
+            words_trimmed: vec![crate::chat_ops::fa::TrimmedWordTiming {
+                word_index: 1,
+                tier: WordTier::Wor,
+                measured: TimeSpan::new(3_600, 4_300),
+                kept: TimeSpan::new(3_600, 4_000),
+            }],
             words_dropped: vec![DroppedWordTiming {
                 word_index: 2,
                 tier: WordTier::Wor,
@@ -1528,9 +2155,13 @@ mod tests {
         assert_eq!(json["kind"], "end_clamped_interleaved_words");
         assert_eq!(json["clamped_to_ms"], 4_000);
         assert_eq!(
-            json["words_trimmed"], 1,
-            "the trimmed count must be present and separate: {json}"
+            json["words_trimmed"].as_array().map(Vec::len),
+            Some(1),
+            "the trimmed side is a list of records, separate from the dropped: {json}"
         );
+        assert_eq!(json["words_trimmed"][0]["tier"], "wor");
+        assert_eq!(json["words_trimmed"][0]["measured_end_ms"], 4_300);
+        assert_eq!(json["words_trimmed"][0]["end_ms"], 4_000);
         assert_eq!(
             json["words_dropped"].as_array().map(Vec::len),
             Some(1),

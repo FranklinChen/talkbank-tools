@@ -24,10 +24,15 @@ mod global_opts;
 mod options;
 
 pub use commands::*;
-pub use global_opts::{GlobalOpts, MediaCacheOpts};
+pub use global_opts::{
+    Dashboard, DashboardFlags, DryRunFlag, GlobalOpts, MediaCacheOpts, Progress, ProgressFlags,
+    RequestedExecution,
+};
 pub use options::*;
 
 use clap::{Args, Parser, Subcommand};
+
+use crate::api::LanguageSpec;
 
 /// batchalign3: process .cha and/or audio files.
 #[derive(Parser, Debug)]
@@ -170,14 +175,19 @@ pub enum Commands {
 }
 
 /// Stable processing-command metadata derived from parsed CLI args.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 ///
 /// It carries no command: the command is the one the typed options name
 /// (`CommandOptions::command`), so the transcribe/diarize choice is made in
 /// one place, `build_typed_options`, and nothing can disagree with it.
-pub struct CommandProfile<'a> {
-    /// Primary language argument for this command.
-    pub lang: &'a str,
+///
+/// The language is the typed [`LanguageSpec`] the submission will carry, built
+/// from each command's typed `--lang` (or its documented absence), never a
+/// string for a later stage to parse: the parse, and the error branch beside
+/// it, used to live in both submission builders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandProfile {
+    /// Job-level language for this command.
+    pub lang: LanguageSpec,
     /// Requested speaker count for this command.
     pub num_speakers: u32,
     /// What kind of input this command discovers.
@@ -227,20 +237,26 @@ impl InputKind {
 
 impl CommonOpts {
     /// Extract the stable processing profile for one command.
-    pub fn command_profile(cmd: &Commands) -> CommandProfile<'_> {
+    pub fn command_profile(cmd: &Commands) -> CommandProfile {
         match cmd {
             Commands::Convert(_) => CommandProfile {
-                lang: "per-file",
+                lang: LanguageSpec::PerFile,
                 num_speakers: 1,
                 input_kind: InputKind::Media,
             },
             Commands::Align(_) => CommandProfile {
-                lang: "eng",
+                // Align has no `--lang`. Each file's language is read from its
+                // own `@Languages:` header in the FA dispatch, which admits the
+                // aligner and the UTR engine against it and stamps it in the
+                // provenance. The job record carried a hardcoded `eng` until
+                // 2026-11-03 that nothing read and no one declared; it is now
+                // the same first-class `PerFile` state as morphotag's.
+                lang: LanguageSpec::PerFile,
                 num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
             Commands::Transcribe(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 num_speakers: a.num_speakers,
                 input_kind: InputKind::Media,
             },
@@ -250,13 +266,11 @@ impl CommonOpts {
                 // `dispatch_translate_job`. The translation target is fixed
                 // (English) and not surfaced through this field.
                 //
-                // The wire-level `"per-file"` value parses to
-                // `LanguageSpec::PerFile`, which is a first-class state
-                // distinct from `Auto` and `Resolved(_)`. Job records,
-                // dashboards, and worker pre-warming all see and respect it,
-                // so no English placeholder is ever stored or displayed for
-                // a translate job.
-                lang: "per-file",
+                // `LanguageSpec::PerFile` is a first-class state distinct
+                // from `Auto` and `Resolved(_)`. Job records, dashboards, and
+                // worker pre-warming all see and respect it, so no English
+                // placeholder is ever stored or displayed for a translate job.
+                lang: LanguageSpec::PerFile,
                 num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
@@ -267,15 +281,14 @@ impl CommonOpts {
                 // `resolve_per_file_lang` and read through
                 // the admitted morphosyntax analysis state.
                 //
-                // The wire-level `"per-file"` value parses to
-                // `LanguageSpec::PerFile`. This replaces the prior
+                // `LanguageSpec::PerFile` replaces the prior
                 // English-placeholder hack that survived the 2026-05-03
                 // incident only because pipeline code stopped reading it
                 // the placeholder still leaked into job records and worker
                 // pre-warming, where it lied about what was actually being
                 // processed. `PerFile` makes the absence of a job-level
                 // language a first-class type-system state.
-                lang: "per-file",
+                lang: LanguageSpec::PerFile,
                 num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
@@ -286,47 +299,50 @@ impl CommonOpts {
                 // the inference language to `LanguageCode3::eng()` for the
                 // files that pass that gate.
                 //
-                // The wire-level `"per-file"` value parses to
-                // `LanguageSpec::PerFile`. The job record will not carry an
-                // English placeholder.
-                lang: "per-file",
+                // The job record will not carry an English placeholder.
+                lang: LanguageSpec::PerFile,
                 num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
-            Commands::Compare(a) => CommandProfile {
-                lang: &a.lang,
-                num_speakers: a.num_speakers,
+            Commands::Compare(_a) => CommandProfile {
+                // Compare has no `--lang`. Its internal morphotag of each main
+                // transcript resolves the language per file from `@Languages:`,
+                // exactly as `morphotag` does; the job-level code it used to
+                // carry reached `WorkerGateway::morphotag_for_compare` and was
+                // discarded there, so it only labelled the job record.
+                lang: LanguageSpec::PerFile,
+                num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
             Commands::Utseg(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 num_speakers: a.num_speakers,
                 input_kind: InputKind::Chat,
             },
             Commands::Benchmark(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 num_speakers: a.num_speakers,
                 input_kind: InputKind::Media,
             },
             Commands::Opensmile(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 num_speakers: 1,
                 input_kind: InputKind::Media,
             },
             Commands::Avqi(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 num_speakers: 1,
                 input_kind: InputKind::Media,
             },
             Commands::SpeakerIdentify(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 // Display-only in the job record. The real speaker facts are
                 // the enrolled spans, carried through the typed options.
                 num_speakers: 1,
                 input_kind: InputKind::Chat,
             },
             Commands::Diarize(a) => CommandProfile {
-                lang: &a.lang,
+                lang: LanguageSpec::from(&a.lang),
                 // Display-only in the job record; the real auto-detect
                 // signal is `DiarizeOptions::expected_speakers` (None =
                 // auto), carried through the typed options channel.

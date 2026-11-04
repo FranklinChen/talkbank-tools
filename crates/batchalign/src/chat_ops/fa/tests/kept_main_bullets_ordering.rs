@@ -157,19 +157,23 @@ fn derived_successor_yields_to_a_kept_predecessor() {
         vec![Some((5000, 5500)), Some((5500, 7500))]
     );
     let (records, effects) = kept.outcome;
-    assert!(matches!(
-        effects.as_slice(),
-        [MonotonicityEffect::YieldedToKeptBullet {
+    let [
+        MonotonicityEffect::YieldedToKeptBullet {
             kept_boundary_ms: 5000,
-            outcome: KeptBulletYield::StartMoved {
-                from_ms: 4200,
-                to_ms: 5000,
-                words_trimmed: 1,
-                ..
-            },
+            outcome:
+                KeptBulletYield::StartMoved {
+                    from_ms: 4200,
+                    to_ms: 5000,
+                    words_trimmed,
+                    ..
+                },
             ..
-        }]
-    ));
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected one start moved to the kept end: {effects:?}");
+    };
+    assert_eq!(words_trimmed.len(), 1);
     assert_eq!(
         records_with(
             &records,
@@ -234,7 +238,8 @@ fn derived_bullet_before_a_lower_kept_start_is_the_one_stripped() {
             kept_boundary_ms: 5000,
             outcome: KeptBulletYield::Stripped {
                 start_ms: 6000,
-                end_ms: 7000
+                end_ms: 7000,
+                ..
             },
             ..
         }]

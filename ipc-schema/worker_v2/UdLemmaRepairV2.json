@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdLemmaRepairV2",
+  "description": "One lemma a worker replaced inside an analysis it returned, by the\nsurface form of its word.\n\nDeserialized through [`is_punctuation_lemma`]: a reported lemma repair\nwhose lemma is not punctuation-only for its word is refused where the\nresponse is read, as a feature repair of a non-padding value is. The\nlemma applied is the word itself, so it is not carried twice.",
+  "type": "object",
+  "properties": {
+    "from_lemma": {
+      "description": "The lemma the model produced, verbatim (`...`): punctuation-only for\n`word`, by admission.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Which repair this is.",
+      "$ref": "#/$defs/UdLemmaRepairKindV2"
+    },
+    "word": {
+      "description": "Surface form of the word, which is also the lemma applied.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "word",
+    "from_lemma"
+  ],
+  "$defs": {
+    "UdLemmaRepairKindV2": {
+      "description": "Why a lemma a worker received from Stanza is not the lemma in the analysis it returned. Closed: a worker cannot report a lemma repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "punctuation_lemma"
+        }
+      ]
+    }
+  }
+}

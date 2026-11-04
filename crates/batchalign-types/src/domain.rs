@@ -870,6 +870,100 @@ impl std::fmt::Display for AsrLanguageRequest {
     }
 }
 
+/// Why command-line text is not an [`AsrLanguageRequest`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum InvalidAsrLanguageRequest {
+    /// Not a language spec at all.
+    #[error(transparent)]
+    Spec(#[from] InvalidLanguageSpec),
+    /// A valid spec, but the per-file one, which no recognizer can take.
+    #[error(transparent)]
+    PerFile(#[from] PerFileHasNoAsrLanguage),
+}
+
+/// `--lang` on `transcribe`: a code, `auto`, or a pair, parsed at the
+/// command line so a recognizer request exists only once the text has been
+/// admitted. There is no default; the flag is required.
+impl std::str::FromStr for AsrLanguageRequest {
+    type Err = InvalidAsrLanguageRequest;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let spec = LanguageSpec::try_from(text)?;
+        Ok(Self::try_from(&spec)?)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LanguageSelection: one declared language or detection
+// ---------------------------------------------------------------------------
+
+/// The language a command with one job-level language is given: a declared
+/// ISO 639-3 code, or `auto` for the engine to detect one.
+///
+/// This is `--lang` for every job-level command other than transcription
+/// (`diarize`, `utseg`, `benchmark`, `opensmile`, `avqi`, `speaker-identify`):
+/// neither a code-switched pair, which describes a recording and belongs to
+/// transcription, nor `per-file`, which belongs to commands that take no
+/// `--lang`, can be written here. Both are refused where the text is parsed,
+/// with the argument named, instead of surviving to submission. Written as
+/// text it is exactly what the matching [`LanguageSpec`] writes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LanguageSelection {
+    /// One declared language.
+    Declared(LanguageCode3),
+    /// The engine detects the language.
+    Auto,
+}
+
+/// Why command-line text is not a [`LanguageSelection`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum InvalidLanguageSelection {
+    /// Not a language spec at all.
+    #[error(transparent)]
+    Spec(#[from] InvalidLanguageSpec),
+    /// A code-switched pair, which only transcription takes.
+    #[error(
+        "this command takes one language; a code-switched pair such as \"{0}\" describes a \
+         recording and belongs to `transcribe`"
+    )]
+    Pair(LanguagePair),
+    /// `per-file`, which is a wire value for commands without `--lang`.
+    #[error(
+        "this command needs a job-level language: a 3-letter ISO 639-3 code such as `eng`, or \
+         `auto`; `per-file` is only for commands that read `@Languages:` from each file"
+    )]
+    PerFile,
+}
+
+impl std::str::FromStr for LanguageSelection {
+    type Err = InvalidLanguageSelection;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match LanguageSpec::try_from(text)? {
+            LanguageSpec::Resolved(code) => Ok(Self::Declared(code)),
+            LanguageSpec::Auto => Ok(Self::Auto),
+            LanguageSpec::Pair(pair) => Err(InvalidLanguageSelection::Pair(pair)),
+            LanguageSpec::PerFile => Err(InvalidLanguageSelection::PerFile),
+        }
+    }
+}
+
+impl From<&LanguageSelection> for LanguageSpec {
+    fn from(selection: &LanguageSelection) -> Self {
+        match selection {
+            LanguageSelection::Declared(code) => Self::Resolved(code.clone()),
+            LanguageSelection::Auto => Self::Auto,
+        }
+    }
+}
+
+impl std::fmt::Display for LanguageSelection {
+    /// Exactly the text of the matching [`LanguageSpec`], by construction.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        LanguageSpec::from(self).fmt(f)
+    }
+}
+
 /// The language or languages of a finished transcript.
 ///
 /// What recognition resolves an [`AsrLanguageRequest`] to: detection becomes
@@ -1261,6 +1355,77 @@ impl std::str::FromStr for PositiveSeconds {
 
 /// The bare count, as a command line or a config file writes it.
 impl std::fmt::Display for PositiveSeconds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A per-job worker cap an operator sets (`--workers N`), never zero.
+///
+/// "Auto-tune" is `Option<WorkerCap>::None`, never a zero. The flag used to be
+/// a bare `usize`, so `--workers 0` was accepted, forwarded to the daemon as
+/// `--workers 0`, and recorded in `daemon.json` as a cap of zero that meant
+/// "no cap": a sentinel every reader had to know about. The count travels
+/// typed from the flag to the server's `max_workers_per_job`, and a daemon
+/// record is compared cap to cap. Distinct from [`NumWorkers`], the count the
+/// runner COMPUTES for a job under that cap.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct WorkerCap(std::num::NonZeroU32);
+
+/// Why a value was refused as [`WorkerCap`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidWorkerCap {
+    /// Zero workers: leave the flag out for auto-tune.
+    #[error("0 is not a worker count; leave --workers out for auto-tune")]
+    Zero,
+    /// Not a whole positive number that fits the server's cap.
+    #[error("{0:?} is not a whole number of workers")]
+    NotAWholeNumber(String),
+}
+
+impl WorkerCap {
+    /// A literal cap, checked non-zero when the constant is evaluated, so
+    /// `--sequential`'s cap of one is written as a number without a runtime
+    /// check.
+    pub const fn literal<const WORKERS: u32>() -> Self {
+        const { assert!(WORKERS > 0, "WorkerCap::literal needs a non-zero count") };
+        Self(std::num::NonZeroU32::MIN.saturating_add(WORKERS - 1))
+    }
+
+    /// The cap, as the server's `max_workers_per_job` takes it.
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl TryFrom<u32> for WorkerCap {
+    type Error = InvalidWorkerCap;
+
+    fn try_from(workers: u32) -> Result<Self, Self::Error> {
+        match std::num::NonZeroU32::new(workers) {
+            Some(workers) => Ok(Self(workers)),
+            None => Err(InvalidWorkerCap::Zero),
+        }
+    }
+}
+
+/// The command-line form: a whole number of workers, never zero.
+impl std::str::FromStr for WorkerCap {
+    type Err = InvalidWorkerCap;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let workers: u32 = text
+            .parse()
+            .map_err(|_| InvalidWorkerCap::NotAWholeNumber(text.to_owned()))?;
+        Self::try_from(workers)
+    }
+}
+
+/// The bare count, as a command line writes it.
+impl std::fmt::Display for WorkerCap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -2040,6 +2205,26 @@ mod tests {
         );
     }
 
+    // ---- WorkerCap: auto-tune is absence, never zero ----
+
+    #[test]
+    fn worker_cap_refuses_zero_from_every_route() {
+        assert_eq!(WorkerCap::try_from(0), Err(InvalidWorkerCap::Zero));
+        assert_eq!("0".parse::<WorkerCap>(), Err(InvalidWorkerCap::Zero));
+        assert!(matches!(
+            "two".parse::<WorkerCap>(),
+            Err(InvalidWorkerCap::NotAWholeNumber(_))
+        ));
+        assert!(matches!(
+            "-1".parse::<WorkerCap>(),
+            Err(InvalidWorkerCap::NotAWholeNumber(_))
+        ));
+        assert!(serde_json::from_str::<WorkerCap>("0").is_err());
+        assert_eq!("4".parse::<WorkerCap>().map(WorkerCap::get), Ok(4));
+        assert_eq!(WorkerCap::literal::<1>().get(), 1);
+        assert_eq!(WorkerCap::literal::<4>().to_string(), "4");
+    }
+
     // ---- AudioPositionSeconds: the admission every position crosses ----
 
     #[test]
@@ -2391,6 +2576,72 @@ mod tests {
         assert_eq!(serde_json::from_str::<LanguageSpec>(&json)?, spec);
         assert_eq!(LanguageSpec::parse_from_db("eng,spa"), (spec.clone(), true));
         assert!(serde_json::from_str::<LanguageSpec>("\"eng,eng\"").is_err());
+        Ok(())
+    }
+
+    /// `transcribe --lang` text: a code, `auto` and a pair are requests;
+    /// `per-file` and nonsense are refused with their own reasons.
+    #[test]
+    fn an_asr_language_request_parses_command_line_text() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_eq!(
+            "yue".parse::<AsrLanguageRequest>()?,
+            AsrLanguageRequest::One(LanguageCode3::try_new("yue")?)
+        );
+        assert_eq!(
+            "auto".parse::<AsrLanguageRequest>()?,
+            AsrLanguageRequest::Detect
+        );
+        assert!(matches!(
+            "eng,spa".parse::<AsrLanguageRequest>()?,
+            AsrLanguageRequest::Pair(_)
+        ));
+        assert!(matches!(
+            "per-file".parse::<AsrLanguageRequest>(),
+            Err(InvalidAsrLanguageRequest::PerFile(_))
+        ));
+        assert!(matches!(
+            "english".parse::<AsrLanguageRequest>(),
+            Err(InvalidAsrLanguageRequest::Spec(_))
+        ));
+        Ok(())
+    }
+
+    /// `--lang` on a one-language command: a code or `auto`; a pair and
+    /// `per-file` are refused by name, and the text written back is the
+    /// spec's text.
+    #[test]
+    fn a_language_selection_is_one_code_or_detection() -> Result<(), Box<dyn std::error::Error>> {
+        let declared = "yue".parse::<LanguageSelection>()?;
+        assert_eq!(
+            declared,
+            LanguageSelection::Declared(LanguageCode3::try_new("yue")?)
+        );
+        assert_eq!(
+            LanguageSpec::from(&declared),
+            LanguageSpec::try_from("yue")?
+        );
+        assert_eq!(declared.to_string(), "yue");
+        assert_eq!(
+            "AUTO".parse::<LanguageSelection>()?,
+            LanguageSelection::Auto
+        );
+        assert_eq!(
+            LanguageSpec::from(&LanguageSelection::Auto),
+            LanguageSpec::Auto
+        );
+        assert!(matches!(
+            "eng,spa".parse::<LanguageSelection>(),
+            Err(InvalidLanguageSelection::Pair(_))
+        ));
+        assert!(matches!(
+            "per-file".parse::<LanguageSelection>(),
+            Err(InvalidLanguageSelection::PerFile)
+        ));
+        assert!(matches!(
+            "en".parse::<LanguageSelection>(),
+            Err(InvalidLanguageSelection::Spec(_))
+        ));
         Ok(())
     }
 

@@ -10,16 +10,14 @@
 
 //! Focused tests for the workflow helper seams.
 
-use batchalign::compare::{gold_path_for, is_gold_file, template_gold_path_for};
+use batchalign::compare::{is_gold_file, template_gold_path_for};
 
+/// The directory-level template convention the kernel names in its "no gold
+/// found" message. The per-file `FILE.gold.cha` companion is planned, not
+/// derived here: `gold_path_for` went with the dead batch entry point that
+/// was its only caller.
 #[test]
 fn compare_gold_path_helpers_match_expected_convention() {
-    assert_eq!(gold_path_for("test.cha"), "test.gold.cha");
-    assert_eq!(
-        gold_path_for("/data/corpus/01DM.cha"),
-        "/data/corpus/01DM.gold.cha"
-    );
-    assert_eq!(gold_path_for("dir/sub/file.cha"), "dir/sub/file.gold.cha");
     assert_eq!(template_gold_path_for("test.cha"), "template.gold.cha");
     assert_eq!(
         template_gold_path_for("/data/corpus/01DM.cha"),

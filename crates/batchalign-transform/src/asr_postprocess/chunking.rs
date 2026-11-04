@@ -1,8 +1,10 @@
+use super::retrace::{ExactRetraceAnalysis, analyze_exact_retraces};
 use super::utterance::ends_utterance;
 use super::{
     AsrPipelineSnapshot, AsrWord, LONG_PAUSE_SENTENCE_STARTERS, LONG_PAUSE_SPLIT_MS, MAX_TURN_LEN,
     PreparedMonologueChunk, RTL_PUNCT, SpeakerIndex, cleanup, is_punct_or_terminator,
 };
+use batchalign_types::segmentation::{BoundaryTerminator, UtteranceSegmentation};
 
 /// Stages 5-5b: long turn splitting and pause-based splitting.
 ///
@@ -56,42 +58,153 @@ pub fn finalize_words_to_chunks_with_snapshot(
         .collect()
 }
 
-/// Split one prepared chunk into smaller prepared chunks according to word-level
-/// utterance assignments.
-pub fn split_prepared_chunk_by_assignments(
-    chunk: &PreparedMonologueChunk,
-    assignments: &[usize],
-) -> Vec<PreparedMonologueChunk> {
-    if chunk.words.len() <= 1 || assignments.is_empty() || assignments.len() != chunk.words.len() {
-        return vec![chunk.clone()];
-    }
+/// A prepared chunk and the terminator the boundary model predicted where
+/// it was cut off, if it was cut off by one: what closes the chunk's last
+/// utterance when the recognizer gave no punctuation to close it with.
+///
+/// Made only by [`RetraceAnalyzedChunk::split`] and [`Self::uncut`], and
+/// read only through its accessors, so a piece cannot be cut by hand and
+/// handed an end nobody predicted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentedChunk {
+    chunk: PreparedMonologueChunk,
+    predicted_end: Option<BoundaryTerminator>,
+}
 
-    let mut split_chunks = Vec::new();
-    let mut current_group = assignments[0];
-    let mut current_words = Vec::new();
-
-    for (word, group) in chunk.words.iter().cloned().zip(assignments.iter().copied()) {
-        if !current_words.is_empty() && group != current_group {
-            split_chunks.push(PreparedMonologueChunk {
-                speaker: chunk.speaker,
-                words: std::mem::take(&mut current_words),
-            });
-            current_group = group;
+impl SegmentedChunk {
+    /// A chunk no boundary model cut: it ends as its words do.
+    pub fn uncut(chunk: PreparedMonologueChunk) -> Self {
+        Self {
+            chunk,
+            predicted_end: None,
         }
-        current_words.push(word);
     }
 
-    if !current_words.is_empty() {
-        split_chunks.push(PreparedMonologueChunk {
-            speaker: chunk.speaker,
-            words: current_words,
-        });
+    /// The chunk's speaker and words.
+    pub fn chunk(&self) -> &PreparedMonologueChunk {
+        &self.chunk
     }
 
-    if split_chunks.is_empty() {
-        vec![chunk.clone()]
-    } else {
-        split_chunks
+    /// The terminator the model predicted at the cut that made this piece.
+    pub fn predicted_end(&self) -> Option<BoundaryTerminator> {
+        self.predicted_end
+    }
+
+    /// The speaker, the words and the predicted end, for retokenization.
+    pub fn into_parts(self) -> (PreparedMonologueChunk, Option<BoundaryTerminator>) {
+        (self.chunk, self.predicted_end)
+    }
+}
+
+/// A segmentation that is not parallel to the chunk it was applied to.
+///
+/// Admission proves a prediction parallel to the request it answers, so this
+/// is reachable only by pairing a segmentation with a chunk it was never
+/// made for; it is an error rather than a silently uncut chunk.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("segmentation assigns {assignments} words, and the chunk has {words}")]
+pub struct SegmentationShapeError {
+    /// Words the chunk holds.
+    pub words: usize,
+    /// Words the segmentation assigns.
+    pub assignments: usize,
+}
+
+/// What cutting one analyzed chunk produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrechatSplit {
+    /// The pieces, in order, each with the end its cut predicted.
+    pub pieces: Vec<SegmentedChunk>,
+    /// Word indices before which the segmentation asked for a cut that the
+    /// retrace analysis protected: the cut would have put the two copies of
+    /// an exact repetition in different utterances, where cleanup could not
+    /// have marked it `[/]`. The evidence artifact records the model's own
+    /// assignments; these indices are what the written transcript differs
+    /// by, and a replay recomputes them from the same words.
+    pub suppressed_cuts_before_words: Vec<usize>,
+}
+
+/// A prepared chunk whose exact repetitions have been analyzed: the one state
+/// a boundary model's segmentation can cut.
+///
+/// Built only by [`Self::analyze`], which runs the same exact repeated n-gram
+/// analysis the CHAT cleanup pass later encodes as `[/]`. [`Self::split`]
+/// consumes it, so the production pre-CHAT path cannot cut a chunk before the
+/// analysis has seen it. Until 2026-11-03 the assignments cut the chunk
+/// directly and retrace detection then ran per piece, so a repetition whose
+/// copies landed in different pieces (`yeah I | I went`) was never seen by
+/// it and no `[/]` was written; the guard existed, but only under an offline
+/// replay policy.
+#[derive(Debug)]
+pub struct RetraceAnalyzedChunk {
+    chunk: PreparedMonologueChunk,
+    analysis: ExactRetraceAnalysis,
+}
+
+impl RetraceAnalyzedChunk {
+    /// Analyze the chunk's exact repetitions under `lang`'s minimum n-gram.
+    pub fn analyze(chunk: PreparedMonologueChunk, lang: &str) -> Self {
+        let words: Vec<&str> = chunk.words.iter().map(|word| word.text.as_str()).collect();
+        let analysis = analyze_exact_retraces(&words, lang);
+        Self { chunk, analysis }
+    }
+
+    /// Cut the chunk where the segmentation's groups change, except before a
+    /// word the retrace analysis protects, where the two groups stay in one
+    /// piece and the model's end for the earlier group is dropped with the
+    /// cut.
+    ///
+    /// Each piece ends as the segmentation says its cut does; the last piece
+    /// ends as the segmentation's tail does, which is predicted only when
+    /// the model predicted an end after the chunk's last word.
+    pub fn split(
+        self,
+        segmentation: &UtteranceSegmentation,
+    ) -> Result<PrechatSplit, SegmentationShapeError> {
+        let assignments = segmentation.assignments();
+        if assignments.len() != self.chunk.words.len() {
+            return Err(SegmentationShapeError {
+                words: self.chunk.words.len(),
+                assignments: assignments.len(),
+            });
+        }
+        let speaker = self.chunk.speaker;
+        let mut pieces = Vec::new();
+        let mut suppressed = Vec::new();
+        let mut current_words = Vec::new();
+        // The cut before the current word, when its group differs from the
+        // previous word's: the index into the segmentation's cut ends.
+        let mut cut = 0usize;
+        for (index, word) in self.chunk.words.into_iter().enumerate() {
+            if index > 0 && assignments[index] != assignments[index - 1] {
+                if self.analysis.protects_split_before(index) {
+                    suppressed.push(index);
+                } else {
+                    pieces.push(SegmentedChunk {
+                        chunk: PreparedMonologueChunk {
+                            speaker,
+                            words: std::mem::take(&mut current_words),
+                        },
+                        predicted_end: segmentation.cut_end(cut),
+                    });
+                }
+                cut += 1;
+            }
+            current_words.push(word);
+        }
+        if !current_words.is_empty() {
+            pieces.push(SegmentedChunk {
+                chunk: PreparedMonologueChunk {
+                    speaker,
+                    words: current_words,
+                },
+                predicted_end: segmentation.tail_end(),
+            });
+        }
+        Ok(PrechatSplit {
+            pieces,
+            suppressed_cuts_before_words: suppressed,
+        })
     }
 }
 

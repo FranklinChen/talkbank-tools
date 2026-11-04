@@ -172,7 +172,14 @@ may authorize FA search without choosing a repeated occurrence.
 
 Original same-speaker non-overlap bullets bound production hints/search and
 remain unchanged. Another speaker's provisional crop cannot silently discard
-an interleaved candidate. Budget refusal grants no fallback timing authority.
+an interleaved candidate. The search corridor for words that were NOT heard is
+the exception, by design (2026-11-03): it is bounded by the nearest measured
+utterance before and after it in document order, whatever the speaker, because
+a turn carrying no overlap marker begins after the turn before it ends; the
+episode model's allowance for an unmarked singleton to interleave with its
+neighbours shapes the correspondence search, not the corridor an unheard word
+is searched in (see the forced-alignment reference). Budget refusal grants no
+fallback timing authority.
 End-to-end acoustic recovery remains a separate acceptance obligation: lexical
 proof alone cannot identify who spoke or prove accurate timing. Repeated words
 may remain ambiguous even with complete recovery candidates; neither selecting

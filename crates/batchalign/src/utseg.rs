@@ -3,7 +3,7 @@
 //! Owns the full CHAT lifecycle for utseg jobs:
 //! parse → collect payloads → infer → apply splits → serialize.
 //!
-//! Python workers receive only `(words, text) → UtsegResponse` via the infer protocol
+//! Python workers receive only `(words, text) → assignments` via the infer protocol
 //! pure Stanza constituency parsing with zero CHAT awareness.
 
 use std::collections::HashMap;
@@ -20,9 +20,8 @@ use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
 use crate::worker::text_request_v2::{PreparedTextRequestIdsV2, build_utseg_request_v2};
 use crate::worker::text_result_v2::parse_utseg_result_v2;
-use batchalign_transform::utseg::{
-    UtsegBatchItem, UtsegResponse, apply_utseg_results, collect_utseg_payloads,
-};
+use batchalign_transform::utseg::{UtsegBatchItem, apply_utseg_results, collect_utseg_payloads};
+use batchalign_types::segmentation::UtteranceSegmentation;
 
 /// Thin adapter matching the legacy `fn(&ChatFile) -> Vec<(usize, Item)>`
 /// hook signature. The Wave 5 utseg collector returns the richer
@@ -50,6 +49,13 @@ use crate::utseg_route::ServableUtsegRoute;
 /// Production honors the worker-declared assignments. Controlled offline
 /// experiments can instead rederive assignments from the same retained raw
 /// boundary evidence under one closed policy revision.
+///
+/// A third variant, `ReapplyBoundaryModelPreservingExactRetraces`, suppressed
+/// candidate splits inside an exact repetition and was the only route to
+/// that guard. The pre-CHAT split now consumes a retrace-analyzed chunk
+/// (`RetraceAnalyzedChunk`), which protects every repetition on every policy,
+/// so the variant no longer named a behavior of its own and was removed on
+/// 2026-11-03.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum UtsegDecisionPolicy {
     /// Apply the worker's admitted assignments unchanged.
@@ -57,9 +63,6 @@ pub(crate) enum UtsegDecisionPolicy {
     WorkerDeclared,
     /// Reapply a policy to boundary-model raw actions without model inference.
     ReapplyBoundaryModel(UtsegAdjacencyPolicyRevisionV2),
-    /// Reapply an adjacency policy, then suppress only those resulting splits
-    /// that would destroy an exact retrace recognized by CHAT cleanup.
-    ReapplyBoundaryModelPreservingExactRetraces(UtsegAdjacencyPolicyRevisionV2),
 }
 
 /// Which utterance-model passes exist in one transcribe execution.
@@ -112,11 +115,13 @@ impl TranscribeUtsegExecution {
 ///
 /// Deserializable because a retained evidence artifact records it and the
 /// replay reads it back (`crate::utseg_evidence::AdmittedUtsegEvidence`).
+/// One variant since the exact-retrace revision moved into the pre-CHAT
+/// split itself: the artifact still names the policy that produced its
+/// receipt, and a future local policy is a variant here, not a new field.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LocalUtsegDecisionPolicyRevision {
     AdjacencyOnlyV1,
-    AdjacencyPreserveExactRetracesV1,
 }
 
 /// Complete receipt for a locally rederived boundary-model decision.
@@ -131,7 +136,6 @@ pub(crate) struct LocalUtsegDecisionReceipt {
     worker_adjacency_policy_revision: UtsegAdjacencyPolicyRevisionV2,
     local_adjacency_policy_revision: UtsegAdjacencyPolicyRevisionV2,
     worker_assignments: Vec<usize>,
-    suppressed_split_before_word_indices: Vec<usize>,
 }
 
 impl LocalUtsegDecisionReceipt {
@@ -141,13 +145,13 @@ impl LocalUtsegDecisionReceipt {
     /// original reapplication: the worker's declared policy must reproduce the
     /// worker assignments the receipt records, the evidence must declare the
     /// local policy the receipt names (reapplication stamps it there), and
-    /// replaying that local policy must reproduce both the applicable
-    /// assignments and the exact suppressions claimed. A receipt describing some
-    /// other decision therefore cannot travel with an admitted prediction.
+    /// replaying that local policy must reproduce the applicable segmentation.
+    /// A receipt describing some other decision therefore cannot travel with
+    /// an admitted prediction.
     fn check_explains(
         &self,
         evidence: &UtsegBoundaryModelEvidenceV2,
-        response: &UtsegResponse,
+        segmentation: &UtteranceSegmentation,
     ) -> Result<(), String> {
         if evidence.adjacency_policy_revision != self.local_adjacency_policy_revision {
             return Err(format!(
@@ -171,7 +175,7 @@ impl LocalUtsegDecisionReceipt {
         let (_, worker_side) = evidence
             .reapply_adjacency_policy(self.worker_adjacency_policy_revision)
             .into_parts();
-        if worker_side != self.worker_assignments {
+        if worker_side.assignments() != self.worker_assignments {
             return Err(
                 "local utterance-boundary receipt records worker assignments that the worker's \
                  own declared policy does not produce"
@@ -179,33 +183,13 @@ impl LocalUtsegDecisionReceipt {
             );
         }
 
-        let reapplied = evidence.reapply_adjacency_policy(self.local_adjacency_policy_revision);
-        let (applicable, suppressed) = match self.revision {
-            LocalUtsegDecisionPolicyRevision::AdjacencyOnlyV1 => {
-                let (_, assignments) = reapplied.into_parts();
-                (assignments, Vec::new())
-            }
-            LocalUtsegDecisionPolicyRevision::AdjacencyPreserveExactRetracesV1 => {
-                let (_, assignments, suppressed) = reapplied
-                    .protect_splits_before(
-                        &self.suppressed_split_before_word_indices,
-                        &self.worker_assignments,
-                    )
-                    .map_err(|error| error.to_string())?
-                    .into_parts();
-                (assignments, suppressed)
-            }
-        };
-        if applicable != response.assignments {
+        let (_, applicable) = evidence
+            .reapply_adjacency_policy(self.local_adjacency_policy_revision)
+            .into_parts();
+        if applicable != *segmentation {
             return Err(
-                "local utterance-boundary receipt does not reproduce the assignments it \
+                "local utterance-boundary receipt does not reproduce the segmentation it \
                  accompanies"
-                    .to_owned(),
-            );
-        }
-        if suppressed != self.suppressed_split_before_word_indices {
-            return Err(
-                "local utterance-boundary receipt claims suppressions its own policy does not make"
                     .to_owned(),
             );
         }
@@ -366,11 +350,12 @@ pub(crate) async fn process_utseg_batch(
 }
 
 /// The single-file text-pipeline hooks for utterance segmentation.
-fn utseg_hooks() -> TextPipelineHooks<UtsegBatchItem, Vec<usize>, AdmittedUtsegPrediction> {
+fn utseg_hooks() -> TextPipelineHooks<UtsegBatchItem, UtteranceSegmentation, AdmittedUtsegPrediction>
+{
     TextPipelineHooks {
         command: crate::api::ReleasedCommand::Utseg,
         collect: collect_utseg_batch_items,
-        integrate: integrate_admitted_assignments,
+        integrate: integrate_admitted_segmentations,
         apply: |file, assignments| {
             apply_utseg_document(file, assignments)
                 .map(crate::pipeline::post_validate::AppliedLayout::Segmented)
@@ -448,11 +433,11 @@ fn apply_utseg_predictions(
     items: &[(usize, UtsegBatchItem)],
     predictions: &[AdmittedUtsegPrediction],
 ) -> Result<(), ServerError> {
-    let mut assignment_map: HashMap<usize, Vec<usize>> = HashMap::new();
-    integrate_admitted_assignments(&mut assignment_map, items, predictions);
-    if !assignment_map.is_empty() {
+    let mut segmentations: HashMap<usize, UtteranceSegmentation> = HashMap::new();
+    integrate_admitted_segmentations(&mut segmentations, items, predictions);
+    if !segmentations.is_empty() {
         // The batch path judges each whole file, so the layout is not needed.
-        let _layout = apply_utseg_document(chat_file, &assignment_map)?;
+        let _layout = apply_utseg_document(chat_file, &segmentations)?;
     }
     Ok(())
 }
@@ -477,12 +462,12 @@ impl From<UtsegDocumentRefusal> for ServerError {
 
 pub(crate) fn apply_utseg_document(
     chat_file: &mut ChatFile,
-    assignment_map: &HashMap<usize, Vec<usize>>,
+    segmentations: &HashMap<usize, UtteranceSegmentation>,
 ) -> Result<batchalign_transform::utseg::SegmentationLayout, UtsegDocumentRefusal> {
     let batchalign_transform::utseg::UtsegApplied {
         invalidated: losses,
         layout,
-    } = apply_utseg_results(chat_file, assignment_map)?;
+    } = apply_utseg_results(chat_file, segmentations)?;
     if !losses.is_empty() {
         let descriptions: Vec<_> = losses
             .iter()
@@ -525,47 +510,51 @@ pub(crate) fn apply_utseg_document(
 /// therefore make an explicit choice before discarding provenance.
 #[derive(Debug, Clone)]
 pub(crate) enum AdmittedUtsegPrediction {
-    /// Direct assignments accompanied by per-word boundary-model evidence.
+    /// The worker's declared segmentation, accompanied by per-word
+    /// boundary-model evidence that admission proved it follows from.
     BoundaryModelWorkerDeclared {
-        /// Assignments safe to apply to the request words.
-        response: UtsegResponse,
+        /// The segmentation safe to apply to the request words, with the
+        /// terminator the model predicted at each cut.
+        segmentation: UtteranceSegmentation,
         /// Model identity and evidence parallel to the request words.
         evidence: UtsegBoundaryModelEvidenceV2,
     },
-    /// Boundary-model evidence whose applicable assignments were locally
+    /// Boundary-model evidence whose applicable segmentation was locally
     /// rederived under a fully recorded closed policy.
     BoundaryModelLocallyReapplied {
-        response: UtsegResponse,
+        segmentation: UtteranceSegmentation,
         evidence: UtsegBoundaryModelEvidenceV2,
         receipt: LocalUtsegDecisionReceipt,
     },
-    /// Direct assignments from a worker that did not expose model evidence.
+    /// Direct assignments from a worker that did not expose model evidence,
+    /// so no cut states a terminator.
     UnobservedAssignments {
-        /// Assignments safe to apply to the request words.
-        response: UtsegResponse,
+        /// The segmentation safe to apply to the request words.
+        segmentation: UtteranceSegmentation,
     },
-    /// Assignments derived from Stanza constituency trees.
+    /// Assignments derived from Stanza constituency trees, which state
+    /// boundaries and no terminator.
     Constituency {
-        /// Assignments safe to apply to the request words.
-        response: UtsegResponse,
+        /// The segmentation safe to apply to the request words.
+        segmentation: UtteranceSegmentation,
     },
 }
 
 impl AdmittedUtsegPrediction {
-    /// Borrow assignments known to be parallel to the dispatched words.
-    pub(crate) fn response(&self) -> &UtsegResponse {
+    /// Borrow the segmentation known to be parallel to the dispatched words.
+    pub(crate) fn segmentation(&self) -> &UtteranceSegmentation {
         match self {
             Self::BoundaryModelWorkerDeclared {
-                response,
+                segmentation,
                 evidence: _,
             }
             | Self::BoundaryModelLocallyReapplied {
-                response,
+                segmentation,
                 evidence: _,
                 receipt: _,
             }
-            | Self::UnobservedAssignments { response }
-            | Self::Constituency { response } => response,
+            | Self::UnobservedAssignments { segmentation }
+            | Self::Constituency { segmentation } => segmentation,
         }
     }
 
@@ -583,10 +572,13 @@ impl AdmittedUtsegPrediction {
         receipt: LocalUtsegDecisionReceipt,
     ) -> Result<Self, String> {
         match self {
-            Self::BoundaryModelWorkerDeclared { response, evidence } => {
-                receipt.check_explains(&evidence, &response)?;
+            Self::BoundaryModelWorkerDeclared {
+                segmentation,
+                evidence,
+            } => {
+                receipt.check_explains(&evidence, &segmentation)?;
                 Ok(Self::BoundaryModelLocallyReapplied {
-                    response,
+                    segmentation,
                     evidence,
                     receipt,
                 })
@@ -600,80 +592,46 @@ impl AdmittedUtsegPrediction {
         }
     }
 
-    fn apply_decision_policy(
-        self,
-        request: &UtsegBatchItem,
-        lang: &LanguageCode3,
-        policy: UtsegDecisionPolicy,
-    ) -> Result<Self, String> {
+    fn apply_decision_policy(self, policy: UtsegDecisionPolicy) -> Result<Self, String> {
         match policy {
             UtsegDecisionPolicy::WorkerDeclared => Ok(self),
-            UtsegDecisionPolicy::ReapplyBoundaryModel(policy) => self
-                .locally_reapply_boundary_model(
-                    request,
-                    lang,
-                    policy,
-                    LocalUtsegDecisionPolicyRevision::AdjacencyOnlyV1,
-                ),
-            UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(policy) => self
-                .locally_reapply_boundary_model(
-                    request,
-                    lang,
-                    policy,
-                    LocalUtsegDecisionPolicyRevision::AdjacencyPreserveExactRetracesV1,
-                ),
+            UtsegDecisionPolicy::ReapplyBoundaryModel(policy) => {
+                self.locally_reapply_boundary_model(policy)
+            }
         }
     }
 
     fn locally_reapply_boundary_model(
         self,
-        request: &UtsegBatchItem,
-        lang: &LanguageCode3,
         policy: UtsegAdjacencyPolicyRevisionV2,
-        revision: LocalUtsegDecisionPolicyRevision,
     ) -> Result<Self, String> {
         match self {
-            Self::BoundaryModelWorkerDeclared { response, evidence } => {
+            Self::BoundaryModelWorkerDeclared {
+                segmentation,
+                evidence,
+            } => {
                 let worker_adjacency_policy_revision = evidence.adjacency_policy_revision;
-                let worker_assignments = response.assignments;
-                let reapplied = evidence.reapply_adjacency_policy(policy);
-                let (evidence, assignments, suppressed_split_before_word_indices) = match revision {
-                    LocalUtsegDecisionPolicyRevision::AdjacencyOnlyV1 => {
-                        let (evidence, assignments) = reapplied.into_parts();
-                        (evidence, assignments, Vec::new())
-                    }
-                    LocalUtsegDecisionPolicyRevision::AdjacencyPreserveExactRetracesV1 => {
-                        let analysis =
-                            batchalign_transform::asr_postprocess::analyze_exact_retraces(
-                                &request.words,
-                                lang.as_ref(),
-                            );
-                        let protected: Vec<_> = analysis.protected_split_indices().collect();
-                        reapplied
-                            .protect_splits_before(&protected, &worker_assignments)
-                            .map_err(|error| error.to_string())?
-                            .into_parts()
-                    }
-                };
+                let worker_assignments = segmentation.into_assignments();
+                let (evidence, segmentation) =
+                    evidence.reapply_adjacency_policy(policy).into_parts();
                 Ok(Self::BoundaryModelLocallyReapplied {
-                    response: UtsegResponse { assignments },
+                    segmentation,
                     evidence,
                     receipt: LocalUtsegDecisionReceipt {
-                        revision,
+                        revision: LocalUtsegDecisionPolicyRevision::AdjacencyOnlyV1,
                         worker_adjacency_policy_revision,
                         local_adjacency_policy_revision: policy,
                         worker_assignments,
-                        suppressed_split_before_word_indices,
                     },
                 })
             }
             Self::BoundaryModelLocallyReapplied { .. } => {
                 Err("cannot apply a second local utterance-boundary policy".into())
             }
-            Self::UnobservedAssignments { response: _ } => {
+            Self::UnobservedAssignments { segmentation: _ } => {
                 Err("cannot reapply an utterance-boundary policy to unobserved assignments".into())
             }
-            Self::Constituency { response: _ } => {
+            Self::Constituency { segmentation: _ } => {
                 Err("cannot reapply an utterance-boundary policy to constituency output".into())
             }
         }
@@ -704,6 +662,10 @@ pub(crate) enum UtsegPredictionOrigin<'a> {
 /// parallel to those words, and applied actions and assignments that agree with
 /// the policy the evidence declares. A caller cannot reach the type without
 /// passing through this function, so there is no route that skips a check.
+///
+/// A boundary model's segmentation is the one its evidence states, so each
+/// cut carries the terminator the model predicted there; the other origins
+/// state cuts and no terminator.
 pub(crate) fn admit_prediction(
     request: &UtsegBatchItem,
     assignments: Vec<usize>,
@@ -716,7 +678,6 @@ pub(crate) fn admit_prediction(
             request.words.len()
         ));
     }
-    let response = UtsegResponse { assignments };
 
     match origin {
         UtsegPredictionOrigin::BoundaryModel(evidence) => {
@@ -730,20 +691,22 @@ pub(crate) fn admit_prediction(
                     request.words.len()
                 ));
             }
-            evidence
-                .validate_assignments(&response.assignments)
+            let segmentation = evidence
+                .validate_assignments(&assignments)
                 .map_err(|error| format!("utseg V2 boundary evidence {error}"))?;
             Ok(AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
-                response,
+                segmentation,
                 evidence: evidence.clone(),
             })
         }
         UtsegPredictionOrigin::UnnamedWorker => {
-            Ok(AdmittedUtsegPrediction::UnobservedAssignments { response })
+            Ok(AdmittedUtsegPrediction::UnobservedAssignments {
+                segmentation: UtteranceSegmentation::unstated(assignments),
+            })
         }
-        UtsegPredictionOrigin::Constituency => {
-            Ok(AdmittedUtsegPrediction::Constituency { response })
-        }
+        UtsegPredictionOrigin::Constituency => Ok(AdmittedUtsegPrediction::Constituency {
+            segmentation: UtteranceSegmentation::unstated(assignments),
+        }),
     }
 }
 
@@ -844,9 +807,7 @@ async fn infer_admitted_batch_with_policy(
     for (i, item_result) in result.items.iter().enumerate() {
         admitted.push(
             admit_worker_item(&items[i].1, item_result)
-                .and_then(|prediction| {
-                    prediction.apply_decision_policy(&items[i].1, lang, decision_policy)
-                })
+                .and_then(|prediction| prediction.apply_decision_policy(decision_policy))
                 // Everything refused here is the worker's own answer about
                 // this item: a refusal will repeat if the same result comes
                 // back, which is what the terminal class means.
@@ -857,13 +818,13 @@ async fn infer_admitted_batch_with_policy(
     Ok(admitted)
 }
 
-pub(crate) fn integrate_admitted_assignments(
-    assignment_map: &mut HashMap<usize, Vec<usize>>,
+pub(crate) fn integrate_admitted_segmentations(
+    segmentations: &mut HashMap<usize, UtteranceSegmentation>,
     misses: &[(usize, UtsegBatchItem)],
     predictions: &[AdmittedUtsegPrediction],
 ) {
     for ((utt_ordinal, _item), prediction) in misses.iter().zip(predictions.iter()) {
-        assignment_map.insert(*utt_ordinal, prediction.response().assignments.clone());
+        segmentations.insert(*utt_ordinal, prediction.segmentation().clone());
     }
 }
 
@@ -965,11 +926,14 @@ mod tests {
         let admitted = admit_worker_item(&two_word_request(), &boundary_result(2))
             .expect("aligned boundary result should be admitted");
 
-        let AdmittedUtsegPrediction::BoundaryModelWorkerDeclared { response, evidence } = admitted
+        let AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
+            segmentation,
+            evidence,
+        } = admitted
         else {
             panic!("direct classifier result should retain its boundary-model evidence");
         };
-        assert_eq!(response.assignments, vec![0, 1]);
+        assert_eq!(segmentation.assignments(), &[0, 1]);
         assert_eq!(evidence.word_evidence.len(), 2);
         assert_eq!(evidence.model_id, "talkbank/utterance-boundary");
     }
@@ -1046,16 +1010,12 @@ mod tests {
         let request = two_word_request();
         let admitted = admit_worker_item(&request, &result)
             .expect("baseline evidence")
-            .apply_decision_policy(
-                &request,
-                &LanguageCode3::eng(),
-                UtsegDecisionPolicy::ReapplyBoundaryModel(
-                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-                ),
-            )
+            .apply_decision_policy(UtsegDecisionPolicy::ReapplyBoundaryModel(
+                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
+            ))
             .expect("candidate replay");
 
-        assert_eq!(admitted.response().assignments, vec![0, 1]);
+        assert_eq!(admitted.segmentation().assignments(), &[0, 1]);
     }
 
     /// The check must accept exactly what the local policy itself produces, or
@@ -1080,16 +1040,12 @@ mod tests {
         let request = two_word_request();
         let reapplied = admit_worker_item(&request, &result)
             .expect("baseline evidence")
-            .apply_decision_policy(
-                &request,
-                &LanguageCode3::eng(),
-                UtsegDecisionPolicy::ReapplyBoundaryModel(
-                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-                ),
-            )
+            .apply_decision_policy(UtsegDecisionPolicy::ReapplyBoundaryModel(
+                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
+            ))
             .expect("candidate replay");
         let AdmittedUtsegPrediction::BoundaryModelLocallyReapplied {
-            response,
+            segmentation,
             evidence,
             receipt,
         } = reapplied
@@ -1099,10 +1055,12 @@ mod tests {
 
         // Exactly what the evidence reader reconstructs from a retained
         // artifact: the admitted parts, then the receipt reattached.
-        let reconstructed =
-            AdmittedUtsegPrediction::BoundaryModelWorkerDeclared { response, evidence }
-                .with_local_decision(receipt)
-                .expect("a receipt this policy produced must be accepted");
+        let reconstructed = AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
+            segmentation,
+            evidence,
+        }
+        .with_local_decision(receipt)
+        .expect("a receipt this policy produced must be accepted");
         assert!(matches!(
             reconstructed,
             AdmittedUtsegPrediction::BoundaryModelLocallyReapplied { .. }
@@ -1126,7 +1084,6 @@ mod tests {
                 local_adjacency_policy_revision:
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
                 worker_assignments: vec![0, 1],
-                suppressed_split_before_word_indices: Vec::new(),
             })
             .expect_err("an unexplained receipt must be refused");
 
@@ -1136,87 +1093,17 @@ mod tests {
     #[test]
     fn candidate_policy_refuses_constituency_output_without_raw_actions() {
         let prediction = AdmittedUtsegPrediction::Constituency {
-            response: UtsegResponse {
-                assignments: vec![0, 0],
-            },
+            segmentation: UtteranceSegmentation::unstated(vec![0, 0]),
         };
         assert!(
             prediction
-                .apply_decision_policy(
-                    &two_word_request(),
-                    &LanguageCode3::eng(),
-                    UtsegDecisionPolicy::ReapplyBoundaryModel(
-                        UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-                    ),
-                )
+                .apply_decision_policy(UtsegDecisionPolicy::ReapplyBoundaryModel(
+                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
+                ))
                 .is_err()
         );
     }
 
-    #[test]
-    fn exact_retrace_guard_suppresses_candidate_splits_inside_both_copies() {
-        let words = [
-            "How", "can", "I", "take", "it", "off", "blur", "can", "I", "take", "it", "off", "blur",
-        ];
-        let request = UtsegBatchItem {
-            words: words.iter().map(|word| (*word).to_owned()).collect(),
-            text: words.join(" "),
-        };
-        let probability = BoundaryProbabilityMicrosV2::try_from(900_000).expect("probability");
-        let mut evidence_words = Vec::new();
-        for index in 0..words.len() {
-            let (raw_action, applied_action) = match index {
-                5 | 11 => (
-                    UtsegBoundaryActionV2::PeriodBoundary,
-                    UtsegBoundaryActionV2::Ordinary,
-                ),
-                6 | 12 => (
-                    UtsegBoundaryActionV2::CapitalizedOnset,
-                    UtsegBoundaryActionV2::CapitalizedOnset,
-                ),
-                _ => (
-                    UtsegBoundaryActionV2::Ordinary,
-                    UtsegBoundaryActionV2::Ordinary,
-                ),
-            };
-            evidence_words.push(UtsegWordBoundaryEvidenceV2::Classified {
-                raw_action,
-                applied_action,
-                boundary_probability_micros: probability,
-            });
-        }
-        let result = UtsegItemResultV2::BoundaryModel {
-            assignments: vec![0; words.len()],
-            boundary_model_evidence: UtsegBoundaryModelEvidenceV2 {
-                model_id: "model".into(),
-                model_revision: test_commit(),
-                normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
-                adjacency_policy_revision:
-                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
-                word_evidence: evidence_words,
-            },
-        };
-
-        let admitted = admit_worker_item(&request, &result)
-            .expect("worker evidence")
-            .apply_decision_policy(
-                &request,
-                &LanguageCode3::eng(),
-                UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(
-                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-                ),
-            )
-            .expect("guarded local replay");
-
-        let AdmittedUtsegPrediction::BoundaryModelLocallyReapplied {
-            response, receipt, ..
-        } = admitted
-        else {
-            panic!("guarded replay must retain its local receipt")
-        };
-        assert_eq!(response.assignments, vec![0; words.len()]);
-        assert_eq!(receipt.suppressed_split_before_word_indices, vec![6, 12]);
-    }
     #[test]
     fn invalidated_analysis_is_recorded_in_typed_output_without_losing_free_text() {
         let source = include_str!("../../../test-fixtures/eng_hello_world_with_mor_gra_act.cha");
@@ -1225,8 +1112,11 @@ mod tests {
             talkbank_model::ParseValidateOptions::default().with_validation(),
         )
         .expect("valid existing analyzed CHAT");
-        apply_utseg_document(&mut chat, &HashMap::from([(0, vec![0, 1])]))
-            .expect("supported partition");
+        apply_utseg_document(
+            &mut chat,
+            &HashMap::from([(0, UtteranceSegmentation::unstated(vec![0, 1]))]),
+        )
+        .expect("supported partition");
         let text = batchalign_transform::serialize::to_chat_string(&chat);
         assert!(text.contains("input utterance 1 %mor"));
         assert!(text.contains("input utterance 1 %gra"));

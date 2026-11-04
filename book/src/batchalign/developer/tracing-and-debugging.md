@@ -279,7 +279,7 @@ batchalign3 align input/ output/ --lang eng --debug-dir /tmp/ba3-debug
 batchalign3 transcribe audio/ output/ --lang eng --debug-dir /tmp/ba3-debug
 
 # Via environment variable (useful for server-side debugging)
-BATCHALIGN_DEBUG_DIR=/tmp/ba3-debug batchalign3 transcribe audio/ output/
+BATCHALIGN_DEBUG_DIR=/tmp/ba3-debug batchalign3 transcribe audio/ output/ --lang eng
 ```
 
 ### Architecture
@@ -522,11 +522,11 @@ batchalign3 align input/ output/ \
   --override-media-cache-tasks utr_asr,forced_alignment
 
 # Refresh Rev words while reusing paid pyannote evidence
-batchalign3 transcribe input/ output/ --diarization enabled \
+batchalign3 transcribe input/ output/ --lang eng --diarization enabled \
   --override-media-cache-tasks rev_asr_evidence
 
 # Refresh pyannote evidence while reusing Rev words
-batchalign3 transcribe input/ output/ --diarization enabled \
+batchalign3 transcribe input/ output/ --lang eng --diarization enabled \
   --override-media-cache-tasks speaker_diarization_raw_evidence
 ```
 
@@ -557,13 +557,15 @@ detects several classes of Stanza misbehavior:
 
 | Anomaly | Detection |
 |---------|-----------|
-| Bogus lemma | Lemma is pure punctuation for a word with letters (e.g. 哎呀 → 》) |
+| Punctuation-only lemma | Lemma is pure punctuation for a word with letters (e.g. 哎呀 → 》) |
 | Sentence count mismatch | Stanza returned a different number of sentences than input utterances |
 | Batch failure | Stanza raised an exception on a batch of items |
 
-When detected, these are logged at `WARNING` level. The bogus-lemma check is
-in `_is_bogus_lemma()` and triggers substitution with a `"?"` lemma rather
-than propagating the bad value.
+When detected, these are logged at `WARNING` level. The lemma check is Rust's
+(`batchalign_core.is_punctuation_lemma`); `RepairedSentence` applies the
+word's surface form as its lemma and reports the replacement as a
+`punctuation_lemma` repair, which the file's `ud_repairs=` counts (see the
+morphosyntax reference, "Lemma repair").
 
 ## Debugging Async Dispatch with `tokio-console`
 

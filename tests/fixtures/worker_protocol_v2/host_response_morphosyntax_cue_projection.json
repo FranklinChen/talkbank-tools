@@ -38,8 +38,7 @@
             "lang": "fra",
             "pipeline": "standard"
           },
-          "repairs": [],
-          "feature_repairs": []
+          "repairs": []
         }
       },
       "elapsed_s": 0.00016483408398926258
@@ -84,16 +83,16 @@
           },
           "repairs": [
             {
+              "field": "relation",
               "kind": "cue_root_promotion",
               "word": "beta",
               "from_relation": "dep",
               "to_relation": "root"
             }
-          ],
-          "feature_repairs": []
+          ]
         }
       },
-      "elapsed_s": 0.00007895799353718758
+      "elapsed_s": 7.895799353718758e-05
     },
     {
       "outcome": {
@@ -162,13 +161,13 @@
           },
           "repairs": [
             {
+              "field": "relation",
               "kind": "cue_root_promotion",
               "word": "beta",
               "from_relation": "dep",
               "to_relation": "root"
             }
-          ],
-          "feature_repairs": []
+          ]
         }
       },
       "elapsed_s": 0.00012612482532858849
@@ -178,7 +177,7 @@
         "kind": "failed",
         "error": "morphosyntax dependency projection: ambiguous lexical root after cue removal: cue 3, children [1, 2], other roots []"
       },
-      "elapsed_s": 0.00003591692075133324
+      "elapsed_s": 3.591692075133324e-05
     }
   ]
 }

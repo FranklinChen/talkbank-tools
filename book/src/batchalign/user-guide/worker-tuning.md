@@ -11,9 +11,9 @@ budgets work, and how to tune the server for your hardware.
 Control how many files are processed in parallel:
 
 ```bash
-batchalign3 --workers 1 transcribe corpus/ -o output/    # One file at a time (safest)
-batchalign3 --workers 4 morphotag corpus/ -o output/     # Four files in parallel
-batchalign3 transcribe corpus/ -o output/                 # Auto-tune (default)
+batchalign3 --workers 1 transcribe corpus/ -o output/ --lang eng   # One file at a time (safest)
+batchalign3 --workers 4 morphotag corpus/ -o output/                # Four files in parallel
+batchalign3 transcribe corpus/ -o output/ --lang eng                # Auto-tune (default)
 ```
 
 All commands now use a two-stage policy: the runner computes a **requested**
@@ -54,6 +54,16 @@ GPU-heavy commands (`transcribe`, `align`, `benchmark`) are capped by both
 
 Override with `--workers N` when you want explicit control, or set
 `max_workers_per_job` in `server.yaml` for a persistent override.
+
+The cap is fixed when a daemon starts. The first invocation that starts the
+daemon hands it `--workers N` (and `--timeout S`) and records them; a later
+invocation that passes the same values proceeds, one that passes none uses
+the daemon as it runs, and one that passes a different value is refused
+before anything is submitted, naming the daemon's values and the requested
+ones. To change the cap, `batchalign3 serve stop` and run the command again.
+A server the CLI did not start (`serve start`, a launchd service, `--server`)
+records neither setting, so `--workers`/`--timeout` beside it is refused:
+drop the flag, or stop that server and let the CLI start a daemon.
 
 ## How worker planning works
 

@@ -274,57 +274,6 @@ pub(super) async fn poll_and_write_incrementally(
     }
 }
 
-/// Resolve whether the CLI should auto-open a submitted dashboard URL.
-///
-/// The public CLI flag is the main user-facing control, while the
-/// `BATCHALIGN_NO_BROWSER` environment variable remains a hidden backstop for
-/// tests and harnesses that must suppress browser launch.
-///
-/// Compiled where it is USED. Its only production caller is the macOS branch of
-/// `maybe_open_dashboard`, so on any other target this function is dead and a
-/// clippy pass with `-D warnings` says so. That went unnoticed while no CI job
-/// ran clippy; the `test` arm keeps the unit tests below running everywhere.
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn dashboard_auto_open_enabled(cli_enabled: bool, no_browser_env: bool) -> bool {
-    cli_enabled && !no_browser_env
-}
-
-/// Launch the submitted job's dashboard URL in the local browser when enabled.
-///
-/// Only opens the browser on macOS when all of:
-/// - the CLI flag is enabled (default on, `--no-open-dashboard` suppresses)
-/// - `BATCHALIGN_NO_BROWSER` env var is not set
-/// - stderr is a TTY (interactive terminal, not piped/cron/ssh)
-pub(super) fn maybe_open_dashboard(dashboard_url: &str, cli_enabled: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::IsTerminal;
-
-        if !dashboard_auto_open_enabled(
-            cli_enabled,
-            std::env::var_os("BATCHALIGN_NO_BROWSER").is_some(),
-        ) {
-            return;
-        }
-
-        // Only open in interactive sessions, not cron, CI, ssh, or piped output.
-        if !std::io::stderr().is_terminal() {
-            return;
-        }
-
-        let _ = std::process::Command::new("open")
-            .arg(dashboard_url)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (dashboard_url, cli_enabled);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1051,21 +1000,6 @@ mod tests {
         assert_eq!(counts.succeeded, 1);
         assert_eq!(counts.failed, 0);
         assert_eq!(counts.not_started, 3);
-    }
-
-    #[test]
-    fn dashboard_auto_open_enabled_when_cli_allows_and_env_clear() {
-        assert!(dashboard_auto_open_enabled(true, false));
-    }
-
-    #[test]
-    fn dashboard_auto_open_disabled_when_cli_disables() {
-        assert!(!dashboard_auto_open_enabled(false, false));
-    }
-
-    #[test]
-    fn dashboard_auto_open_disabled_by_env_backstop() {
-        assert!(!dashboard_auto_open_enabled(true, true));
     }
 
     #[test]

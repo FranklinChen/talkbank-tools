@@ -1,7 +1,7 @@
 # Model Downloads and Caching (Developer Reference)
 
 **Status:** Current
-**Last updated:** 2026-10-30 11:23 EDT
+**Last updated:** 2026-11-03 23:58 EST
 
 This page documents how batchalign3 downloads, caches, and verifies ML
 models, the contributor-facing complement to the
@@ -375,13 +375,16 @@ its cache rows are namespaced by that engine before inference runs.
 
 That identity is resolved from the exact typed worker route, not from whichever
 worker first populated the pool's availability snapshot. `WorkerKey` owns
-target, language, and engine recipe. Command dispatch obtains that worker, and
-`WorkerPool::ensure_command_capabilities` completes any lazy `ensure_task` for
-FA and takes the worker's report after that load (`LoadedCapabilities`). Only
-then does `FaCacheNamespace::from_loaded` construct the FA identity, which
-forced alignment carries in `FaServices` and uses for its cache rows and
-evidence envelopes. A worker that still names no FA engine after loading is
-refused.
+target, language, and engine recipe. The FA dispatch obtains that worker per
+file language (`FaWorkerAdmission`, once per language per job, because align
+is per-file and the worker a file reaches is keyed by the language its
+`@Languages:` declares), and `WorkerPool::ensure_command_capabilities`
+completes any lazy `ensure_task` for FA and takes the worker's report after
+that load (`LoadedCapabilities`). Only then does
+`FaCacheNamespace::from_loaded` construct the FA identity, which forced
+alignment carries in `FaServices` and uses for its cache rows and evidence
+envelopes. A worker that still names no FA engine after loading is refused,
+and every file of that language fails by name.
 
 Lazy-profile keys retain engine selection. This is required for correctness,
 not only cache hygiene: a task-only key could load Wave2Vec once, report
@@ -459,11 +462,24 @@ envelopes therefore remain replayable as `legacy_typed_projection`; new
 responses are `exact_provider_json`. `CachePolicy::RequireCache` fails closed
 on a true request miss and never turns a storage migration into a service call.
 
-The present recipe is `SourceBytesLegacyAudioMpegV1`: source bytes, normalized
-`provider-media.<extension>` filename, digest-derived metadata, and the
-historical `audio/mpeg` multipart MIME. Do not interpret that name as a quality
-endorsement. A future WAV, FLAC, MIME-correct, padding-retained, or other recipe
-must be a distinct enum variant with deterministic tests and a distinct key.
+Two recipes exist, both preserving the source bytes. `SourceBytesLegacyAudioMpegV1`
+is MPEG audio's: `provider-media.mp3`, digest-derived metadata, `audio/mpeg`.
+`SourceBytesDeclaredContainerV1` (since 2026-11-03) is every other container's:
+the file name and multipart MIME are the probed container's own. Before that
+date every upload used the legacy recipe, declared `audio/mpeg` and named after
+the SOURCE path's extension, so a non-MP3 recording's key changed. The tricky
+part a newcomer should know: `RevAsrEvidenceRequest` derives a second,
+`legacy_key`, from the same key material with the legacy presentation
+(`RevProviderPresentation::legacy_for`), decided by comparing the two
+presentations (`PreparedRevProviderMedia::new`, so an MPEG file at an `.mpga`
+path has a legacy key too, and a `.mp3` has none). A miss under the current key
+consults the legacy key once (`legacy_lookup`, under `UseCache` and
+`RequireCache`; a forced refresh consults neither), and a hit is re-stored under
+the current key by the same writer a commit uses (`store_evidence`), after
+which any pending-job record under the current key goes. The trace says
+`replayed_from_legacy_key` for that run. A padding-retained or other new
+recipe must be a distinct enum variant with deterministic tests and a distinct
+key.
 
 `RevAsrEvidenceResolution::trace()` uses a private trace seed captured by the
 resolver from the exact request. Callers therefore cannot pair one request's

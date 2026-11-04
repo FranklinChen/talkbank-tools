@@ -704,7 +704,7 @@ fn imposition_reason(kept: KeptBullet, clamped: &ClampedWordCounts) -> Option<(S
     let mut reason = String::new();
     let needs_review = match kept.0 {
         Kept::Extent { start_ms, end_ms } => {
-            if clamped.trimmed() == 0 && clamped.dropped.is_empty() {
+            if clamped.trimmed.is_empty() && clamped.dropped.is_empty() {
                 return None;
             }
             let _ = write!(reason, "kept_main_bullet={start_ms}_{end_ms}");
@@ -720,7 +720,7 @@ fn imposition_reason(kept: KeptBullet, clamped: &ClampedWordCounts) -> Option<(S
     let _ = write!(
         reason,
         " words_trimmed={} words_dropped={} ",
-        clamped.trimmed(),
+        clamped.trimmed.len(),
         clamped.dropped.len()
     );
     write_dropped(&mut reason, clamped);

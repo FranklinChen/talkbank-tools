@@ -93,14 +93,32 @@ def _assert_fields_match(
 
 
 def _schema_variants(schema: dict) -> list[dict]:
-    """The variant schemas of a generated tagged enum, with ``$ref`` resolved."""
+    """The variant schemas of a generated tagged enum, with ``$ref`` resolved.
+
+    A newtype variant of an internally tagged enum (``Relation(UdRelationRepairV2)``)
+    is written as the tag property beside a ``$ref`` to the record, so the
+    reference is merged into the variant rather than replacing it: the tag
+    stays, and the record's fields and required-ness join it.
+    """
     variants = schema.get("oneOf") or schema.get("anyOf")
     assert variants, f"{schema.get('title')} is not a tagged union in the Rust schema"
     defs = schema.get("$defs", {})
     resolved: list[dict] = []
     for variant in variants:
         if "$ref" in variant:
-            variant = defs[variant["$ref"].rsplit("/", 1)[-1]]
+            referenced = defs[variant["$ref"].rsplit("/", 1)[-1]]
+            variant = {
+                **referenced,
+                **{key: value for key, value in variant.items() if key != "$ref"},
+                "properties": {
+                    **referenced.get("properties", {}),
+                    **variant.get("properties", {}),
+                },
+                "required": [
+                    *referenced.get("required", []),
+                    *variant.get("required", []),
+                ],
+            }
         resolved.append(variant)
     return resolved
 
@@ -122,22 +140,26 @@ def _schema_enum_values(schema: dict) -> set[str]:
     }
 
 
-def _assert_tagged_union_matches(schema: dict, python_union: object) -> None:
+def _assert_tagged_union_matches(
+    schema: dict, python_union: object, *, tag: str = "kind"
+) -> None:
     """Assert a Rust internally tagged enum and a pydantic discriminated union agree.
 
-    Both directions: the same set of ``kind`` tags, and for each tag the same
+    Both directions: the same set of ``tag`` values, and for each tag the same
     fields and required-ness. The Python variants are read off the union
-    alias itself (``Annotated[A | B | C, Field(discriminator="kind")]``), so
-    there is no second hand-kept list of variants here to drift. ``kind`` is
+    alias itself (``Annotated[A | B | C, Field(discriminator=tag)]``), so
+    there is no second hand-kept list of variants here to drift. The tag is
     compared as the tag, not as a field: Rust requires it on every variant,
-    while each pydantic variant defaults it to its own literal.
+    while each pydantic variant defaults it to its own literal. The tag is
+    ``kind`` unless the Rust enum names another (``UdRepairV2`` is tagged
+    ``field``, because each of its variants carries a ``kind`` of its own).
     """
     (union, *_metadata) = get_args(python_union)
     python_by_tag = {
-        variant.model_fields["kind"].default: variant for variant in get_args(union)
+        variant.model_fields[tag].default: variant for variant in get_args(union)
     }
     schema_by_tag = {
-        _schema_enum_values(variant["properties"]["kind"]).pop(): variant
+        _schema_enum_values(variant["properties"][tag]).pop(): variant
         for variant in _schema_variants(schema)
     }
     assert python_by_tag.keys() == schema_by_tag.keys(), (
@@ -145,19 +167,19 @@ def _assert_tagged_union_matches(schema: dict, python_union: object) -> None:
         f"{sorted(python_by_tag.keys() - schema_by_tag.keys())}, only in Rust="
         f"{sorted(schema_by_tag.keys() - python_by_tag.keys())}"
     )
-    for tag, variant_schema in schema_by_tag.items():
+    for value, variant_schema in schema_by_tag.items():
         without_tag = {
             "properties": {
                 name: field
                 for name, field in variant_schema.get("properties", {}).items()
-                if name != "kind"
+                if name != tag
             },
             "required": [
-                name for name in variant_schema.get("required", []) if name != "kind"
+                name for name in variant_schema.get("required", []) if name != tag
             ],
         }
         _assert_fields_match(
-            without_tag, python_by_tag[tag], known_extra_python=frozenset({"kind"})
+            without_tag, python_by_tag[value], known_extra_python=frozenset({tag})
         )
 
 
@@ -290,43 +312,53 @@ class TestWorkerV2Conformance:
         tokens = _schema_enum_values(schema["$defs"]["WhisperLanguageToken"])
         assert tokens == set(LANGUAGES)
 
-    def test_ud_relation_repair(self) -> None:
-        """The repair an analyzed item carries must read the same on both sides.
+    def test_ud_repair(self) -> None:
+        """The one repair list an analyzed item carries reads the same on both sides.
 
-        The relation vocabulary is closed in Rust and in Python, so a kind
-        added to one language only would be refused by the other at runtime,
-        and a repair that could not be read is a repair the file's provenance
-        would never count.
+        Closed in two steps on each side: the ``field`` tag (which field of
+        the word was repaired) and, inside each field's record, its ``kind``
+        (why). A kind added to one language only would be refused by the
+        other at runtime, and a repair that could not be read is a repair the
+        file's provenance would never count.
         """
         from batchalign.worker._types_v2 import (
-            UdRelationRepairKindV2,
-            UdRelationRepairV2,
-        )
-
-        schema = _load_schema("worker_v2", "UdRelationRepairV2")
-        _assert_fields_match(schema, UdRelationRepairV2)
-        kind = schema.get("$defs", {}).get("UdRelationRepairKindV2")
-        assert kind is not None, "schema lost the UdRelationRepairKindV2 definition"
-        assert _schema_enum_values(kind) == {
-            variant.value for variant in UdRelationRepairKindV2
-        }
-
-    def test_ud_feature_repair(self) -> None:
-        """A removed feature value must read the same on both sides, for the
-        relation repair's reason: one the other side could not read is one the
-        file's provenance would never count."""
-        from batchalign.worker._types_v2 import (
+            UdFeatureNameRepairKindV2,
+            UdFeatureNameRepairV2,
             UdFeatureRepairKindV2,
             UdFeatureRepairV2,
+            UdLemmaRepairKindV2,
+            UdLemmaRepairV2,
+            UdRelationRepairKindV2,
+            UdRelationRepairV2,
+            UdRepairV2,
         )
 
-        schema = _load_schema("worker_v2", "UdFeatureRepairV2")
-        _assert_fields_match(schema, UdFeatureRepairV2)
-        kind = schema.get("$defs", {}).get("UdFeatureRepairKindV2")
-        assert kind is not None, "schema lost the UdFeatureRepairKindV2 definition"
-        assert _schema_enum_values(kind) == {
-            variant.value for variant in UdFeatureRepairKindV2
-        }
+        _assert_tagged_union_matches(
+            _load_schema("worker_v2", "UdRepairV2"), UdRepairV2, tag="field"
+        )
+        # Each field's record and its own reason vocabulary. The field tag is
+        # a pydantic default here and a serde tag in Rust, so the record's
+        # own schema (the enum variant's payload) does not list it.
+        for record, kind_name, kind_enum in [
+            (UdRelationRepairV2, "UdRelationRepairKindV2", UdRelationRepairKindV2),
+            (UdFeatureRepairV2, "UdFeatureRepairKindV2", UdFeatureRepairKindV2),
+            (
+                UdFeatureNameRepairV2,
+                "UdFeatureNameRepairKindV2",
+                UdFeatureNameRepairKindV2,
+            ),
+            (UdLemmaRepairV2, "UdLemmaRepairKindV2", UdLemmaRepairKindV2),
+        ]:
+            schema = _load_schema("worker_v2", record.__name__)
+            _assert_fields_match(
+                schema, record, known_extra_python=frozenset({"field"})
+            )
+            kind = schema.get("$defs", {}).get(kind_name)
+            assert kind is not None, f"schema lost the {kind_name} definition"
+            assert _schema_enum_values(kind) == {variant.value for variant in kind_enum}
+            assert _schema_enum_values(_load_schema("worker_v2", kind_name)) == {
+                variant.value for variant in kind_enum
+            }
 
     def test_utseg_request(self) -> None:
         """The segmenter a utseg request names reads the same on both sides.

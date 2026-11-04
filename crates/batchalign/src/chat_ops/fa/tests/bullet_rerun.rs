@@ -645,6 +645,7 @@ fn test_fast_path_strips_backward_wor_timestamps_and_removes_stale_wor_tier() {
         WordGapHealing::Heal,
         "wav2vec_fa",
         &crate::engine_reports::FaCacheNamespace::for_test("test-build"),
+        crate::types::results::RecordingRead::Read,
     )
     .with_written_decisions(written)
     .into_timeline_trace();

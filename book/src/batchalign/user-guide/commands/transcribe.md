@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-10-06 23:58 EDT
+**Last updated:** 2026-11-03 23:58 EST
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -41,8 +41,9 @@ discards the transcript. See
 ## Quick start
 
 ```bash
-# Transcribe a single recording, output alongside input
-batchalign3 transcribe interview.wav
+# Transcribe a single recording, output alongside input. `--lang` is
+# required: name the recording's language, or `auto` to detect one.
+batchalign3 transcribe interview.wav --lang eng
 
 # Transcribe all audio files in a directory
 batchalign3 transcribe recordings/ -o transcripts/ --lang eng
@@ -55,10 +56,10 @@ batchalign3 transcribe recording.wav -o out/ --lang auto
 batchalign3 transcribe bilingual.wav -o out/ --lang auto
 
 # Transcribe with paid pyannoteAI Precision-2 diarization, the default
-batchalign3 transcribe interview.wav -o out/ --asr-engine whisper --diarization enabled
+batchalign3 transcribe interview.wav -o out/ --lang eng --asr-engine whisper --diarization enabled
 
 # Keep all audio local and use the TalkBank-pinned Pyannote model
-batchalign3 transcribe interview.wav -o out/ --diarization enabled --speaker-engine pyannote
+batchalign3 transcribe interview.wav -o out/ --lang eng --diarization enabled --speaker-engine pyannote
 
 # Use a server on this machine (a server on another host is refused: recordings are never uploaded)
 batchalign3 --server http://127.0.0.1:8001 transcribe corpus/ -o out/ --lang eng
@@ -131,6 +132,22 @@ that evidence before submitting anything to Rev, so it avoids another Rev
 call. Keeping raw monologues, elements, punctuation, timings, confidence, and
 resolved language also lets BA3 post-processing experiments replay the same
 service output locally.
+
+The evidence key names the upload as Rev.AI received it (its declared type
+and file name). On 2026-11-03 the declaration of every non-MP3 upload
+changed to its true container (`audio/wav`, `audio/flac`, `audio/ogg`,
+`audio/aac`, `audio/mp4`), which is a new key for such recordings; an MPEG
+recording at a `.mp3` path has the key it always had. Evidence cached under an
+old key before that date is not re-bought: on the first miss under the new
+key the request consults the key it had then, once, and on a hit stores the
+evidence under the new key and uses it, with no Rev call; a forced refresh
+(`--override-media-cache`) consults neither key. The run's evidence trace
+records that run's outcome as `replayed_from_legacy_key` (every later run
+says `replayed`), so a reader can see the migration happened. Whether a
+second key exists is decided by comparing the two keys, so an MPEG recording
+under another name (`.mpga`, no extension) consults the key that name gave
+it, and a `.mp3` never consults a second key. The legacy entry is left in
+place.
 
 With `--diarization enabled`, BA3 durably caches both the backend-shaped
 speaker evidence and the normalized turns used by the transcribe pipeline.
@@ -329,16 +346,17 @@ acceptable CHAT segmentation.
 | `-o`, `--output DIR` | Output directory for new `.cha` files |
 | `--file-list FILE` | Read input paths from a text file |
 | `--in-place` | Write `.cha` files alongside the audio inputs |
+| `--overwrite` | Replace an existing `<media>.cha` beside the recording. Without it, and without `-o DIR`, a recording whose `.cha` already exists is refused before anything is submitted, naming the file: an earlier transcript is never replaced silently, and no ASR is paid for a file that would not be written. `-o DIR` is itself the authority to replace what is under `DIR`. |
 
 ### ASR and language options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--lang CODE` | `eng` | 3-letter ISO language code, `auto` for language auto-detection, or a code-switched pair such as `eng,spa` (primary language first; parsed, and withheld from transcription today; see [Code-switched recordings](#code-switched-recordings---lang-engspa-withheld)) |
+| `--lang CODE\|auto` | required | 3-letter ISO 639-3 language code, `auto` for language auto-detection, or a code-switched pair such as `eng,spa` (primary language first; parsed, and withheld from transcription today; see [Code-switched recordings](#code-switched-recordings---lang-engspa-withheld)). There is no default: a recording transcribed under a language nobody chose is a silent error, so an invocation without `--lang` is refused before anything is submitted, and detection is the explicit `auto`. |
 | `--asr-engine NAME` | `rev` | ASR engine; see the table below. `--help` prints the same list, generated from the engines that exist, so neither can go stale. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured so existing scripts keep working. Hidden from `--help`. |
 | `--num-speakers N` | `2` | Speaker count passed to Rev.AI and to the dedicated diarizer. With `--diarization enabled` it must be 2 or more: a count of 1 is refused at submission, not obeyed. NOT a worker count; see `--workers`. No short flag, deliberately: see below. |
-| `--auto-speakers` | off | Let the provider infer the speaker count instead. Rev.AI only: any other `--asr-engine` is refused before the job runs. Conflicts with `--num-speakers`. |
+| `--auto-speakers` | off | Let the speaker engine infer the count instead. Accepted wherever the engines the run involves take it: Rev.AI's own diarization, and every dedicated `--speaker-engine` (pyannoteAI, pyannote, nemo), whatever the `--asr-engine`. Refused, by name, only with `--asr-engine tencent` and no `--diarization enabled`: Tencent's integrated diarization must be given the count, and it is the run's one speaker engine then. With a dedicated diarizer, Tencent is asked for no separation of its own and the diarizer infers the count. Conflicts with `--num-speakers`. |
 | `--diarization {auto,enabled,disabled}` | `auto` | Dedicated speaker diarization stage (`auto` = disabled) |
 | `--speaker-engine {pyannote-ai,pyannote,nemo}` | `pyannote-ai` when enabled | Paid pyannoteAI Precision-2 cloud diarization, or an explicit local engine |
 | `--wor` / `--nowor` | `--nowor` | Include or suppress the `%wor` word-timing tier |
@@ -372,8 +390,16 @@ An UNDER-count is not absorbed either. The count is passed to Rev.AI and to
 the dedicated diarizer, and the local `pyannote` and `nemo` engines produce
 exactly the number they are given, so a count below the real number of
 voices merges voices together. (An earlier version of this page said the
-pipeline took `max(num_speakers, detected)`; no such step exists.) Only
-Rev.AI can infer the count, with `--auto-speakers`.
+pipeline took `max(num_speakers, detected)`; no such step exists.) To have
+the count inferred, pass `--auto-speakers`: Rev.AI's own diarization and
+every dedicated speaker engine infer it. The count belongs to the speaker
+plan, not to the recognizer, so a local or cloud `--asr-engine` that labels
+no speakers is no reason to refuse it; before 2026-11-03 every non-Rev
+recognizer was. The one refusal left is `--asr-engine tencent` with no
+dedicated diarizer, since Tencent's integrated diarization must be given the
+count. With `--diarization enabled`, Tencent is asked for no separation of
+its own (the dedicated engine's labels replace the recognizer's anyway) and
+the dedicated engine infers the count.
 
 **A count of 1 is refused, not obeyed.** With `--diarization enabled`, a
 count of 1 asks a diarizer to separate the speakers of a recording asserted
@@ -381,11 +407,11 @@ to hold one, which is a contradiction rather than a request. The job is
 refused at submission:
 
 ```text
-diarization was requested with a speaker count of 1, which asks a diarizer to separate speakers in a recording asserted to have one. Pass the real count (2 or more); or omit diarization, for a single-speaker recording; or pass auto_speakers to have the count inferred, where the ASR engine supports it.
+diarization was requested with a speaker count of 1, which asks a diarizer to separate speakers in a recording asserted to have one. Pass the real count (2 or more); or omit diarization, for a single-speaker recording; or pass auto_speakers to have the count inferred.
 ```
 
 So with diarization the count is 2 or more, or it is omitted and the number
-is detected (on Rev.AI, `--auto-speakers`). One is neither, and it is refused
+is detected (`--auto-speakers`). One is neither, and it is refused
 rather than silently treated as detection. It used to be obeyed: the count
 reached the diarizer, which returned a single track, which is why
 `--diarization enabled` runs came back with one `PAR0`.
@@ -627,6 +653,8 @@ A new `.cha` file per audio input (audio extension replaced: `foo.wav` →
 - `@Languages`, `@Participants`, `@ID` headers
 - Utterance lines with timing bullets
 - `%wor` tier (if `--wor` is set)
+- a `%com` tier for each recognizer token the file could not hold (see
+  below), or an `@Comment` where a whole utterance was lost to one
 
 No `%mor` or `%gra` tiers are created by `transcribe`. Run `morphotag`
 afterwards if morphosyntactic analysis is needed.
@@ -650,6 +678,29 @@ for a code-switched pair, retains unresolved digits in the intermediate model.
 A transcript that keeps such digits does not pass complete CHAT admission, so it
 is written diagnosed, with each finding reported, rather than as a clean
 success.
+
+**A recognizer token CHAT cannot hold is dropped, and the file says so.** The
+last post-processing pass keeps, of each ASR token, the longest prefix that is
+a legal CHAT word (Whisper's bare `:`, or exotic symbol runs, have none).
+Until 2026-11-03 a token with no legal prefix vanished with only a log line;
+a reader of the transcript could not tell a dropped token from silence. Each
+such token is now named, verbatim and with its time, in a `%com` tier on the
+utterance that lost it:
+
+```text
+*PAR0:	hello world . 0_700
+%com:	batchalign dropped recognizer token ':' at 300-400 ms: not representable in CHAT
+```
+
+An utterance whose every token was dropped has no main tier to write, so the
+same record stands where it would have been, as an `@Comment` prefixed with
+its speaker. The comment is rendered by the record itself, so the file, the
+log and the run's `<stem>_dropped_tokens.json` debug artifact (written beside
+`<stem>_language_invalid_words.json` when a debug directory is set) carry the
+same words. A control character, whitespace or the bullet delimiter inside
+the token is written as its code point (`U+0015`) so the comment line stays
+valid CHAT. The output is checked by Chatter's full validation in the build's
+own tests.
 
 **A recording with no recognized words fails; it does not produce an empty
 file.** If the ASR engine returns no words, or post-processing keeps no

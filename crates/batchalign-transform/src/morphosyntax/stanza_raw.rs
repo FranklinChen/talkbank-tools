@@ -2,20 +2,35 @@
 //!
 //! After the CHAT divorce, Python workers return Stanza's native `to_dict()`
 //! output (a `Vec<Vec<serde_json::Value>>`, one sentence of word dicts per
-//! utterance). This module parses that raw output into typed UD structures,
-//! applying the same validation that previously lived in Python.
+//! utterance), already repaired at the worker's repair boundary
+//! (`RepairedSentence`), with every repair reported beside it. This module
+//! parses that raw output into typed UD structures; the admission of each
+//! word (`TryFrom<UdWordAnalysis> for UdWord`) refuses a value the worker
+//! should have repaired rather than repairing it a second time.
+//!
+//! One carve-out, deliberately kept and named: `normalize_word_dict` still
+//! FILLS fields that are absent, `null` or (for the lemma) empty on a word
+//! dict, with the surface form, `X`, `dep` and empty FEATS. For a multi-word
+//! token's range row that is the row's shape (it carries no analysis of its
+//! own). For a syntactic word it is a silent default of the class this module
+//! otherwise refuses; it is unreachable from the worker, whose `UdWord` model
+//! always sends every field, and it is kept for the example harness and for
+//! raw `to_dict()` output fed to this parser directly. Whether such a word
+//! should instead fail the item or be reported as a repair is an open
+//! decision, recorded with the change that deleted the second repair.
 
-use super::{UdResponse, UdSentence, UdWord, validate_and_clean};
+use super::{UdResponse, UdSentence, UdWord};
 
 /// Parse raw Stanza `doc.to_dict()` output into a [`UdResponse`].
 ///
 /// Stanza's `to_dict()` returns a list of sentences, each a list of word dicts.
-/// This function deserializes each word dict into a [`UdWord`], applying
-/// validation and cleanup.
+/// This function deserializes each word dict into a [`UdWord`], which admits
+/// it or refuses it (`UdWordAdmissionError`, surfaced as a word parse error).
 ///
 /// # Errors
 ///
-/// Returns `Err` if a word dict cannot be deserialized into [`UdWord`].
+/// Returns `Err` if a word dict cannot be deserialized into [`UdWord`],
+/// including a word the admission refuses.
 pub fn parse_raw_stanza_output(
     raw_sentences: &[serde_json::Value],
 ) -> Result<UdResponse, StanzaParseError> {
@@ -28,14 +43,12 @@ pub fn parse_raw_stanza_output(
 
         let mut words = Vec::with_capacity(word_dicts.len());
         for (word_idx, raw_word) in word_dicts.iter().enumerate() {
-            let mut word: UdWord = serde_json::from_value(normalize_word_dict(raw_word.clone()))
+            let word: UdWord = serde_json::from_value(normalize_word_dict(raw_word.clone()))
                 .map_err(|e| StanzaParseError::WordParse {
                     sentence_idx: sent_idx,
                     word_idx,
                     source: e,
                 })?;
-
-            validate_and_clean(&mut word);
             words.push(word);
         }
 
@@ -348,38 +361,39 @@ mod tests {
         assert!(resp.sentences[0].words[0].lemma.is_empty());
     }
 
+    /// A padding relation or a punctuation-only lemma the worker did not
+    /// repair is refused as that word's parse error, naming the word, rather
+    /// than repaired here a second time. (Both used to be rewritten in place.)
     #[test]
-    fn parse_raw_stanza_pad_deprel() {
-        let raw = vec![json!([
-            {
-                "id": 1,
-                "text": "hello",
-                "lemma": "hello",
-                "upos": "INTJ",
-                "head": 0,
-                "deprel": "<pad>"
-            }
-        ])];
-
-        let resp = parse_raw_stanza_output(&raw).unwrap();
-        assert_eq!(resp.sentences[0].words[0].deprel, "dep");
-    }
-
-    #[test]
-    fn parse_raw_stanza_bogus_lemma() {
-        let raw = vec![json!([
-            {
-                "id": 1,
-                "text": "hello",
-                "lemma": ".",
-                "upos": "INTJ",
-                "head": 0,
-                "deprel": "root"
-            }
-        ])];
-
-        let resp = parse_raw_stanza_output(&raw).unwrap();
-        assert_eq!(resp.sentences[0].words[0].lemma, "hello");
+    fn parse_raw_stanza_refuses_what_the_worker_should_have_repaired() {
+        for (lemma, deprel, expected) in [
+            ("hello", "<pad>", "is model padding"),
+            (".", "root", "is punctuation only"),
+        ] {
+            let raw = vec![json!([
+                {
+                    "id": 1,
+                    "text": "hello",
+                    "lemma": lemma,
+                    "upos": "INTJ",
+                    "head": 0,
+                    "deprel": deprel
+                }
+            ])];
+            let err = parse_raw_stanza_output(&raw).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                matches!(
+                    err,
+                    StanzaParseError::WordParse {
+                        sentence_idx: 0,
+                        word_idx: 0,
+                        ..
+                    }
+                ) && message.contains(expected),
+                "{message}"
+            );
+        }
     }
 
     #[test]

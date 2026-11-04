@@ -157,7 +157,6 @@ mod tests {
         async fn morphotag_for_compare(
             &self,
             _chat_text: &str,
-            _lang: &LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>

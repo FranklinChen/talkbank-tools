@@ -397,6 +397,30 @@ export interface components {
          */
         DisplayPath: string;
         /**
+         * @description Wire form of `chat_ops::fa::orchestrate::DroppedWordTiming`: a word whose
+         *     timing was thrown away entirely, past the clamp bound, with the extent
+         *     it lost.
+         */
+        DroppedWordTimingTrace: {
+            /**
+             * Format: int64
+             * @description End of the extent that was lost.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the extent that was lost.
+             */
+            start_ms: number;
+            /** @description Which tier this word's dropped timing lived on. */
+            tier: components["schemas"]["WordTierTrace"];
+            /**
+             * @description This word's position among the words visited on its own tier, in
+             *     document order.
+             */
+            word_index: number;
+        };
+        /**
          * @description Why a worker's capability report was refused at admission.
          *
          *     A blank or separator-bearing name and an unknown task key cannot reach this
@@ -993,9 +1017,11 @@ export interface components {
             job_id: components["schemas"]["JobId"];
             /**
              * @description Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
-             *     code-switched pair such as `"eng,spa"`.
+             *     code-switched pair such as `"eng,spa"`. Always written by the server;
+             *     a record without one is malformed and refused at deserialization
+             *     rather than read as English.
              */
-            lang?: components["schemas"]["LanguageSpec"];
+            lang: components["schemas"]["LanguageSpec"];
             last_cancelled_at?: components["schemas"]["MachineTime"] | null;
             /** @description Caller-reported host of the most recent cancel attempt. */
             last_cancelled_host?: string | null;
@@ -1091,9 +1117,11 @@ export interface components {
             job_id: components["schemas"]["JobId"];
             /**
              * @description Job language: a resolved ISO 639-3 code, `"auto"`, `"per-file"`, or a
-             *     code-switched pair such as `"eng,spa"`.
+             *     code-switched pair such as `"eng,spa"`. Always written by the server;
+             *     a record without one is malformed and refused at deserialization
+             *     rather than read as English.
              */
-            lang?: components["schemas"]["LanguageSpec"];
+            lang: components["schemas"]["LanguageSpec"];
             next_eligible_at?: components["schemas"]["MachineTime"] | null;
             /**
              * Format: int64
@@ -1170,8 +1198,17 @@ export interface components {
             /**
              * @description Job language: a 3-letter ISO code, `"auto"` for ASR-driven detection,
              *     `"per-file"`, or a code-switched pair such as `"eng,spa"`.
+             *
+             *     Required. A submission that omits it is refused at deserialization
+             *     (serde names the missing field) rather than run as English: the field
+             *     defaulted to `eng` until 2026-11-03, so a client that forgot it had its
+             *     recording transcribed, or its workers selected, as English with nothing
+             *     said. Every client sends one: the CLI requires `--lang` on the commands
+             *     that take it and writes `per-file` for the rest
+             *     (`cli::args::CommandProfile`), and the dashboard does the same
+             *     (`frontend/src/components/process/jobPlan.ts`).
              */
-            lang?: components["schemas"]["LanguageSpec"];
+            lang: components["schemas"]["LanguageSpec"];
             /** @description Media filenames for the server to resolve from media_roots (transcribe only). */
             media_files?: string[];
             /** @description Key into server's media_mappings config (e.g. "childes-data"). */
@@ -1449,6 +1486,19 @@ export interface components {
             stage: components["schemas"]["OptionalStage"];
         } | {
             /**
+             * @description The first of them, in recording order, at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
+             */
+            first_seams: components["schemas"]["WindowSeamRecord"][];
+            /** @enum {string} */
+            kind: "window_seam_ambiguous";
+            /**
+             * Format: int64
+             * @description How many seams were reconciled by rule, at least one.
+             */
+            seams: number;
+        } | {
+            /**
              * @description The first of those utterances, in transcript order, at most
              *     [`FileOutputDiagnostics::FIRST_FINDINGS`].
              */
@@ -1637,6 +1687,107 @@ export interface components {
          */
         ReleasedCommand: "align" | "transcribe" | "transcribe_s" | "translate" | "morphotag" | "coref" | "utseg" | "benchmark" | "opensmile" | "compare" | "avqi" | "diarize" | "speaker_identify" | "convert";
         /**
+         * @description The finalization rules that can remove a word's measured timing, and
+         *     nothing else: a closed set, so a removal cannot name an effect that moves
+         *     only a bullet (`end_clamped_coverage_only`, `end_clamped_boundary_from_words`)
+         *     or trims a word without dropping it.
+         *
+         *     Each variant carries what a reader needs to find the conflict in the
+         *     transcript: the boundary the utterance collided with and the line that
+         *     supplied it. The full effect, with both utterances' ordinals and
+         *     speakers, stays in [`FaTimelineTrace::timing_decisions`].
+         */
+        RemovalEffectTrace: {
+            /** @enum {string} */
+            kind: "start_regression_stripped";
+            /** @description Index into `ChatFile.lines` of the utterance that supplied it. */
+            preceding_line_idx: number;
+            /** @description Speaker on that line. */
+            preceding_speaker: string;
+            /**
+             * Format: int64
+             * @description The greatest preceding start, which this one fell below.
+             */
+            preceding_start_ms: number;
+            /**
+             * Format: int64
+             * @description The utterance's own measured start, the one that regressed.
+             */
+            utterance_start_ms: number;
+        } | {
+            /** @enum {string} */
+            kind: "start_regression_raised";
+            /** @description Index into `ChatFile.lines` of the utterance that supplied it. */
+            preceding_line_idx: number;
+            /** @description Speaker on that line. */
+            preceding_speaker: string;
+            /**
+             * Format: int64
+             * @description The greatest preceding start: the utterance's new start.
+             */
+            preceding_start_ms: number;
+            /**
+             * Format: int64
+             * @description The utterance's own measured start, the one that regressed.
+             */
+            utterance_start_ms: number;
+            /**
+             * @description The words cut to begin at the new start, with what they lost:
+             *     carried here so the account can say by how much the first kept
+             *     word was trimmed beside the words that were dropped.
+             */
+            words_trimmed: components["schemas"]["TrimmedWordTimingTrace"][];
+        } | {
+            /** @enum {string} */
+            kind: "zero_duration_clamp_stripped";
+            /** @description Index into `ChatFile.lines` of the utterance that supplied it. */
+            next_line_idx: number;
+            /**
+             * Format: int64
+             * @description The next same-speaker start, at or before `utterance_start_ms`.
+             */
+            next_start_ms: number;
+            /**
+             * Format: int64
+             * @description The utterance's own measured start.
+             */
+            utterance_start_ms: number;
+        } | {
+            /**
+             * Format: int64
+             * @description The next same-speaker start, now this utterance's end.
+             */
+            bound_ms: number;
+            /** @enum {string} */
+            kind: "end_clamped_interleaved_words";
+            /** @description Index into `ChatFile.lines` of the utterance that supplied it. */
+            next_line_idx: number;
+        } | {
+            /**
+             * Format: int64
+             * @description The kept boundary it could not fit beside.
+             */
+            kept_boundary_ms: number;
+            /** @description Index into `ChatFile.lines` of the kept utterance. */
+            kept_line_idx: number;
+            /** @description Speaker on the kept utterance. */
+            kept_speaker: string;
+            /** @enum {string} */
+            kind: "yielded_to_kept_bullet_stripped";
+        } | {
+            /**
+             * Format: int64
+             * @description The kept end the start moved to.
+             */
+            kept_end_ms: number;
+            /** @description Index into `ChatFile.lines` of the kept utterance. */
+            kept_line_idx: number;
+            /** @description Speaker on the kept utterance. */
+            kept_speaker: string;
+            /** @enum {string} */
+            kind: "yielded_to_kept_end_leading_words_dropped";
+        };
+        /**
          * @description A path relative to a data repo root (e.g. `"French/Newcastle/Photos/13"`).
          *
          *     Valid on any machine that has the repo cloned, but must be combined
@@ -1819,6 +1970,42 @@ export interface components {
             /** @description Used memory in MB (`total - available`). */
             used_mb: components["schemas"]["MemoryMb"];
         };
+        /**
+         * @description Wire form of `chat_ops::fa::orchestrate::TrimmedWordTiming`: a word a
+         *     clamp cut to a shorter positive extent, with the extent it had and the
+         *     extent it kept (schema 10). The word still carries `start_ms..end_ms` in
+         *     the written file; the record exists so a reader can see what was cut
+         *     without diffing two files.
+         */
+        TrimmedWordTimingTrace: {
+            /**
+             * Format: int64
+             * @description End of the extent it kept.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description End of the extent the word had before the cut.
+             */
+            measured_end_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the extent the word had before the cut.
+             */
+            measured_start_ms: number;
+            /**
+             * Format: int64
+             * @description Start of the extent it kept.
+             */
+            start_ms: number;
+            /** @description Which tier this word's timing lives on. */
+            tier: components["schemas"]["WordTierTrace"];
+            /**
+             * @description This word's position among the words visited on its own tier, in
+             *     document order.
+             */
+            word_index: number;
+        };
         /** @description Why an utterance's words have no timing: the causes this build writes. */
         UntimedCauseRecord: {
             /** @enum {string} */
@@ -1853,6 +2040,24 @@ export interface components {
             unrequested: number;
         } | {
             /** @enum {string} */
+            kind: "removed";
+            /**
+             * @description Every finalization effect that removed timing from this
+             *     utterance, in the order the run applied them; at least one, each
+             *     with at least one interval.
+             */
+            removals: components["schemas"]["WordTimingRemovalTrace"][];
+        } | {
+            /** @enum {string} */
+            kind: "needs_recording";
+            /**
+             * @description Every finalization effect that removed the retained timing, in
+             *     the order the run applied them; at least one, each with at least
+             *     one interval.
+             */
+            removals: components["schemas"]["WordTimingRemovalTrace"][];
+        } | {
+            /** @enum {string} */
             kind: "unrecorded";
         };
         /** @description One utterance forced alignment left with untimed words. */
@@ -1880,6 +2085,61 @@ export interface components {
          * @enum {string}
          */
         UtrPass: "initial" | "fallback";
+        /**
+         * @description One window seam the reconciler settled by rule, as the job reports it.
+         *
+         *     Locates the utterance that keeps the copy the way every other first-N
+         *     record does: its position among the written utterances and its main tier
+         *     as written, so a reader of the job finds the `%com` the transcript carries
+         *     at the same place.
+         */
+        WindowSeamRecord: components["schemas"]["StoredUtteranceLocation"] & {
+            /**
+             * Format: int64
+             * @description The decode window whose copy was dropped, counting from 0.
+             */
+            dropped_from_window: number;
+            /**
+             * Format: int64
+             * @description Where the seam is in the recording, in milliseconds.
+             */
+            seam_ms: number;
+            /** @description The repeated text, as the recognizer emitted it. */
+            text: string;
+        };
+        /**
+         * @description Wire form of `chat_ops::fa::WordTier`: which representation a word's
+         *     timing lived on. Spelled `main_tier` / `wor` on the wire, as the former
+         *     string field was, so no artifact changes shape; the enum is what lets a
+         *     reader match on it without comparing strings.
+         * @enum {string}
+         */
+        WordTierTrace: "main_tier" | "wor";
+        /**
+         * @description One finalization effect's removal of measured word timing from one
+         *     utterance: which rule removed it, and every interval it removed.
+         *
+         *     This is the cause the completion account gives a word the run itself
+         *     untimed ([`crate::api::UntimedCauseRecord::Removed`]), so it is a wire
+         *     record: it is stored in the file's diagnostics and shown in the report.
+         *     Built only by [`FaTimingDecisionTrace::word_timing_removal`], from the
+         *     effect the finalizer recorded at the moment it removed the timing, and
+         *     only when that effect removed at least one measured interval, so a
+         *     record never says "removed" about an utterance that had no word timing
+         *     to lose.
+         */
+        WordTimingRemovalTrace: {
+            /**
+             * @description The finalization rule that removed the timing, with the boundary it
+             *     enforced.
+             */
+            effect: components["schemas"]["RemovalEffectTrace"];
+            /**
+             * @description The measured word intervals it removed, in word order within each
+             *     tier, main tier first; at least one.
+             */
+            measured: components["schemas"]["DroppedWordTimingTrace"][];
+        };
         /** @description What the server decided about one worker key's latest capability report. */
         WorkerCapabilityAdmission: {
             /** @description Admitted or refused. */

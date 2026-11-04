@@ -60,9 +60,13 @@ pub enum CliError {
         failure: talkbank_model::InternalFailure,
     },
 
-    /// ASR backend/count admission failed before inference. Exit code 2.
+    /// ASR backend admission failed before inference. Exit code 2.
     #[error(transparent)]
     AsrPlan(#[from] crate::transcribe::TranscribeAsrPlanError),
+    /// Speaker count or separation admission failed before inference. Exit
+    /// code 2.
+    #[error(transparent)]
+    SpeakerPlan(#[from] crate::transcribe::SpeakerPlanError),
     /// No input files or directories were provided on the command line or via
     /// `--file-list`. Triggers before any server communication.
     /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
@@ -113,6 +117,22 @@ pub enum CliError {
         first: PathBuf,
         /// Second source.
         second: PathBuf,
+    },
+
+    /// A generated result would replace a file that already exists beside its
+    /// source, and nothing authorized that. Refused before submission, so no
+    /// provider is called and no model runs for a file that will not be
+    /// written. Exit code 2.
+    #[error(
+        "{destination} already exists; nothing was submitted. Pass --overwrite to replace it, or \
+         -o DIR to write the result for {input} under DIR"
+    )]
+    ExistingOutput {
+        /// The planned destination that is already a file.
+        destination: PathBuf,
+        /// The input whose result would have gone there. (Not `source`:
+        /// thiserror reads a field of that name as the error's cause.)
+        input: PathBuf,
     },
 
     /// Distinct artifacts cannot share a write destination. Exit code 2.
@@ -192,6 +212,14 @@ pub enum CliError {
     /// Exit code: [`EXIT_CONFIG`](Self::EXIT_CONFIG) (3).
     #[error("daemon failed to start")]
     DaemonStartFailed,
+
+    /// The invocation passed `--workers` or `--timeout`, and the server it
+    /// would have used runs other values (or does not record its own), so the
+    /// request cannot be honoured. Nothing was submitted; the message names
+    /// both runtimes and the two ways out.
+    /// Exit code: [`EXIT_USAGE`](Self::EXIT_USAGE) (2).
+    #[error(transparent)]
+    DaemonRuntime(#[from] crate::cli::daemon::RuntimeRefusal),
 
     /// The CLI exhausted its retry budget while polling for job completion.
     /// This usually indicates the server crashed or became unresponsive
@@ -433,8 +461,11 @@ impl CliError {
             | Self::FileListEntryMissing { .. }
             | Self::InvalidArgument(_)
             | Self::InputNameCollision { .. }
+            | Self::ExistingOutput { .. }
             | Self::OutputCollision { .. }
             | Self::AsrPlan(_)
+            | Self::SpeakerPlan(_)
+            | Self::DaemonRuntime(_)
             | Self::PathTraversal(_) => Self::EXIT_USAGE,
             Self::Config(_) | Self::DaemonStartFailed => Self::EXIT_CONFIG,
             Self::ServerUnreachable { .. } | Self::Http(_) => Self::EXIT_NETWORK,

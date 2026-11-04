@@ -618,11 +618,12 @@ sequenceDiagram
    surface with `capability::command_supported`: a command is advertised when
    the worker supports its primary infer task, whether or not the model behind
    it has loaded. Engine names are not consulted. At dispatch the same step
-   runs again on a post-load report, and the forced-alignment dispatch arm
-   (only `align`, whose cache rows are namespaced by the FA engine)
-   additionally reads the FA engine from that report with
-   `FaCacheNamespace::from_loaded`, refusing a job whose worker still names no
-   FA engine after the load.
+   runs again on a post-load report. For `align` (whose cache rows are
+   namespaced by the FA engine) it runs per file language inside the FA
+   dispatch, since align is per-file and its worker is keyed by the language
+   each file declares, and the gate additionally reads the FA engine from that
+   report with `FaCacheNamespace::from_loaded`, failing every file of a
+   language whose worker still names no FA engine after the load.
 7. The `/health` endpoint advertises the validated capability set once it is
    known. The CLI checks this before submitting jobs, if a required command is
    missing, it errors immediately rather than queueing a job that will fail.

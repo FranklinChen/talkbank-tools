@@ -69,8 +69,6 @@ struct BenchmarkFileContext<'a> {
     planned_units: &'a HashMap<String, BenchmarkWorkUnit>,
     /// Whether output should pass through merge-abbrev before persistence.
     should_merge_abbrev: bool,
-    /// The one language the job is scored in, settled by the plan.
-    lang: &'a crate::api::LanguageCode3,
 }
 
 /// Dispatch benchmark through the Rust-owned benchmark pipeline.
@@ -85,7 +83,6 @@ pub(crate) async fn dispatch_benchmark_infer(
         base_options,
         mwt,
         should_merge_abbrev,
-        lang,
     } = plan;
     let planned_units: Arc<HashMap<String, BenchmarkWorkUnit>> = {
         let sink = host.sink().clone();
@@ -146,7 +143,6 @@ pub(crate) async fn dispatch_benchmark_infer(
         let mwt = mwt.clone();
         let planned_units = planned_units.clone();
         let filename = file.filename.clone();
-        let lang = lang.clone();
 
         let task: BenchmarkFileFuture = Box::pin(async move {
             let _permit = permit;
@@ -158,7 +154,6 @@ pub(crate) async fn dispatch_benchmark_infer(
                 mwt: &mwt,
                 planned_units: planned_units.as_ref(),
                 should_merge_abbrev,
-                lang: &lang,
             };
             process_one_benchmark_file(&file, &mut opts, context).await
         });
@@ -201,7 +196,6 @@ async fn process_one_benchmark_file(
         mwt,
         planned_units,
         should_merge_abbrev,
-        lang,
     } = context;
     let job_id = &job.identity.job_id;
     let file_index = file.file_index;
@@ -301,7 +295,6 @@ async fn process_one_benchmark_file(
             process_benchmark(BenchmarkRequest {
                 audio_path: &audio_path,
                 reference: reference.clone(),
-                lang,
                 services,
                 transcribe_options: opts,
                 mwt,

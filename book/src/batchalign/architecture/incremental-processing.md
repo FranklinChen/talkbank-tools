@@ -1,7 +1,7 @@
 # Incremental Processing
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-03 23:37 EST
 
 Incremental processing allows batchalign to reprocess only the utterances that
 changed after a user edits a CHAT file, preserving cached dependent tiers
@@ -186,14 +186,21 @@ the file contains edits elsewhere.
 
 ### Layer 3: Dispatch Integration (`runner/dispatch/`)
 
-The dispatch layer reads optional `before_paths` from the job. Active alignment
-admits a declared prior once before media preparation or UTR, retains it across
-retries, and refuses missing or invalid declared input rather than silently
-falling back. A declared no-op does not consume an unused optional prior.
+The dispatch layer reads optional `before_paths` from the job. The route is
+decided first (`AlignRoute::decide`); on the `NeedsAudio` route alone, active
+alignment admits the declared prior once (`ActiveAlignment::with_prior`),
+before media preparation or UTR, retains it across retries, and refuses
+missing or invalid declared input rather than silently falling back. A
+declared no-op and a complete-`%wor` file finish on `WithoutRecording` and
+never read the prior: since 2026-11-03 a `--before` beside a file whose
+`%wor` is already complete refreshes that file from its own `%wor` rather
+than aligning it against the prior, and its stamp carries no `incremental`
+(the stamp says `incremental` only on a run that aligned against a prior).
 
 ```text
-source parse → source-bound working disposition
-active disposition + optional admitted prior → attempt
+source parse → source-bound working disposition → AlignRoute::decide
+WithoutRecording → pass-through or refresh_from_complete_wor (no prior read)
+NeedsAudio + optional admitted prior → attempt
 attempt + prior → process_fa_incremental
 attempt without prior → run_fa_from_ast
 processed structure → complete construction admission → output

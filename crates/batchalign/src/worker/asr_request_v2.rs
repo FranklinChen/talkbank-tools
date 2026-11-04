@@ -80,8 +80,10 @@ pub struct AsrBuildInputV2<'a> {
     pub ids: &'a PreparedAsrRequestIdsV2,
     /// Source media; the backend determines its transport.
     pub audio_path: &'a Path,
-    /// Expected count, used only if the backend offers integrated separation.
-    pub expected_speakers: crate::api::NumSpeakers,
+    /// Whether the provider must separate speakers, and into how many. Derived
+    /// once by the speaker plan from the count and the backend's integrated
+    /// diarization; carried, not re-derived, here.
+    pub diarization: ProviderDiarizationV2,
     /// Worker-runtime language requested by the Rust control plane.
     pub lang: &'a WorkerLanguage,
     /// Concrete V2 ASR backend selected by Rust.
@@ -180,10 +182,7 @@ pub async fn build_asr_request_v2(
             (
                 AsrInputV2::ProviderMedia(ProviderMediaInputV2 {
                     media_path: media_path.to_string_lossy().as_ref().into(),
-                    diarization: ProviderDiarizationV2::for_backend(
-                        input.backend,
-                        input.expected_speakers,
-                    ),
+                    diarization: input.diarization,
                 }),
                 Vec::new(),
                 decode_budget_seconds,
@@ -260,7 +259,10 @@ mod tests {
                 AsrBuildInputV2 {
                     ids: &ids,
                     audio_path: &tempdir.path().join("missing.wav"),
-                    expected_speakers: crate::api::NumSpeakers(2),
+                    diarization: ProviderDiarizationV2::for_backend(
+                        backend,
+                        crate::api::NumSpeakers(2),
+                    ),
                     lang: &lang,
                     backend,
                     models: &models,
@@ -303,7 +305,10 @@ mod tests {
                 AsrBuildInputV2 {
                     ids: &ids,
                     audio_path: &media_path,
-                    expected_speakers: crate::api::NumSpeakers(2),
+                    diarization: ProviderDiarizationV2::for_backend(
+                        backend,
+                        crate::api::NumSpeakers(2),
+                    ),
                     lang: &lang,
                     backend,
                     models: &models,

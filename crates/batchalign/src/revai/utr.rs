@@ -15,6 +15,7 @@ use super::{CompletedRevAsrEvidence, extract_timed_words};
 /// Project provider evidence into the normalized response consumed by UTR.
 pub(crate) fn rev_evidence_to_utr_asr_response(evidence: &CompletedRevAsrEvidence) -> AsrResponse {
     AsrResponse {
+        seam_ambiguities: Vec::new(),
         tokens: extract_timed_words(evidence.transcript_evidence().transcript())
             .into_iter()
             .map(|word| AsrToken {

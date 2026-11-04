@@ -33,7 +33,15 @@ pub struct JobSubmission {
     pub command: ReleasedCommand,
     /// Job language: a 3-letter ISO code, `"auto"` for ASR-driven detection,
     /// `"per-file"`, or a code-switched pair such as `"eng,spa"`.
-    #[serde(default = "default_lang")]
+    ///
+    /// Required. A submission that omits it is refused at deserialization
+    /// (serde names the missing field) rather than run as English: the field
+    /// defaulted to `eng` until 2026-11-03, so a client that forgot it had its
+    /// recording transcribed, or its workers selected, as English with nothing
+    /// said. Every client sends one: the CLI requires `--lang` on the commands
+    /// that take it and writes `per-file` for the rest
+    /// (`cli::args::CommandProfile`), and the dashboard does the same
+    /// (`frontend/src/components/process/jobPlan.ts`).
     pub lang: LanguageSpec,
     /// Number of speakers.
     #[serde(default = "default_num_speakers")]
@@ -87,10 +95,6 @@ pub struct JobSubmission {
     /// selects fresh processing for that source only; it never shifts later priors.
     #[serde(default)]
     pub before_paths: Vec<Option<batchalign_types::paths::ClientPath>>,
-}
-
-pub(crate) fn default_lang() -> LanguageSpec {
-    LanguageSpec::Resolved(LanguageCode3::eng())
 }
 
 pub(crate) fn default_num_speakers() -> NumSpeakers {
@@ -150,43 +154,35 @@ impl JobSubmission {
         if let CommandOptions::Transcribe(options) | CommandOptions::TranscribeS(options) =
             &self.options
         {
-            if options.auto_speakers && options.effective_asr_engine() != AsrEngineName::RevAi {
-                return Err(ValidationError(
-                    "automatic speaker counts currently require the Rev.AI ASR engine".into(),
-                ));
-            }
-            if !options.auto_speakers && self.num_speakers.0 == 0 {
-                return Err(ValidationError(
-                    "expected speaker count must be positive; use auto_speakers for inference"
-                        .into(),
-                ));
-            }
-            // Policy: a diarization speaker count is
-            // either exactly N (N at least 2) or automatic, for every diarizer.
-            //
-            // Refused rather than quietly treated as automatic. Asking to
-            // SEPARATE speakers while asserting the recording has one is a
-            // contradiction, not a request for detection, and silently
-            // detecting would do something other than what was asked. What it
-            // used to do was obey: the count reached the diarizer, which
-            // returned one track, which is why `--diarization enabled` runs
-            // came back with a single PAR0 and the two ml_golden
-            // "surfaces multiple speakers" tests failed.
-            if options.diarize && !options.auto_speakers && self.num_speakers.0 == 1 {
-                return Err(ValidationError(
-                    "diarization was requested with a speaker count of 1, which asks a \
-                     diarizer to separate speakers in a recording asserted to have one. \
-                     Pass the real count (2 or more); or omit diarization, for a \
-                     single-speaker recording; or pass auto_speakers to have the count \
-                     inferred, where the ASR engine supports it."
-                        .into(),
-                ));
-            }
+            // The speaker plan's own admission, the same one dispatch applies
+            // to a persisted job: the count must be one a speaker engine can
+            // take, a dedicated diarizer is not asked to separate a recording
+            // asserted to hold one speaker, and an automatic count is refused
+            // only by an engine that must be given one (the recognizer alone
+            // used to decide this, so `--auto-speakers` was refused for every
+            // non-Rev recognizer even when only the diarizer needed the
+            // count). Run here so the operator hears it before the job exists.
+            let recognizer =
+                crate::transcribe::AsrBackend::try_from_engine(&options.effective_asr_engine())
+                    .map_err(|error| ValidationError(error.to_string()))?;
+            let count =
+                crate::transcribe::SpeakerCount::admit(options.auto_speakers, self.num_speakers)
+                    .map_err(|error| ValidationError(error.to_string()))?;
+            crate::transcribe::SpeakerPlan::admit(
+                count,
+                crate::transcribe::SpeakerSeparation::from_request(
+                    options.diarize,
+                    options.common.engine_overrides.speaker,
+                ),
+                Some(recognizer),
+            )
+            .map_err(|error| ValidationError(error.to_string()))?;
         }
 
-        // Validate the (command, lang) pairing is a legal one. Morphotag,
-        // translate, and coref MUST submit `LanguageSpec::PerFile`; every
-        // other processing command MUST NOT. This boundary check keeps
+        // Validate the (command, lang) pairing is a legal one. A per-file
+        // command (`dispatch_language::language_source`: morphotag, translate,
+        // coref, compare, convert, align) MUST submit `LanguageSpec::PerFile`;
+        // every other processing command MUST NOT. This boundary check keeps
         // pipeline code from ever observing an invalid combination, and
         // makes the dashboard / job record show honest values.
         let language = self.validate_lang_command_pairing()?;
@@ -298,17 +294,18 @@ impl JobSubmission {
     /// 400, Whisper wrong-language transcription, Stanza model-not-found).
     /// Reject (command, lang) combinations that would be lies.
     ///
-    /// `LanguageSpec::PerFile` is the unique correct shape for morphotag,
-    /// translate, and coref; they have no `--lang` CLI flag and read
-    /// language per-file from each CHAT file's `@Languages:` header. Any
-    /// other shape on those commands means a placeholder is sneaking
-    /// through (the 2026-05-03 morphotag incident).
+    /// `LanguageSpec::PerFile` is the unique correct shape for the per-file
+    /// commands (`dispatch_language::language_source`: morphotag, translate,
+    /// coref, compare, convert and, since 2026-11-03, align); they have no
+    /// `--lang` CLI flag and read language per-file from each CHAT file's
+    /// `@Languages:` header. Any other shape on those commands means a
+    /// placeholder is sneaking through (the 2026-05-03 morphotag incident).
     ///
     /// Conversely, every other processing command (transcribe,
-    /// transcribe_s, benchmark, align, compare, utseg, opensmile, avqi)
-    /// takes a concrete `--lang` (or `--lang auto` for ASR-detect). Those
-    /// must never carry `PerFile`; if they do, something downstream of
-    /// the CLI built a malformed `JobSubmission`.
+    /// transcribe_s, benchmark, utseg, opensmile, avqi, diarize,
+    /// speaker-identify) takes a concrete `--lang` (or `--lang auto` for
+    /// ASR-detect). Those must never carry `PerFile`; if they do, something
+    /// downstream of the CLI built a malformed `JobSubmission`.
     fn validate_lang_command_pairing(&self) -> Result<PairedLanguage<'_>, ValidationError> {
         use crate::dispatch_language::{CommandLanguageSource, language_source};
         use crate::types::domain::LanguageSpec;
@@ -666,77 +663,64 @@ pub(crate) struct DeclaredLanguages {
     secondary: Vec<DeclaredSecondary>,
 }
 
-/// Why a `@Languages:` header plus a `--lang` fallback yields no primary.
+/// Why a `@Languages:` header yields no primary.
 ///
 /// Two cases and not one, because they are different operator actions: a file
-/// with no header needs one written or a `--lang` passed, while a file whose
-/// first entry is unreadable needs that entry fixed. Rendered by the align
-/// dispatch, which is the only thing that knows the filename.
+/// with no header needs one written, while a file whose first entry is
+/// unreadable needs that entry fixed. Rendered by the align dispatch, which is
+/// the only thing that knows the filename.
+///
+/// There is no fallback to stand in for either. Align used to accept the
+/// job's `--lang` in place of a missing or unreadable primary; align has no
+/// `--lang`, its job language is `per-file`, so the only language a file can
+/// be aligned under is the one it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HeaderLanguageError {
-    /// The header's first entry is not a parseable code and there is no
-    /// `--lang` to stand in for it.
+    /// The header's first entry is not a parseable code.
     UnreadablePrimary {
         /// The entry exactly as the file spells it.
         raw: String,
     },
-    /// There is no `@Languages:` header at all and no `--lang` to stand in.
+    /// There is no `@Languages:` header at all.
     NoHeader,
 }
 
 impl DeclaredLanguages {
-    /// Resolve a whole `@Languages:` header against the job's `--lang`.
+    /// Read a whole `@Languages:` header.
     ///
     /// THE only constructor, and it owns the resolution the align dispatch
     /// used to do at its own call site. That split is what made header ORDER
-    /// decide admission: the caller resolved the primary (falling back to
-    /// `--lang` when the first entry would not parse) and then passed
+    /// decide admission: the caller resolved the primary (falling back to the
+    /// job's `--lang` when the first entry would not parse) and then passed
     /// `skip(1)` of the header as the secondaries, so an unreadable FIRST
     /// entry was dropped on the floor while an unreadable SECOND one refused
     /// the file.
     ///
-    /// Here the fallback replaces only the unreadable entry's ROLE as primary;
-    /// the entry itself stays in the declaration as `Unreadable`, because it
-    /// is still something the file declares and still something the engine
-    /// must be shown to support.
+    /// With no job language to fall back on, an unreadable first entry is
+    /// refused here by name, and every later entry stays in the declaration
+    /// (readable or not) because it is something the file declares and
+    /// something the engine must be shown to support.
     pub(crate) fn from_header<'a>(
         entries: impl IntoIterator<Item = &'a str>,
-        fallback: Option<&LanguageCode3>,
     ) -> Result<Self, HeaderLanguageError> {
         let entries: Vec<&'a str> = entries.into_iter().collect();
         let Some((first, rest)) = entries.split_first() else {
-            return match fallback {
-                Some(code) => Ok(Self {
-                    primary: code.clone(),
-                    secondary: Vec::new(),
-                }),
-                None => Err(HeaderLanguageError::NoHeader),
-            };
+            return Err(HeaderLanguageError::NoHeader);
         };
 
-        let (primary, displaced) = match LanguageCode3::try_new(first) {
-            Ok(code) => (code, None),
-            Err(_) => match fallback {
-                Some(code) => (
-                    code.clone(),
-                    Some(DeclaredSecondary::Unreadable((*first).to_owned())),
-                ),
-                None => {
-                    return Err(HeaderLanguageError::UnreadablePrimary {
-                        raw: (*first).to_owned(),
-                    });
-                }
-            },
-        };
+        let primary =
+            LanguageCode3::try_new(first).map_err(|_| HeaderLanguageError::UnreadablePrimary {
+                raw: (*first).to_owned(),
+            })?;
 
         Ok(Self {
             primary,
-            secondary: displaced
-                .into_iter()
-                .chain(rest.iter().map(|raw| match LanguageCode3::try_new(raw) {
+            secondary: rest
+                .iter()
+                .map(|raw| match LanguageCode3::try_new(raw) {
                     Ok(code) => DeclaredSecondary::Code(code),
                     Err(_) => DeclaredSecondary::Unreadable((*raw).to_owned()),
-                }))
+                })
                 .collect(),
         })
     }
@@ -934,7 +918,10 @@ pub struct ValidationError(pub String);
 /// `UnsupportedLanguageError`.
 ///
 /// Exhaustive over the commands with no catch-all, so a new command states
-/// whether it uses Stanza. `compare` morphotags its main transcript. `utseg`
+/// whether it uses Stanza. `compare` morphotags its main transcript, but per
+/// file from `@Languages:` like `morphotag`, so like `morphotag` it arrives as
+/// `PerFile` and is admitted per file; its arm here is reached by no
+/// submission. `utseg`
 /// runs Stanza only on its constituency route, so it is admitted by the
 /// route: a boundary-model language needs no Stanza, and a language with no
 /// route at all is refused here with the remedy. `transcribe` runs its Stanza
@@ -1044,6 +1031,25 @@ mod tests {
     /// Convenience for the common case: a legal morphotag submission.
     fn morphotag_submission() -> JobSubmission {
         morphotag_submission_with_lang(LanguageSpec::PerFile)
+    }
+
+    /// A `POST /jobs` body that names no language is refused when it is read,
+    /// and the refusal names the field. The field defaulted to `eng` until
+    /// 2026-11-03, so a client that forgot it had its job run as English with
+    /// nothing said; now no `JobSubmission` exists without a language.
+    #[test]
+    fn a_submission_without_a_language_is_refused_by_name() {
+        let mut body = serde_json::to_value(morphotag_submission()).expect("serializes");
+        body.as_object_mut()
+            .expect("a JSON object")
+            .remove("lang")
+            .expect("the serialized submission carries its language");
+        let refusal = serde_json::from_value::<JobSubmission>(body)
+            .expect_err("a submission without a language must not deserialize");
+        assert!(
+            refusal.to_string().contains("lang"),
+            "the refusal must name the missing field: {refusal}"
+        );
     }
 
     #[test]
@@ -1235,10 +1241,13 @@ mod tests {
         }
     }
 
-    fn align_submission(lang: &str, utr_engine: Option<UtrEngine>) -> JobSubmission {
+    /// A legal align submission: align has no `--lang`, so its language is
+    /// `PerFile`. The `lang` parameter exists so a test can build the illegal
+    /// job-level shape and assert that `validate()` refuses it.
+    fn align_submission(lang: LanguageSpec, utr_engine: Option<UtrEngine>) -> JobSubmission {
         JobSubmission {
             command: ReleasedCommand::Align,
-            lang: LanguageSpec::Resolved(LanguageCode3::try_new(lang).expect("test lang")),
+            lang,
             num_speakers: NumSpeakers(1),
             files: vec![],
             media_files: vec![],
@@ -1466,20 +1475,22 @@ mod tests {
         );
     }
 
+    /// RED FIRST: `auto_speakers` was refused for every non-Rev recognizer,
+    /// even with a dedicated diarizer that infers the count. It is admitted
+    /// wherever the speaker engine takes it, and refused, by name, only by a
+    /// recognizer whose integrated diarization must be given the count and
+    /// that is the run's one speaker engine.
     #[test]
-    fn auto_speakers_refuses_unsupported_engine_at_submission() {
+    fn auto_speakers_is_refused_only_where_the_speaker_engine_cannot_infer() {
         let mut submission = transcribe_submission("eng", AsrEngineName::Whisper);
         let CommandOptions::Transcribe(options) = &mut submission.options else {
             panic!("transcribe")
         };
         options.auto_speakers = true;
-        assert!(
-            submission
-                .validate()
-                .expect_err("unsupported automatic count")
-                .to_string()
-                .contains("automatic speaker counts")
-        );
+        options.diarize = true;
+        submission
+            .validate()
+            .expect("a dedicated diarizer infers the count whatever the recognizer");
         let CommandOptions::Transcribe(options) = &mut submission.options else {
             panic!("transcribe")
         };
@@ -1487,6 +1498,27 @@ mod tests {
         submission
             .validate()
             .expect("Rev automatic count is supported");
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("transcribe")
+        };
+        options.asr_engine = AsrEngineName::HkTencent;
+        // Tencent recognizes Chinese variants only; the speaker admission is
+        // what this test is about, so the language is one it serves.
+        submission.lang = LanguageSpec::Resolved(LanguageCode3::yue());
+        submission
+            .validate()
+            .expect("with a dedicated diarizer, Tencent is asked for no separation");
+        let CommandOptions::Transcribe(options) = &mut submission.options else {
+            panic!("transcribe")
+        };
+        options.diarize = false;
+        let message = submission
+            .validate()
+            .expect_err("Tencent alone must be given the count")
+            .to_string();
+        assert!(message.contains("automatic speaker counts"), "{message}");
+        assert!(message.contains("tencent"), "{message}");
+        assert!(message.contains("--diarization enabled"), "{message}");
     }
 
     /// Diarization with a speaker count of one is refused at SUBMISSION.
@@ -1821,12 +1853,30 @@ mod tests {
             .expect("utseg needs no lemmatizer");
     }
 
+    /// Align's UTR engine is checked against each FILE's language once that
+    /// file's timing state is known, never at submission: the submission has
+    /// no language to check it against.
     #[test]
-    fn align_with_unsupported_rev_language_does_not_fail_request_validation() {
-        let submission = align_submission("yue", Some(UtrEngine::RevAi));
+    fn align_with_a_utr_engine_does_not_fail_request_validation() {
+        let submission = align_submission(LanguageSpec::PerFile, Some(UtrEngine::RevAi));
         assert!(
             submission.validate().is_ok(),
-            "align should defer UTR language checks until file timing state is known"
+            "align defers UTR language checks to each file's `@Languages:`"
+        );
+    }
+
+    /// An align job carrying a job-level language is the placeholder the job
+    /// record used to hold (`eng`, until 2026-11-03), and it is refused by name
+    /// at the wire boundary like morphotag's.
+    #[test]
+    fn align_with_a_job_level_language_is_refused_by_name() {
+        let submission = align_submission(LanguageSpec::Resolved(LanguageCode3::eng()), None);
+        let refusal = submission
+            .validate()
+            .expect_err("align has no --lang; a job-level language is a placeholder");
+        assert!(
+            refusal.to_string().contains("'align' has no --lang"),
+            "{refusal}"
         );
     }
 
@@ -1866,12 +1916,7 @@ mod fa_language_support_tests {
 
     /// Only the primary declared, the ordinary case.
     fn only(code: &str) -> DeclaredLanguages {
-        DeclaredLanguages::from_header([code], None).expect("a readable header")
-    }
-
-    /// `--lang eng`, the fallback the align dispatch passes.
-    fn eng_fallback() -> LanguageCode3 {
-        LanguageCode3::try_new("eng").expect("a valid ISO-639-3 code")
+        DeclaredLanguages::from_header([code]).expect("a readable header")
     }
 
     /// Run the admission for one engine.
@@ -1902,64 +1947,59 @@ mod fa_language_support_tests {
         )
     }
 
-    /// An unparseable FIRST entry still decides admission.
+    /// An unparseable entry decides admission wherever it sits.
     ///
-    /// THE CALLER'S resolution, which is why it is exercised through
-    /// `from_header` rather than through a pre-resolved primary: the align
-    /// dispatch used to resolve the primary itself, falling back to `--lang`
-    /// when the first header entry would not parse, and then hand `skip(1)` of
-    /// the header over as the secondaries. The entry it could not read
-    /// vanished. `@Languages: not-a-code, eng` with `--lang eng` was ADMITTED
-    /// while `@Languages: eng, not-a-code` was refused, for identical content,
-    /// which is the order-decides-admission defect this type exists to remove.
+    /// The align dispatch used to resolve the primary itself, falling back to
+    /// the job's `--lang` when the first header entry would not parse, and
+    /// then hand `skip(1)` of the header over as the secondaries. The entry it
+    /// could not read vanished: `@Languages: not-a-code, eng` with `--lang
+    /// eng` was ADMITTED while `@Languages: eng, not-a-code` was refused, for
+    /// identical content. Now an unreadable FIRST entry is refused by the
+    /// header reader, by name, and an unreadable SECOND entry is refused by
+    /// engine admission, by name; neither is dropped.
     #[test]
-    fn an_unreadable_first_entry_still_decides_admission() {
-        let fallback = eng_fallback();
-        let unreadable_first =
-            DeclaredLanguages::from_header(["not-a-code", "eng"], Some(&fallback))
-                .expect("--lang supplies the primary");
-        let unreadable_second =
-            DeclaredLanguages::from_header(["eng", "not-a-code"], Some(&fallback))
-                .expect("the header supplies the primary");
-        let first = admit(unreadable_first, FaEngineName::Qwen3)
-            .expect_err("an unreadable entry cannot be shown supported wherever it sits");
+    fn an_unreadable_entry_is_refused_by_name_wherever_it_sits() {
+        let Err(HeaderLanguageError::UnreadablePrimary { raw }) =
+            DeclaredLanguages::from_header(["not-a-code", "eng"])
+        else {
+            panic!("an unreadable primary has nothing to stand in for it");
+        };
+        assert_eq!(raw, "not-a-code");
+
+        let unreadable_second = DeclaredLanguages::from_header(["eng", "not-a-code"])
+            .expect("the header supplies the primary");
         let second = admit(unreadable_second, FaEngineName::Qwen3)
             .expect_err("an unreadable entry cannot be shown supported wherever it sits");
-        assert_eq!(first.to_string(), second.to_string());
         assert!(
-            first.to_string().contains("not-a-code"),
-            "the refusal must quote the entry it could not read: {first}"
+            second.to_string().contains("not-a-code"),
+            "the refusal must quote the entry it could not read: {second}"
         );
     }
 
     /// The primary the caller goes on to use is the one the declaration holds.
     ///
     /// There is no second resolution to disagree with: `file_lang` is read off
-    /// the same value that was validated, so a fallback used for the primary
-    /// cannot silently differ from the primary that was checked.
+    /// the same value that was validated.
     #[test]
     fn the_resolved_primary_is_the_one_the_declaration_carries() {
-        let fallback = eng_fallback();
-        let from_header =
-            DeclaredLanguages::from_header(["yue", "eng"], Some(&fallback)).expect("readable");
+        let from_header = DeclaredLanguages::from_header(["yue", "eng"]).expect("readable");
         assert_eq!(
             from_header.primary(),
             &LanguageCode3::try_new("yue").unwrap()
         );
-        let from_fallback =
-            DeclaredLanguages::from_header(Vec::<&str>::new(), Some(&fallback)).expect("readable");
-        assert_eq!(from_fallback.primary(), &fallback);
     }
 
-    /// With no header and no `--lang`, there is nothing to resolve from.
+    /// A missing header and an unreadable primary are different operator
+    /// actions, so they are refused apart. Neither has a fallback: align has
+    /// no `--lang` to stand in for the file's own declaration.
     #[test]
-    fn a_header_and_fallback_that_are_both_absent_are_refused_apart() {
+    fn a_missing_header_and_an_unreadable_primary_are_refused_apart() {
         assert!(matches!(
-            DeclaredLanguages::from_header(Vec::<&str>::new(), None),
+            DeclaredLanguages::from_header(Vec::<&str>::new()),
             Err(HeaderLanguageError::NoHeader)
         ));
         assert!(matches!(
-            DeclaredLanguages::from_header(["not-a-code"], None),
+            DeclaredLanguages::from_header(["not-a-code"]),
             Err(HeaderLanguageError::UnreadablePrimary { .. })
         ));
     }
@@ -2056,7 +2096,7 @@ mod fa_language_support_tests {
     /// content written `deu, eng` was refused.
     #[test]
     fn a_secondary_declared_language_is_admitted_on_its_own_merits() {
-        let declared = DeclaredLanguages::from_header(["eng", "deu"], None).expect("readable");
+        let declared = DeclaredLanguages::from_header(["eng", "deu"]).expect("readable");
         let message = admit(declared, FaEngineName::Qwen3)
             .expect_err("German is unsupported wherever it is declared")
             .to_string();
@@ -2078,14 +2118,14 @@ mod fa_language_support_tests {
     #[test]
     fn the_proof_carries_the_headers_own_primary_in_either_order() {
         let yue_first = admit(
-            DeclaredLanguages::from_header(["yue", "eng"], None).expect("readable"),
+            DeclaredLanguages::from_header(["yue", "eng"]).expect("readable"),
             FaEngineName::Qwen3,
         )
         .expect("both codes are mapped");
         assert_eq!(yue_first.primary_language().as_ref(), "yue");
 
         let eng_first = admit(
-            DeclaredLanguages::from_header(["eng", "yue"], None).expect("readable"),
+            DeclaredLanguages::from_header(["eng", "yue"]).expect("readable"),
             FaEngineName::Qwen3,
         )
         .expect("both codes are mapped");
@@ -2112,8 +2152,8 @@ mod fa_language_support_tests {
     /// Header ORDER is not what decides admission.
     #[test]
     fn header_order_does_not_decide_admission() {
-        let eng_first = DeclaredLanguages::from_header(["eng", "deu"], None).expect("readable");
-        let deu_first = DeclaredLanguages::from_header(["deu", "eng"], None).expect("readable");
+        let eng_first = DeclaredLanguages::from_header(["eng", "deu"]).expect("readable");
+        let deu_first = DeclaredLanguages::from_header(["deu", "eng"]).expect("readable");
         assert!(admit(eng_first, FaEngineName::Qwen3).is_err());
         assert!(admit(deu_first, FaEngineName::Qwen3).is_err());
     }
@@ -2122,8 +2162,7 @@ mod fa_language_support_tests {
     /// secondary it cannot parse cannot make it wrong.
     #[test]
     fn a_language_general_engine_ignores_an_unparseable_secondary() {
-        let declared =
-            DeclaredLanguages::from_header(["eng", "not-a-code"], None).expect("readable");
+        let declared = DeclaredLanguages::from_header(["eng", "not-a-code"]).expect("readable");
         assert!(admit(declared.clone(), FaEngineName::Wave2Vec).is_ok());
         let message = admit(declared, FaEngineName::Qwen3)
             .expect_err("Qwen3 needs a label for every declared language")

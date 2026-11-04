@@ -158,6 +158,7 @@ mod tests {
     #[test]
     fn test_convert_asr_response_groups_by_speaker() {
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "hello".into(),
@@ -197,6 +198,7 @@ mod tests {
     #[test]
     fn test_convert_asr_response_handles_speaker_change_and_back() {
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "a".into(),
@@ -235,6 +237,7 @@ mod tests {
     #[test]
     fn test_convert_asr_response_empty() {
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![],
             lang: LanguageCode3::eng(),
             model: None,
@@ -247,6 +250,7 @@ mod tests {
     #[test]
     fn test_convert_asr_response_no_speaker_defaults_to_zero() {
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![AsrToken {
                 text: "hello".into(),
                 start_s: at(0.0),
@@ -267,6 +271,7 @@ mod tests {
     #[test]
     fn flat_asr_missing_timestamp_is_preserved() {
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![AsrToken {
                 text: "hello".into(),
                 start_s: None,
@@ -300,6 +305,7 @@ mod tests {
     #[test]
     fn test_convert_asr_response_always_uses_speaker_labels() {
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "hello".into(),
@@ -374,6 +380,8 @@ mod tests {
                     asr_postprocess::SynthesisCause::NoMark,
                 ),
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             },
             asr_postprocess::Utterance {
                 speaker: SpeakerIndex(1),
@@ -382,6 +390,8 @@ mod tests {
                     asr_postprocess::SynthesisCause::NoMark,
                 ),
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             },
         ];
         let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
@@ -405,6 +415,8 @@ mod tests {
                 asr_postprocess::SynthesisCause::NoMark,
             ),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }];
         let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
             .into_transcript(&["eng".to_string()], None, false)
@@ -429,6 +441,7 @@ mod tests {
     /// each, with timing and speaker labels. Simulates a short interview.
     fn canned_revai_two_speaker_response() -> AsrResponse {
         AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 // Speaker 0: first turn
                 AsrToken {
@@ -641,6 +654,7 @@ mod tests {
     /// contiguous stream of tokens with timing.
     fn canned_whisper_no_speaker_response() -> AsrResponse {
         AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "the".into(),
@@ -991,6 +1005,7 @@ mod tests {
             confidence: Some(0.9),
         };
         let response = AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 token("we", 0.0, "0"),
                 token("took", 0.3, "0"),

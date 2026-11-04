@@ -207,7 +207,7 @@ still produces the document the run wrote. `post-chat` consumes the
 `_pre_utseg.cha` dump, the post-CHAT sidecar and the `_post_utseg.cha` dump;
 `pre-asr` consumes the retained `*_asr_response.json`, the pre-CHAT sidecar and
 the `_post_asr.cha` dump, and rebuilds CHAT through transcribe's own functions
-(`prepare_asr_chunks`, `build_prechat_utseg_items`, `apply_prechat_assignments`)
+(`prepare_asr_chunks`, `build_prechat_utseg_items`, `apply_prechat_segmentations`)
 so the replay cannot drift from the code it checks. Each mode names the phase it
 reproduces when it admits the artifact, so a pass cannot be replayed against the
 other's evidence.

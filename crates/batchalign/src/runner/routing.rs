@@ -9,33 +9,33 @@
 //! Whether a command can run at all is decided by
 //! [`crate::capability::command_supported`], the same rule that decides what
 //! `/health` advertises, so a command is never advertised and then refused
-//! here for a reason advertisement did not check. The forced-alignment arm
-//! additionally reads the FA engine the loaded worker reported
-//! ([`FaCacheNamespace::from_loaded`]), because every FA cache row is
-//! namespaced by it. Every refusal in this module goes through [`fail_job`].
+//! here for a reason advertisement did not check. Forced alignment is probed
+//! per file language instead, inside its dispatch
+//! ([`super::dispatch::FaWorkerAdmission`]): align is a per-file command, and
+//! the worker a file reaches is keyed by the language that file declares, so
+//! there is no job-level worker to read the FA engine (the cache namespace)
+//! off. Every refusal in this module goes through [`fail_job`].
 
 use std::sync::Arc;
 
 use tracing::{info, warn};
 
 use crate::api::{NumWorkers, ReleasedCommand};
-use crate::capability::command_supported;
-use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind, command_spec};
+use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
 use crate::dispatch_language::DispatchLanguage;
-use crate::engine_reports::FaCacheNamespace;
 use crate::execution::{
     MorphotagRuntimeOptions, PooledWorkerGateway, dispatch_compare_job, dispatch_coref_job,
     dispatch_morphotag_job, dispatch_translate_job, dispatch_utseg_job,
 };
 use crate::store::RunnerJobSnapshot;
-use crate::worker::pool::{GpuModelPlan, WorkerPool};
+use crate::worker::pool::GpuModelPlan;
 
 use super::context::{DispatchHostContext, JobDispatchRequest, RunnerExecutionContext};
 use super::dispatch::{
     BatchedInferDispatchPlan, BenchmarkDispatchPlan, BenchmarkDispatchRuntime, FaDispatchPlan,
     FaDispatchRuntime, MediaAnalysisDispatchPlan, MediaAnalysisDispatchRuntime,
     TranscribeDispatchPlan, TranscribeDispatchRuntime, dispatch_benchmark_infer, dispatch_fa_infer,
-    dispatch_media_analysis_v2, dispatch_transcribe_infer,
+    dispatch_media_analysis_v2, dispatch_transcribe_infer, pre_scale_workers, probe_command_worker,
 };
 use super::policy::command_requires_chat_infer;
 use super::test_echo::dispatch_test_echo_files;
@@ -93,48 +93,6 @@ pub(super) async fn dispatch_job_with_execution_context(
     let Some(family) = FamilyPlan::build(&job, host, runner_dispatch_kind, all_chat).await else {
         return Ok(());
     };
-    let gpu_models = family.gpu_models();
-
-    // Resolve the admitted report of the exact worker key this command
-    // selects, bootstrapping that worker if the pool has not probed it yet. A
-    // pool-wide first-worker report can advertise task availability, but it
-    // cannot identify the model behind another engine-specific key and must
-    // never namespace that key's cache evidence.
-    //
-    // Capability discovery is language-agnostic: the worker reports its
-    // resources.json, which lists every supported language regardless of which
-    // lang the worker boots with. The job-level `LanguageSpec` is mapped to its
-    // `WorkerLanguage` counterpart (a code-switched pair to its primary
-    // language) and forwarded. The Python bootstrap recognises `auto` and `per-file` as
-    // non-ISO sentinels and skips eager Stanza model load for those, see
-    // `batchalign/worker/_model_loading/bootstrap.py::_load_single_task`.
-    let loaded = match pool
-        .ensure_command_capabilities(
-            command,
-            job.dispatch.lang.to_worker_language(),
-            &job.dispatch.options,
-            &gpu_models,
-        )
-        .await
-    {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            fail_job(
-                &job,
-                host,
-                format!("Failed to resolve selected worker capabilities for '{command}': {error}"),
-            )
-            .await;
-            return Ok(());
-        }
-    };
-    if let Err(unavailable) =
-        command_supported(&command_spec(command).capabilities, loaded.reports())
-    {
-        fail_job(&job, host, format!("cannot run '{command}': {unavailable}")).await;
-        return Ok(());
-    }
-    pre_scale_job_workers(&job, pool, num_workers, &gpu_models).await;
 
     info!(
         job_id = %job.identity.job_id,
@@ -144,9 +102,75 @@ pub(super) async fn dispatch_job_with_execution_context(
         "Dispatching job"
     );
 
+    let family = match family {
+        // Align probes per file language inside its dispatch: each file's
+        // worker is keyed by the language that file declares, and the FA
+        // engine that worker reports namespaces that file's cache rows. The
+        // job itself carries no language to probe on.
+        FamilyPlan::PerFileAudio(plan) => {
+            dispatch_fa_infer(
+                &job,
+                host,
+                FaDispatchRuntime {
+                    pool: pool.clone(),
+                    cache: cache.clone(),
+                    num_workers,
+                },
+                plan,
+            )
+            .await;
+            return Ok(());
+        }
+        FamilyPlan::JobLevel(family) => family,
+    };
+
+    // Probe the exact worker key this command selects, bootstrapping that
+    // worker if the pool has not probed it yet, and apply the availability
+    // rule to its post-load report. A pool-wide first-worker report can
+    // advertise task availability, but it cannot identify the model behind
+    // another engine-specific key and must never namespace that key's cache
+    // evidence.
+    //
+    // Capability discovery is language-agnostic: the worker reports its
+    // resources.json, which lists every supported language regardless of which
+    // lang the worker boots with. The job-level `LanguageSpec` is mapped to its
+    // `WorkerLanguage` counterpart (a code-switched pair to its primary
+    // language) and forwarded; a per-file text command forwards the `per-file`
+    // sentinel, which the Python bootstrap recognises, with `auto`, as a
+    // non-ISO value and skips eager Stanza model load for, see
+    // `batchalign/worker/_model_loading/bootstrap.py::_load_single_task`.
+    let gpu_models = family.gpu_models();
+    if let Err(refusal) = probe_command_worker(
+        pool,
+        command,
+        job.dispatch.lang.to_worker_language(),
+        &job.dispatch.options,
+        &gpu_models,
+    )
+    .await
+    {
+        fail_job(&job, host, format!("cannot run '{command}': {refusal}")).await;
+        return Ok(());
+    }
+    // Skipped for per-file text commands (morphotag, translate, coref): they
+    // have no job-level language, and pre-scaling against a placeholder would
+    // spawn a worker no file is dispatched to; their pipelines spawn
+    // per-language workers as they walk the files.
+    if !job.dispatch.lang.is_per_file() {
+        pre_scale_workers(
+            pool,
+            command,
+            job.dispatch.lang.to_worker_language(),
+            num_workers,
+            &job.dispatch.options,
+            &gpu_models,
+        )
+        .await;
+    }
+
     match family {
         // Audio-first commands: they take audio input, not CHAT.
-        FamilyPlan::Transcribe(plan) => {
+        JobLevelFamily::Transcribe(plan) => {
             dispatch_transcribe_infer(
                 &job,
                 host,
@@ -159,7 +183,7 @@ pub(super) async fn dispatch_job_with_execution_context(
             )
             .await;
         }
-        FamilyPlan::Benchmark(plan) => {
+        JobLevelFamily::Benchmark(plan) => {
             dispatch_benchmark_infer(
                 &job,
                 host,
@@ -172,7 +196,7 @@ pub(super) async fn dispatch_job_with_execution_context(
             )
             .await;
         }
-        FamilyPlan::MediaAnalysis(plan) => {
+        JobLevelFamily::MediaAnalysis(plan) => {
             dispatch_media_analysis_v2(
                 &job,
                 host,
@@ -185,7 +209,7 @@ pub(super) async fn dispatch_job_with_execution_context(
             )
             .await;
         }
-        FamilyPlan::SpeakerIdentity => {
+        JobLevelFamily::SpeakerIdentity => {
             crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
                 &job,
                 host,
@@ -193,30 +217,7 @@ pub(super) async fn dispatch_job_with_execution_context(
             )
             .await;
         }
-        // FA cache rows and evidence envelopes are namespaced by the engine the
-        // selected worker reported after FA loaded on it. A worker that still
-        // names no FA engine then is refused: there is nothing honest to
-        // namespace the cache by.
-        FamilyPlan::ForcedAlignment(plan) => match FaCacheNamespace::from_loaded(&loaded) {
-            Ok(cache_namespace) => {
-                dispatch_fa_infer(
-                    &job,
-                    host,
-                    FaDispatchRuntime {
-                        pool: pool.clone(),
-                        cache: cache.clone(),
-                        cache_namespace,
-                        num_workers,
-                    },
-                    plan,
-                )
-                .await;
-            }
-            Err(unavailable) => {
-                fail_job(&job, host, format!("cannot run '{command}': {unavailable}")).await;
-            }
-        },
-        FamilyPlan::BatchedText => {
+        JobLevelFamily::BatchedText => {
             dispatch_batched_text_command(&job, host, execution, num_workers).await?;
         }
     }
@@ -298,16 +299,10 @@ async fn dispatch_batched_text_command(
             )
             .await
         }
-        (DispatchLanguage::Job(job_language), ReleasedCommand::Compare) => {
-            dispatch_compare_job(
-                job,
-                host,
-                &gateway,
-                &plan.mwt,
-                plan.should_merge_abbrev,
-                &job_language,
-            )
-            .await
+        // Compare takes no language either: its internal morphotag of each
+        // main transcript reads that file's `@Languages:` header.
+        (DispatchLanguage::PerFile, ReleasedCommand::Compare) => {
+            dispatch_compare_job(job, host, &gateway, &plan.mwt, plan.should_merge_abbrev).await
         }
         (DispatchLanguage::Job(job_language), ReleasedCommand::Utseg) => {
             // Refuse a language with no segmenter before dispatching, for the
@@ -473,14 +468,32 @@ async fn plan_or_fail_files<Plan>(
 /// One job's dispatch plan, built from its persisted snapshot before any
 /// worker is probed.
 ///
+/// The first level is WHERE the job's worker is probed, so the router cannot
+/// probe a job-level worker for a command that has no job-level language: the
+/// per-file arm carries no `LoadedCapabilities` and the job-level arm cannot
+/// be reached without one.
+enum FamilyPlan {
+    /// Align: audio-bound and per-file in its language too. Each file's worker
+    /// is probed by the language that file declares, inside its dispatch
+    /// ([`super::dispatch::FaWorkerAdmission`]).
+    PerFileAudio(FaDispatchPlan),
+    /// Every other family: one worker probed before any file is dispatched,
+    /// keyed by the job's language, or by the `per-file` sentinel for the
+    /// batched text commands that resolve their language per file (their
+    /// pipelines spawn per-language workers as they walk the files; the probe
+    /// establishes task support).
+    JobLevel(JobLevelFamily),
+}
+
+/// The dispatch families probed once per job.
+///
 /// The variant is the dispatch family; the payload is that family's typed
 /// plan, which owns the engines the job runs and therefore its GPU models.
-enum FamilyPlan {
+enum JobLevelFamily {
     Transcribe(TranscribeDispatchPlan),
     Benchmark(BenchmarkDispatchPlan),
     MediaAnalysis(MediaAnalysisDispatchPlan),
     SpeakerIdentity,
-    ForcedAlignment(FaDispatchPlan),
     BatchedText,
 }
 
@@ -507,16 +520,18 @@ impl FamilyPlan {
                 .await;
                 return None;
             }
-            RunnerDispatchKind::TranscribeAudioInfer => Self::Transcribe(
+            RunnerDispatchKind::TranscribeAudioInfer => Self::JobLevel(JobLevelFamily::Transcribe(
                 plan_or_fail_files(job, host, TranscribeDispatchPlan::from_job).await?,
-            ),
-            RunnerDispatchKind::BenchmarkAudioInfer => Self::Benchmark(
+            )),
+            RunnerDispatchKind::BenchmarkAudioInfer => Self::JobLevel(JobLevelFamily::Benchmark(
                 plan_or_fail_files(job, host, BenchmarkDispatchPlan::from_job).await?,
-            ),
-            RunnerDispatchKind::MediaAnalysisV2 => Self::MediaAnalysis(
+            )),
+            RunnerDispatchKind::MediaAnalysisV2 => Self::JobLevel(JobLevelFamily::MediaAnalysis(
                 plan_or_fail_files(job, host, MediaAnalysisDispatchPlan::from_job).await?,
-            ),
-            RunnerDispatchKind::SpeakerIdentity if all_chat => Self::SpeakerIdentity,
+            )),
+            RunnerDispatchKind::SpeakerIdentity if all_chat => {
+                Self::JobLevel(JobLevelFamily::SpeakerIdentity)
+            }
             RunnerDispatchKind::SpeakerIdentity => {
                 fail_job(
                     job,
@@ -530,56 +545,25 @@ impl FamilyPlan {
                 .await;
                 return None;
             }
-            RunnerDispatchKind::ForcedAlignment => Self::ForcedAlignment(
-                plan_or_fail_files(job, host, FaDispatchPlan::from_job).await?,
-            ),
-            RunnerDispatchKind::BatchedTextInfer => Self::BatchedText,
+            RunnerDispatchKind::ForcedAlignment => {
+                Self::PerFileAudio(plan_or_fail_files(job, host, FaDispatchPlan::from_job).await?)
+            }
+            RunnerDispatchKind::BatchedTextInfer => Self::JobLevel(JobLevelFamily::BatchedText),
         })
     }
+}
 
-    /// The GPU-profile engines the job's requests name.
+impl JobLevelFamily {
+    /// The GPU-profile engines the job's requests name, which key the one
+    /// worker the router probes and pre-scales. The per-file family derives
+    /// its own from its plan inside `dispatch_fa_infer`.
     fn gpu_models(&self) -> GpuModelPlan {
         match self {
             Self::Transcribe(plan) => plan.gpu_models(),
             Self::Benchmark(plan) => plan.gpu_models(),
             Self::MediaAnalysis(plan) => plan.gpu_models(),
-            Self::ForcedAlignment(plan) => plan.gpu_models(),
             Self::SpeakerIdentity | Self::BatchedText => GpuModelPlan::without_engines(),
         }
-    }
-}
-
-/// Pre-scale the job's workers before its files dispatch, so a batch pays one
-/// cold start rather than one per file.
-///
-/// Runs after the capability probe, on the same key ([`WorkerPool::pre_scale_for_command`]
-/// keys a GPU command by its model plan), so the workers it warms are the ones
-/// the job's requests reach.
-///
-/// Skipped for LazyProfile: on constrained machines workers start empty and
-/// load models on demand, so a pre-scaled worker would sit idle until files
-/// need it. Skipped for per-file commands (morphotag, translate, coref): they
-/// have no job-level language, and pre-scaling against a placeholder would
-/// spawn a worker no file is dispatched to; their pipelines spawn per-language
-/// workers as they walk the files.
-async fn pre_scale_job_workers(
-    job: &RunnerJobSnapshot,
-    pool: &Arc<WorkerPool>,
-    num_workers: NumWorkers,
-    gpu_models: &GpuModelPlan,
-) {
-    if *num_workers > 1
-        && pool.bootstrap_mode() != crate::worker::WorkerBootstrapMode::LazyProfile
-        && !job.dispatch.lang.is_per_file()
-    {
-        pool.pre_scale_for_command(
-            job.dispatch.command,
-            job.dispatch.lang.to_worker_language(),
-            num_workers.0,
-            &job.dispatch.options,
-            gpu_models,
-        )
-        .await;
     }
 }
 

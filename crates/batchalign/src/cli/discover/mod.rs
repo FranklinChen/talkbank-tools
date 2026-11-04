@@ -394,6 +394,14 @@ impl PassthroughReport {
             .filter(|entry| matches!(entry.decision, PassthroughDecision::NotCopied(_)))
     }
 
+    /// Entries this run copied, or under [`PassthroughMode::Plan`] would
+    /// copy, into the output directory.
+    pub fn copied(&self) -> impl Iterator<Item = &PassthroughEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.decision, PassthroughDecision::CopiedThrough(_)))
+    }
+
     /// Fold another run's report into this one (used when several input
     /// directories are walked for one command invocation).
     pub fn extend_from(&mut self, other: PassthroughReport) {
@@ -428,17 +436,30 @@ fn is_input_directory_record(path: &Path) -> bool {
     lower == "provenance.json" || lower.ends_with(".provenance.json")
 }
 
+/// Whether a pass-through walk copies the files it finds, or only records
+/// what it would copy: a plan (`--dry-run`) must leave the output directory
+/// untouched while reporting the same decisions the run would make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassthroughMode {
+    /// Copy each file decided `CopiedThrough` into the output directory.
+    Copy,
+    /// Decide and record only; touch nothing.
+    Plan,
+}
+
 /// Copy files that are not inputs for `input_kind` from `in_dir` to `out_dir`.
 ///
 /// Preserves relative directory structure. Skipped for in-place mode and
 /// generation commands. A non-matching file that is itself a record about
 /// the input directory (a provenance manifest) is never copied through: see
-/// [`PassthroughDecision`].
+/// [`PassthroughDecision`]. Under [`PassthroughMode::Plan`] the same report
+/// is built and no file is written.
 pub fn copy_nonmatching(
     in_dir: &Path,
     out_dir: &Path,
     input_kind: InputKind,
     command: ReleasedCommand,
+    mode: PassthroughMode,
 ) -> Result<PassthroughReport, CliError> {
     if GENERATION_COMMANDS.contains(&command) {
         return Ok(PassthroughReport::default());
@@ -477,8 +498,10 @@ pub fn copy_nonmatching(
                 ))
             })?;
             let decision = classify_nonmatching(path);
-            match decision {
-                PassthroughDecision::CopiedThrough(_) => {
+            match (decision, mode) {
+                (PassthroughDecision::CopiedThrough(_), PassthroughMode::Plan)
+                | (PassthroughDecision::NotCopied(_), _) => {}
+                (PassthroughDecision::CopiedThrough(_), PassthroughMode::Copy) => {
                     let dest = out_dir.join(rel);
                     if let Some(parent) = dest.parent() {
                         fs::create_dir_all(parent).map_err(|err| {
@@ -488,7 +511,6 @@ pub fn copy_nonmatching(
                     fs::copy(path, &dest)
                         .map_err(|err| io_with_path("copy non-matching file", &dest, err))?;
                 }
-                PassthroughDecision::NotCopied(_) => {}
             }
             report.entries.push(PassthroughEntry {
                 relative_path: rel.to_path_buf(),

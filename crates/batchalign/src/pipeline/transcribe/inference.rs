@@ -16,11 +16,7 @@ pub(super) async fn stage_asr_infer<'a>(
     let opts = ctx.opts;
     let mut evidence_language = None;
     let response = match opts.plan.asr().inference() {
-        crate::transcribe::AsrInference::NonRev {
-            backend,
-            speakers,
-            language,
-        } => {
+        crate::transcribe::AsrInference::NonRev { backend, language } => {
             // Measured ONCE, here, and only when the request needs it: a
             // provider-media backend sizes its decode budget from the file's
             // length, while a prepared-audio backend derives the budget from
@@ -43,7 +39,9 @@ pub(super) async fn stage_asr_infer<'a>(
                     backend,
                     audio_path: ctx.audio_path,
                     lang: language,
-                    num_speakers: NumSpeakers(speakers.get()),
+                    // What the provider is told about speakers, decided by the
+                    // speaker plan at admission; the count itself stays there.
+                    diarization: opts.speakers.recognizer_diarization(),
                     extras: &ctx.opts.engine_extras,
                     gpu: &ctx.opts.gpu_models(),
                     decode_budget,
@@ -58,7 +56,7 @@ pub(super) async fn stage_asr_infer<'a>(
             let request = RevAsrEvidenceRequest::new(
                 provider_media,
                 language,
-                ctx.opts.expected_speakers(),
+                ctx.opts.speakers.count(),
                 &RevAsrModelRevision::current(),
             )
             .map_err(|error| ServerError::Persistence(error.to_string()))?;
@@ -82,6 +80,14 @@ pub(super) async fn stage_asr_infer<'a>(
                     info!(
                         cache_key = %request.cache_key(),
                         "Replaying validated raw Rev.AI transcript evidence"
+                    );
+                }
+                RevAsrEvidenceSource::MigratedFromLegacyKey => {
+                    info!(
+                        cache_key = %request.cache_key(),
+                        legacy_key = ?request.legacy_key(),
+                        "Replaying validated raw Rev.AI transcript evidence found under its \
+                         pre-2026-11-03 key and stored under the current one"
                     );
                 }
                 RevAsrEvidenceSource::Inferred(reason) => {
@@ -124,20 +130,13 @@ pub(super) async fn stage_speaker_diarization<P: TranscribePlan>(
     if P::REPLAY {
         return Ok(());
     }
-    let response = &ctx.state.response;
-    if !should_run_dedicated_speaker_diarization(response, ctx.opts.speaker_backend) {
+    // No dedicated engine in the plan, or nothing recognized to attribute:
+    // nothing to run.
+    let Some(speaker_backend) =
+        dedicated_diarization_to_run(ctx.opts.speakers, &ctx.state.response)
+    else {
         return Ok(());
-    }
-
-    // Control-flow invariant: `should_run_dedicated_speaker_diarization`
-    // immediately above returns false when `ctx.opts.speaker_backend`
-    // is `None`, taking the early-return branch. Reaching this
-    // line therefore guarantees `Some(...)`.
-    #[allow(clippy::expect_used)]
-    let speaker_backend = ctx
-        .opts
-        .speaker_backend
-        .expect("speaker backend presence checked above");
+    };
 
     // Speaker workers require a concrete routing language. The request may
     // be detection even after ASR, so the value comes from the context's

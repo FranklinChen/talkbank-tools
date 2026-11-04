@@ -7,6 +7,23 @@ use tracing::warn;
 
 use super::types::AsrResponse;
 
+/// Put the response's window-seam records on the utterances built from it.
+///
+/// The ONE call for every path that rebuilds utterances from an
+/// [`AsrResponse`]: the transcribe pipeline's post-processing stage and the
+/// `eval utseg-replay` rebuild. The replay used to skip it and so compared a
+/// transcript carrying seam comments against one without them, blaming
+/// segmentation for a difference it did not make.
+pub(crate) fn place_response_seams(
+    utterances: &mut [batchalign_transform::asr_postprocess::Utterance],
+    response: &AsrResponse,
+) -> Result<(), batchalign_transform::asr_postprocess::UnplacedSeams> {
+    batchalign_transform::asr_postprocess::place_seam_ambiguities(
+        utterances,
+        response.seam_ambiguities.clone(),
+    )
+}
+
 /// Convert flat ASR tokens (with speaker labels) into speaker-grouped monologues.
 ///
 /// Groups consecutive tokens by speaker. Adjacent tokens with the same speaker

@@ -602,7 +602,7 @@ struct CheckedSession {
 impl CheckedSession {
     fn write(&self, directory: &Path) -> Result<(), MergeVerifyError> {
         let path = self.session.path(directory);
-        std::fs::write(&path, self.output.to_chat_string())
+        crate::atomic_file::write_text_artifact(&path, &self.output.to_chat_string())
             .map_err(|source| MergeVerifyError::Io { path, source })
     }
 }
@@ -680,9 +680,11 @@ pub fn run(
     for session in &checked {
         session.write(out_dir)?;
     }
-    std::fs::write(&queue_path, queue_json).map_err(|source| MergeVerifyError::Io {
-        path: queue_path,
-        source,
+    crate::atomic_file::write_text_artifact(&queue_path, &queue_json).map_err(|source| {
+        MergeVerifyError::Io {
+            path: queue_path,
+            source,
+        }
     })?;
 
     Ok(summary)

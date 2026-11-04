@@ -14,7 +14,6 @@ use std::pin::Pin;
 
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 
-use crate::api::LanguageCode3;
 use crate::error::ServerError;
 use crate::pipeline::PipelineServices;
 use crate::runner::util::ProgressSender;
@@ -33,8 +32,6 @@ pub(crate) struct BenchmarkRequest<'a> {
     pub audio_path: &'a Path,
     /// Gold-standard CHAT transcript to compare against.
     pub reference: crate::compare::AdmittedComparisonReference,
-    /// Primary language used for comparison and downstream NLP shaping.
-    pub lang: &'a LanguageCode3,
     /// Shared worker/cache services used by the transcribe and compare phases.
     pub services: PipelineServices<'a>,
     /// Typed transcription options for the Rust-owned transcribe pipeline.
@@ -84,7 +81,6 @@ pub(crate) fn process_benchmark(request: BenchmarkRequest<'_>) -> BenchmarkFutur
         Box::pin(crate::compare::process_compare_constructed_main(
             transcribed_chat,
             request.reference,
-            request.lang,
             request.services,
             request.mwt,
         ))

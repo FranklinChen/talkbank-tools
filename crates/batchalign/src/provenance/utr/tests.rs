@@ -100,6 +100,7 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
         false,
         false,
         crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
+        crate::provenance::AlignTiming::Aligned,
     )
     .format();
     let text = format!("@Comment:\t{stamp}\n");

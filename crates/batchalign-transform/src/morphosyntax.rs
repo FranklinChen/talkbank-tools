@@ -45,8 +45,8 @@
 //! - [`ud_types`]: UD value types: `UniversalPos`, `DepRel`, `VerbForm`,
 //!   `UdId`, `UdPunctable`, `UdWord` (and its wire record `UdWordAnalysis`),
 //!   the typed features `WordFeatures` with their `FeatSource` and the
-//!   curated-table bundle `CuratedFeats`, `UdSentence`, `UdResponse`, plus `validate_and_clean` / `is_bogus_lemma` /
-//!   `sanitize_mor_text`.
+//!   curated-table bundle `CuratedFeats`, `UdSentence`, `UdResponse`, the
+//!   admission refusal `UdWordAdmissionError`, plus `sanitize_mor_text`.
 //! - [`payload`]: payload collection (`collect_payloads`, `declared_languages`,
 //!   `MorphosyntaxBatchItem`, `CollectedUtterance`, `AlignmentWarning`,
 //!   `PayloadCollection`) and `%mor`/`%gra` mutation passes
@@ -100,7 +100,7 @@ pub use lang_it::{try_handle_italian_range_override, try_handle_italian_single_o
 pub use lang_ja::{JaOverride, japanese_verbform};
 pub use mapping_helpers::{assemble_mors, normalize_deprel, provenance_for_ud_word};
 pub use mapping_provenance::{ChunkHead, ChunkProvenance, MappedItem, MorProvenance};
-pub use mor_word::{clean_lemma, is_clitic, map_ud_word};
+pub use mor_word::{Classified, Lexical, TagMarker, clean_lemma, is_clitic, map_ud_word};
 pub use outcome::{MorOutcome, MorOutcomeKind, NotApplicableReason, classify_not_applicable};
 pub use payload::{
     AlignmentWarning, BatchWord, CollectedUtterance, MorphologyInput, MorphosyntaxBatchItem,
@@ -127,6 +127,6 @@ pub use types::{
 pub(crate) use ud_types::FeatName;
 pub use ud_types::{
     CuratedFeats, DepRel, FeatSource, FeatValue, UdHead, UdId, UdPunctable, UdResponse, UdSentence,
-    UdWord, UdWordAnalysis, UdWordId, UniversalPos, VerbForm, WordFeatures, is_bogus_lemma,
-    sanitize_mor_text, ud_pair_value, validate_and_clean,
+    UdWord, UdWordAdmissionError, UdWordAnalysis, UdWordId, UniversalPos, VerbForm, WordFeatures,
+    sanitize_mor_text, ud_pair_value,
 };

@@ -245,24 +245,201 @@ pub struct DaemonInfo {
     /// opt-in), captured at spawn time, compared by `runtime_mismatch`
     /// the same way as `force_cpu`.
     pub allow_mps: bool,
-    /// The `--workers` value the daemon was started with; `None` when the
-    /// operator didn't pass `--workers` (the daemon resolved its own
-    /// per-job parallelism from host facts). Used by the warm-reuse path to fire the `--workers` shadowing
-    /// warning only when the requested value actually differs from
-    /// the running daemon's: eliminating false positives when the
-    /// operator re-passes a value that already matches.
-    pub workers: Option<crate::api::NumWorkers>,
-    /// The `--timeout` value the daemon was started with; `None` when it
-    /// was not passed. Same false-positive elimination as `workers`,
-    /// applied to the daemon's per-task ceiling. A `daemon.json` written
-    /// before the type refused zero may hold `0`, read as "not passed".
-    #[serde(default, deserialize_with = "crate::config::zero_as_no_override")]
-    pub audio_task_timeout_s: Option<crate::api::PositiveSeconds>,
+    /// The `--workers` and `--timeout` the daemon was started with, recorded
+    /// so a later invocation that passes either flag can be checked against
+    /// the daemon that will actually serve it ([`RequestedRuntime::reconcile`]).
+    /// Flattened: the record's fields are `workers` and `audio_task_timeout_s`,
+    /// as they were before the pair became one value.
+    #[serde(flatten)]
+    pub runtime: RequestedRuntime,
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// The two settings a daemon fixes at startup, as an invocation asks for them:
+/// `--workers` and `--timeout`, each absent when the flag was not passed.
+///
+/// Built ONCE from the command line (`GlobalOpts::runtime`), and then the one
+/// value that is applied to a server's config, forwarded to a spawned daemon's
+/// command line, recorded in `daemon.json`, and compared against that record
+/// when a daemon is reused. It replaced two `Option`s carried side by side
+/// through five signatures, with the worker count a bare `usize` on the CLI,
+/// a `NumWorkers` in the record and a `u32` in the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedRuntime {
+    /// `--workers N`: the per-job worker cap, or auto-tune when absent.
+    /// A `daemon.json` written while the flag was a bare integer may hold
+    /// `0`, which meant auto-tune; it is read as absent.
+    #[serde(default, deserialize_with = "crate::config::zero_as_no_cap")]
+    pub workers: Option<crate::api::WorkerCap>,
+    /// `--timeout S`: the audio-task ceiling, or the built-in one when absent.
+    /// A `daemon.json` written before the type refused zero may hold `0`, read
+    /// as absent.
+    #[serde(
+        rename = "audio_task_timeout_s",
+        default,
+        deserialize_with = "crate::config::zero_as_no_override"
+    )]
+    pub timeout: Option<crate::api::PositiveSeconds>,
+}
+
+impl RequestedRuntime {
+    /// Neither flag passed: the daemon's own values, whatever they are.
+    pub const NONE: Self = Self {
+        workers: None,
+        timeout: None,
+    };
+
+    /// Whether the invocation asked for nothing, and so can use any daemon.
+    pub const fn is_none(self) -> bool {
+        self.workers.is_none() && self.timeout.is_none()
+    }
+
+    /// Compare what this invocation asked for with what a running daemon was
+    /// started with. A setting that was not asked for matches whatever the
+    /// daemon runs; one that was must equal the daemon's, where "the daemon
+    /// was started without the flag" is a value (auto-tune, the built-in
+    /// ceiling) and not a wildcard: a request for four workers against a
+    /// daemon auto-tuning to one differs.
+    pub fn reconcile(self, running: Self) -> RuntimeReconciliation {
+        /// One setting: not asked for, or asked for and equal to the daemon's.
+        fn setting_matches<T: PartialEq>(requested: Option<T>, running: Option<T>) -> bool {
+            match requested {
+                None => true,
+                Some(requested) => Some(requested) == running,
+            }
+        }
+        if setting_matches(self.workers, running.workers)
+            && setting_matches(self.timeout, running.timeout)
+        {
+            RuntimeReconciliation::Matches
+        } else {
+            RuntimeReconciliation::Differs {
+                requested: self,
+                running,
+            }
+        }
+    }
+
+    /// Apply the requested settings to a server configuration: the one place
+    /// `--workers` becomes `max_workers_per_job` and `--timeout` becomes
+    /// `audio_task_timeout_s`, for a daemon being started, a `serve start`,
+    /// and a direct (`--no-server`) run alike. A setting not asked for leaves
+    /// the configured value alone.
+    pub fn apply_to(self, config: &mut ServerConfig) {
+        if let Some(workers) = self.workers {
+            config.max_workers_per_job = Some(workers.get());
+        }
+        if let Some(timeout) = self.timeout {
+            config.audio_task_timeout_s = Some(timeout);
+        }
+    }
+
+    /// The flags that hand these settings to a `serve start` child process,
+    /// in the spelling that process parses.
+    pub fn serve_start_args(self) -> Vec<String> {
+        let mut args = Vec::with_capacity(4);
+        if let Some(workers) = self.workers {
+            args.push("--workers".to_owned());
+            args.push(workers.to_string());
+        }
+        if let Some(timeout) = self.timeout {
+            args.push("--timeout".to_owned());
+            args.push(timeout.to_string());
+        }
+        args
+    }
+}
+
+/// The settings as a message names them: `--workers 4 --timeout 3600`, or
+/// what their absence means.
+impl std::fmt::Display for RequestedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.workers, self.timeout) {
+            (None, None) => write!(f, "no --workers (auto-tune) and no --timeout (built-in)"),
+            (Some(workers), None) => write!(f, "--workers {workers} and no --timeout (built-in)"),
+            (None, Some(timeout)) => write!(f, "no --workers (auto-tune) and --timeout {timeout}"),
+            (Some(workers), Some(timeout)) => write!(f, "--workers {workers} --timeout {timeout}"),
+        }
+    }
+}
+
+/// What reusing a running daemon found when the invocation's requested
+/// settings were held against the daemon's recorded ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeReconciliation {
+    /// Every requested setting equals the daemon's (or nothing was requested).
+    Matches,
+    /// A requested setting is not what the daemon runs. Proceeding would
+    /// silently serve the job under `running`; the invocation is refused.
+    Differs {
+        /// What this invocation asked for.
+        requested: RequestedRuntime,
+        /// What the daemon was started with.
+        running: RequestedRuntime,
+    },
+}
+
+/// Why an invocation that passed `--workers` or `--timeout` was refused the
+/// server it would otherwise have used.
+///
+/// Both settings are fixed when a server starts and the server has no request
+/// that changes them, so a flag on a submission can only be honoured by the
+/// server that was started with it. Before this type, the recorded case
+/// printed a warning and proceeded under the daemon's values, and the
+/// unrecorded cases said nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeRefusal {
+    /// The running daemon was started by this CLI and its record disagrees.
+    #[error(
+        "{daemon} daemon at {url} was started with {running}; this invocation asked for \
+         {requested}. A running daemon's --workers and --timeout cannot change. Either stop it \
+         with `batchalign3 serve stop` and run this command again (the CLI starts a daemon with \
+         the requested values), or drop the flag to use the running daemon's values."
+    )]
+    Differs {
+        /// The daemon profile, as its messages name it (`main`, `sidecar`).
+        daemon: &'static str,
+        /// Where it answers.
+        url: String,
+        /// What this invocation asked for.
+        requested: RequestedRuntime,
+        /// What the daemon was started with.
+        running: RequestedRuntime,
+    },
+    /// The server was not started by this CLI (a `serve start`, a launchd
+    /// service, an explicit `--server`), so nothing records the `--workers`
+    /// and `--timeout` it runs with, and the request cannot be confirmed.
+    #[error(
+        "this invocation asked for {requested}, but the server at {url} was not started by \
+         this CLI and does not record its --workers and --timeout, so the request cannot be \
+         honoured. Drop the flag to use that server as it runs, or stop it and run this command \
+         again (with no --server) so the CLI starts a daemon with the requested values."
+    )]
+    Unrecorded {
+        /// Where the server answers.
+        url: String,
+        /// What this invocation asked for.
+        requested: RequestedRuntime,
+    },
+}
+
+impl RuntimeRefusal {
+    /// Admit reuse of a server whose startup settings are NOT recorded: only
+    /// an invocation that asked for nothing may use it.
+    pub fn admit_unrecorded(requested: RequestedRuntime, url: &str) -> Result<(), Self> {
+        if requested.is_none() {
+            Ok(())
+        } else {
+            Err(Self::Unrecorded {
+                url: url.to_owned(),
+                requested,
+            })
+        }
+    }
+}
 
 /// What the operator asked of a daemon on this invocation: the CLI's device
 /// switches and the two values fixed at a daemon's startup.
@@ -277,13 +454,46 @@ pub struct DaemonRequest {
     pub force_cpu: bool,
     /// `--allow-mps`.
     pub allow_mps: bool,
-    /// `--workers`, when passed.
-    pub workers: Option<crate::api::NumWorkers>,
-    /// `--timeout`, when passed.
-    pub timeout: Option<crate::api::PositiveSeconds>,
+    /// `--workers` and `--timeout`, as passed.
+    pub runtime: RequestedRuntime,
 }
 
-/// Return the main daemon URL or `None` if the daemon cannot be started.
+/// How the invocation came by the server it will submit to.
+///
+/// The dashboard opens once per daemon, on the invocation that started it:
+/// a daemon that was already running has had its dashboard opened by the
+/// invocation that started it (or the operator closed it on purpose), so a
+/// shell loop over ten directories opens one tab, not ten. Carried from the
+/// one place that knows the answer, the daemon path, instead of inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerOrigin {
+    /// This invocation spawned the daemon and waited for it to come up.
+    StartedByThisInvocation,
+    /// The server was already running: a reused daemon, a `serve start`, a
+    /// launchd service, or an explicit `--server`.
+    AlreadyRunning,
+}
+
+/// A daemon the invocation may submit to, and how it came by it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDaemon {
+    /// Where it answers.
+    pub url: String,
+    /// Whether this invocation started it.
+    pub origin: ServerOrigin,
+}
+
+impl ResolvedDaemon {
+    /// A daemon that was running before this invocation looked.
+    fn already_running(url: String) -> Self {
+        Self {
+            url,
+            origin: ServerOrigin::AlreadyRunning,
+        }
+    }
+}
+
+/// Return the main daemon, or `None` if the daemon cannot be started.
 ///
 /// `config` is the caller's loaded `server.yaml`: the daemon path reads the
 /// port request, the verbosity and the device settings from it rather than
@@ -294,16 +504,16 @@ pub async fn ensure_daemon(
     layout: &RuntimeLayout,
     config: &ServerConfig,
     request: DaemonRequest,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<ResolvedDaemon>, CliError> {
     ensure_daemon_for(DaemonProfile::Main, layout, config, request).await
 }
 
-/// Return the sidecar daemon URL or `None` if the daemon cannot be started.
+/// Return the sidecar daemon, or `None` if the daemon cannot be started.
 pub async fn ensure_sidecar_daemon(
     layout: &RuntimeLayout,
     config: &ServerConfig,
     request: DaemonRequest,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<ResolvedDaemon>, CliError> {
     ensure_daemon_for(DaemonProfile::Sidecar, layout, config, request).await
 }
 
@@ -357,7 +567,7 @@ async fn ensure_daemon_for(
     layout: &RuntimeLayout,
     config: &ServerConfig,
     request: DaemonRequest,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<ResolvedDaemon>, CliError> {
     let lock = DaemonStartLock::acquire_async(profile, layout.state_dir()).await?;
     let result = ensure_daemon_locked(&lock, layout, config, request).await;
     drop(lock);
@@ -516,19 +726,44 @@ fn runtime_mismatch(info: &DaemonInfo, flags: DaemonDeviceFlags) -> bool {
     info.force_cpu != flags.resolved_force_cpu || info.allow_mps != flags.resolved_allow_mps
 }
 
-/// True when the operator passed a CLI flag whose value differs from
-/// the running daemon's recorded value. Suppresses the warm-reuse
-/// shadowing warning when the user re-passes a value that already
-/// matches the daemon. A `None` on the daemon side (pre-upgrade
-/// daemon.json that lacks the field) is treated as "unknown" and
-/// triggers the warning so the user still gets a signal, falling
-/// back to the pre-persisted-value behavior on first contact after
-/// upgrade.
-fn flag_shadows_daemon<T: PartialEq>(requested: Option<T>, persisted: Option<T>) -> bool {
-    match (requested, persisted) {
-        (None, _) => false,
-        (Some(_), None) => true,
-        (Some(r), Some(p)) => r != p,
+/// Admit reuse of the live daemon `pid` answering at `url`, holding what this
+/// invocation asked for against what that daemon was started with.
+///
+/// The record is `daemon.json` under the profile's lock. It names the daemon
+/// this CLI started; a server started any other way (`serve start`, launchd)
+/// has no record, or a record naming a different process, and then only an
+/// invocation that asked for nothing may use it. This is the ONE reuse
+/// decision for both routes a running main daemon is found by: its handshake
+/// ([`detect_manual_server`], which sees the CLI's own daemon too, since it
+/// publishes to the same slot) and its record ([`ensure_daemon_locked`]).
+fn admit_reuse(
+    profile: DaemonProfile,
+    url: &str,
+    requested: RequestedRuntime,
+    recorded: Option<RequestedRuntime>,
+) -> Result<(), CliError> {
+    match recorded {
+        Some(running) => match requested.reconcile(running) {
+            RuntimeReconciliation::Matches => Ok(()),
+            RuntimeReconciliation::Differs { requested, running } => Err(RuntimeRefusal::Differs {
+                daemon: profile.label(),
+                url: url.to_owned(),
+                requested,
+                running,
+            }
+            .into()),
+        },
+        None => RuntimeRefusal::admit_unrecorded(requested, url).map_err(CliError::from),
+    }
+}
+
+/// The runtime `daemon.json` records for the daemon `pid`, if it names that
+/// process: a record naming another process (or none, or one that cannot be
+/// read) says nothing about the daemon that answered.
+fn recorded_runtime_of(lock: &DaemonStartLock, pid: u32) -> Option<RequestedRuntime> {
+    match lock.read_state() {
+        StateFile::Recorded(info) if info.pid == pid => Some(info.runtime),
+        StateFile::Recorded(_) | StateFile::Absent | StateFile::Unreadable { .. } => None,
     }
 }
 
@@ -584,13 +819,13 @@ async fn ensure_daemon_locked(
     layout: &RuntimeLayout,
     config: &ServerConfig,
     request: DaemonRequest,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<ResolvedDaemon>, CliError> {
     let profile = lock.profile;
     let dir = layout.state_dir();
     if profile.check_manual_server()
-        && let Some(url) = detect_manual_server(lock, config.port).await?
+        && let Some(url) = detect_manual_server(lock, config.port, request.runtime).await?
     {
-        return Ok(Some(url));
+        return Ok(Some(ResolvedDaemon::already_running(url)));
     }
 
     // Compute the resolved device flags once: they drive both the
@@ -603,8 +838,7 @@ async fn ensure_daemon_locked(
         port: config.port,
         verbose: config.verbose,
         flags: device_flags,
-        workers: request.workers,
-        timeout: request.timeout,
+        runtime: request.runtime,
     };
 
     // An unreadable state file refuses the start: it may name a live daemon,
@@ -644,55 +878,18 @@ async fn ensure_daemon_locked(
             if let Some(published) = published
                 && health_check(published.get()).await
             {
-                // The daemon's per-task ceiling (`audio_task_timeout_s`)
-                // and per-job parallelism (`max_workers_per_job`) are
-                // both fixed at daemon startup. On the warm-reuse path
-                // the user's `--timeout` / `--workers` are silently
-                // discarded, without surfacing that, a request can
-                // fail with a timeout below the requested value, or a
-                // multi-file batch can run serially because the daemon
-                // stayed at workers=1 (the host-facts auto-clamp on
-                // hosts without a usable GPU). Auto-restart is not the
-                // answer here: the running daemon may be processing
-                // other operators' jobs, and killing it would discard
-                // their in-flight work. Warning is honest signal.
-                if flag_shadows_daemon(request.timeout, info.audio_task_timeout_s) {
-                    let running = match info.audio_task_timeout_s {
-                        Some(s) => format!("{s}s"),
-                        None => "<not set>".to_owned(),
-                    };
-                    let requested = match request.timeout {
-                        Some(s) => format!("{s}s"),
-                        None => "<not set>".to_owned(),
-                    };
-                    eprintln!(
-                        "warning: --timeout {requested} requested but the {} daemon was \
-                         started with --timeout {running}. The per-task ceiling stays at \
-                         the running value for this submission. To apply the new ceiling, \
-                         run `batchalign3 serve stop` then `batchalign3 serve start --timeout \
-                         <secs>`, or pass `--no-server` to bypass the daemon entirely.",
-                        profile.label(),
-                    );
-                }
-                if flag_shadows_daemon(request.workers, info.workers) {
-                    let running = match info.workers {
-                        Some(n) => n.to_string(),
-                        None => "<not set>".to_owned(),
-                    };
-                    let requested = match request.workers {
-                        Some(n) => n.to_string(),
-                        None => "<not set>".to_owned(),
-                    };
-                    eprintln!(
-                        "warning: --workers {requested} requested but the {} daemon was \
-                         started with --workers {running}. Per-job parallelism stays at \
-                         the running value for this submission. To apply the new value, \
-                         run `batchalign3 serve stop` then `batchalign3 serve start --workers \
-                         <N>`, or pass `--no-server` to bypass the daemon entirely.",
-                        profile.label(),
-                    );
-                }
-                return Ok(Some(format!("http://127.0.0.1:{published}")));
+                // The daemon's per-task ceiling and per-job worker cap are
+                // fixed at its startup, and the server has no request that
+                // changes them. An invocation that asked for other values is
+                // refused rather than served under the daemon's: it used to
+                // print a warning and proceed, so `--timeout` could be
+                // exceeded by a ceiling below it and a batch could run
+                // serially under `--workers 4`. Auto-restart is not the
+                // answer either: the daemon may be running other operators'
+                // jobs, and killing it would discard their in-flight work.
+                let url = format!("http://127.0.0.1:{published}");
+                admit_reuse(profile, &url, request.runtime, Some(info.runtime))?;
+                return Ok(Some(ResolvedDaemon::already_running(url)));
             }
 
             stop_server_process(info.pid);
@@ -721,6 +918,7 @@ async fn ensure_daemon_locked(
 async fn detect_manual_server(
     lock: &DaemonStartLock,
     configured: PortRequest,
+    requested: RequestedRuntime,
 ) -> Result<Option<String>, CliError> {
     let handshake = match lock.read_handshake() {
         Ok(Some(handshake)) => handshake,
@@ -768,7 +966,17 @@ async fn detect_manual_server(
 
     match ManualServerDisposition::probe(port).await {
         ManualServerDisposition::Reusable { url } => {
-            debug!(port, pid, "Reusing manual server");
+            // "Manual" names the route, not the server: the CLI's own daemon
+            // publishes to this same slot, so this is where it is reused on
+            // every invocation after the one that started it. Its record is
+            // what says what it runs; a server started another way has none.
+            admit_reuse(
+                lock.profile,
+                &url,
+                requested,
+                recorded_runtime_of(lock, pid),
+            )?;
+            debug!(port, pid, "Reusing server found by its handshake");
             Ok(Some(url))
         }
         ManualServerDisposition::Unreachable => Ok(None),
@@ -1029,21 +1237,20 @@ struct DaemonStart {
     /// `server.yaml`'s `verbose`, passed on as `-v` flags.
     verbose: u8,
     flags: DaemonDeviceFlags,
-    workers: Option<crate::api::NumWorkers>,
-    timeout: Option<crate::api::PositiveSeconds>,
+    /// `--workers` and `--timeout`, forwarded to the child and recorded.
+    runtime: RequestedRuntime,
 }
 
 async fn start_daemon(
     lock: &DaemonStartLock,
     layout: &RuntimeLayout,
     start: DaemonStart,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<ResolvedDaemon>, CliError> {
     let DaemonStart {
         port,
         verbose,
         flags,
-        workers,
-        timeout,
+        runtime,
     } = start;
     let profile = lock.profile;
     let dir = layout.state_dir();
@@ -1066,11 +1273,17 @@ async fn start_daemon(
         match probe_fixed_port(fixed_port).await {
             PortOccupant::Free => {}
             PortOccupant::ExistingDaemon { build_hash } => {
+                // Healthy, our build, and unrecorded: this path is reached
+                // with no state file (absent, or just removed), so what it
+                // was started with is unknown and only a request for nothing
+                // can be served by it.
+                let url = format!("http://127.0.0.1:{fixed_port}");
+                RuntimeRefusal::admit_unrecorded(runtime, &url)?;
                 eprintln!(
                     "{} daemon already running on port {fixed_port} ({build_hash}); reusing it.",
                     profile.label(),
                 );
-                return Ok(Some(format!("http://127.0.0.1:{fixed_port}")));
+                return Ok(Some(ResolvedDaemon::already_running(url)));
             }
             PortOccupant::StaleDaemon { theirs, ours } => {
                 let theirs_label = if theirs.is_empty() {
@@ -1138,12 +1351,7 @@ async fn start_daemon(
     if flags.cli_allow_mps {
         cmd.arg("--allow-mps");
     }
-    if let Some(n) = workers {
-        cmd.args(["--workers", &n.to_string()]);
-    }
-    if let Some(t) = timeout {
-        cmd.args(["--timeout", &t.to_string()]);
-    }
+    cmd.args(runtime.serve_start_args());
 
     let log_path = profile.log_file(dir);
     // Append mode: preserve previous daemon logs across restarts.
@@ -1223,10 +1431,9 @@ async fn start_daemon(
     let port = bound.get();
     // Persist the resolved device values, not the CLI raw bools, so future
     // restart decisions compare against the same merged result the daemon
-    // process is actually running with. workers/timeout are recorded as
-    // passed so the warm-reuse warning can name what the daemon was started
-    // with.
-    lock.write_info(&daemon_info(pid, flags, workers, timeout))?;
+    // process is actually running with. The runtime is recorded as passed, so
+    // a later invocation's `--workers`/`--timeout` is held against it.
+    lock.write_info(&daemon_info(pid, flags, runtime))?;
 
     if wait_for_health_until(pid, port, deadline).await {
         eprintln!(
@@ -1235,7 +1442,10 @@ async fn start_daemon(
             port,
             pid
         );
-        return Ok(Some(format!("http://127.0.0.1:{port}")));
+        return Ok(Some(ResolvedDaemon {
+            url: format!("http://127.0.0.1:{port}"),
+            origin: ServerOrigin::StartedByThisInvocation,
+        }));
     }
 
     debug!(
@@ -1381,19 +1591,13 @@ pub struct UnreadableRecord {
 }
 
 /// The record of the daemon this binary just started.
-fn daemon_info(
-    pid: u32,
-    flags: DaemonDeviceFlags,
-    workers: Option<crate::api::NumWorkers>,
-    audio_task_timeout_s: Option<crate::api::PositiveSeconds>,
-) -> DaemonInfo {
+fn daemon_info(pid: u32, flags: DaemonDeviceFlags, runtime: RequestedRuntime) -> DaemonInfo {
     DaemonInfo {
         pid,
         build_hash: crate::build_hash().to_string(),
         force_cpu: flags.resolved_force_cpu,
         allow_mps: flags.resolved_allow_mps,
-        workers,
-        audio_task_timeout_s,
+        runtime,
     }
 }
 
@@ -1527,40 +1731,51 @@ mod tests {
     /// Build a `DaemonInfo` with all the unrelated fields filled in,
     /// so each test can name only what it actually exercises. Keeps the
     /// individual tests focused on the field they pin.
-    fn info_with(
-        build_hash: String,
-        force_cpu: bool,
-        workers: Option<crate::api::NumWorkers>,
-        audio_task_timeout_s: Option<crate::api::PositiveSeconds>,
-    ) -> DaemonInfo {
+    fn info_with(build_hash: String, force_cpu: bool, runtime: RequestedRuntime) -> DaemonInfo {
         DaemonInfo {
             pid: 1,
             build_hash,
             force_cpu,
             allow_mps: false,
-            workers,
-            audio_task_timeout_s,
+            runtime,
         }
     }
+
+    /// `--workers 4 --timeout 3600`, the runtime most tests below ask for.
+    const FOUR_WORKERS_ONE_HOUR: RequestedRuntime = RequestedRuntime {
+        workers: Some(crate::api::WorkerCap::literal::<4>()),
+        timeout: Some(crate::api::PositiveSeconds::literal::<3600>()),
+    };
 
     #[test]
     fn daemon_info_roundtrip() {
         let info = info_with(
             "1.0.0-abc1234-1700000000".to_string(),
             true,
-            Some(crate::api::NumWorkers(4)),
-            Some(crate::api::PositiveSeconds::literal::<3600>()),
+            FOUR_WORKERS_ONE_HOUR,
         );
         let json = serde_json::to_string(&info).unwrap();
+        // The record keeps its field names: the pair is flattened into it.
+        assert!(json.contains(r#""workers":4"#), "{json}");
+        assert!(json.contains(r#""audio_task_timeout_s":3600"#), "{json}");
         let back: DaemonInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pid, 1);
         assert_eq!(back.build_hash, "1.0.0-abc1234-1700000000");
-        assert_eq!(back.workers, Some(crate::api::NumWorkers(4)));
-        assert_eq!(
-            back.audio_task_timeout_s
-                .map(crate::api::PositiveSeconds::get),
-            Some(3600)
+        assert_eq!(back.runtime, FOUR_WORKERS_ONE_HOUR);
+    }
+
+    /// A record written while `--workers` was a bare integer may say `0`,
+    /// which meant auto-tune, as `audio_task_timeout_s: 0` meant the built-in
+    /// ceiling. Both read as absent, never as a cap or ceiling of zero.
+    #[test]
+    fn a_legacy_zero_in_the_record_reads_as_absent() {
+        let json = format!(
+            r#"{{"pid":1,"build_hash":"{}","force_cpu":false,"allow_mps":false,
+                "workers":0,"audio_task_timeout_s":0}}"#,
+            crate::build_hash()
         );
+        let back: DaemonInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runtime, RequestedRuntime::NONE);
     }
 
     /// A state file without the build that wrote it cannot say whether its
@@ -1583,14 +1798,18 @@ mod tests {
 
     #[test]
     fn is_stale_detects_build_hash_mismatch() {
-        let info = info_with("old-build-hash".to_string(), false, None, None);
+        let info = info_with("old-build-hash".to_string(), false, RequestedRuntime::NONE);
         // Our build hash is different from "old-build-hash"
         assert!(is_stale(&info));
     }
 
     #[test]
     fn is_stale_same_build_hash() {
-        let info = info_with(crate::build_hash().to_string(), false, None, None);
+        let info = info_with(
+            crate::build_hash().to_string(),
+            false,
+            RequestedRuntime::NONE,
+        );
         assert!(!is_stale(&info));
     }
 
@@ -1639,8 +1858,7 @@ mod tests {
         let request = DaemonRequest {
             force_cpu: false,
             allow_mps: false,
-            workers: None,
-            timeout: None,
+            runtime: RequestedRuntime::NONE,
         };
         let refused = ensure_daemon_locked(&lock, &layout, &ServerConfig::default(), request)
             .await
@@ -1668,25 +1886,18 @@ mod tests {
                 resolved_force_cpu: true,
                 resolved_allow_mps: false,
             };
-            lock.write_info(&daemon_info(
-                42,
-                flags,
-                Some(crate::api::NumWorkers(6)),
-                Some(crate::api::PositiveSeconds::literal::<1800>()),
-            ))
-            .unwrap();
+            let runtime = RequestedRuntime {
+                workers: Some(crate::api::WorkerCap::literal::<6>()),
+                timeout: Some(crate::api::PositiveSeconds::literal::<1800>()),
+            };
+            lock.write_info(&daemon_info(42, flags, runtime)).unwrap();
             let StateFile::Recorded(info) = lock.read_state() else {
                 panic!("the written record reads back");
             };
             assert_eq!(info.pid, 42);
             assert_eq!(info.build_hash, crate::build_hash());
             assert!(info.force_cpu);
-            assert_eq!(info.workers, Some(crate::api::NumWorkers(6)));
-            assert_eq!(
-                info.audio_task_timeout_s
-                    .map(crate::api::PositiveSeconds::get),
-                Some(1800)
-            );
+            assert_eq!(info.runtime, runtime);
         }
     }
 
@@ -1696,20 +1907,19 @@ mod tests {
         // server-mode case where host facts pick the parallelism).
         let dir = tempfile::tempdir().unwrap();
         let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
-        lock.write_info(&daemon_info(7, NO_DEVICE_FLAGS, None, None))
+        lock.write_info(&daemon_info(7, NO_DEVICE_FLAGS, RequestedRuntime::NONE))
             .unwrap();
         let StateFile::Recorded(info) = lock.read_state() else {
             panic!("the written record reads back");
         };
-        assert_eq!(info.workers, None);
-        assert_eq!(info.audio_task_timeout_s, None);
+        assert_eq!(info.runtime, RequestedRuntime::NONE);
     }
 
     #[test]
     fn remove_state_removes_the_record() {
         let dir = tempfile::tempdir().unwrap();
         let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir.path()).unwrap();
-        lock.write_info(&daemon_info(1, NO_DEVICE_FLAGS, None, None))
+        lock.write_info(&daemon_info(1, NO_DEVICE_FLAGS, RequestedRuntime::NONE))
             .unwrap();
         assert!(matches!(lock.read_state(), StateFile::Recorded(_)));
         lock.remove_state().unwrap();
@@ -1718,41 +1928,261 @@ mod tests {
 
     #[test]
     fn runtime_mismatch_detects_force_cpu_changes() {
-        let info = info_with(crate::build_hash().to_string(), false, None, None);
+        let info = info_with(
+            crate::build_hash().to_string(),
+            false,
+            RequestedRuntime::NONE,
+        );
         assert!(runtime_mismatch(&info, resolved_flags(true, false)));
         assert!(!runtime_mismatch(&info, resolved_flags(false, false)));
     }
 
+    // ---- RequestedRuntime: what a reused daemon is held to ----
+
+    /// An invocation that asked for nothing matches any daemon, whatever it
+    /// was started with.
     #[test]
-    fn flag_shadows_daemon_silent_when_user_did_not_pass_flag() {
-        // User accepted the daemon's default, never warn, regardless
-        // of what the daemon was started with.
-        assert!(!flag_shadows_daemon::<u32>(None, None));
-        assert!(!flag_shadows_daemon(None, Some(4)));
+    fn a_request_for_nothing_matches_any_running_runtime() {
+        for running in [RequestedRuntime::NONE, FOUR_WORKERS_ONE_HOUR] {
+            assert_eq!(
+                RequestedRuntime::NONE.reconcile(running),
+                RuntimeReconciliation::Matches
+            );
+        }
     }
 
+    /// Re-passing the values the daemon was started with matches; so does
+    /// passing only one of them when it equals the daemon's.
     #[test]
-    fn flag_shadows_daemon_silent_when_values_match() {
-        // The whole point of this helper: re-passing a value that
-        // already matches the running daemon must NOT warn.
-        assert!(!flag_shadows_daemon(Some(4), Some(4)));
-        assert!(!flag_shadows_daemon(Some(1800u64), Some(1800u64)));
+    fn a_request_equal_to_the_running_runtime_matches() {
+        assert_eq!(
+            FOUR_WORKERS_ONE_HOUR.reconcile(FOUR_WORKERS_ONE_HOUR),
+            RuntimeReconciliation::Matches
+        );
+        let workers_only = RequestedRuntime {
+            workers: FOUR_WORKERS_ONE_HOUR.workers,
+            timeout: None,
+        };
+        assert_eq!(
+            workers_only.reconcile(FOUR_WORKERS_ONE_HOUR),
+            RuntimeReconciliation::Matches
+        );
     }
 
+    /// A requested value the daemon does not run differs, and "started without
+    /// the flag" is a value (auto-tune, the built-in ceiling), not a wildcard.
     #[test]
-    fn flag_shadows_daemon_warns_on_value_mismatch() {
-        assert!(flag_shadows_daemon(Some(4), Some(1)));
-        assert!(flag_shadows_daemon(Some(3600u64), Some(1800u64)));
+    fn a_request_the_daemon_does_not_run_differs_naming_both() {
+        let one_worker = RequestedRuntime {
+            workers: Some(crate::api::WorkerCap::literal::<1>()),
+            timeout: None,
+        };
+        assert_eq!(
+            FOUR_WORKERS_ONE_HOUR.reconcile(one_worker),
+            RuntimeReconciliation::Differs {
+                requested: FOUR_WORKERS_ONE_HOUR,
+                running: one_worker,
+            }
+        );
+        assert_eq!(
+            one_worker.reconcile(RequestedRuntime::NONE),
+            RuntimeReconciliation::Differs {
+                requested: one_worker,
+                running: RequestedRuntime::NONE,
+            }
+        );
+        // The refusal names both runtimes and both ways out.
+        let refusal = RuntimeRefusal::Differs {
+            daemon: DaemonProfile::Main.label(),
+            url: "http://127.0.0.1:8000".to_owned(),
+            requested: FOUR_WORKERS_ONE_HOUR,
+            running: one_worker,
+        }
+        .to_string();
+        for needle in [
+            "--workers 4 --timeout 3600",
+            "--workers 1 and no --timeout (built-in)",
+            "batchalign3 serve stop",
+            "drop the flag",
+        ] {
+            assert!(
+                refusal.contains(needle),
+                "{needle:?} missing from {refusal}"
+            );
+        }
     }
 
+    /// A server with no record (not started by this CLI) serves only an
+    /// invocation that asked for nothing.
     #[test]
-    fn flag_shadows_daemon_warns_when_persisted_is_unknown() {
-        // Pre-upgrade daemon.json files lack the field → persisted is
-        // None. The user passed a value, so we cannot prove it matches.
-        // Warn (the pre-persisted-value behavior, preserved on first
-        // contact post-upgrade).
-        assert!(flag_shadows_daemon(Some(4), None::<u32>));
-        assert!(flag_shadows_daemon(Some(1800u64), None));
+    fn an_unrecorded_server_admits_only_a_request_for_nothing() {
+        let url = "http://127.0.0.1:8000";
+        assert_eq!(
+            RuntimeRefusal::admit_unrecorded(RequestedRuntime::NONE, url),
+            Ok(())
+        );
+        let refusal = RuntimeRefusal::admit_unrecorded(FOUR_WORKERS_ONE_HOUR, url).unwrap_err();
+        assert!(
+            matches!(&refusal, RuntimeRefusal::Unrecorded { url: at, requested }
+            if at == url && *requested == FOUR_WORKERS_ONE_HOUR)
+        );
+        assert!(refusal.to_string().contains("does not record"), "{refusal}");
+    }
+
+    /// A fresh daemon is handed exactly the flags that were requested, in the
+    /// spelling `serve start` parses; nothing when nothing was asked for.
+    #[test]
+    fn a_fresh_daemon_is_started_with_the_requested_flags() {
+        assert_eq!(
+            FOUR_WORKERS_ONE_HOUR.serve_start_args(),
+            ["--workers", "4", "--timeout", "3600"]
+        );
+        assert!(RequestedRuntime::NONE.serve_start_args().is_empty());
+        let mut config = ServerConfig::default();
+        FOUR_WORKERS_ONE_HOUR.apply_to(&mut config);
+        assert_eq!(config.max_workers_per_job, Some(4));
+        assert_eq!(
+            config
+                .audio_task_timeout_s
+                .map(crate::api::PositiveSeconds::get),
+            Some(3600)
+        );
+    }
+
+    /// A loopback server that answers `/health` as a daemon of OUR build,
+    /// standing in for a running daemon. It answers every request until the
+    /// test ends; the ensure path probes it once per call.
+    async fn serve_health_of_our_build() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral loopback port");
+        let port = listener.local_addr().expect("local addr").port();
+        let body = format!(
+            r#"{{"status":"ok","version":"test","build_hash":"{}"}}"#,
+            crate::build_hash()
+        );
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        port
+    }
+
+    /// Stand up what the ensure path sees for a running main daemon: a
+    /// handshake naming THIS process (alive by construction) on a port where a
+    /// server of our build answers, and, when `recorded` says so, a
+    /// `daemon.json` naming the same process and the runtime it was started
+    /// with. Returns the lock the ensure path must hold, and the URL.
+    fn running_daemon(
+        dir: &Path,
+        port: u16,
+        recorded: Option<RequestedRuntime>,
+    ) -> (DaemonStartLock, String) {
+        let bound = crate::server_handshake::BoundPort::from_listener_addr(
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        )
+        .expect("a bound port is never zero");
+        // The published record is the test's fixture, kept until the directory
+        // goes; it does not need retiring.
+        let _published =
+            ServerHandshake::publish_listening(dir, HandshakeSlot::Main, bound).unwrap();
+        let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir).unwrap();
+        if let Some(runtime) = recorded {
+            lock.write_info(&daemon_info(std::process::id(), NO_DEVICE_FLAGS, runtime))
+                .unwrap();
+        }
+        (lock, format!("http://127.0.0.1:{port}"))
+    }
+
+    async fn ensure_with(
+        lock: &DaemonStartLock,
+        dir: &Path,
+        runtime: RequestedRuntime,
+    ) -> Result<Option<ResolvedDaemon>, CliError> {
+        let layout = RuntimeLayout::from_state_dir(dir.to_path_buf());
+        let request = DaemonRequest {
+            force_cpu: false,
+            allow_mps: false,
+            runtime,
+        };
+        ensure_daemon_locked(lock, &layout, &ServerConfig::default(), request).await
+    }
+
+    /// Reusing a recorded daemon with no flags proceeds, as does re-passing
+    /// the values it was started with.
+    #[tokio::test]
+    async fn reusing_a_recorded_daemon_proceeds_without_flags_and_with_matching_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = serve_health_of_our_build().await;
+        let (lock, url) = running_daemon(dir.path(), port, Some(FOUR_WORKERS_ONE_HOUR));
+        for runtime in [RequestedRuntime::NONE, FOUR_WORKERS_ONE_HOUR] {
+            let resolved = ensure_with(&lock, dir.path(), runtime).await.unwrap();
+            // Reused, so the invocation did not start it: the dashboard stays shut.
+            assert_eq!(
+                resolved,
+                Some(ResolvedDaemon::already_running(url.clone())),
+                "{runtime}"
+            );
+        }
+    }
+
+    /// Reusing a recorded daemon with a different value is refused, naming
+    /// the daemon's values and the requested ones; nothing is submitted and
+    /// the daemon is left running (its record is untouched).
+    #[tokio::test]
+    async fn reusing_a_recorded_daemon_with_a_different_value_is_refused_naming_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = serve_health_of_our_build().await;
+        let running = RequestedRuntime {
+            workers: Some(crate::api::WorkerCap::literal::<1>()),
+            timeout: None,
+        };
+        let (lock, url) = running_daemon(dir.path(), port, Some(running));
+        let refused = ensure_with(&lock, dir.path(), FOUR_WORKERS_ONE_HOUR)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, CliError::DaemonRuntime(RuntimeRefusal::Differs {
+                url: at, requested, running: was, ..
+            }) if *at == url && *requested == FOUR_WORKERS_ONE_HOUR && *was == running),
+            "{refused}"
+        );
+        assert!(
+            matches!(lock.read_state(), StateFile::Recorded(info) if info.runtime == running),
+            "the running daemon's record is left as it was"
+        );
+    }
+
+    /// A server found by its handshake but never recorded by this CLI serves
+    /// an invocation that asked for nothing, and refuses one that passed a
+    /// flag, since nothing says what it runs.
+    #[tokio::test]
+    async fn reusing_an_unrecorded_server_is_refused_only_when_a_flag_was_passed() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = serve_health_of_our_build().await;
+        let (lock, url) = running_daemon(dir.path(), port, None);
+        let resolved = ensure_with(&lock, dir.path(), RequestedRuntime::NONE)
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(ResolvedDaemon::already_running(url.clone())));
+        let refused = ensure_with(&lock, dir.path(), FOUR_WORKERS_ONE_HOUR)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, CliError::DaemonRuntime(RuntimeRefusal::Unrecorded { url: at, .. })
+                if *at == url),
+            "{refused}"
+        );
     }
 
     /// `--force-cpu` always wins over the host-facts recommendation,

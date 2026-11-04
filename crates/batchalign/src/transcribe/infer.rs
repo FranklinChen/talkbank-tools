@@ -43,8 +43,10 @@ pub(crate) struct AsrInferParams<'a> {
     /// engine handles internally. Never a pair: these engines recognize one
     /// language at a time, and the plan admitted the request as such.
     pub lang: &'a SingleAsrLanguage,
-    /// Expected number of speakers for diarization.
-    pub num_speakers: NumSpeakers,
+    /// What the recognizer is told about speakers: whether to separate them
+    /// itself, and into how many. Decided by the speaker plan at admission;
+    /// the recognizer never sees the count it was derived from.
+    pub diarization: crate::types::worker_v2::ProviderDiarizationV2,
     /// Per-engine configuration extras (e.g. `qwen_model`,
     /// `qwen_device`) drawn from `CommonOptions.engine_overrides.extras`.
     /// Plumbed through to the worker spawn argv so the engine's load
@@ -198,7 +200,7 @@ async fn infer_asr_via_worker_v2(
             ids: &PreparedAsrRequestIdsV2::fresh(),
             models: &models,
             audio_path: params.audio_path,
-            expected_speakers: params.num_speakers,
+            diarization: params.diarization,
             lang: worker_lang,
             backend: worker_mode.as_v2_backend(),
             extras: params.extras,

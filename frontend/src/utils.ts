@@ -10,21 +10,23 @@ type LanguageSpec = components["schemas"]["LanguageSpec"];
  *
  * `LanguageSpec` is one string on the wire: `auto`, `per-file`, a 3-letter code
  * such as `eng`, or a code-switched pair such as `eng,spa`, which displays as
- * written. An absent language displays as `eng`, the submission default.
+ * written. Every job record carries one (the server requires it since
+ * 2026-11-03), so there is no absent case to fill in; this used to answer
+ * `eng` for a missing language, the silent default the server dropped.
  *
  * This used to test for `"Auto"` and `{ Resolved: ... }`, the shapes a derived
  * OpenAPI schema claimed and the server never sent.
  */
-export function displayLang(spec: LanguageSpec | undefined): string {
-  return spec ?? "eng";
+export function displayLang(spec: LanguageSpec): string {
+  return spec;
 }
 
 /**
- * Whether a LanguageSpec represents the default (eng), used to hide
- * the language badge when it would just say "eng".
+ * Whether a LanguageSpec is English, used to hide the language badge when it
+ * would just say "eng".
  */
-export function isDefaultLang(spec: LanguageSpec | undefined): boolean {
-  return displayLang(spec) === "eng";
+export function isDefaultLang(spec: LanguageSpec): boolean {
+  return spec === "eng";
 }
 
 /**

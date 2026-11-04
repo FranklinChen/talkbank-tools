@@ -466,6 +466,7 @@ mod tests {
 
     fn response() -> AsrResponse {
         AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![AsrToken {
                 text: "hello".into(),
                 start_s: at(0.1),

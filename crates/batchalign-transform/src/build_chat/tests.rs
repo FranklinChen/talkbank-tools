@@ -58,6 +58,8 @@ fn a_synthesized_end_is_written_as_a_period_and_reported() {
             end,
         },
         lang: None,
+        dropped_tokens: Vec::new(),
+        seam_ambiguities: Vec::new(),
     };
     let desc = TranscriptDescription {
         langs: eng(),
@@ -83,6 +85,8 @@ fn a_synthesized_end_is_written_as_a_period_and_reported() {
                     ),
                 },
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             },
             utterance(asr_postprocess::UtteranceEnd::Synthesized(
                 asr_postprocess::SynthesisCause::NoMark,
@@ -132,6 +136,8 @@ fn an_utterance_states_its_end_as_a_field() {
                     end,
                 },
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             }],
             write_wor: false,
         };
@@ -190,6 +196,8 @@ fn test_build_chat_minimal() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -239,6 +247,8 @@ fn test_build_chat_with_timing() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: true,
     };
@@ -282,6 +292,8 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
                     end: observed("."),
                 },
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             },
             UtteranceDesc {
                 speaker: "PAR".to_string(),
@@ -293,6 +305,8 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
                     end: observed("."),
                 },
                 lang: None,
+                dropped_tokens: Vec::new(),
+                seam_ambiguities: Vec::new(),
             },
         ],
         write_wor: true,
@@ -334,6 +348,8 @@ fn test_build_chat_text_utterance() {
                 timing: described(Some(0), Some(1000)),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -363,6 +379,8 @@ fn test_build_chat_question_terminator() {
                 end: observed("?"),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -395,6 +413,8 @@ fn test_write_wor_false_suppresses_wor_tier() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -420,6 +440,8 @@ fn test_transcript_from_asr_utterances() {
             words: vec![asr_postprocess::AsrWord::new("hello", Some(0), Some(500))],
             end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         },
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(1),
@@ -430,6 +452,8 @@ fn test_transcript_from_asr_utterances() {
             )],
             end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         },
     ];
 
@@ -465,6 +489,8 @@ fn test_numbered_asr_names_require_no_dense_speaker_population() {
         words: vec![asr_postprocess::AsrWord::new("hello", None, None)],
         end: asr_postprocess::UtteranceEnd::Synthesized(asr_postprocess::SynthesisCause::NoMark),
         lang: None,
+        dropped_tokens: Vec::new(),
+        seam_ambiguities: Vec::new(),
     }];
 
     assert!(matches!(
@@ -615,6 +641,8 @@ fn alphanumeric_token_passes_zho_validation_gate() {
         words: vec![asr_postprocess::AsrWord::new("C-3PO", Some(0), Some(500))],
         end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
         lang: None,
+        dropped_tokens: Vec::new(),
+        seam_ambiguities: Vec::new(),
     }];
     let result = transcript_from_asr_utterances(
         &utterances,
@@ -683,6 +711,8 @@ fn build_single_utterance(words: Vec<WordDesc>) -> String {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -869,6 +899,8 @@ fn media_header_has_comma_separator() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -903,12 +935,16 @@ fn asr_pipeline_sets_correct_participant_roles() {
             words: vec![AsrWord::new("hello", Some(0), Some(500))],
             end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         },
         Utterance {
             speaker: SpeakerIndex(1),
             words: vec![AsrWord::new("world", Some(600), Some(1000))],
             end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         },
     ];
     let participant_ids = vec!["PAR0".to_string(), "PAR1".to_string()];
@@ -981,6 +1017,8 @@ fn transcribe_comment_includes_do_not_use() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -1598,12 +1636,16 @@ fn built_chat_file_exposes_participants_from_headers() {
             words: vec![asr_postprocess::AsrWord::new("hello", Some(100), Some(400))],
             end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         },
         asr_postprocess::Utterance {
             speaker: asr_postprocess::SpeakerIndex(1),
             words: vec![asr_postprocess::AsrWord::new("hi", Some(500), Some(800))],
             end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         },
     ];
     let ids = vec!["PAR".to_string(), "INV".to_string()];
@@ -1669,6 +1711,8 @@ fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: false,
     };
@@ -1813,6 +1857,8 @@ fn generated_bullets_come_only_from_positive_intervals() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: true,
     };
@@ -1847,6 +1893,168 @@ fn generated_bullets_come_only_from_positive_intervals() {
 }
 
 /// A transcript whose every word lacks usable timing has no bullet at all.
+/// The assembled transcript of these utterances, after the cleanup passes
+/// (so the sanitizer has run), as CHAT text.
+fn finalized_chat(mut utterances: Vec<asr_postprocess::Utterance>) -> String {
+    asr_postprocess::finalize_utterances(&mut utterances, "eng");
+    let desc = NamedAsrUtterances::numbered(&utterances)
+        .into_transcript(&["eng".to_owned()], Some("recording.wav"), false)
+        .expect("test: transcript")
+        .description;
+    to_chat_string(&build_chat(desc).expect("test: CHAT builds").into_file())
+}
+
+/// Chatter's full validation of a document this builder wrote.
+fn assert_valid_chat(text: &str) {
+    crate::parse_and_validate(
+        text,
+        talkbank_model::ParseValidateOptions::default().with_validation(),
+    )
+    .unwrap_or_else(|error| panic!("the transcript must validate: {error}\n{text}"));
+}
+
+fn spoken(speaker: usize, words: &[(&str, i64, i64)]) -> asr_postprocess::Utterance {
+    asr_postprocess::Utterance {
+        speaker: asr_postprocess::SpeakerIndex(speaker),
+        words: words
+            .iter()
+            .map(|(text, start, end)| {
+                asr_postprocess::AsrWord::new(*text, Some(*start), Some(*end))
+            })
+            .collect(),
+        end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
+        lang: None,
+        dropped_tokens: Vec::new(),
+        seam_ambiguities: Vec::new(),
+    }
+}
+
+/// A recognizer token CHAT cannot hold (Whisper's bare `:`) is dropped from
+/// the words and named, with its time, in a `%com` on the utterance that lost
+/// it; the file still validates. The reader learns from the file what the
+/// log said.
+#[test]
+fn a_dropped_recognizer_token_is_named_in_a_comment_on_its_utterance() {
+    let text = finalized_chat(vec![spoken(
+        0,
+        &[("hello", 0, 300), (":", 300, 400), ("world", 400, 700)],
+    )]);
+    // English post-processing capitalizes the utterance's first word.
+    assert!(
+        text.contains("*PAR0:\tHello world . \u{15}0_700\u{15}\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "%com:\tbatchalign dropped recognizer token ':' at 300-400 ms: not representable in CHAT\n"
+        ),
+        "{text}"
+    );
+    assert_valid_chat(&text);
+}
+
+/// An utterance whose every token is dropped has no main tier to write; the
+/// record stands where it would have been, as an `@Comment` naming the
+/// speaker, between the utterances that survived. Still valid CHAT.
+#[test]
+fn an_utterance_that_loses_every_token_leaves_a_comment_in_its_place() {
+    let text = finalized_chat(vec![
+        spoken(0, &[("hello", 0, 300)]),
+        spoken(1, &[(":", 300, 400)]),
+        spoken(0, &[("world", 400, 700)]),
+    ]);
+    let hello = text.find("*PAR0:\tHello").expect("first utterance");
+    let comment = text
+        .find(
+            "@Comment:\tPAR1: batchalign dropped recognizer token ':' at 300-400 ms: not \
+             representable in CHAT\n",
+        )
+        .expect("the comment stands in for the lost utterance");
+    let world = text.find("*PAR0:\tWorld").expect("last utterance");
+    assert!(hello < comment && comment < world, "{text}");
+    assert!(!text.contains("*PAR1:"), "{text}");
+    assert_valid_chat(&text);
+}
+
+/// No illegal token and no seam record, no comment: a record is written only
+/// when there is one, so a clean transcript is unchanged.
+#[test]
+fn a_transcript_with_no_dropped_token_carries_no_comment() {
+    let text = finalized_chat(vec![spoken(0, &[("hello", 0, 300), ("world", 400, 700)])]);
+    assert!(!text.contains("%com:"), "{text}");
+    assert!(!text.contains("dropped recognizer token"), "{text}");
+    assert!(!text.contains("window seam"), "{text}");
+    assert_valid_chat(&text);
+}
+
+/// A repetition the window reconciler kept once is named, with the seam's
+/// time and the text, in a `%com` on the utterance that keeps the copy, by
+/// the same renderer that writes a dropped token; the file still validates.
+#[test]
+fn a_window_seam_kept_once_is_named_in_a_comment_on_its_utterance() {
+    let mut kept = spoken(0, &[("so", 29_000, 29_400), ("go", 29_500, 30_500)]);
+    kept.seam_ambiguities
+        .push(asr_postprocess::SeamAmbiguity::new(
+            30_120,
+            "go",
+            asr_postprocess::WindowOrdinal::new(1),
+            batchalign_types::interval::AdmittedInterval::admit_millis(29_500, 30_500)
+                .expect("an ordered fixture"),
+        ));
+    let text = finalized_chat(vec![spoken(0, &[("hello", 0, 300)]), kept]);
+    let kept_line = text
+        .find("*PAR0:\tSo go . \u{15}29000_30500\u{15}\n")
+        .expect("the utterance that keeps the copy");
+    let comment = text
+        .find("%com:\tbatchalign window seam at 30120 ms: repeated \"go\" kept once, review here\n")
+        .expect("the seam comment");
+    assert!(
+        kept_line < comment,
+        "the comment follows its utterance: {text}"
+    );
+    assert_eq!(text.matches("%com:").count(), 1, "{text}");
+    assert_valid_chat(&text);
+}
+
+/// The one renderer writes a control character, whitespace or the bullet
+/// delimiter as its code point, so the comment line cannot be broken or
+/// restructured by the token it reports; the time is written as the
+/// recognizer gave it, or its absence said.
+#[test]
+fn a_dropped_token_comment_escapes_what_would_break_the_line() {
+    let mut utterances = vec![spoken(0, &[("hello", 0, 300), ("\u{15}:\t", 300, 400)])];
+    asr_postprocess::finalize_utterances(&mut utterances, "eng");
+    let [utterance] = utterances.as_slice() else {
+        panic!("one utterance");
+    };
+    let [token] = utterance.dropped_tokens.as_slice() else {
+        panic!("one dropped token, got {:?}", utterance.dropped_tokens);
+    };
+    assert_eq!(
+        token.comment_text(),
+        "batchalign dropped recognizer token 'U+0015:U+0009' at 300-400 ms: not representable in CHAT"
+    );
+    let text = finalized_chat(utterances);
+    assert_valid_chat(&text);
+
+    let mut untimed = vec![asr_postprocess::Utterance {
+        speaker: asr_postprocess::SpeakerIndex(0),
+        words: vec![
+            asr_postprocess::AsrWord::new("hello", None, None),
+            asr_postprocess::AsrWord::new(":", None, None),
+        ],
+        end: asr_postprocess::UtteranceEnd::observed(".").expect("a terminator"),
+        lang: None,
+        dropped_tokens: Vec::new(),
+        seam_ambiguities: Vec::new(),
+    }];
+    asr_postprocess::finalize_utterances(&mut untimed, "eng");
+    assert_eq!(
+        untimed[0].dropped_tokens[0].comment_text(),
+        "batchalign dropped recognizer token ':' with no timing: not representable in CHAT"
+    );
+}
+
 #[test]
 fn an_utterance_with_no_positive_word_has_no_bullet() {
     let desc = TranscriptDescription {
@@ -1867,6 +2075,8 @@ fn an_utterance_with_no_positive_word_has_no_bullet() {
                 end: observed("."),
             },
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }],
         write_wor: true,
     };

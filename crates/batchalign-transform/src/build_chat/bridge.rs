@@ -313,6 +313,8 @@ fn build_named_asr_transcript(
                 end: utterance.end.clone(),
             },
             lang: declared_lang,
+            dropped_tokens: utterance.dropped_tokens.clone(),
+            seam_ambiguities: utterance.seam_ambiguities.clone(),
         });
     }
 

@@ -149,7 +149,7 @@ fn interleaved_words_clamps_bullet_and_every_word_past_the_bound() {
             result.effects()
         );
     };
-    assert_eq!(*words_trimmed, 1);
+    assert_eq!(words_trimmed.len(), 1);
     assert!(
         words_dropped.is_empty(),
         "no word is wholly past the bound here: {words_dropped:?}"
@@ -217,7 +217,7 @@ fn interleaved_words_reports_trimmed_and_dropped_separately() {
             result.effects()
         );
     };
-    assert_eq!(*words_trimmed, 1);
+    assert_eq!(words_trimmed.len(), 1);
     assert_eq!(words_dropped.len(), 1);
     let dropped = &words_dropped[0];
     assert_eq!(

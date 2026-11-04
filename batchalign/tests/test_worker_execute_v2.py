@@ -719,7 +719,6 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
                                         "pipeline": "standard",
                                     },
                                     "repairs": [],
-                                    "feature_repairs": [],
                                 }
                             )
                         )
@@ -808,7 +807,6 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
                                 "pipeline": "cantonese_pycantonese_pos",
                             },
                             "repairs": [],
-                            "feature_repairs": [],
                         }
                     )
                 )

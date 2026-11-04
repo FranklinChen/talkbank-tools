@@ -95,17 +95,21 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             MorphosyntaxResultV2,
             MorphosyntaxItemResultV2,
             MorphosyntaxModelIdentityV2,
-            // The relation repairs an analyzed item carries. Registered as
-            // named types, not left to appear only as `$defs`, for the same
-            // reason as the model identity: the Python conformance test reads
-            // these FILES, so a type with no file of its own is a contract
-            // Python is never checked against.
+            // The repairs an analyzed item carries: the one tagged list, its
+            // field kinds, and each field's record and reason vocabulary.
+            // Registered as named types, not left to appear only as `$defs`,
+            // for the same reason as the model identity: the Python
+            // conformance test reads these FILES, so a type with no file of
+            // its own is a contract Python is never checked against.
+            UdRepairV2,
             UdRelationRepairV2,
             UdRelationRepairKindV2,
-            // The feature values an analyzed item's worker removed, beside
-            // its relation repairs, for the same reason.
             UdFeatureRepairV2,
             UdFeatureRepairKindV2,
+            UdFeatureNameRepairV2,
+            UdFeatureNameRepairKindV2,
+            UdLemmaRepairV2,
+            UdLemmaRepairKindV2,
             // Pinned ASR model identity. Registered as named types rather than
             // left to appear only as `$defs` inside the request and result
             // schemas, because the Python conformance test reads these FILES:

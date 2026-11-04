@@ -1,7 +1,5 @@
 use crate::common::{LiveServerJobClient, require_live_direct, require_live_server};
-use batchalign::api::{
-    JobStatus, JobSubmission, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
-};
+use batchalign::api::{JobStatus, JobSubmission, LanguageSpec, NumSpeakers, ReleasedCommand};
 use batchalign::options::{AlignOptions, CommandOptions, CommonOptions};
 use batchalign::worker::InferTask;
 
@@ -11,7 +9,7 @@ fn missing_audio_submission(
 ) -> JobSubmission {
     JobSubmission {
         command: ReleasedCommand::Align,
-        lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+        lang: LanguageSpec::PerFile,
         num_speakers: NumSpeakers(1),
         files: vec![],
         media_files: vec![],

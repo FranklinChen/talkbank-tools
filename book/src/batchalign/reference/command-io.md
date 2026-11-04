@@ -56,11 +56,27 @@ current architecture split:
 - output materialization belongs with the owning command or orchestrator module
 
 When output resolves to the same path as input, mutating commands overwrite the
-original `.cha` file (no automatic backup).
+original `.cha` file (no automatic backup). The overwrite is atomic: the new
+text is written to a uniquely named temporary file beside the original,
+synced to disk, and renamed over it (`atomic_file::write_text_artifact`, on
+the daemon's write and on the CLI's copy-back alike), so a crash, a kill or a
+full disk mid-write leaves the original whole rather than truncated. CSV
+sidecars and evidence documents are written the same way. An original that
+is a symlink is written through, so the file it names changes and the link
+stays a link.
 
 For generation commands such as `transcribe` and `benchmark`, omitting `-o` or
 passing `--in-place` still creates new output files next to the source media; it
-does not rewrite the media input.
+does not rewrite the media input. Because such a result is not the input, an
+existing file at its destination (an earlier `<media>.cha`, `.turns.json` or
+`.compare.csv`) is never replaced silently: admission decides each
+destination once, before anything is submitted, as fresh, a rewrite of the
+submitted source (the in-place commands above), or a replacement under an
+authority. The two authorities are `--overwrite` on the command line and an
+explicit `-o DIR` (results were asked for under that directory). Without
+either, the invocation is refused naming the file and both remedies, and no
+job, provider call or model run happens for a file that would not be written
+(`ResultDestinations::admit` in `crates/batchalign/src/cli/output.rs`).
 
 ### Submission retry semantics
 

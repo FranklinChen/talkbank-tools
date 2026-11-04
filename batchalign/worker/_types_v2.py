@@ -1134,6 +1134,7 @@ class UdRelationRepairKindV2(str, Enum):
 class UdRelationRepairV2(BaseModel):
     """One relation rewrite a worker made inside an analysis it returned."""
 
+    field: Literal["relation"] = "relation"
     kind: UdRelationRepairKindV2
     word: str
     from_relation: str
@@ -1153,26 +1154,77 @@ class UdFeatureRepairKindV2(str, Enum):
 class UdFeatureRepairV2(BaseModel):
     """One feature value a worker removed from an analysis it returned."""
 
+    field: Literal["feature_value"] = "feature_value"
     kind: UdFeatureRepairKindV2
     word: str
     feature: str
     removed_value: str
 
 
+class UdFeatureNameRepairKindV2(str, Enum):
+    """Why a feature name a worker received from Stanza is not in its analysis.
+
+    Closed on both sides of the boundary, like ``UdRelationRepairKindV2``.
+    """
+
+    FEATURE_NAME_ALIAS = "feature_name_alias"
+    """A known misspelling (``Verbform``), respelled to the UD name."""
+
+
+class UdFeatureNameRepairV2(BaseModel):
+    """One feature name a worker respelled inside an analysis it returned."""
+
+    field: Literal["feature_name"] = "feature_name"
+    kind: UdFeatureNameRepairKindV2
+    word: str
+    from_name: str
+    to_name: str
+
+
+class UdLemmaRepairKindV2(str, Enum):
+    """Why a lemma a worker received from Stanza is not in its analysis.
+
+    Closed on both sides of the boundary, like ``UdRelationRepairKindV2``.
+    """
+
+    PUNCTUATION_LEMMA = "punctuation_lemma"
+    """Punctuation only, for a word with letters; the surface form applied."""
+
+
+class UdLemmaRepairV2(BaseModel):
+    """One lemma a worker replaced, by its word's surface form, inside an
+    analysis it returned. The lemma applied is ``word`` itself."""
+
+    field: Literal["lemma"] = "lemma"
+    kind: UdLemmaRepairKindV2
+    word: str
+    from_lemma: str
+
+
+UdRepairV2: TypeAlias = Annotated[
+    UdRelationRepairV2 | UdFeatureRepairV2 | UdFeatureNameRepairV2 | UdLemmaRepairV2,
+    Field(discriminator="field"),
+]
+"""One repair a worker made inside an analysis (internally tagged on ``field``).
+
+The ONE list an analyzed item carries: every repair site produces one of
+these, so the file's provenance count that reads the list cannot miss a kind.
+"""
+
+
 class MorphosyntaxAnalyzedItemV2(BaseModel):
     """An item Stanza analyzed, with the model that analyzed it.
 
-    ``repairs`` and ``feature_repairs`` are required, with no default, for the
-    reason ``model`` is: a default would make "this worker repaired nothing"
-    and "this worker does not report repairs" the same value, which is the
-    shape that let a rewrite live only in a log line.
+    ``repairs`` is required, with no default, for the reason ``model`` is: a
+    default would make "this worker repaired nothing" and "this worker does
+    not report repairs" the same value, which is the shape that let a rewrite
+    live only in a log line.
     """
 
     kind: Literal["analyzed"] = "analyzed"
     raw_sentences: list[WorkerJSONValue]
     model: MorphosyntaxModelIdentityV2
-    repairs: list[UdRelationRepairV2]
-    feature_repairs: list[UdFeatureRepairV2]
+    repairs: list[UdRepairV2]
 
 
 class MorphosyntaxNoWordsItemV2(BaseModel):

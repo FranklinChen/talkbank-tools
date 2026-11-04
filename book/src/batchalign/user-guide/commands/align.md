@@ -10,9 +10,24 @@ The [bullet policy reference](../../reference/bullet-policies.md) collects the
 current defaults and explains word overlap versus utterance overlap, positive
 duration, kept boundaries, partial timing, and final validation.
 
-**Requires:** a `.cha` file whose `@Media` header names an audio file visible
-to the server (or to the local daemon). See
-[Media Resolution](../../reference/command-io.md#1-align).
+**Requires:** a `.cha` file whose `@Media` header names its recording and
+whose `@Languages:` header names the file's language. The recording itself
+must be visible to the server (or to the local daemon) when words need
+aligning: a file whose every word already carries `%wor` timing is refreshed
+from it without the recording (its stamp then says
+`timing=refreshed_from_wor`), and a `NoAlign` file is returned without it;
+pass `--override-media-cache` to align such a file again from its recording,
+which is then required. See
+[Media Resolution](../../reference/command-io.md#1-align) and the
+[reference's Step 0](../../reference/forced-alignment.md#step-0-cheap-reuse-for-already-word-timed-files).
+
+`align` takes no `--lang`. Each file is aligned under the language its own
+`@Languages:` header declares: the aligner and the timing-recovery engine are
+admitted against that header (primary and secondary entries alike), the worker
+the file reaches is keyed by it, and the provenance stamp names it. The job
+record says `per-file`. A file with no header, or whose first entry is not an
+ISO 639-3 code, is failed by name; there is no job language to stand in for
+it. Files of several languages may share one job.
 
 `@Options: NoAlign` opts valid CHAT out of alignment and returns its exact
 original bytes, without timing changes, cleanup or processing stamps. It does
@@ -162,12 +177,12 @@ runtime. Source: `crates/batchalign/src/runner/dispatch/`.
 ```mermaid
 flowchart TD
     start([align invoked]) --> read[Read CHAT file]
-    read --> resolve_audio[Resolve audio file]
+    read --> parse[Parse and admit → ChatFile]
+    parse --> reuse_check{"AlignRoute::decide:\ncomplete reusable %wor and\nno --override-media-cache?"}
+    reuse_check -->|Yes: no recording read| reuse["Refresh main-tier bullets from %wor\nmechanically, then resolve overlap\n(--end-overlap-policy) and only THEN\noptionally regenerate %wor from the\nresolved state"]
+    reuse_check -->|No: NeedsAudio| resolve_audio[Resolve audio file]
     resolve_audio --> ensure_wav[ensure_wav: convert mp4→wav if needed]
-    ensure_wav --> parse[parse_lenient → ChatFile]
-    parse --> reuse_check{Complete reusable\n%wor timing?}
-    reuse_check -->|Yes| reuse["Refresh main-tier bullets from %wor\nmechanically, then resolve overlap\n(--end-overlap-policy) and only THEN\noptionally regenerate %wor from the\nresolved state"]
-    reuse_check -->|No| count[count_utterance_timing → timed, untimed]
+    ensure_wav --> count[count_utterance_timing → timed, untimed]
     reuse --> done([Output .cha file])
 
     count --> utr_check{untimed > 0?}

@@ -1,7 +1,7 @@
 # English Transcribe Corrections
 
 **Status:** Current
-**Last updated:** 2026-05-01 09:47 EDT
+**Last updated:** 2026-11-03 14:16 EST
 
 BA3 applies three orthographic corrections to English ASR output
 before CHAT assembly. Each rule ships silent-mutation (no
@@ -94,6 +94,15 @@ Implementation: `crates/batchalign-transform/src/asr_postprocess/cleanup.rs::app
 - Empty strings and pure-punctuation tokens.
 
 Idempotent (already-capitalized first words pass through).
+
+The same rule, through the same slot decision (`initial_cap_slot` in
+`cleanup.rs`), is applied to every non-first child of a post-CHAT utterance
+split (standalone `utseg` and transcribe's second pass) when the file's
+`@Languages` names English first: the child's first capitalizable word is
+capitalized on the main tier and on its `%wor` word, with the same skips
+(walked past a retrace node, a filler, an event; stopped at a letter form).
+Until 2026-11-03 a split child began lowercase (`and he likes cake .`). See
+`SplitChildOrthography` in `crates/batchalign-transform/src/utseg.rs`.
 
 **Probe-verdict lock**: `_UTTERANCE_INITIAL_CASES` (POST_NEUTRAL × 3)
 , `hello`, `the`, `what` all show case-invariant Stanza POS.

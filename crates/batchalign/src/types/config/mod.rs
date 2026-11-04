@@ -33,5 +33,5 @@ pub use lease::{LEASE_HEARTBEAT, LeaseTtl, LeaseTtlTooShort};
 pub use load::*;
 pub use port::PortRequest;
 pub use positive::{JobTtlDays, MemoryGatePollSeconds, WorkerStartupLimit};
-pub use serde_helpers::zero_as_no_override;
+pub use serde_helpers::{zero_as_no_cap, zero_as_no_override};
 pub use server::*;

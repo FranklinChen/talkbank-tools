@@ -320,10 +320,10 @@ async fn run_hosted_job(
             .collect()
     };
 
-    // Pre-scaling happens in routing, after the job's dispatch plan exists:
-    // a GPU command's workers are keyed by that plan, and pre-scaling from the
-    // options alone warmed a worker no request reached
-    // (`runner::routing::pre_scale_job_workers`).
+    // Pre-scaling happens after the job's dispatch plan exists, in routing for
+    // a job-level command and per file language for align: a GPU command's
+    // workers are keyed by that plan, and pre-scaling from the options alone
+    // warmed a worker no request reached (`runner::dispatch::pre_scale_workers`).
 
     // Every file task the dispatch spawns inherits this attempt's job id and
     // cancellation token (see `runner::job_scope`).

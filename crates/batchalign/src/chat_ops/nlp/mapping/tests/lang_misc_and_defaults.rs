@@ -115,38 +115,44 @@ fn a_verb_without_verbform_or_number_is_written_bare() {
 
 #[test]
 fn test_garbage_deprel_rejected() {
-    // A deprel with garbage characters should be rejected, not silently fixed.
+    // A deprel with garbage characters is rejected, not silently fixed. Two
+    // gates, in order: a padding relation (`<PAD>`) never becomes a `UdWord`
+    // at all, because the worker's repair boundary owns that rewrite and the
+    // admission refuses what it should have repaired; a relation that is no
+    // padding but still cannot be a `%gra` label is admitted as the model's
+    // and refused by the mapper.
+    let analysis =
+        |id: usize, text: &str, upos: UniversalPos, head: usize, deprel: &str| UdWordAnalysis {
+            id: UdId::Single(id),
+            text: text.to_string(),
+            lemma: text.to_string(),
+            upos: UdPunctable::Value(upos),
+            xpos: None,
+            feats: None,
+            head,
+            deprel: deprel.to_string(),
+            deps: None,
+            misc: None,
+        };
+    let refused = UdWord::try_from(analysis(2, "big", UniversalPos::Adj, 1, "<PAD>"));
+    assert!(
+        matches!(
+            refused,
+            Err(batchalign_transform::morphosyntax::UdWordAdmissionError::PaddingRelation { .. })
+        ),
+        "a padding relation is refused at admission, got: {refused:?}"
+    );
+
     let ctx = MappingContext {
         lang: talkbank_model::model::LanguageCode::new("en").expect("valid test language code"),
     };
     let sentence = UdSentence {
         words: vec![
-            UdWord::try_from(UdWordAnalysis {
-                id: UdId::Single(1),
-                text: "dog".to_string(),
-                lemma: "dog".to_string(),
-                upos: UdPunctable::Value(UniversalPos::Noun),
-                xpos: None,
-                feats: None,
-                head: 0,
-                deprel: "root".to_string(),
-                deps: None,
-                misc: None,
-            })
-            .expect("test analysis carries no padding feature"),
-            UdWord::try_from(UdWordAnalysis {
-                id: UdId::Single(2),
-                text: "big".to_string(),
-                lemma: "big".to_string(),
-                upos: UdPunctable::Value(UniversalPos::Adj),
-                xpos: None,
-                feats: None,
-                head: 1,
-                deprel: "<PAD>".to_string(), // garbage deprel
-                deps: None,
-                misc: None,
-            })
-            .expect("test analysis carries no padding feature"),
+            UdWord::try_from(analysis(1, "dog", UniversalPos::Noun, 0, "root"))
+                .expect("a UD relation is admitted"),
+            // A space is no character of a `%gra` relation label.
+            UdWord::try_from(analysis(2, "big", UniversalPos::Adj, 1, "bad relation"))
+                .expect("the admission judges padding and lemmas, not label spelling"),
         ],
     };
     let err = map_ud_sentence(&sentence, &ctx).unwrap_err();
@@ -181,9 +187,10 @@ fn is_terminator_punct_matches_only_sentence_terminators() {
     assert!(super::is_terminator_punct(&make(".", ".")));
     assert!(super::is_terminator_punct(&make("+...", "+...")));
 
-    // Content punctuation MUST NOT be classified as a terminator
-    // these flow through to `map_ud_word` to produce Mor items
-    // (`cm|cm`, `end|end`, `beg|beg`, etc.). The CA-prosody arrows
+    // Content punctuation MUST NOT be classified as a terminator: a comma
+    // flows through `map_ud_word` (`cm|cm`), and the tag markers `„` and `‡`
+    // are written by `TagMarker::mor` after `map_ud_word_item` classifies
+    // them. The CA-prosody arrows
     // (`⇗ ↗ → ↘ ⇘ ≋ ≈`) belong here too: per CHECK they are
     // SEPARATORS, not terminators (BUG-009, 2026-05-01).
     // `Terminator::CaRisingToHigh` and friends remain as model variants

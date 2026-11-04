@@ -493,7 +493,7 @@ impl AnchorIndex {
         words: &[crate::chat_ops::fa::FaWord],
         corridor: crate::chat_ops::fa::TimeSpan,
         recording: &crate::chat_ops::fa::coordinates::Recording,
-    ) -> Option<crate::chat_ops::fa::TimeSpan> {
+    ) -> Option<super::search::SearchWindow> {
         if words.iter().enumerate().any(|(index, word)| {
             word.utterance_index != utterance || word.utterance_word_index != WordIdx::new(index)
         }) {
@@ -512,12 +512,12 @@ impl AnchorIndex {
             if let Some(first) = anchors.anchors().first()
                 && first.word() == WordIdx::new(0)
             {
-                window.start_ms = window.start_ms.max(first.start().get());
+                window.span.start_ms = window.span.start_ms.max(first.start().get());
             }
             if let Some(last) = anchors.anchors().last()
                 && anchors.alignable_words().is_last(last.word())
             {
-                window.end_ms = window.end_ms.min(last.end().get());
+                window.span.end_ms = window.span.end_ms.min(last.end().get());
             }
         }
         Some(window)

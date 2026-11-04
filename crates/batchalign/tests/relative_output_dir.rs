@@ -96,6 +96,7 @@ fn write_one_result(out_dir: &Path) {
         &outputs,
         &inputs,
         Some(out_dir),
+        None,
     )
     .expect("admit destinations");
 

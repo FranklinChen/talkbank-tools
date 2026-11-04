@@ -1,7 +1,7 @@
 # Retrace Detection
 
 **Status:** Current behavior reference
-**Last verified:** 2026-05-21 15:20 EDT
+**Last verified:** 2026-11-03 14:16 EST
 
 This page documents how current batchalign retrace detection works. It does not
 preserve branch-era side-by-side implementation archaeology.
@@ -63,6 +63,23 @@ The gate lives at the marking step in `apply_retrace_detection`
 not carry a dedicated filler variant; disfluency replacement (stage 7)
 rewrites `um` to `&-um` before retrace detection runs, so the prefix is
 the stable filler marker for this check.
+
+## Model boundaries never separate a repetition
+
+In `transcribe`, the pre-CHAT boundary model cuts prepared chunks before
+retrace detection runs on the pieces. Detection sees one utterance at a
+time, so a model boundary between the copies of an exact repetition would
+hide the pair from it: `yeah I I went` with a boundary after the first `I`
+used to become `Yeah I .` and `I went .` with no `[/]`. The cut now consumes
+a retrace-analyzed chunk (`RetraceAnalyzedChunk` in
+`crates/batchalign-transform/src/asr_postprocess/chunking.rs`): the same
+exact repeated n-gram analysis as above runs over the whole chunk first, and
+a cut inside a repetition (including the seam between its copies) is not
+made, so both copies reach detection together and the output is
+`Yeah I [/] I went .`. The suppressed cut is logged; the post-CHAT pass, which
+sees the typed retrace and binds it forward to its material, may still split
+before the retrace node (`Yeah .` and `I [/] I went .`). Fillers take part
+in the analysis as in detection, so `&-um &-um` protects no cut.
 
 ## Current implementation properties
 

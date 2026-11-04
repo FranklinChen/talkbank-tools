@@ -87,23 +87,51 @@ fn representative_batchalign2_aliases_match_canonical_typed_options() {
             note: "align rev UTR alias",
         },
         EquivalenceCase {
-            canonical: &["transcribe", "--asr-engine", "whisperx", "audio/"],
-            compat: &["transcribe", "--whisperx", "audio/"],
+            canonical: &[
+                "transcribe",
+                "--lang",
+                "eng",
+                "--asr-engine",
+                "whisperx",
+                "audio/",
+            ],
+            compat: &["transcribe", "--lang", "eng", "--whisperx", "audio/"],
             note: "transcribe whisperx alias",
         },
         EquivalenceCase {
-            canonical: &["transcribe", "--asr-engine", "rev", "audio/"],
-            compat: &["transcribe", "--rev", "audio/"],
+            canonical: &[
+                "transcribe",
+                "--lang",
+                "eng",
+                "--asr-engine",
+                "rev",
+                "audio/",
+            ],
+            compat: &["transcribe", "--lang", "eng", "--rev", "audio/"],
             note: "transcribe rev alias",
         },
         EquivalenceCase {
-            canonical: &["transcribe", "--diarization", "enabled", "audio/"],
-            compat: &["transcribe", "--diarize", "audio/"],
+            canonical: &[
+                "transcribe",
+                "--lang",
+                "eng",
+                "--diarization",
+                "enabled",
+                "audio/",
+            ],
+            compat: &["transcribe", "--lang", "eng", "--diarize", "audio/"],
             note: "transcribe diarize alias",
         },
         EquivalenceCase {
-            canonical: &["transcribe", "--diarization", "disabled", "audio/"],
-            compat: &["transcribe", "--nodiarize", "audio/"],
+            canonical: &[
+                "transcribe",
+                "--lang",
+                "eng",
+                "--diarization",
+                "disabled",
+                "audio/",
+            ],
+            compat: &["transcribe", "--lang", "eng", "--nodiarize", "audio/"],
             note: "transcribe nodiarize alias",
         },
         EquivalenceCase {
@@ -142,7 +170,15 @@ fn compat_engine_aliases_override_canonical_enums_before_dispatch() {
         other => panic!("expected Align options, got {other:?}"),
     }
 
-    match typed_options(&["transcribe", "--asr-engine", "rev", "--whisperx", "audio/"]) {
+    match typed_options(&[
+        "transcribe",
+        "--lang",
+        "eng",
+        "--asr-engine",
+        "rev",
+        "--whisperx",
+        "audio/",
+    ]) {
         CommandOptions::Transcribe(options) => {
             assert_eq!(options.asr_engine, AsrEngineName::WhisperX)
         }
@@ -221,6 +257,8 @@ fn custom_engine_names_override_hidden_aliases_and_canonical_enums() {
 
     match typed_options(&[
         "transcribe",
+        "--lang",
+        "eng",
         "--asr-engine",
         "whisper",
         "--whisperx",
@@ -254,6 +292,8 @@ fn custom_engine_names_override_hidden_aliases_and_canonical_enums() {
 fn compat_diarization_flags_override_enum_and_preserve_dispatch_contract() {
     match typed_options(&[
         "transcribe",
+        "--lang",
+        "eng",
         "--diarization",
         "disabled",
         "--diarize",
@@ -265,6 +305,8 @@ fn compat_diarization_flags_override_enum_and_preserve_dispatch_contract() {
     assert_eq!(
         dispatch_command(&[
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "disabled",
             "--diarize",
@@ -275,6 +317,8 @@ fn compat_diarization_flags_override_enum_and_preserve_dispatch_contract() {
 
     match typed_options(&[
         "transcribe",
+        "--lang",
+        "eng",
         "--diarization",
         "enabled",
         "--nodiarize",
@@ -286,6 +330,8 @@ fn compat_diarization_flags_override_enum_and_preserve_dispatch_contract() {
     assert_eq!(
         dispatch_command(&[
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "enabled",
             "--nodiarize",
@@ -294,12 +340,26 @@ fn compat_diarization_flags_override_enum_and_preserve_dispatch_contract() {
         "transcribe"
     );
 
-    match typed_options(&["transcribe", "--diarize", "--nodiarize", "audio/"]) {
+    match typed_options(&[
+        "transcribe",
+        "--lang",
+        "eng",
+        "--diarize",
+        "--nodiarize",
+        "audio/",
+    ]) {
         CommandOptions::TranscribeS(options) => assert!(options.diarize),
         other => panic!("expected TranscribeS options, got {other:?}"),
     }
     assert_eq!(
-        dispatch_command(&["transcribe", "--diarize", "--nodiarize", "audio/"]),
+        dispatch_command(&[
+            "transcribe",
+            "--lang",
+            "eng",
+            "--diarize",
+            "--nodiarize",
+            "audio/"
+        ]),
         "transcribe_s",
         "--diarize must remain the deciding compat flag when both BA2 bools are present"
     );
@@ -310,10 +370,10 @@ fn compat_paths_reach_the_same_usage_error_path_as_canonical_forms() {
     let cases = [
         &["align", "--whisper-fa"][..],
         &["align", "--fa-engine", "whisper"][..],
-        &["transcribe", "--whisper"][..],
-        &["transcribe", "--asr-engine", "whisper"][..],
-        &["transcribe", "--diarize"][..],
-        &["transcribe", "--diarization", "enabled"][..],
+        &["transcribe", "--lang", "eng", "--whisper"][..],
+        &["transcribe", "--lang", "eng", "--asr-engine", "whisper"][..],
+        &["transcribe", "--lang", "eng", "--diarize"][..],
+        &["transcribe", "--lang", "eng", "--diarization", "enabled"][..],
     ];
 
     for args in cases {

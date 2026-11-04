@@ -124,6 +124,7 @@ pub enum UtteranceEnd {
 pub enum SynthesisCause {
     NoMark,                            // the chunk ran out of words
     UnwritableMark(UnwritableEndMark), // `...` (Ellipsis) or `(.)` (Pause)
+    ModelBoundary(BoundaryTerminator), // the boundary model cut here: Period, Question, Exclamation
 }
 ```
 
@@ -140,7 +141,12 @@ emits no utterance.
 
 CHAT requires a terminator and has no notation for one nobody heard, so a
 synthesized end is written as `.` (`UtteranceEnd::terminator`, the one place
-that period is chosen). `build_chat` returns the written utterances whose end
+that period is chosen), except an end the boundary model predicted
+(`ModelBoundary`), which is written with the predicted kind through
+`chat_terminator`, the one conversion from a `BoundaryTerminator` to a
+`Terminator`. A piece the pre-CHAT pass cut carries the end its cut
+predicted (`SegmentedChunk`), and `retokenize` closes its last utterance with
+that cause when the recognizer left it open. `build_chat` returns the written utterances whose end
 was synthesized (`BuiltChat::synthesized_ends`, by position among the file's
 utterances), and transcribe counts them in the file's provenance stamp
 (`asr_synthesized_terminators=N`), named for the stage it counts: a later
@@ -151,11 +157,27 @@ count. CA transcripts created from ASR still get these periods.
 
 **File:** `crates/batchalign-transform/src/utseg.rs`
 
-A split's earlier children receive a synthesized period. The final child
-inherits the parent's terminator, including a non-period ending; the retained
-`utseg_split_inherits_terminator_on_last_child` control exercises that boundary.
-The `%wor` terminators are kept in sync with their new main tiers. These cuts
-are not included in the ASR assembly's synthesized-end count.
+A split's earlier children end with the terminator the segmentation
+predicted at their cut (`SegmentEnds::Predicted`, from the boundary model's
+action), and with a period where the segmenter stated none
+(`SegmentEnds::Unstated`: Stanza constituency, bare worker assignments). The
+final child inherits the parent's terminator, including a non-period ending;
+the retained `utseg_split_inherits_terminator_on_last_child` control
+exercises both halves of that boundary. The `%wor` terminators are kept in
+sync with their new main tiers. These cuts are not included in the ASR
+assembly's synthesized-end count.
+
+The pinned Chatter (v0.34.0) `UtteranceSplitPlan` rebuilds every earlier
+child with a period and has no parameter for a terminator per child, so BA3
+sets the predicted terminator after the split, in `split_source` and
+`finish_child`, the one transition from a rebuilt child to a line of the
+file, which also applies the English utterance-initial capital the file's
+language asks for. Design record: the Chatter API should take the terminator
+class per child boundary, so the plan rebuilds each child with its end and
+this post-split terminator step disappears; that change is made in Chatter
+and replaces the terminator half of the transition at the next Chatter
+release. The capitalization half stays here: it is this pipeline's English
+orthography, not a CHAT-format fact.
 
 ### 4. CHAT building from ASR
 
@@ -257,7 +279,8 @@ in `ENDING_PUNCT` and would have been treated as regular word content.
 | Chatter `talkbank-model` | Terminator inventory, CA separators, optional main-tier ending and paired MOR/GRA construction |
 | `crates/batchalign-transform/src/asr_postprocess/utterance.rs` | Observed or synthesized ASR ending and its cause |
 | `crates/batchalign-transform/src/build_chat/utterances.rs` | Consume the description's end; report synthesized assembly endings |
-| `crates/batchalign-transform/src/utseg.rs` | Split children, preserve the parent's ending on the final child and synchronize `%wor` |
+| `crates/batchalign-transform/src/utseg.rs` | Finish split children: the predicted ending on earlier children, the parent's ending on the final child, `%wor` in sync, English capital on new children |
+| `crates/batchalign-types/src/segmentation.rs` | `UtteranceSegmentation`: assignments with `SegmentEnds` (a predicted terminator per cut and for the tail, or unstated), built only from boundary evidence or as unstated |
 | `crates/batchalign-transform/src/morphosyntax/payload.rs` | Typed Stanza-input terminator policy |
 | `crates/batchalign-transform/src/morphosyntax/sentence_mapping.rs` | Build GRA chunk relations and the terminator relation |
 | `crates/batchalign-transform/src/inject.rs` | Admit the MOR/GRA terminator slot before installing tiers |

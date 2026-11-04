@@ -116,6 +116,7 @@ pub fn parse_asr_response_v2(
         TaskResultV2::MonologueAsrResult(result) => {
             result.model.admit(pinned, backend)?;
             Ok(AsrResponse {
+                seam_ambiguities: Vec::new(),
                 lang: resolve_worker_lang(&result.lang, fallback_lang)
                     .map_err(AsrResponseAdmissionError::Lowering)?,
                 // Carried from the wire result only after the admission above,
@@ -305,9 +306,13 @@ pub(crate) fn whisper_chunk_result_to_asr_response(
     result: &WhisperChunkResultV2,
     fallback_lang: Option<&LanguageCode3>,
 ) -> Result<AsrResponse, String> {
-    // Both producers' seams are settled here, once, whatever they sent.
-    let observations =
-        super::whisper_windows::reconcile(&result.chunks).map_err(|refused| refused.to_string())?;
+    // Both producers' seams are settled here, once, whatever they sent. A
+    // repetition the reconciler could not attribute is kept once and carried
+    // on the response as a record, never a refusal of the whole recording.
+    let super::whisper_windows::Reconciled {
+        spans: observations,
+        seams,
+    } = super::whisper_windows::reconcile(&result.chunks).map_err(|refused| refused.to_string())?;
     let spans = MonotoneChunkSpans::project(&observations).map_err(|refused| {
         format!("Whisper chunk boundaries could not be fitted as audio positions: {refused}")
     })?;
@@ -340,6 +345,7 @@ pub(crate) fn whisper_chunk_result_to_asr_response(
                 })
             })
             .collect(),
+        seam_ambiguities: seams,
         source_monologues: None,
     })
 }
@@ -366,24 +372,64 @@ fn resolve_worker_lang(
     }
 }
 
+/// Fixtures for the Whisper lowering shared with the pipeline tests, which
+/// run a windowed response through this lowering and on to CHAT.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::{AudioPositionSeconds, LanguageCode3, NonNegativeSeconds};
+pub(crate) mod test_fixtures {
+    use super::AsrRequestedModelsV2;
+    use crate::api::{LanguageCode3, NonNegativeSeconds};
     use crate::types::worker_v2::{
-        AsrElementKindV2, AsrElementV2, AsrModelIdentityV2, AsrMonologueV2, ExecuteResponseV2,
-        HubCommitV2, LoadedModelV2, ModelIdV2, MonologueAsrResultV2, ObservedRevisionV2,
-        RequestedModelV2, RequestedRevisionV2, TaskResultV2, WhisperChunkResultV2,
-        WhisperChunkSpanV2, WorkerRequestIdV2,
+        AsrModelIdentityV2, ExecuteResponseV2, HubCommitV2, LoadedModelV2, ModelIdV2,
+        ObservedRevisionV2, RequestedModelV2, RequestedRevisionV2, TaskResultV2,
+        WhisperChunkResultV2, WorkerRequestIdV2,
     };
 
-    /// A fixture position; every literal in this module is a valid one.
-    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
-        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
+    /// The commit the plan pins in these fixtures.
+    pub(crate) const PINNED: &str = "06f233fe06e710322aca913c1bc4249a0d71fce1";
+
+    pub(crate) fn commit(hex: &str) -> HubCommitV2 {
+        HubCommitV2::try_from(hex).expect("a 40 hex character commit is valid")
+    }
+
+    pub(crate) fn whisper_id() -> ModelIdV2 {
+        ModelIdV2::try_from("openai/whisper-large-v3").expect("a hub model id is stamp safe")
+    }
+
+    /// A loaded identity for tests whose subject is LOWERING, not which
+    /// checkpoint ran. Pinned and observed to the same commit, so it is a value
+    /// [`test_requested`] admits: these fixtures must agree, or every test here
+    /// would be measuring the refusal instead of the lowering.
+    pub(crate) fn test_identity() -> AsrModelIdentityV2 {
+        AsrModelIdentityV2::Whisper {
+            asr: LoadedModelV2 {
+                id: whisper_id(),
+                requested: RequestedRevisionV2::Commit {
+                    commit: commit(PINNED),
+                },
+                observed: ObservedRevisionV2::Commit {
+                    commit: commit(PINNED),
+                },
+            },
+        }
+    }
+
+    /// The pin [`test_identity`] answers: the same model at the same commit.
+    pub(crate) fn test_requested() -> AsrRequestedModelsV2 {
+        AsrRequestedModelsV2::Whisper {
+            asr: RequestedModelV2 {
+                id: whisper_id(),
+                revision: RequestedRevisionV2::Commit {
+                    commit: commit(PINNED),
+                },
+            },
+        }
     }
 
     /// Independent decodes of overlapping sample windows.
-    fn window_response(left: serde_json::Value, right: serde_json::Value) -> ExecuteResponseV2 {
+    pub(crate) fn window_response(
+        left: serde_json::Value,
+        right: serde_json::Value,
+    ) -> ExecuteResponseV2 {
         let chunks = serde_json::from_value(serde_json::json!({
             "sample_rate_hz": 16000,
             "windows": [
@@ -404,6 +450,26 @@ mod tests {
             }),
             NonNegativeSeconds::try_from(0.01).expect("elapsed"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::*;
+    use super::*;
+    use crate::api::{AudioPositionSeconds, LanguageCode3, NonNegativeSeconds};
+
+    /// Another valid commit, for the worker that loaded the wrong one.
+    const OTHER: &str = "c07281df297b9905d24a508279258cccf987a064";
+    use crate::types::worker_v2::{
+        AsrElementKindV2, AsrElementV2, AsrModelIdentityV2, AsrMonologueV2, ExecuteResponseV2,
+        LoadedModelV2, MonologueAsrResultV2, ObservedRevisionV2, RequestedRevisionV2, TaskResultV2,
+        WhisperChunkResultV2, WhisperChunkSpanV2, WorkerRequestIdV2,
+    };
+
+    /// A fixture position; every literal in this module is a valid one.
+    fn at(seconds: f64) -> Option<AudioPositionSeconds> {
+        Some(AudioPositionSeconds::try_from(seconds).expect("fixture position"))
     }
 
     #[test]
@@ -432,6 +498,10 @@ mod tests {
             ["again", "again", "shared"]
         );
         assert_eq!(parsed.tokens[1].start_s, at(20.0));
+        assert!(
+            parsed.seam_ambiguities.is_empty(),
+            "an unambiguous overlap leaves no seam record"
+        );
     }
 
     #[test]
@@ -453,22 +523,109 @@ mod tests {
         assert!(parsed.tokens[1].start_s.is_none());
     }
 
+    /// Two earlier observations both fit the incoming one, so which is the
+    /// repeat cannot be told. The earlier window's copies stay, the later
+    /// window's copy is dropped, and the decision is a record on the response
+    /// naming the seam (the first instant window 1 owns: sample 352000 at
+    /// 16 kHz, 22000 ms), the text and the window whose copy was dropped.
+    /// Until 2026-11-03 this refused the whole recording.
     #[test]
-    fn window_boundary_refuses_ambiguous_repetition() {
+    fn window_boundary_keeps_one_copy_of_an_ambiguous_repetition_and_marks_the_seam() {
         let response = window_response(
             serde_json::json!([
                 {"text":"go", "start_s":20.0, "end_s":22.0},
                 {"text":"go", "start_s":20.5, "end_s":22.5}]),
             serde_json::json!([{"text":"go", "start_s":1.0, "end_s":3.0}]),
         );
-        let error = parse_asr_response_v2(
+        let parsed = parse_asr_response_v2(
             &response,
             Some(&LanguageCode3::eng()),
             &test_requested(),
             AsrBackendV2::LocalWhisper,
         )
-        .expect_err("ambiguous seam");
-        assert!(error.to_string().contains("ambiguous"), "{error}");
+        .expect("the recording is transcribed, with the seam marked");
+        assert_eq!(
+            parsed
+                .tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["go", "go"],
+            "the later window's copy is dropped, the earlier window's copies stay"
+        );
+        let [seam] = parsed.seam_ambiguities.as_slice() else {
+            panic!("one seam record, got {:?}", parsed.seam_ambiguities);
+        };
+        assert_eq!(seam.seam_ms(), 22_000);
+        assert_eq!(seam.text(), "go");
+        assert_eq!(seam.dropped_from().as_usize(), 1);
+        assert_eq!(seam.kept().start_ms(), 20_000);
+        assert_eq!(seam.kept().end_ms(), 22_000);
+    }
+
+    /// Two incoming observations claim the same earlier one: the second claim
+    /// cannot be attributed, so it is dropped and recorded; the first stays
+    /// shared. One copy results.
+    #[test]
+    fn a_second_claim_on_an_already_matched_observation_is_kept_once_and_marked() {
+        let response = window_response(
+            serde_json::json!([{"text":"go", "start_s":20.0, "end_s":22.0}]),
+            serde_json::json!([
+                {"text":"go", "start_s":1.0, "end_s":3.0},
+                {"text":"go", "start_s":1.5, "end_s":3.0}]),
+        );
+        let parsed = parse_asr_response_v2(
+            &response,
+            Some(&LanguageCode3::eng()),
+            &test_requested(),
+            AsrBackendV2::LocalWhisper,
+        )
+        .expect("the recording is transcribed, with the seam marked");
+        assert_eq!(
+            parsed
+                .tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["go"]
+        );
+        assert_eq!(parsed.seam_ambiguities.len(), 1);
+        assert_eq!(parsed.seam_ambiguities[0].dropped_from().as_usize(), 1);
+    }
+
+    /// Matches that cross (the later incoming word matches an EARLIER
+    /// observation than the one before it did) cannot be attributed either:
+    /// the crossing claim is dropped and recorded, the anchors stay in order.
+    #[test]
+    fn a_crossing_match_is_kept_once_and_marked() {
+        let response = window_response(
+            serde_json::json!([
+                {"text":"yes", "start_s":20.0, "end_s":20.5},
+                {"text":"no", "start_s":21.0, "end_s":21.5}]),
+            serde_json::json!([
+                {"text":"no", "start_s":2.0, "end_s":2.5},
+                {"text":"yes", "start_s":1.0, "end_s":1.5}]),
+        );
+        let parsed = parse_asr_response_v2(
+            &response,
+            Some(&LanguageCode3::eng()),
+            &test_requested(),
+            AsrBackendV2::LocalWhisper,
+        )
+        .expect("the recording is transcribed, with the seam marked");
+        assert_eq!(
+            parsed
+                .tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["yes", "no"],
+            "the earlier window's order stands"
+        );
+        let [seam] = parsed.seam_ambiguities.as_slice() else {
+            panic!("one seam record, got {:?}", parsed.seam_ambiguities);
+        };
+        assert_eq!(seam.text(), "yes");
     }
 
     #[test]
@@ -497,49 +654,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "middle", "last"]
         );
-    }
-
-    /// The commit the plan pins in these fixtures.
-    const PINNED: &str = "06f233fe06e710322aca913c1bc4249a0d71fce1";
-    /// Another valid commit, for the worker that loaded the wrong one.
-    const OTHER: &str = "c07281df297b9905d24a508279258cccf987a064";
-
-    fn commit(hex: &str) -> HubCommitV2 {
-        HubCommitV2::try_from(hex).expect("a 40 hex character commit is valid")
-    }
-
-    fn whisper_id() -> ModelIdV2 {
-        ModelIdV2::try_from("openai/whisper-large-v3").expect("a hub model id is stamp safe")
-    }
-
-    /// A loaded identity for tests whose subject is LOWERING, not which
-    /// checkpoint ran. Pinned and observed to the same commit, so it is a value
-    /// [`test_requested`] admits: these fixtures must agree, or every test here
-    /// would be measuring the refusal instead of the lowering.
-    fn test_identity() -> AsrModelIdentityV2 {
-        AsrModelIdentityV2::Whisper {
-            asr: LoadedModelV2 {
-                id: whisper_id(),
-                requested: RequestedRevisionV2::Commit {
-                    commit: commit(PINNED),
-                },
-                observed: ObservedRevisionV2::Commit {
-                    commit: commit(PINNED),
-                },
-            },
-        }
-    }
-
-    /// The pin [`test_identity`] answers: the same model at the same commit.
-    fn test_requested() -> AsrRequestedModelsV2 {
-        AsrRequestedModelsV2::Whisper {
-            asr: RequestedModelV2 {
-                id: whisper_id(),
-                revision: RequestedRevisionV2::Commit {
-                    commit: commit(PINNED),
-                },
-            },
-        }
     }
 
     /// A wire bound, through the same proof the deserializer uses.

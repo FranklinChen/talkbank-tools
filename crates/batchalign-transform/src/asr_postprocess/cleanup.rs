@@ -14,6 +14,7 @@ use super::{
     AsrNormalizedText, AsrWord, ENDING_PUNCT, MOR_PUNCT, Utterance, WordKind,
     is_punct_or_terminator,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -160,30 +161,152 @@ pub fn strip_boundary_quotes(words: Vec<AsrWord>) -> Vec<AsrWord> {
 pub fn sanitize_chat_illegal_word_chars(words: Vec<AsrWord>) -> Vec<AsrWord> {
     words
         .into_iter()
-        .filter_map(sanitize_chat_illegal_word)
+        .filter_map(|word| match sanitize_chat_illegal_word(word) {
+            Sanitized::Kept(word) => Some(word),
+            Sanitized::Dropped(_) => None,
+        })
         .collect()
 }
 
-/// Apply [`sanitize_chat_illegal_word_chars`] to every word in every
-/// utterance and drop utterances that lose all their words (they
-/// would otherwise serialize as empty main-tier lines).
+/// A recognizer token no CHAT-legal prefix of which exists, so the sanitizer
+/// could keep none of it.
+///
+/// The record of the drop, kept on the utterance that lost the token
+/// ([`Utterance::dropped_tokens`]) so it travels with the words it stood
+/// among and is written into the transcript beside them: as a `%com` tier on
+/// the utterance, or as an `@Comment` where the utterance would have been
+/// when nothing else survived. The log line at the drop is the narration;
+/// this is what a reader of the file sees. Its fields are private: the one
+/// way to make one is to drop a word, and the one way to read it is through
+/// its accessors and [`Self::comment_text`], the single renderer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DroppedAsrToken {
+    /// The token, verbatim, as the recognizer emitted it after normalization.
+    text: AsrNormalizedText,
+    /// Its start in milliseconds, when the recognizer timed it.
+    start_ms: Option<i64>,
+    /// Its end in milliseconds, when the recognizer timed it.
+    end_ms: Option<i64>,
+}
+
+impl DroppedAsrToken {
+    fn of(word: &AsrWord) -> Self {
+        Self {
+            text: word.text.clone(),
+            start_ms: word.start_ms,
+            end_ms: word.end_ms,
+        }
+    }
+
+    /// The token, verbatim.
+    pub fn text(&self) -> &str {
+        self.text.as_str()
+    }
+
+    /// Its start in milliseconds, when timed.
+    pub fn start_ms(&self) -> Option<i64> {
+        self.start_ms
+    }
+
+    /// Its end in milliseconds, when timed.
+    pub fn end_ms(&self) -> Option<i64> {
+        self.end_ms
+    }
+
+    /// The one rendering of this record as CHAT comment text, for a `%com`
+    /// tier on the utterance and for an `@Comment` in its place alike:
+    /// `batchalign dropped recognizer token ':' at 300-400 ms: not
+    /// representable in CHAT`.
+    ///
+    /// The token is quoted with its characters as they were, except that a
+    /// control character, whitespace or the CHAT bullet delimiter (U+0015),
+    /// any of which would break or restructure the comment line, is written
+    /// as its code point (`U+0015`). The rest of a dropped token is by
+    /// definition punctuation or symbols CHAT does not admit as a word, and a
+    /// comment tier admits them as text.
+    pub fn comment_text(&self) -> String {
+        let quoted = quoted_for_comment(self.text.as_str(), CommentQuoting::Token);
+        let when = match (self.start_ms, self.end_ms) {
+            (Some(start), Some(end)) => format!("at {start}-{end} ms"),
+            (Some(start), None) => format!("from {start} ms"),
+            (None, Some(end)) => format!("until {end} ms"),
+            (None, None) => "with no timing".to_owned(),
+        };
+        format!("batchalign dropped recognizer token {quoted} {when}: not representable in CHAT")
+    }
+}
+
+/// How a recognizer text is quoted inside a `%com` or `@Comment` this
+/// pipeline writes about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommentQuoting {
+    /// One token, in single quotes; every whitespace character is written as
+    /// its code point, since a token holds none.
+    Token,
+    /// A phrase, in double quotes; spaces stay, since a repeated span may be
+    /// several words.
+    Phrase,
+}
+
+/// Quote `text` for a comment line so the text cannot break or restructure
+/// it: a control character, the CHAT bullet delimiter (U+0015) and, per the
+/// quoting, whitespace are written as their code points (`U+0015`). The one
+/// rule, shared by the dropped-token and the window-seam records.
+pub(crate) fn quoted_for_comment(text: &str, quoting: CommentQuoting) -> String {
+    let (open, close) = match quoting {
+        CommentQuoting::Token => ('\'', '\''),
+        CommentQuoting::Phrase => ('"', '"'),
+    };
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push(open);
+    for c in text.chars() {
+        let escaped_whitespace = match quoting {
+            CommentQuoting::Token => c.is_whitespace(),
+            CommentQuoting::Phrase => c.is_whitespace() && c != ' ',
+        };
+        if c.is_control() || c == '\u{15}' || escaped_whitespace {
+            quoted.push_str(&format!("U+{:04X}", u32::from(c)));
+        } else {
+            quoted.push(c);
+        }
+    }
+    quoted.push(close);
+    quoted
+}
+
+/// What the sanitizer made of one word: the word, possibly shortened to its
+/// CHAT-legal prefix, or the record of a token none of which could stay.
+enum Sanitized {
+    Kept(AsrWord),
+    Dropped(DroppedAsrToken),
+}
+
+/// Sanitize every word in every utterance, keeping the record of each
+/// dropped token on the utterance that lost it.
+///
+/// An utterance that keeps no word has no main tier to write, but what it
+/// lost is kept with it: the CHAT builder writes the record as an `@Comment`
+/// where the utterance would have stood. Only an utterance with neither a
+/// word nor a record is removed; none exists after retokenization, which
+/// never makes an empty utterance, so the retention is stated for the reader
+/// rather than for a case that happens.
 pub fn sanitize_chat_illegal_chars_in_utterances(utterances: &mut Vec<Utterance>) {
     for utt in utterances.iter_mut() {
         let original = std::mem::take(&mut utt.words);
-        utt.words = original
-            .into_iter()
-            .filter_map(sanitize_chat_illegal_word)
-            .collect();
+        for word in original {
+            match sanitize_chat_illegal_word(word) {
+                Sanitized::Kept(word) => utt.words.push(word),
+                Sanitized::Dropped(token) => utt.dropped_tokens.push(token),
+            }
+        }
     }
-    // Drop utterances that lost every word; they would serialize as
-    // empty main-tier lines, which CHAT rejects.
-    utterances.retain(|u| !u.words.is_empty());
+    utterances.retain(|u| !u.words.is_empty() || !u.dropped_tokens.is_empty());
 }
 
-fn sanitize_chat_illegal_word(mut word: AsrWord) -> Option<AsrWord> {
+fn sanitize_chat_illegal_word(mut word: AsrWord) -> Sanitized {
     let original = word.text.as_str();
     if super::ChatWordText::try_from(original).is_ok() {
-        return Some(word);
+        return Sanitized::Kept(word);
     }
 
     // Greedy rebuild: push each char, validate; pop if it broke the
@@ -201,9 +324,9 @@ fn sanitize_chat_illegal_word(mut word: AsrWord) -> Option<AsrWord> {
     if sanitized.is_empty() {
         tracing::warn!(
             original = %original,
-            "ASR token is entirely CHAT-illegal; dropping"
+            "ASR token is entirely CHAT-illegal; dropping, and recording the drop on its utterance"
         );
-        return None;
+        return Sanitized::Dropped(DroppedAsrToken::of(&word));
     }
     if sanitized != original {
         tracing::debug!(
@@ -213,7 +336,7 @@ fn sanitize_chat_illegal_word(mut word: AsrWord) -> Option<AsrWord> {
         );
         word.text = AsrNormalizedText::new(&sanitized);
     }
-    Some(word)
+    Sanitized::Kept(word)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,11 +413,7 @@ pub fn apply_disfluency_replacements(utterances: &mut [Utterance], lang: &str) {
 /// and would flood the output with false-positive retrace marks.
 pub fn apply_retrace_detection(utterances: &mut [Utterance], lang: &str) {
     for utt in utterances.iter_mut() {
-        let word_texts: Vec<String> = utt
-            .words
-            .iter()
-            .map(|word| word.text.as_str().to_owned())
-            .collect();
+        let word_texts: Vec<&str> = utt.words.iter().map(|word| word.text.as_str()).collect();
         let analysis = super::analyze_exact_retraces(&word_texts, lang);
 
         // Apply: set kind=Retrace and strip punctuation on marked words.
@@ -512,24 +631,51 @@ fn apply_utterance_initial_capitalization(utterances: &mut [Utterance]) {
             if word.kind == WordKind::Retrace {
                 continue;
             }
-            let text = word.text.as_str();
-            if !owns_utterance_initial_cap(text) {
-                continue;
+            match initial_cap_slot(word.text.as_str()) {
+                InitialCapSlot::NotOwner => continue,
+                InitialCapSlot::Letters => break,
+                InitialCapSlot::Owner => {
+                    // First real word: capitalize it via the local helper (a
+                    // no-op if it already starts with an uppercase or
+                    // non-letter character), then stop: one capitalization
+                    // per utterance.
+                    let capitalized = super::english_caps::capitalize_first(word.text.as_str());
+                    word.text = AsrNormalizedText::new(capitalized);
+                    break;
+                }
             }
-            // A letter string (`www@k`, from a reserved-marker spelling; see
-            // `write_word_forms`) owns the slot but is written in lowercase,
-            // as letters are: capitalizing it would write a different
-            // letter.
-            if is_letter_form(text) {
-                break;
-            }
-            // First real word: capitalize it via the local helper (a no-op if
-            // it already starts with an uppercase or non-letter character), then
-            // stop: one capitalization per utterance.
-            let capitalized = super::english_caps::capitalize_first(text);
-            word.text = AsrNormalizedText::new(capitalized);
-            break;
         }
+    }
+}
+
+/// What the utterance-initial capitalization rule does with one surface, in
+/// the order the walk over an utterance's words asks: the rule skips a
+/// non-owner, stops without a capital at a letter form, and capitalizes the
+/// first owner. One decision for the pre-CHAT pass over ASR words and the
+/// post-CHAT split's new children, so the two cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitialCapSlot {
+    /// Not a capitalizable content word (marker, filler, fragment,
+    /// punctuation): the slot belongs to a later word.
+    NotOwner,
+    /// A letter string (`www@k`, from a reserved-marker spelling; see
+    /// `write_word_forms`) or a letter (`b@l`) owns the slot but is written in
+    /// lowercase, as letters are: capitalizing it would write a different
+    /// letter, so the walk stops here.
+    Letters,
+    /// The word the slot belongs to.
+    Owner,
+}
+
+/// Decide the slot for one surface as the pre-CHAT pass spells it (`&-um`,
+/// `www@k`, `xxx`).
+pub(crate) fn initial_cap_slot(text: &str) -> InitialCapSlot {
+    if !owns_utterance_initial_cap(text) {
+        InitialCapSlot::NotOwner
+    } else if is_letter_form(text) {
+        InitialCapSlot::Letters
+    } else {
+        InitialCapSlot::Owner
     }
 }
 
@@ -701,6 +847,8 @@ mod tests {
             words: content.iter().map(|w| make_word(w)).collect(),
             end,
             lang: None,
+            dropped_tokens: Vec::new(),
+            seam_ambiguities: Vec::new(),
         }
     }
 

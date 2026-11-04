@@ -9,9 +9,9 @@ use crate::compare::{
     CompareMaterializedOutputs, is_gold_file, process_compare_morphotagged_main,
     template_gold_path_for,
 };
-use crate::dispatch_language::JobLanguage;
 use crate::planning::{self, JobPlan};
 use crate::recipe_runner::recipe::RecipeStageId;
+use crate::recipe_runner::runtime::publish_text;
 use crate::recipe_runner::work_unit::{CompareWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage, classify_server_error};
@@ -30,8 +30,6 @@ struct ExecutionContext<'a> {
     pub(crate) gateway: &'a dyn WorkerGateway,
     pub(crate) mwt: &'a MwtDict,
     pub(crate) should_merge_abbrev: bool,
-    /// The job's resolved language, proven by the router's one resolution.
-    pub(crate) job_language: &'a JobLanguage,
 }
 
 /// Stage executor interface used by the new execution kernel.
@@ -143,7 +141,6 @@ pub(crate) async fn dispatch_compare_job(
     gateway: &dyn WorkerGateway,
     mwt: &MwtDict,
     should_merge_abbrev: bool,
-    job_language: &JobLanguage,
 ) -> Result<(), crate::error::ServerError> {
     let plan = match planning::build_job_plan(job) {
         Ok(plan) => plan,
@@ -176,7 +173,6 @@ pub(crate) async fn dispatch_compare_job(
         gateway,
         mwt,
         should_merge_abbrev,
-        job_language,
     };
     ExecutionKernel::new(Box::new(CompareStageExecutor))
         .run(&plan, &ctx)
@@ -293,23 +289,15 @@ impl StageExecutor for CompareStageExecutor {
                         "compare morphosyntax stage ran before input read".into(),
                     )
                 })?;
-                // The worker-pool / label key: the job's own resolved
-                // language, handed to this dispatch rather than recovered from
-                // the snapshot. Real per-file resolution still lives inside
-                // `collect_payloads`.
-                //
-                // This was `as_resolved().unwrap_or_else(|| eng)`: a silent
-                // English default behind a `warn!`, which is the same shape as
-                // the check that made coref undispatchable, with the opposite
-                // failure mode. Compare is a job-level command, so a
-                // `JobLanguage` exists for it by construction and there is no
-                // absent case left to default.
-                let lang = ctx.job_language.code();
+                // No job language: the main transcript's language is read
+                // from its own `@Languages:` header inside the morphosyntax
+                // pipeline (`collect_payloads`), exactly as `morphotag` reads
+                // it. A job-level code used to be handed here and discarded by
+                // the gateway, so the one it named was never the one used.
                 state.morphotagged_main = Some(
                     ctx.gateway
                         .morphotag_for_compare(
                             main_text,
-                            lang,
                             ctx.mwt,
                             crate::infer_retry::Cancellation::Token(&ctx.job.cancel_token),
                         )
@@ -406,13 +394,6 @@ impl StageExecutor for CompareStageExecutor {
     }
 }
 
-async fn write_compare_text_file(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, content).await
-}
-
 fn compare_output_root(filesystem: &crate::store::RunnerFilesystemConfig) -> PathBuf {
     if filesystem.paths_mode && !filesystem.output_paths.is_empty() {
         let first_output = filesystem.output_paths[0].assume_shared_filesystem();
@@ -432,7 +413,7 @@ async fn write_consolidated_compare_csv(
     let output = format_consolidated_csv(rows)?;
 
     let primary_path = compare_output_root(filesystem).join("compare.csv");
-    write_compare_text_file(&primary_path, &output)
+    publish_text(&primary_path, &output)
         .await
         .map_err(|error| {
             crate::error::ServerError::Persistence(format!(
@@ -443,13 +424,11 @@ async fn write_consolidated_compare_csv(
     let staged_path = filesystem.staging_dir.join("output").join("compare.csv");
     let staged_path = staged_path.as_path().to_owned();
     if staged_path != primary_path {
-        write_compare_text_file(&staged_path, &output)
-            .await
-            .map_err(|error| {
-                crate::error::ServerError::Persistence(format!(
-                    "failed to write staged consolidated compare.csv: {error}"
-                ))
-            })?;
+        publish_text(&staged_path, &output).await.map_err(|error| {
+            crate::error::ServerError::Persistence(format!(
+                "failed to write staged consolidated compare.csv: {error}"
+            ))
+        })?;
     }
 
     Ok(())
@@ -480,7 +459,6 @@ mod tests {
         async fn morphotag_for_compare(
             &self,
             chat_text: &str,
-            _lang: &crate::api::LanguageCode3,
             _mwt: &MwtDict,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
@@ -545,7 +523,9 @@ mod tests {
             },
             dispatch: RunnerDispatchConfig {
                 command: ReleasedCommand::Compare,
-                lang: LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
+                // Compare is a per-file command: the language is each
+                // transcript's own, never a job-level code.
+                lang: LanguageSpec::PerFile,
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Compare(CompareOptions {
                     common: CommonOptions::default(),
@@ -671,18 +651,6 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         ));
         let host = DispatchHostContext::from_store(store);
-        // Built through the one constructor rather than assembled here, so the
-        // test exercises the real resolution: compare is a job-level command,
-        // and this is the language its snapshot carries. Bound to a `let`
-        // because the context borrows it.
-        let resolved = crate::dispatch_language::DispatchLanguage::resolve(
-            ReleasedCommand::Compare,
-            &LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
-        )
-        .expect("compare submits a resolved language");
-        let crate::dispatch_language::DispatchLanguage::Job(job_language) = resolved else {
-            panic!("compare is a job-level command")
-        };
         let gateway = FakeGateway::default();
         let ctx = ExecutionContext {
             job: &snapshot,
@@ -690,7 +658,6 @@ mod tests {
             gateway: &gateway,
             mwt: &MwtDict::default(),
             should_merge_abbrev: false,
-            job_language: &job_language,
         };
 
         ExecutionKernel::new(Box::new(CompareStageExecutor))

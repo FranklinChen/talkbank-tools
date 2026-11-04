@@ -8,7 +8,7 @@ use crate::types::revai_language::{RevLanguage, RevLanguageRefusal};
 // `SelectableEngine` is imported for its `ALL` associated constant, which is
 // what makes the "engines that do work" list derived rather than restated.
 use crate::types::engines::{AsrEngineName, SelectableEngine};
-use crate::types::worker_v2::{AsrBackendV2, SpeakerBackendV2};
+use crate::types::worker_v2::{AsrBackendV2, ProviderDiarizationV2, SpeakerBackendV2};
 use batchalign_transform::asr_postprocess::AsrMonologue;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,15 @@ pub struct AsrResponse {
     pub tokens: Vec<AsrToken>,
     /// Language code.
     pub lang: LanguageCode3,
+    /// Repetitions at a Whisper window seam that the reconciler kept once
+    /// (`worker::whisper_windows`), in recording order. Placed on the
+    /// utterance that keeps each copy once the utterances exist
+    /// (`asr_postprocess::place_seam_ambiguities`), written there as a
+    /// `%com`, and reported to the job as a shortfall. Empty for every other
+    /// engine and for an unambiguous stitch; absent from the serialized
+    /// evidence then, so earlier `_asr_response.json` files still read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seam_ambiguities: Vec<batchalign_transform::asr_postprocess::SeamAmbiguity>,
     /// Optional provider-shaped monologues preserved from the ASR boundary.
     ///
     /// BA2 parity depends on not discarding provider punctuation elements and
@@ -378,11 +387,227 @@ impl std::fmt::Display for AsrIdentity {
     }
 }
 
-/// Speaker-count policy accepted by the Rev.AI backend.
+/// How many speakers a transcribe run expects.
+///
+/// Decided ONCE, at plan admission, from the request's `auto_speakers` and
+/// `num_speakers`, and read by every speaker engine the run involves: Rev.AI's
+/// integrated diarization (through [`SpeakerCount::known`], where `None` is
+/// "infer"), Tencent's (through the [`ProviderDiarizationV2`] the plan
+/// derives) and a dedicated speaker engine. The recognizer path never sees
+/// it: a count was a property of the ASR plan until 2026-11-03, which is why
+/// `--auto-speakers` was refused for every non-Rev recognizer even when only
+/// the dedicated diarizer needed the count, and that diarizer takes `Auto`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RevSpeakerCount {
-    Automatic,
-    Fixed(std::num::NonZeroU32),
+pub(crate) enum SpeakerCount {
+    /// Exactly this many. A `u8`: no recording has more than 255 speakers,
+    /// and zero names nobody.
+    Known(std::num::NonZeroU8),
+    /// The speaker engine infers the count.
+    Auto,
+}
+
+impl SpeakerCount {
+    /// Admit the request's two fields. `auto_speakers` wins (the CLI makes
+    /// the two conflict); otherwise the count must be in `1..=255`.
+    pub(crate) fn admit(
+        auto_speakers: bool,
+        count: crate::api::NumSpeakers,
+    ) -> Result<Self, SpeakerPlanError> {
+        if auto_speakers {
+            return Ok(Self::Auto);
+        }
+        u8::try_from(count.0)
+            .ok()
+            .and_then(std::num::NonZeroU8::new)
+            .map(Self::Known)
+            .ok_or(SpeakerPlanError::InvalidCount(count.0))
+    }
+
+    /// The count as a provider parameter: `None` is "infer", never a sentinel.
+    pub(crate) fn known(self) -> Option<crate::api::NumSpeakers> {
+        match self {
+            Self::Known(count) => Some(crate::api::NumSpeakers(u32::from(count.get()))),
+            Self::Auto => None,
+        }
+    }
+}
+
+/// Who separates the speakers of a transcribe run beyond what the recognizer
+/// labels itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpeakerSeparation {
+    /// Only the recognizer's own labels: Rev.AI's or Tencent's integrated
+    /// diarization, or none for an engine that labels no speakers.
+    RecognizerOnly,
+    /// A dedicated speaker engine runs after recognition; its labels replace
+    /// the recognizer's.
+    Dedicated(SpeakerBackendV2),
+}
+
+impl SpeakerSeparation {
+    /// From the request: `diarize` selects a dedicated engine, the override
+    /// names it, and pyannoteAI Precision-2 is the default.
+    pub(crate) fn from_request(
+        diarize: bool,
+        engine: Option<crate::types::engines::SpeakerEngineName>,
+    ) -> Self {
+        match diarize {
+            true => Self::Dedicated(
+                engine
+                    .unwrap_or(crate::types::engines::SpeakerEngineName::PyannoteAi)
+                    .worker_backend(),
+            ),
+            false => Self::RecognizerOnly,
+        }
+    }
+}
+
+/// The speaker plan of a transcribe run: who separates speakers and how many
+/// to expect, admitted together with the recognizer, so a count an engine the
+/// run involves cannot take is refused here by name and re-checked nowhere.
+///
+/// Built only by [`SpeakerPlan::admit`], which is called at submission (so
+/// the operator hears a refusal before the job exists) and again at dispatch
+/// (a persisted job predates nothing it cannot pass), both from the same
+/// request fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpeakerPlan {
+    count: SpeakerCount,
+    separation: SpeakerSeparation,
+    /// What a worker-hosted recognizer is told about speakers, derived here
+    /// once from the count and the recognizer's integrated diarization. The
+    /// recognizer path reads this and never the count.
+    recognizer_diarization: ProviderDiarizationV2,
+}
+
+/// Refusal to admit a speaker count and separation as one plan.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SpeakerPlanError {
+    /// The count is not one a speaker engine can take.
+    #[error(
+        "expected speaker count must be positive and at most 255, got {0}; use auto_speakers for inference"
+    )]
+    InvalidCount(u32),
+    /// Policy: a diarization speaker count is either exactly N (N at least 2)
+    /// or automatic. Asking to SEPARATE speakers while asserting the
+    /// recording has one is a contradiction, not a request for detection, and
+    /// silently detecting would do something other than what was asked. What
+    /// it used to do was obey: the count reached the diarizer, which returned
+    /// one track, which is why `--diarization enabled` runs came back with a
+    /// single `PAR0`.
+    #[error(
+        "diarization was requested with a speaker count of 1, which asks a diarizer to \
+         separate speakers in a recording asserted to have one. Pass the real count \
+         (2 or more); or omit diarization, for a single-speaker recording; or pass \
+         auto_speakers to have the count inferred."
+    )]
+    SeparatingOneSpeaker,
+    /// The recognizer separates speakers itself but only into a count it is
+    /// given: on the worker wire there is no way to ask it to infer one. Only
+    /// when it is the run's one speaker engine: with a dedicated diarizer the
+    /// recognizer is asked for no separation and the diarizer infers the
+    /// count.
+    #[error(
+        "automatic speaker counts are not supported by {engine}'s integrated diarization, \
+         which must be given the count; pass --num-speakers, or --diarization enabled to \
+         have a dedicated speaker engine infer it"
+    )]
+    AutoCountUnsupported {
+        /// The recognizer's engine name, as provenance spells it.
+        engine: crate::api::StampSafeText,
+    },
+}
+
+impl SpeakerPlan {
+    /// Admit `count` and `separation` for a run whose recognizer is
+    /// `recognizer` (`None` for a replay, which runs none).
+    pub(crate) fn admit(
+        count: SpeakerCount,
+        separation: SpeakerSeparation,
+        recognizer: Option<AsrBackend>,
+    ) -> Result<Self, SpeakerPlanError> {
+        if let (SpeakerSeparation::Dedicated(_), SpeakerCount::Known(one)) = (separation, count)
+            && one.get() == 1
+        {
+            return Err(SpeakerPlanError::SeparatingOneSpeaker);
+        }
+        let recognizer_diarization = match recognizer {
+            // No worker request carries these: a replay runs no recognizer,
+            // native Whisper labels no speakers, and Rev.AI's Rust client
+            // reads the count itself through `SpeakerCount::known`, taking
+            // either kind.
+            None | Some(AsrBackend::RustRevAi) | Some(AsrBackend::RustWhisperRs) => {
+                ProviderDiarizationV2::NotRequested
+            }
+            Some(AsrBackend::Worker(mode)) => {
+                let backend = mode.as_v2_backend();
+                match (separation, count) {
+                    // A dedicated engine's labels replace the recognizer's,
+                    // so the recognizer is asked for no separation and the
+                    // count, known or inferred, is the dedicated engine's.
+                    // Until 2026-11-03 Tencent was asked to separate anyway,
+                    // and refused `Auto` for a count it was not going to use.
+                    (SpeakerSeparation::Dedicated(_), _) => ProviderDiarizationV2::NotRequested,
+                    (SpeakerSeparation::RecognizerOnly, SpeakerCount::Known(known)) => {
+                        ProviderDiarizationV2::for_backend(
+                            backend,
+                            crate::api::NumSpeakers(u32::from(known.get())),
+                        )
+                    }
+                    // The recognizer is the run's one speaker engine, and its
+                    // integrated diarization must be given the count.
+                    (SpeakerSeparation::RecognizerOnly, SpeakerCount::Auto)
+                        if backend.separates_speakers() =>
+                    {
+                        return Err(SpeakerPlanError::AutoCountUnsupported {
+                            engine: AsrBackend::Worker(mode).provenance_name(),
+                        });
+                    }
+                    (SpeakerSeparation::RecognizerOnly, SpeakerCount::Auto) => {
+                        ProviderDiarizationV2::NotRequested
+                    }
+                }
+            }
+        };
+        Ok(Self {
+            count,
+            separation,
+            recognizer_diarization,
+        })
+    }
+
+    /// A plan for tests: `count` exact, a dedicated engine or none, no
+    /// recognizer.
+    #[cfg(test)]
+    pub(crate) fn for_test(count: u32, dedicated: Option<SpeakerBackendV2>) -> Self {
+        Self::admit(
+            SpeakerCount::admit(false, crate::api::NumSpeakers(count)).expect("test: a count"),
+            dedicated.map_or(
+                SpeakerSeparation::RecognizerOnly,
+                SpeakerSeparation::Dedicated,
+            ),
+            None,
+        )
+        .expect("test: an admissible speaker plan")
+    }
+
+    /// How many speakers the run expects.
+    pub(crate) fn count(self) -> SpeakerCount {
+        self.count
+    }
+
+    /// The dedicated speaker engine, when one runs after recognition.
+    pub(crate) fn dedicated(self) -> Option<SpeakerBackendV2> {
+        match self.separation {
+            SpeakerSeparation::Dedicated(backend) => Some(backend),
+            SpeakerSeparation::RecognizerOnly => None,
+        }
+    }
+
+    /// What a worker-hosted recognizer is told about speakers.
+    pub(crate) fn recognizer_diarization(self) -> ProviderDiarizationV2 {
+        self.recognizer_diarization
+    }
 }
 
 /// A language request for an engine that recognizes one language at a time:
@@ -492,15 +717,16 @@ impl AdmittedAsrLanguage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TranscribeAsrPlan(AsrPlanKind);
 
+/// The recognizer and the language it was admitted with. No speaker count:
+/// that is the speaker plan's ([`SpeakerPlan`]), and the recognizer path
+/// cannot see or refuse it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AsrPlanKind {
     RevAi {
-        speakers: RevSpeakerCount,
         language: RevLanguage,
     },
     NonRev {
         backend: NonRevAsrBackend,
-        speakers: std::num::NonZeroU32,
         language: SingleAsrLanguage,
     },
 }
@@ -512,21 +738,14 @@ pub(crate) enum AsrInference<'p> {
     /// Another engine.
     NonRev {
         backend: NonRevAsrBackend,
-        speakers: std::num::NonZeroU32,
         language: &'p SingleAsrLanguage,
     },
 }
 
 #[derive(Debug, thiserror::Error)]
-/// Refusal to admit a backend, speaker-count and checkpoint request as one
+/// Refusal to admit a backend, language and checkpoint request as one
 /// executable plan.
 pub enum TranscribeAsrPlanError {
-    /// Automatic counts are not implemented by this backend.
-    #[error("automatic speaker counts require the Rev.AI ASR engine")]
-    UnsupportedAutomaticCount,
-    /// A fixed count cannot be represented as a positive provider count.
-    #[error("fixed speaker count must be in 1..=4294967295, got {0}")]
-    InvalidFixedCount(usize),
     /// The checkpoint selected through the backend's override key cannot be
     /// recorded in provenance.
     #[error("ASR checkpoint override `{key}` cannot be recorded in provenance: {reason}")]
@@ -553,8 +772,6 @@ pub enum TranscribeAsrPlanError {
 impl TranscribeAsrPlan {
     pub(crate) fn from_request(
         backend: AsrBackend,
-        automatic: bool,
-        count: usize,
         engine_extras: &std::collections::BTreeMap<String, String>,
         language: &LanguageSpec,
     ) -> Result<Self, TranscribeAsrPlanError> {
@@ -564,49 +781,20 @@ impl TranscribeAsrPlan {
         // value itself is discarded: provenance names the models the run
         // loaded, never the one the request asked for.
         let _ = backend.admit_checkpoint(engine_extras)?;
-        let language = AdmittedAsrLanguage::admit(backend, language)?;
-        match (language, automatic) {
-            (AdmittedAsrLanguage::RevAi(language), true) => Ok(Self(AsrPlanKind::RevAi {
-                speakers: RevSpeakerCount::Automatic,
-                language,
-            })),
-            (AdmittedAsrLanguage::NonRev { .. }, true) => {
-                Err(TranscribeAsrPlanError::UnsupportedAutomaticCount)
+        Ok(Self(match AdmittedAsrLanguage::admit(backend, language)? {
+            AdmittedAsrLanguage::RevAi(language) => AsrPlanKind::RevAi { language },
+            AdmittedAsrLanguage::NonRev { backend, language } => {
+                AsrPlanKind::NonRev { backend, language }
             }
-            (language, false) => {
-                let speakers = Self::fixed_count(count)?;
-                Ok(Self(match language {
-                    AdmittedAsrLanguage::RevAi(language) => AsrPlanKind::RevAi {
-                        speakers: RevSpeakerCount::Fixed(speakers),
-                        language,
-                    },
-                    AdmittedAsrLanguage::NonRev { backend, language } => AsrPlanKind::NonRev {
-                        backend,
-                        speakers,
-                        language,
-                    },
-                }))
-            }
-        }
-    }
-
-    fn fixed_count(count: usize) -> Result<std::num::NonZeroU32, TranscribeAsrPlanError> {
-        let raw =
-            u32::try_from(count).map_err(|_| TranscribeAsrPlanError::InvalidFixedCount(count))?;
-        std::num::NonZeroU32::new(raw).ok_or(TranscribeAsrPlanError::InvalidFixedCount(count))
+        }))
     }
 
     /// What the ASR stage runs.
     pub(crate) fn inference(&self) -> AsrInference<'_> {
         match &self.0 {
-            AsrPlanKind::RevAi { language, .. } => AsrInference::RevAi { language },
-            AsrPlanKind::NonRev {
-                backend,
-                speakers,
-                language,
-            } => AsrInference::NonRev {
+            AsrPlanKind::RevAi { language } => AsrInference::RevAi { language },
+            AsrPlanKind::NonRev { backend, language } => AsrInference::NonRev {
                 backend: *backend,
-                speakers: *speakers,
                 language,
             },
         }
@@ -615,7 +803,7 @@ impl TranscribeAsrPlan {
     /// The language this plan asks recognition for.
     pub(crate) fn language(&self) -> AsrLanguageRequest {
         match &self.0 {
-            AsrPlanKind::RevAi { language, .. } => language.request(),
+            AsrPlanKind::RevAi { language } => language.request(),
             AsrPlanKind::NonRev { language, .. } => AsrLanguageRequest::from(language),
         }
     }
@@ -634,22 +822,6 @@ impl TranscribeAsrPlan {
         }
     }
 
-    pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        match &self.0 {
-            AsrPlanKind::RevAi {
-                speakers: RevSpeakerCount::Automatic,
-                ..
-            } => None,
-            AsrPlanKind::RevAi {
-                speakers: RevSpeakerCount::Fixed(count),
-                ..
-            }
-            | AsrPlanKind::NonRev {
-                speakers: count, ..
-            } => Some(crate::api::NumSpeakers(count.get())),
-        }
-    }
-
     /// The ASR identity transcript provenance records for this plan: the
     /// backend's engine name. A run adds the models it loaded.
     pub(crate) fn identity(&self) -> AsrIdentity {
@@ -663,17 +835,14 @@ impl TranscribeAsrPlan {
 /// Replay has no live inference operation and accepts transcript languages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReplayAsrPlan {
-    speakers: std::num::NonZeroU32,
     language: AsrLanguageRequest,
 }
 
 impl ReplayAsrPlan {
     pub(crate) fn for_legacy_replay(
-        count: usize,
         language: &LanguageSpec,
     ) -> Result<Self, TranscribeAsrPlanError> {
         Ok(Self {
-            speakers: TranscribeAsrPlan::fixed_count(count)?,
             language: AsrLanguageRequest::try_from(language)?,
         })
     }
@@ -687,7 +856,6 @@ impl ReplayAsrPlan {
 pub(crate) trait TranscribePlan: Clone + Send + Sync + sealed::Sealed {
     const REPLAY: bool;
     fn language(&self) -> AsrLanguageRequest;
-    fn expected_speakers(&self) -> Option<crate::api::NumSpeakers>;
     /// The engine recognition runs on, or `None` when the plan replays
     /// recorded recognition and runs no ASR model.
     fn recognition_backend(&self) -> Option<AsrBackend>;
@@ -704,9 +872,6 @@ impl TranscribePlan for TranscribeAsrPlan {
     fn language(&self) -> AsrLanguageRequest {
         self.language()
     }
-    fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        self.expected_speakers()
-    }
     fn recognition_backend(&self) -> Option<AsrBackend> {
         Some(self.backend())
     }
@@ -716,9 +881,6 @@ impl TranscribePlan for ReplayAsrPlan {
     const REPLAY: bool = true;
     fn language(&self) -> AsrLanguageRequest {
         self.language.clone()
-    }
-    fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        Some(crate::api::NumSpeakers(self.speakers.get()))
     }
     /// Replay reads recorded recognition evidence and runs no ASR model.
     fn recognition_backend(&self) -> Option<AsrBackend> {
@@ -819,10 +981,9 @@ impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
 #[derive(Clone)]
 pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
     pub(crate) plan: AdmittedTranscribePlan<P>,
-    /// Whether the command requested diarized speaker attribution.
-    pub diarize: bool,
-    /// Concrete speaker backend selected by Rust when dedicated diarization is needed.
-    pub speaker_backend: Option<SpeakerBackendV2>,
+    /// Who separates speakers and how many to expect. Replaces a `diarize`
+    /// flag beside an `Option` backend that were equal by construction.
+    pub(crate) speakers: SpeakerPlan,
 
     /// Whether to run morphosyntax after CHAT assembly.
     pub with_morphosyntax: bool,
@@ -845,7 +1006,7 @@ pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
 impl<P: TranscribePlan> TranscribeOptions<P> {
     /// Provider/diarizer count hint; automatic mode never uses a numeric sentinel.
     pub(crate) fn expected_speakers(&self) -> Option<crate::api::NumSpeakers> {
-        self.plan.asr().expected_speakers()
+        self.speakers.count().known()
     }
 
     /// The language recognition is asked for, admitted with the engine in
@@ -877,14 +1038,8 @@ mod transcribe_segmentation_tests {
     use crate::params::UtsegFallbackPolicy::{AllowStanza, Refuse};
 
     fn asr(language: LanguageSpec) -> TranscribeAsrPlan {
-        TranscribeAsrPlan::from_request(
-            AsrBackend::RustRevAi,
-            false,
-            2,
-            &Default::default(),
-            &language,
-        )
-        .expect("ASR admission")
+        TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, &Default::default(), &language)
+            .expect("ASR admission")
     }
 
     #[test]
@@ -983,7 +1138,7 @@ mod speaker_plan_tests {
             (whisper, english_spanish()),
             (AsrBackend::RustRevAi, english_french),
         ] {
-            let refusal = TranscribeAsrPlan::from_request(backend, true, 2, &none, &pair)
+            let refusal = TranscribeAsrPlan::from_request(backend, &none, &pair)
                 .expect_err("a pair is withheld at plan time on every engine");
             assert!(
                 matches!(refusal, TranscribeAsrPlanError::PairWithheld(_)),
@@ -994,12 +1149,11 @@ mod speaker_plan_tests {
 
         for backend in [AsrBackend::RustRevAi, whisper] {
             assert!(matches!(
-                TranscribeAsrPlan::from_request(backend, false, 1, &none, &LanguageSpec::PerFile),
+                TranscribeAsrPlan::from_request(backend, &none, &LanguageSpec::PerFile),
                 Err(TranscribeAsrPlanError::NoJobLanguage(_))
             ));
-            let detect =
-                TranscribeAsrPlan::from_request(backend, false, 1, &none, &LanguageSpec::Auto)
-                    .expect("every engine takes detection");
+            let detect = TranscribeAsrPlan::from_request(backend, &none, &LanguageSpec::Auto)
+                .expect("every engine takes detection");
             assert_eq!(detect.language(), AsrLanguageRequest::Detect);
         }
     }
@@ -1024,56 +1178,148 @@ mod speaker_plan_tests {
     fn a_legacy_replay_plan_takes_any_transcript_language() {
         for lang in ["yue", "eng,spa", "auto"] {
             let spec = LanguageSpec::try_from(lang).expect("a spec");
-            let plan =
-                ReplayAsrPlan::for_legacy_replay(2, &spec).expect("replay takes the language");
+            let plan = ReplayAsrPlan::for_legacy_replay(&spec).expect("replay takes the language");
             assert_eq!(plan.language().to_string(), lang);
         }
         assert!(matches!(
-            ReplayAsrPlan::for_legacy_replay(2, &LanguageSpec::PerFile),
+            ReplayAsrPlan::for_legacy_replay(&LanguageSpec::PerFile),
             Err(TranscribeAsrPlanError::NoJobLanguage(_))
         ));
     }
 
+    /// RED FIRST: `--auto-speakers` was refused for every non-Rev recognizer,
+    /// because the count was the ASR plan's. It is the speaker plan's: a
+    /// dedicated diarizer takes `Auto` whatever the recognizer (Tencent
+    /// included, which is then asked for no separation of its own), Rev.AI's
+    /// integrated diarization takes either, a recognizer that labels no
+    /// speakers has no count to refuse, and only an engine that must be given
+    /// the count AND is the run's one speaker engine (Tencent's integrated
+    /// diarization, on the worker wire, with no dedicated diarizer) refuses
+    /// `Auto`, by name.
     #[test]
-    fn backend_count_admission_preserves_automatic_and_fixed_policies() {
-        let none = std::collections::BTreeMap::new();
-        let automatic =
-            TranscribeAsrPlan::from_request(AsrBackend::RustRevAi, true, 2, &none, &english())
-                .unwrap();
-        assert_eq!(automatic.backend(), AsrBackend::RustRevAi);
-        assert_eq!(automatic.expected_speakers(), None);
-        for backend in [
-            AsrBackend::RustRevAi,
-            AsrBackend::RustWhisperRs,
-            AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2),
-        ] {
-            let fixed =
-                TranscribeAsrPlan::from_request(backend, false, 3, &none, &english()).unwrap();
-            assert_eq!(fixed.backend(), backend);
-            assert_eq!(fixed.expected_speakers(), Some(crate::api::NumSpeakers(3)));
-            assert!(matches!(
-                TranscribeAsrPlan::from_request(backend, false, 0, &none, &english()),
-                Err(TranscribeAsrPlanError::InvalidFixedCount(0))
-            ));
-            if backend != AsrBackend::RustRevAi {
-                assert!(matches!(
-                    TranscribeAsrPlan::from_request(backend, true, 3, &none, &english()),
-                    Err(TranscribeAsrPlanError::UnsupportedAutomaticCount)
-                ));
+    fn the_speaker_plan_admits_auto_wherever_the_speaker_engine_takes_it() {
+        let auto = SpeakerCount::admit(true, crate::api::NumSpeakers(2)).expect("auto");
+        assert_eq!(auto, SpeakerCount::Auto);
+        let whisper = AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2);
+        let dedicated = SpeakerSeparation::Dedicated(SpeakerBackendV2::Pyannote);
+
+        let plan = SpeakerPlan::admit(auto, dedicated, Some(whisper))
+            .expect("the dedicated diarizer infers the count");
+        assert_eq!(plan.count().known(), None);
+        assert_eq!(plan.dedicated(), Some(SpeakerBackendV2::Pyannote));
+        assert_eq!(
+            plan.recognizer_diarization(),
+            ProviderDiarizationV2::NotRequested
+        );
+        for separation in [SpeakerSeparation::RecognizerOnly, dedicated] {
+            SpeakerPlan::admit(auto, separation, Some(AsrBackend::RustRevAi))
+                .expect("Rev.AI infers the count");
+        }
+        SpeakerPlan::admit(auto, SpeakerSeparation::RecognizerOnly, Some(whisper))
+            .expect("no engine in this run needs a count");
+        SpeakerPlan::admit(auto, dedicated, None).expect("a replay runs no recognizer");
+
+        let tencent = AsrBackend::Worker(AsrWorkerMode::HkTencentV2);
+        // The three Tencent cases. Alone, Tencent's integrated diarization
+        // must be given the count: refused by name, with the dedicated
+        // diarizer named as the remedy.
+        match SpeakerPlan::admit(auto, SpeakerSeparation::RecognizerOnly, Some(tencent)) {
+            Err(SpeakerPlanError::AutoCountUnsupported { engine }) => {
+                assert_eq!(engine.as_str(), "tencent");
+                let message = SpeakerPlanError::AutoCountUnsupported { engine }.to_string();
+                assert!(message.contains("--diarization enabled"), "{message}");
             }
+            other => panic!("Tencent alone cannot infer the count: {other:?}"),
         }
-        if usize::BITS > 32 {
-            assert!(matches!(
-                TranscribeAsrPlan::from_request(
-                    AsrBackend::RustRevAi,
-                    false,
-                    usize::MAX,
-                    &none,
-                    &english()
-                ),
-                Err(TranscribeAsrPlanError::InvalidFixedCount(_))
-            ));
+        // With a dedicated diarizer, the diarizer infers the count and
+        // Tencent is asked for no separation of its own.
+        let inferred = SpeakerPlan::admit(auto, dedicated, Some(tencent))
+            .expect("the dedicated diarizer infers the count whatever the recognizer");
+        assert_eq!(inferred.count(), SpeakerCount::Auto);
+        assert_eq!(inferred.dedicated(), Some(SpeakerBackendV2::Pyannote));
+        assert_eq!(
+            inferred.recognizer_diarization(),
+            ProviderDiarizationV2::NotRequested
+        );
+        // And with a known count too: separation the diarizer will redo is
+        // not asked of the recognizer.
+        let two = SpeakerCount::admit(false, crate::api::NumSpeakers(2)).expect("two");
+        assert_eq!(
+            SpeakerPlan::admit(two, dedicated, Some(tencent))
+                .expect("a known count with a dedicated diarizer")
+                .recognizer_diarization(),
+            ProviderDiarizationV2::NotRequested
+        );
+    }
+
+    /// A known count reaches each engine that takes one as its own parameter:
+    /// Rev.AI reads it through `known`, Tencent is told to separate into it
+    /// (two or more; one is a single track), and a dedicated diarizer with a
+    /// count of one is the contradiction it always was. The count itself is
+    /// admitted once, in `1..=255`.
+    #[test]
+    fn a_known_count_reaches_each_engine_as_its_own_parameter() {
+        use crate::api::NumSpeakers;
+        let three = SpeakerCount::admit(false, NumSpeakers(3)).expect("three");
+        let rev = SpeakerPlan::admit(
+            three,
+            SpeakerSeparation::RecognizerOnly,
+            Some(AsrBackend::RustRevAi),
+        )
+        .expect("Rev.AI takes a count");
+        assert_eq!(rev.count().known(), Some(NumSpeakers(3)));
+        assert_eq!(
+            rev.recognizer_diarization(),
+            ProviderDiarizationV2::NotRequested
+        );
+
+        let tencent = AsrBackend::Worker(AsrWorkerMode::HkTencentV2);
+        let separated = SpeakerPlan::admit(three, SpeakerSeparation::RecognizerOnly, Some(tencent))
+            .expect("Tencent takes a count");
+        assert_eq!(
+            separated.recognizer_diarization(),
+            ProviderDiarizationV2::for_backend(AsrBackendV2::HkTencent, NumSpeakers(3))
+        );
+        assert!(separated.recognizer_diarization().is_requested());
+        let one = SpeakerCount::admit(false, NumSpeakers(1)).expect("one");
+        assert_eq!(
+            SpeakerPlan::admit(one, SpeakerSeparation::RecognizerOnly, Some(tencent))
+                .expect("one speaker is one track")
+                .recognizer_diarization(),
+            ProviderDiarizationV2::NotRequested
+        );
+        assert_eq!(
+            SpeakerPlan::admit(
+                one,
+                SpeakerSeparation::Dedicated(SpeakerBackendV2::PyannoteAi),
+                Some(AsrBackend::RustRevAi)
+            ),
+            Err(SpeakerPlanError::SeparatingOneSpeaker)
+        );
+        for count in [0, 256, u32::MAX] {
+            assert_eq!(
+                SpeakerCount::admit(false, NumSpeakers(count)),
+                Err(SpeakerPlanError::InvalidCount(count))
+            );
         }
+        assert_eq!(
+            SpeakerSeparation::from_request(true, None),
+            SpeakerSeparation::Dedicated(SpeakerBackendV2::PyannoteAi)
+        );
+        assert_eq!(
+            SpeakerSeparation::from_request(
+                true,
+                Some(crate::types::engines::SpeakerEngineName::Nemo)
+            ),
+            SpeakerSeparation::Dedicated(SpeakerBackendV2::Nemo)
+        );
+        assert_eq!(
+            SpeakerSeparation::from_request(
+                false,
+                Some(crate::types::engines::SpeakerEngineName::Nemo)
+            ),
+            SpeakerSeparation::RecognizerOnly
+        );
     }
 
     /// Only the backend that reads a checkpoint admits one, and only as
@@ -1104,22 +1350,22 @@ mod speaker_plan_tests {
             "the same override must not attach to a backend that reads no checkpoint"
         );
         // Both are still admissible plans; the override simply does not attach.
-        TranscribeAsrPlan::from_request(funaudio, false, 1, &paraformer, &english()).unwrap();
-        TranscribeAsrPlan::from_request(whisper, false, 1, &paraformer, &english()).unwrap();
+        TranscribeAsrPlan::from_request(funaudio, &paraformer, &english()).unwrap();
+        TranscribeAsrPlan::from_request(whisper, &paraformer, &english()).unwrap();
 
         let padded = std::collections::BTreeMap::from([(
             crate::types::engines::FUNAUDIO_MODEL_OVERRIDE_KEY.to_owned(),
             "paraformer-zh ".to_owned(),
         )]);
         assert!(matches!(
-            TranscribeAsrPlan::from_request(funaudio, false, 1, &padded, &english()),
+            TranscribeAsrPlan::from_request(funaudio, &padded, &english()),
             Err(TranscribeAsrPlanError::InvalidCheckpoint { .. })
         ));
     }
 
     #[test]
     fn replay_policy_refusal_has_a_typed_usage_exit() {
-        let error = crate::cli::error::CliError::from(TranscribeAsrPlanError::InvalidFixedCount(0));
+        let error = crate::cli::error::CliError::from(SpeakerPlanError::InvalidCount(0));
         assert_eq!(error.exit_code(), crate::cli::error::CliError::EXIT_USAGE);
     }
 }

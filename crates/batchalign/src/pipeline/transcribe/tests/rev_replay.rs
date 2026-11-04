@@ -8,9 +8,9 @@ use super::*;
 async fn rev_cold_and_replayed_transcribe_are_semantically_identical() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let audio_path = tempdir.path().join("sample.wav");
-    tokio::fs::write(&audio_path, b"provider media")
-        .await
-        .expect("write provider media");
+    // A real WAV: the Rev provider-media boundary probes the container of
+    // what it is handed, so arbitrary bytes no longer stand in for a recording.
+    crate::media::probe::fixtures::write_pcm_wav(&audio_path, 0);
     let cache_dir = tempdir.path().join("cache");
     let cold_debug = tempdir.path().join("cold-debug");
     let replay_debug = tempdir.path().join("replay-debug");
@@ -19,7 +19,7 @@ async fn rev_cold_and_replayed_transcribe_are_semantically_identical() {
         calls: AtomicUsize::new(0),
     };
     let mut opts = test_transcribe_options(None);
-    opts.diarize = false;
+    opts.speakers = crate::transcribe::SpeakerPlan::for_test(2, None);
 
     let cache = UtteranceCache::sqlite(Some(cache_dir.clone()))
         .await
@@ -147,6 +147,7 @@ async fn replay_output(tokens: Vec<AsrToken>) -> Result<TranscribeOutput, Server
     std::fs::write(
         &asr,
         serde_json::to_vec_pretty(&AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens,
             lang: LanguageCode3::eng(),
             model: None,
@@ -176,13 +177,12 @@ async fn replay_output(tokens: Vec<AsrToken>) -> Result<TranscribeOutput, Server
     let pair = crate::api::LanguageSpec::try_from("eng,spa").expect("a pair");
     let opts = TranscribeOptions {
         plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
-            ReplayAsrPlan::for_legacy_replay(2, &pair).unwrap(),
+            ReplayAsrPlan::for_legacy_replay(&pair).unwrap(),
             false,
             UtsegFallbackPolicy::Refuse,
         )
         .unwrap(),
-        diarize: false,
-        speaker_backend: None,
+        speakers: crate::transcribe::SpeakerPlan::for_test(2, None),
         with_morphosyntax: live.with_morphosyntax,
         cache_policies: live.cache_policies,
         write_wor: live.write_wor,
@@ -297,6 +297,7 @@ async fn legacy_replay_runs_current_speaker_projection_without_live_inference() 
     std::fs::write(
         &asr,
         serde_json::to_vec_pretty(&AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "bonjour".into(),
@@ -355,13 +356,12 @@ async fn legacy_replay_runs_current_speaker_projection_without_live_inference() 
     );
     let opts = TranscribeOptions {
         plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
-            ReplayAsrPlan::for_legacy_replay(2, &LanguageCode3::fra().into()).unwrap(),
+            ReplayAsrPlan::for_legacy_replay(&LanguageCode3::fra().into()).unwrap(),
             false,
             UtsegFallbackPolicy::Refuse,
         )
         .unwrap(),
-        diarize: opts.diarize,
-        speaker_backend: opts.speaker_backend,
+        speakers: opts.speakers,
         with_morphosyntax: opts.with_morphosyntax,
         cache_policies: opts.cache_policies,
         write_wor: opts.write_wor,

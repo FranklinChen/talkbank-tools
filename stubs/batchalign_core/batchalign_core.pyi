@@ -48,6 +48,8 @@ __all__ = [
     "execute_utseg_request_v2",
     "execute_word_segmentation_request_v2",
     "funaudio_segments_to_asr",
+    "is_padding_value",
+    "is_punctuation_lemma",
     "open_protocol_stdin",
     "prepare_protocol_message",
     "repair_feats",
@@ -117,6 +119,17 @@ def repair_feats(feats: str) -> tuple[str | None, list[tuple[str, str]]]:
     """FEATS without model padding (``<PAD>``, ``<UNK>``) and each removed
     ``(feature, value)``: Rust's one repair (``repair_feats``), so the worker
     never classifies a value itself."""
+
+def is_padding_value(value: str) -> bool:
+    """Whether ``value`` is model padding (``<PAD>``, ``<UNK>``): Rust's one
+    test (``PaddingValue::admit``), which the server's feature and relation
+    admission also apply, so the worker never classifies a label itself."""
+
+def is_punctuation_lemma(text: str, lemma: str) -> bool:
+    """Whether ``lemma`` is punctuation only for a word ``text`` that has
+    letters: Rust's one test (``is_punctuation_lemma``), which the server's
+    UD word admission also applies, so the worker never classifies a lemma
+    itself."""
 
 StanzaProcessorName = Literal[
     "tokenize", "mwt", "pos", "lemma", "depparse", "constituency", "coref"

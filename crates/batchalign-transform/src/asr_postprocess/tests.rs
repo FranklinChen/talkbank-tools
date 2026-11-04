@@ -300,7 +300,7 @@ fn test_retokenize_simple() {
         AsrWord::new("world", Some(500), Some(1000)),
         AsrWord::new(".", None, None),
     ];
-    let utts = retokenize(SpeakerIndex(0), words);
+    let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
     assert_eq!(utts.len(), 1);
     assert_eq!(utts[0].speaker, SpeakerIndex(0));
     // The terminator is the utterance's end, not one of its words.
@@ -315,7 +315,7 @@ fn test_retokenize_splits_on_period() {
         AsrWord::new(".", Some(500), Some(600)),
         AsrWord::new("world", Some(600), Some(1000)),
     ];
-    let utts = retokenize(SpeakerIndex(0), words);
+    let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
     assert_eq!(utts.len(), 2);
     assert_eq!(utts[0].words.len(), 1);
     assert_eq!(utts[0].words[0].text, "hello");
@@ -334,7 +334,7 @@ fn test_retokenize_trailing_no_terminator() {
         AsrWord::new("hello", Some(0), Some(500)),
         AsrWord::new("world", Some(500), Some(1000)),
     ];
-    let utts = retokenize(SpeakerIndex(0), words);
+    let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
     assert_eq!(utts.len(), 1);
     assert_eq!(utts[0].words.last().unwrap().text, "world");
     assert_eq!(
@@ -358,7 +358,7 @@ fn test_retokenize_an_unwritable_ending_mark_is_a_synthesized_end() {
             AsrWord::new("hello", Some(0), Some(500)),
             AsrWord::new(text, None, None),
         ];
-        let utts = retokenize(SpeakerIndex(0), words);
+        let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
         assert_eq!(utts.len(), 1, "{text}");
         assert!(
             utts[0].words.iter().all(|w| !w.text.as_str().contains('.')),
@@ -381,7 +381,7 @@ fn test_retokenize_trailing_off_is_observed_not_an_ellipsis() {
         AsrWord::new("hello", Some(0), Some(500)),
         AsrWord::new("+...", None, None),
     ];
-    let utts = retokenize(SpeakerIndex(0), words);
+    let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
     assert_eq!(utts.len(), 1);
     assert_eq!(utts[0].end, end("+..."));
 }
@@ -428,7 +428,7 @@ fn test_retokenize_emits_no_empty_utterance() {
         AsrWord::new("?", None, None),
         AsrWord::new("!", None, None),
     ];
-    let utts = retokenize(SpeakerIndex(0), words);
+    let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
     assert_eq!(utts.len(), 1, "{utts:?}");
     assert_eq!(utts[0].end, end("?"));
 }
@@ -439,7 +439,7 @@ fn test_retokenize_rtl_punct() {
         AsrWord::new("hello", Some(0), Some(500)),
         AsrWord::new("؟", None, None),
     ];
-    let utts = retokenize(SpeakerIndex(0), words);
+    let utts = retokenize(SpeakerIndex(0), words, SynthesisCause::NoMark);
     assert_eq!(utts.len(), 1);
     assert_eq!(utts[0].end, end("?")); // normalized
 }
@@ -648,7 +648,8 @@ fn test_process_raw_asr_preserves_same_speaker_monologue_boundaries() {
 }
 
 #[test]
-fn test_split_prepared_chunk_by_assignments_preserves_speaker_and_groups() {
+fn an_analyzed_chunk_splits_at_group_changes_keeping_speaker_and_predicted_ends() {
+    use batchalign_types::segmentation::{BoundaryTerminator, UtteranceSegmentation};
     let chunk = PreparedMonologueChunk {
         speaker: SpeakerIndex(2),
         words: vec![
@@ -658,12 +659,22 @@ fn test_split_prepared_chunk_by_assignments_preserves_speaker_and_groups() {
             AsrWord::new("you", Some(400), Some(500)),
         ],
     };
+    let segmentation = UtteranceSegmentation::from_boundaries([
+        None,
+        Some(BoundaryTerminator::Question),
+        None,
+        None,
+    ]);
 
-    let split = split_prepared_chunk_by_assignments(&chunk, &[0, 0, 1, 1]);
-    assert_eq!(split.len(), 2);
-    assert_eq!(split[0].speaker, SpeakerIndex(2));
+    let split = RetraceAnalyzedChunk::analyze(chunk.clone(), "eng")
+        .split(&segmentation)
+        .expect("parallel segmentation");
+    assert!(split.suppressed_cuts_before_words.is_empty());
+    assert_eq!(split.pieces.len(), 2);
+    assert_eq!(split.pieces[0].chunk().speaker, SpeakerIndex(2));
     assert_eq!(
-        split[0]
+        split.pieces[0]
+            .chunk()
             .words
             .iter()
             .map(|word| word.text.as_str())
@@ -671,13 +682,55 @@ fn test_split_prepared_chunk_by_assignments_preserves_speaker_and_groups() {
         vec!["on", "television"]
     );
     assert_eq!(
-        split[1]
+        split.pieces[0].predicted_end(),
+        Some(BoundaryTerminator::Question)
+    );
+    assert_eq!(
+        split.pieces[1]
+            .chunk()
             .words
             .iter()
             .map(|word| word.text.as_str())
             .collect::<Vec<_>>(),
         vec!["have", "you"]
     );
+    assert_eq!(split.pieces[1].predicted_end(), None);
+
+    // Not parallel to the chunk: refused rather than left uncut.
+    assert!(
+        RetraceAnalyzedChunk::analyze(chunk, "eng")
+            .split(&UtteranceSegmentation::unstated(vec![0, 1]))
+            .is_err()
+    );
+}
+
+/// A model cut inside an exact repetition is not made: the words stay in one
+/// piece, so retrace detection sees both copies, and the cut is reported.
+#[test]
+fn an_analyzed_chunk_does_not_cut_between_the_copies_of_a_repetition() {
+    use batchalign_types::segmentation::{BoundaryTerminator, UtteranceSegmentation};
+    let chunk = PreparedMonologueChunk {
+        speaker: SpeakerIndex(0),
+        words: vec![
+            AsrWord::new("yeah", Some(0), Some(100)),
+            AsrWord::new("I", Some(100), Some(200)),
+            AsrWord::new("I", Some(300), Some(400)),
+            AsrWord::new("went", Some(400), Some(500)),
+        ],
+    };
+    let segmentation = UtteranceSegmentation::from_boundaries([
+        None,
+        Some(BoundaryTerminator::Period),
+        None,
+        None,
+    ]);
+
+    let split = RetraceAnalyzedChunk::analyze(chunk, "eng")
+        .split(&segmentation)
+        .expect("parallel segmentation");
+    assert_eq!(split.suppressed_cuts_before_words, vec![2]);
+    assert_eq!(split.pieces.len(), 1);
+    assert_eq!(split.pieces[0].chunk().words.len(), 4);
 }
 
 /// Golden test: Cantonese normalization in pipeline.

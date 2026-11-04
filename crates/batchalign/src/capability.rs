@@ -20,11 +20,12 @@
 //!
 //! Knowing which engine runs a task is a separate fact, read later. Only forced
 //! alignment needs it before dispatch (its cache rows are namespaced by the FA
-//! engine), and the forced-alignment dispatch arm reads it itself with
+//! engine), and the FA dispatch's per-language gate
+//! (`runner::dispatch::FaWorkerAdmission`) reads it itself with
 //! [`crate::engine_reports::FaCacheNamespace::from_loaded`], from the report
-//! the pool took after loading FA on the selected worker. There is no second
-//! declaration of which commands need an identity: the arm that reads the
-//! namespace is the only place that says so.
+//! the pool took after loading FA on the worker keyed by each file's declared
+//! language. There is no second declaration of which commands need an
+//! identity: the gate that reads the namespace is the only place that says so.
 //!
 //! It does NOT depend on axum, sqlx, or any server-specific crate. Used by
 //! both the direct-mode host ([`crate::worker_setup`]) and the HTTP server

@@ -50,6 +50,7 @@ mod audio_task;
 mod benchmark_pipeline;
 mod diarize_chat;
 pub(crate) mod diarize_turns;
+mod fa_admission;
 mod fa_pipeline;
 mod kernel_plan;
 mod media_analysis_v2;
@@ -61,7 +62,95 @@ mod transcribe_pipeline;
 mod utr;
 
 pub(crate) use benchmark_pipeline::{BenchmarkDispatchRuntime, dispatch_benchmark_infer};
+pub(crate) use fa_admission::FaWorkerAdmission;
+
+/// Why a command's worker could not be probed into a usable state.
+///
+/// Two refusals and not one, because they are different operator actions: a
+/// probe failure is the worker not coming up or not loading (a download, a
+/// crash, a timeout), while an unavailable identity is a worker that came up
+/// and still does not support the command's task or did not name its engine.
+/// The router fails the whole job with one of these; `align` fails every file
+/// of one language with one (`FaWorkerAdmission`). Both say the same words.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WorkerProbeRefusal {
+    /// The worker keyed for this command could not be probed.
+    #[error("failed to resolve selected worker capabilities: {0}")]
+    Probe(#[source] crate::worker::error::WorkerError),
+    /// The worker was probed and does not support the command's task, or
+    /// named no engine where one is required.
+    #[error("{0}")]
+    Unavailable(#[source] crate::engine_reports::EngineIdentityUnavailable),
+}
+
+impl WorkerProbeRefusal {
+    /// How a file failed by this refusal is classified, and so whether it is
+    /// retried: a probe failure by what the worker did (a crash is retried, a
+    /// model that will not load is not), an unavailable identity as analysis
+    /// the configured backend cannot provide.
+    pub(crate) fn category(&self) -> crate::scheduling::FailureCategory {
+        match self {
+            Self::Probe(error) => crate::runner::util::classify_worker_error(error),
+            Self::Unavailable(_) => crate::scheduling::FailureCategory::AnalysisUnavailable,
+        }
+    }
+}
+
+/// Probe the worker `command`'s requests will reach under `language`: load the
+/// command's task on it, take its report, and apply the availability rule
+/// ([`crate::capability::command_supported`], the same rule that decides what
+/// `/health` advertises).
+///
+/// The one probe for a job-level command (the router, once per job) and for
+/// `align` (`FaWorkerAdmission`, once per language), so the two cannot drift
+/// in what they load, what they check or what they say when refusing.
+pub(crate) async fn probe_command_worker(
+    pool: &crate::worker::pool::WorkerPool,
+    command: crate::api::ReleasedCommand,
+    language: impl Into<crate::api::WorkerLanguage>,
+    options: &crate::options::CommandOptions,
+    gpu_models: &crate::worker::pool::GpuModelPlan,
+) -> Result<crate::worker::pool::LoadedCapabilities, WorkerProbeRefusal> {
+    let loaded = pool
+        .ensure_command_capabilities(command, language, options, gpu_models)
+        .await
+        .map_err(WorkerProbeRefusal::Probe)?;
+    crate::capability::command_supported(
+        &crate::command_model::command_spec(command).capabilities,
+        loaded.reports(),
+    )
+    .map_err(WorkerProbeRefusal::Unavailable)?;
+    Ok(loaded)
+}
 pub(crate) use fa_pipeline::*;
 pub(crate) use media_analysis_v2::{MediaAnalysisDispatchRuntime, dispatch_media_analysis_v2};
 pub(crate) use plan::*;
 pub(crate) use transcribe_pipeline::{TranscribeDispatchRuntime, dispatch_transcribe_infer};
+
+/// Pre-scale the workers one command's requests will reach, so a batch pays
+/// one cold start rather than one per file.
+///
+/// Runs after a capability probe, on the same key the probe spawned
+/// ([`crate::worker::pool::WorkerPool::pre_scale_for_command`] keys a GPU
+/// command by its model plan), so the workers it warms are the ones the
+/// requests reach. A job-level command calls it once from the router with the
+/// job's language; `align` calls it once per language from
+/// [`FaWorkerAdmission`], with the language the files declare.
+///
+/// Skipped for LazyProfile: on constrained machines workers start empty and
+/// load models on demand, so a pre-scaled worker would sit idle until files
+/// need it.
+pub(crate) async fn pre_scale_workers(
+    pool: &std::sync::Arc<crate::worker::pool::WorkerPool>,
+    command: crate::api::ReleasedCommand,
+    language: impl Into<crate::api::WorkerLanguage>,
+    num_workers: crate::api::NumWorkers,
+    options: &crate::options::CommandOptions,
+    gpu_models: &crate::worker::pool::GpuModelPlan,
+) {
+    if *num_workers > 1 && pool.bootstrap_mode() != crate::worker::WorkerBootstrapMode::LazyProfile
+    {
+        pool.pre_scale_for_command(command, language, num_workers.0, options, gpu_models)
+            .await;
+    }
+}

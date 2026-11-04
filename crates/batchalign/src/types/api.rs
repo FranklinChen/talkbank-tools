@@ -54,18 +54,15 @@ mod tests {
 
     #[test]
     fn job_submission_roundtrip() {
-        let json = r#"{"command": "morphotag", "options": {"command": "morphotag"}}"#;
+        // `lang` is required on the wire (no serde default since 2026-11-03;
+        // `types::request::tests::a_submission_without_a_language_is_refused_by_name`
+        // pins the refusal). This roundtrip exercises the serde shape only,
+        // not submission validation.
+        let json =
+            r#"{"command": "morphotag", "lang": "per-file", "options": {"command": "morphotag"}}"#;
         let sub: JobSubmission = serde_json::from_str(json).unwrap();
         assert_eq!(sub.command, "morphotag");
-        // Default value for `lang` on a morphotag deserialization. The
-        // wire-level fixture above does not specify `lang`, so we get the
-        // serde default: a `LanguageSpec` constructed from the empty
-        // string falls back to `Resolved(eng)` via parse_from_db's invalid
-        // path. This roundtrip test only exercises the serde shape, it
-        // does NOT exercise submission validation, which would (correctly)
-        // reject this combination at the route boundary because morphotag
-        // requires `LanguageSpec::PerFile`.
-        assert_eq!(sub.lang, LanguageSpec::Resolved(LanguageCode3::eng()));
+        assert_eq!(sub.lang, LanguageSpec::PerFile);
         assert_eq!(sub.num_speakers, 1);
         assert!(sub.files.is_empty());
         assert!(!sub.paths_mode);

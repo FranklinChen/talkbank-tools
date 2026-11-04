@@ -44,6 +44,46 @@ pub(crate) fn write_unpadded_cbr_mpeg2_mp3(path: &Path) {
     write_frames(path, [0xFF, 0xF3, 0x80, 0xC0], 208);
 }
 
+/// Write a valid RIFF/WAVE file: a tenth of a second of 16-bit mono PCM at
+/// 16 kHz whose samples depend on `seed`, so two seeds are two recordings in
+/// the same container and one seed written twice is the same recording.
+///
+/// For tests that need media ffprobe reads as a WAV (format `wav`, codec
+/// `pcm_s16le`) without an encoder: the Rev.AI provider-media boundary probes
+/// the container of what it is handed, so arbitrary bytes no longer stand in
+/// for a recording there.
+pub(crate) fn write_pcm_wav(path: &Path, seed: u8) {
+    const RATE_HZ: u32 = 16_000;
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+    let samples: Vec<i16> = (0..RATE_HZ / 10)
+        .map(|index| {
+            let phase = i64::from(index) * (i64::from(seed) + 3);
+            i16::try_from((phase * 97) % 20_000 - 10_000).expect("within i16")
+        })
+        .collect();
+    let data_bytes = u32::try_from(samples.len() * 2).expect("fixture fits a WAV header");
+    let block_align = CHANNELS * (BITS_PER_SAMPLE / 8);
+    let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&CHANNELS.to_le_bytes());
+    bytes.extend_from_slice(&RATE_HZ.to_le_bytes());
+    bytes.extend_from_slice(&(RATE_HZ * u32::from(block_align)).to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(path, bytes).expect("write fixture");
+}
+
 /// [`FRAMES`] copies of one silent frame: `header`, then zeros to `frame_bytes`.
 fn write_frames(path: &Path, header: [u8; 4], frame_bytes: usize) {
     let mut frame = vec![0u8; frame_bytes];

@@ -63,6 +63,7 @@ pub mod overlap_markers;
 pub(crate) mod region_tests;
 mod regions;
 mod search;
+pub(in crate::chat_ops::fa) use self::search::{CorridorCeiling, CorridorFloor, SearchProvenance};
 mod token_text;
 mod two_pass;
 
@@ -163,13 +164,7 @@ pub fn select_strategy(
     let has_overlap = chat_file.lines.iter().any(|line| {
         if let Line::Utterance(utt) = line {
             // Check for +< linker (explicit overlap marker)
-            if utt
-                .main
-                .content
-                .linkers
-                .iter()
-                .any(|l| l.kind == talkbank_model::model::LinkerKind::LazyOverlapPrecedes)
-            {
+            if super::overlaps_previous_utterance(utt) {
                 return true;
             }
             // Check for ⌊ CA overlap markers (bottom overlap = overlapping speaker)
@@ -877,12 +872,7 @@ pub(super) fn collect_utr_utterance_info(
                         })
                 }
             };
-            let has_lazy_overlap = utt
-                .main
-                .content
-                .linkers
-                .iter()
-                .any(|l| l.kind == talkbank_model::model::LinkerKind::LazyOverlapPrecedes);
+            let has_lazy_overlap = super::overlaps_previous_utterance(utt);
             let overlap_info = overlap_markers::extract_overlap_info(&utt.main.content.content);
 
             // Collect bottom region indices for index-aware matching.
@@ -2609,8 +2599,8 @@ mod tests {
             let window = serde_json::to_value(&plan.search_envelopes[index]).expect("wire");
             assert_eq!(window["scope"]["kind"], "order_corridor");
             let (floor, ceiling) = (
-                window["floor_ms"].as_u64().expect("floor"),
-                window["ceiling_ms"].as_u64().expect("bounded ceiling"),
+                window["floor"]["ms"].as_u64().expect("floor"),
+                window["ceiling"]["ms"].as_u64().expect("bounded ceiling"),
             );
             let legacy = &expected[index];
             assert!(

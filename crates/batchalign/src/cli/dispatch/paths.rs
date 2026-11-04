@@ -7,19 +7,117 @@ use crate::api::{JobSubmission, LanguageSpec};
 use crate::options::CommandOptions;
 
 use crate::cli::discover::{
-    PassthroughReport, copy_nonmatching, infer_base_dir, plan_server_inputs,
+    PassthroughMode, PassthroughReport, copy_nonmatching, infer_base_dir, plan_server_inputs,
 };
 use crate::cli::error::CliError;
-use crate::cli::output::ResultDestinations;
+use crate::cli::output::{Overwrite, ResultDestinations};
 
-use super::helpers::{filter_files_for_command, inject_lexicon, order_files_for_command};
+use super::helpers::{
+    classify_files, filter_files_for_command, inject_lexicon, order_files_for_command,
+};
 use crate::cli::args::InputKind;
 
-pub(super) struct PreparedPathsSubmission {
+pub(super) struct PreparedSubmission {
     pub submission: JobSubmission,
     pub destinations: ResultDestinations,
     pub total_files: usize,
     pub passthrough: PassthroughReport,
+}
+
+/// Where the inputs' non-input neighbours would be copied, and the report of
+/// that walk, for every input directory of one submission. Nothing is copied
+/// under [`PassthroughMode::Plan`].
+fn pass_through_neighbours(
+    command: ReleasedCommand,
+    input_kind: InputKind,
+    inputs: &[std::path::PathBuf],
+    out_dir: Option<&Path>,
+    mode: PassthroughMode,
+) -> Result<PassthroughReport, CliError> {
+    let mut passthrough = PassthroughReport::default();
+    if command != ReleasedCommand::Convert
+        && let Some(od) = out_dir
+    {
+        for inp in inputs {
+            if Path::new(inp).is_dir() {
+                let dir_report =
+                    copy_nonmatching(Path::new(inp), Path::new(od), input_kind, command, mode)?;
+                passthrough.extend_from(dir_report);
+            }
+        }
+    }
+    Ok(passthrough)
+}
+
+/// Discover, plan and package one content submission: transcripts shipped by
+/// content to a server on another host (which resolves recordings itself).
+///
+/// The same preparation `prepare_paths_submission` is for a shared
+/// filesystem, so a plan of either transport is the submission the run would
+/// send. `None` when nothing was found to submit.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_content_submission(
+    options: &CommandOptions,
+    lang: &LanguageSpec,
+    num_speakers: u32,
+    input_kind: InputKind,
+    inputs: &[std::path::PathBuf],
+    out_dir: Option<&std::path::Path>,
+    lexicon: Option<&str>,
+    overwrite: Option<Overwrite>,
+    mode: PassthroughMode,
+) -> Result<Option<PreparedSubmission>, CliError> {
+    let command = options.command();
+    let (files, outputs) =
+        crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
+    let (files, outputs) = filter_files_for_command(command, files, outputs);
+    let (files, outputs) = order_files_for_command(command, files, outputs)?;
+    let plan = plan_server_inputs(options, &files, &outputs, inputs, out_dir, overwrite)?;
+    let passthrough = pass_through_neighbours(command, input_kind, inputs, out_dir, mode)?;
+
+    let base_dir = infer_base_dir(inputs)?;
+    let source_paths = plan
+        .inputs()
+        .iter()
+        .map(|input| input.source().to_path_buf())
+        .collect::<Vec<_>>();
+    let server_names = plan
+        .inputs()
+        .iter()
+        .map(|input| input.server_name().to_owned())
+        .collect::<Vec<_>>();
+    let (file_payloads, media_file_names) = classify_files(&source_paths, &server_names)?;
+    if file_payloads.is_empty() && media_file_names.is_empty() {
+        return Ok(None);
+    }
+    let total_files = file_payloads.len() + media_file_names.len();
+
+    let mut opts = options.clone();
+    inject_lexicon(&mut opts, lexicon)?;
+    let debug_traces = opts.common().debug_dir.is_some();
+
+    Ok(Some(PreparedSubmission {
+        submission: JobSubmission {
+            command,
+            lang: lang.clone(),
+            num_speakers: num_speakers.into(),
+            files: file_payloads,
+            media_files: media_file_names,
+            media_mapping: Default::default(),
+            media_subdir: Default::default(),
+            source_dir: base_dir.to_string_lossy().to_string().into(),
+            options: opts,
+            paths_mode: false,
+            source_paths: vec![],
+            output_paths: vec![],
+            display_names: vec![],
+            debug_traces,
+            before_paths: vec![],
+        },
+        destinations: plan.into_destinations(),
+        total_files,
+        passthrough,
+    }))
 }
 
 /// Discover, plan and package one shared-filesystem submission.
@@ -30,7 +128,7 @@ pub(super) struct PreparedPathsSubmission {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_paths_submission(
     options: &CommandOptions,
-    lang: &str,
+    lang: &LanguageSpec,
     num_speakers: u32,
     input_kind: InputKind,
     inputs: &[std::path::PathBuf],
@@ -38,26 +136,16 @@ pub(super) fn prepare_paths_submission(
     lexicon: Option<&str>,
     before: Option<&std::path::Path>,
     media_mapping_keys: &[String],
-) -> Result<Option<PreparedPathsSubmission>, CliError> {
+    overwrite: Option<Overwrite>,
+    mode: PassthroughMode,
+) -> Result<Option<PreparedSubmission>, CliError> {
     let command = options.command();
     let (files, outputs) =
         crate::cli::discover::discover_server_inputs(inputs, out_dir, input_kind)?;
     let (files, outputs) = filter_files_for_command(command, files, outputs);
     let (files, outputs) = order_files_for_command(command, files, outputs)?;
-    let plan = plan_server_inputs(options, &files, &outputs, inputs, out_dir)?;
-
-    let mut passthrough = PassthroughReport::default();
-    if command != ReleasedCommand::Convert
-        && let Some(od) = out_dir
-    {
-        for inp in inputs {
-            if Path::new(inp).is_dir() {
-                let dir_report =
-                    copy_nonmatching(Path::new(inp), Path::new(od), input_kind, command)?;
-                passthrough.extend_from(dir_report);
-            }
-        }
-    }
+    let plan = plan_server_inputs(options, &files, &outputs, inputs, out_dir, overwrite)?;
+    let passthrough = pass_through_neighbours(command, input_kind, inputs, out_dir, mode)?;
 
     if files.is_empty() {
         return Ok(None);
@@ -123,11 +211,10 @@ pub(super) fn prepare_paths_submission(
         Vec::new()
     };
 
-    Ok(Some(PreparedPathsSubmission {
+    Ok(Some(PreparedSubmission {
         submission: JobSubmission {
             command,
-            lang: LanguageSpec::try_from(lang)
-                .map_err(|e| CliError::InvalidArgument(format!("invalid language: {e}")))?,
+            lang: lang.clone(),
             num_speakers: num_speakers.into(),
             files: vec![],
             media_files: vec![],
@@ -182,8 +269,11 @@ fn detect_media_mapping(
 #[cfg(test)]
 mod tests {
     use super::{detect_media_mapping, prepare_paths_submission};
-    use crate::api::{ContentType, FileProvenance, FileResult, ReleasedCommand};
+    use crate::api::{
+        ContentType, FileProvenance, FileResult, LanguageCode3, LanguageSpec, ReleasedCommand,
+    };
     use crate::cli::args::InputKind;
+    use crate::cli::discover::PassthroughMode;
     use crate::cli::output::write_result;
     use crate::options::{AlignOptions, CommandOptions, MorphotagOptions};
 
@@ -215,13 +305,10 @@ mod tests {
                 if let Some(name) = added {
                     std::fs::write(priors.join(name), CHAT).unwrap();
                 }
+                // Both commands here are per-file: neither has a `--lang`.
                 let prepared = prepare_paths_submission(
                     &options,
-                    if options.command() == ReleasedCommand::Morphotag {
-                        "per-file"
-                    } else {
-                        "eng"
-                    },
+                    &LanguageSpec::PerFile,
                     1,
                     InputKind::Chat,
                     std::slice::from_ref(&inputs),
@@ -229,6 +316,8 @@ mod tests {
                     None,
                     Some(&priors),
                     &[],
+                    None,
+                    PassthroughMode::Copy,
                 )
                 .unwrap()
                 .unwrap();
@@ -273,7 +362,7 @@ mod tests {
         std::fs::write(&three, CHAT).unwrap();
         let prepared = prepare_paths_submission(
             &morphotag(),
-            "eng",
+            &LanguageSpec::Resolved(LanguageCode3::eng()),
             1,
             InputKind::Chat,
             &[directory, two, three],
@@ -281,6 +370,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            PassthroughMode::Copy,
         )
         .unwrap()
         .unwrap();
@@ -323,7 +414,7 @@ mod tests {
         std::fs::write(&other, CHAT).unwrap();
         let err = prepare_paths_submission(
             &morphotag(),
-            "eng",
+            &LanguageSpec::Resolved(LanguageCode3::eng()),
             1,
             InputKind::Chat,
             &[directory, other],
@@ -331,6 +422,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            PassthroughMode::Copy,
         )
         .err()
         .expect("colliding outputs must be refused");
@@ -368,7 +461,7 @@ mod tests {
 
         let prepared = prepare_paths_submission(
             &align(),
-            "eng",
+            &LanguageSpec::PerFile,
             1,
             InputKind::Chat,
             std::slice::from_ref(&input_dir),
@@ -376,6 +469,8 @@ mod tests {
             None,
             None,
             &["slabank-data".to_string()],
+            None,
+            PassthroughMode::Copy,
         )
         .unwrap()
         .expect("expected one prepared submission");
@@ -384,6 +479,52 @@ mod tests {
         assert_eq!(
             prepared.submission.media_subdir.as_str(),
             "French/Newcastle/Discussion/12"
+        );
+    }
+
+    /// An existing `<media>.cha` beside the recording refuses the whole
+    /// preparation: no `JobSubmission` is built, so nothing can be submitted,
+    /// started or paid for. `--overwrite` lets the same preparation through.
+    #[test]
+    fn transcribe_preparation_refuses_an_existing_cha_before_any_submission_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let input_dir = root.path().join("recordings");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(input_dir.join("session.wav"), b"recording bytes").unwrap();
+        std::fs::write(input_dir.join("session.cha"), CHAT).unwrap();
+        let transcribe = crate::recipe_runner::runtime::test_options(ReleasedCommand::Transcribe);
+        let prepare = |overwrite| {
+            prepare_paths_submission(
+                &transcribe,
+                &LanguageSpec::Resolved(LanguageCode3::eng()),
+                2,
+                InputKind::Media,
+                std::slice::from_ref(&input_dir),
+                None,
+                None,
+                None,
+                &[],
+                overwrite,
+                PassthroughMode::Copy,
+            )
+        };
+        assert!(matches!(
+            prepare(None),
+            Err(crate::cli::error::CliError::ExistingOutput { .. })
+        ));
+        let prepared = prepare(Some(crate::cli::output::Overwrite::by_flag()))
+            .unwrap()
+            .expect("one recording to submit");
+        assert_eq!(prepared.total_files, 1);
+        // The anchor is canonical (on macOS, under `/private`), beside the
+        // recording: the daemon writes `session.cha` next to it.
+        assert_eq!(
+            prepared.submission.output_paths[0].as_str(),
+            input_dir
+                .join("session.wav")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
         );
     }
 
@@ -403,7 +544,7 @@ mod tests {
 
         let prepared = prepare_paths_submission(
             &align(),
-            "eng",
+            &LanguageSpec::PerFile,
             1,
             InputKind::Chat,
             std::slice::from_ref(&input_dir),
@@ -411,6 +552,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            PassthroughMode::Copy,
         )
         .unwrap()
         .expect("expected one prepared submission");

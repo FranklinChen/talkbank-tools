@@ -11,17 +11,17 @@ use batchalign::worker::InferTask;
 
 #[tokio::test]
 async fn align_spa_wav2vec() {
-    align_audio_clip("spa_marrero_clip", "spa_marrero_timed", "spa", "align_spa").await;
+    align_audio_clip("spa_marrero_clip", "spa_marrero_timed", "align_spa").await;
 }
 
 #[tokio::test]
 async fn align_fra_wav2vec() {
-    align_audio_clip("fra_geneva_clip", "fra_geneva_timed", "fra", "align_fra").await;
+    align_audio_clip("fra_geneva_clip", "fra_geneva_timed", "align_fra").await;
 }
 
 #[tokio::test]
 async fn align_jpn_wav2vec() {
-    align_audio_clip("jpn_tyo_clip", "jpn_tyo_timed", "jpn", "align_jpn").await;
+    align_audio_clip("jpn_tyo_clip", "jpn_tyo_timed", "align_jpn").await;
 }
 
 #[tokio::test]
@@ -29,7 +29,6 @@ async fn align_yue_wav2vec() {
     align_audio_clip_with_options(
         "yue_hku_clip",
         "yue_hku_timed",
-        "yue",
         "align_yue",
         align_options_with_utr(
             FaEngineName::Wave2Vec,
@@ -45,17 +44,15 @@ async fn align_eng_multi_speaker_wav2vec() {
     align_audio_clip(
         "eng_multi_speaker",
         "eng_multi_speaker",
-        "eng",
         "align_eng_multi_speaker",
     )
     .await;
 }
 
-async fn align_audio_clip_server(audio_name: &str, chat_name: &str, lang: &str, label: &str) {
+async fn align_audio_clip_server(audio_name: &str, chat_name: &str, label: &str) {
     align_audio_clip_server_with_options(
         audio_name,
         chat_name,
-        lang,
         label,
         align_options(FaEngineName::Wave2Vec, WorTierPolicy::Include),
     )
@@ -65,7 +62,6 @@ async fn align_audio_clip_server(audio_name: &str, chat_name: &str, lang: &str, 
 async fn align_audio_clip_with_options(
     audio_name: &str,
     chat_name: &str,
-    lang: &str,
     label: &str,
     options: batchalign::options::CommandOptions,
 ) {
@@ -88,7 +84,8 @@ async fn align_audio_clip_with_options(
     let (info, outputs) = jobs
         .submit_paths_job(
             ReleasedCommand::Align,
-            lang,
+            // Align is per-file: each file's language is its `@Languages:`.
+            "per-file",
             vec![fixtures.stripped_chat.to_string_lossy().into()],
             vec![output_path.to_string_lossy().into()],
             options,
@@ -135,7 +132,6 @@ fn untimed_chat_text(chat: &str) -> String {
 async fn align_untimed_audio_clip_with_options(
     audio_name: &str,
     chat_name: &str,
-    lang: &str,
     label: &str,
     options: batchalign::options::CommandOptions,
 ) -> (batchalign::api::JobInfo, Vec<String>) {
@@ -162,7 +158,8 @@ async fn align_untimed_audio_clip_with_options(
 
     jobs.submit_paths_job(
         ReleasedCommand::Align,
-        lang,
+        // Align is per-file: each file's language is its `@Languages:`.
+        "per-file",
         vec![untimed_path.to_string_lossy().into()],
         vec![output_path.to_string_lossy().into()],
         options,
@@ -173,7 +170,6 @@ async fn align_untimed_audio_clip_with_options(
 async fn align_untimed_audio_clip_with_options_detailed(
     audio_name: &str,
     chat_name: &str,
-    lang: &str,
     label: &str,
     options: batchalign::options::CommandOptions,
 ) -> (batchalign::api::JobInfo, batchalign::store::JobDetail) {
@@ -200,7 +196,7 @@ async fn align_untimed_audio_clip_with_options_detailed(
     session
         .run_submission(JobSubmission {
             command: ReleasedCommand::Align,
-            lang: LanguageSpec::try_from(lang).expect("test lang should be valid"),
+            lang: LanguageSpec::PerFile,
             num_speakers: NumSpeakers(1),
             files: vec![],
             media_files: vec![],
@@ -221,7 +217,6 @@ async fn align_untimed_audio_clip_with_options_detailed(
 async fn align_audio_clip_server_with_options(
     audio_name: &str,
     chat_name: &str,
-    lang: &str,
     label: &str,
     options: batchalign::options::CommandOptions,
 ) {
@@ -243,7 +238,8 @@ async fn align_audio_clip_server_with_options(
     let (info, outputs) = jobs
         .submit_paths_job(
             ReleasedCommand::Align,
-            lang,
+            // Align is per-file: each file's language is its `@Languages:`.
+            "per-file",
             vec![fixtures.stripped_chat.to_string_lossy().into()],
             vec![output_path.to_string_lossy().into()],
             options,
@@ -263,7 +259,6 @@ async fn align_audio_clip_server_with_options(
 async fn align_server_untimed_audio_clip_with_options(
     audio_name: &str,
     chat_name: &str,
-    lang: &str,
     label: &str,
     options: batchalign::options::CommandOptions,
 ) -> (
@@ -294,7 +289,8 @@ async fn align_server_untimed_audio_clip_with_options(
     let (info, outputs) = jobs
         .submit_paths_job(
             ReleasedCommand::Align,
-            lang,
+            // Align is per-file: each file's language is its `@Languages:`.
+            "per-file",
             vec![untimed_path.to_string_lossy().into()],
             vec![output_path.to_string_lossy().into()],
             options,
@@ -306,13 +302,7 @@ async fn align_server_untimed_audio_clip_with_options(
 
 #[tokio::test]
 async fn align_server_spa_wav2vec() {
-    align_audio_clip_server(
-        "spa_marrero_clip",
-        "spa_marrero_timed",
-        "spa",
-        "align_server_spa",
-    )
-    .await;
+    align_audio_clip_server("spa_marrero_clip", "spa_marrero_timed", "align_server_spa").await;
 }
 
 #[tokio::test]
@@ -320,7 +310,6 @@ async fn align_server_yue_wav2vec() {
     align_audio_clip_server_with_options(
         "yue_hku_clip",
         "yue_hku_timed",
-        "yue",
         "align_server_yue",
         align_options_with_utr(
             FaEngineName::Wave2Vec,
@@ -336,7 +325,6 @@ async fn align_yue_untimed_rev_utr_fails_cleanly() {
     let (info, detail) = align_untimed_audio_clip_with_options_detailed(
         "yue_hku_clip",
         "yue_hku_timed",
-        "yue",
         "align_yue_untimed_rev",
         align_options_with_utr(
             FaEngineName::Wave2Vec,
@@ -368,7 +356,6 @@ async fn align_yue_untimed_whisper_utr_succeeds() {
     let (info, outputs) = align_untimed_audio_clip_with_options(
         "yue_hku_clip",
         "yue_hku_timed",
-        "yue",
         "align_yue_untimed_whisper",
         align_options_with_utr(
             FaEngineName::Wave2Vec,
@@ -392,7 +379,6 @@ async fn align_server_yue_untimed_rev_utr_fails_cleanly() {
     let (info, results, _outputs) = align_server_untimed_audio_clip_with_options(
         "yue_hku_clip",
         "yue_hku_timed",
-        "yue",
         "align_server_yue_untimed_rev",
         align_options_with_utr(
             FaEngineName::Wave2Vec,
@@ -424,7 +410,6 @@ async fn align_server_yue_untimed_whisper_utr_succeeds() {
     let (info, _results, outputs) = align_server_untimed_audio_clip_with_options(
         "yue_hku_clip",
         "yue_hku_timed",
-        "yue",
         "align_server_yue_untimed_whisper",
         align_options_with_utr(
             FaEngineName::Wave2Vec,
@@ -452,7 +437,6 @@ async fn align_eng_untimed_rev_utr_succeeds_when_key_available() {
     let (info, outputs) = align_untimed_audio_clip_with_options(
         "eng_multi_speaker",
         "eng_multi_speaker",
-        "eng",
         "align_eng_untimed_rev",
         align_options_with_utr(
             FaEngineName::Wave2Vec,

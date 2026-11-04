@@ -603,6 +603,7 @@ mod tests {
     use crate::api::DisplayPath;
     use crate::scheduling::FailureCategory;
     use crate::worker::pool::PoolConfig;
+    use batchalign_types::segmentation::UtteranceSegmentation;
 
     /// A minimal file that satisfies L1: participants, languages, terminator.
     const VALID: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
@@ -1060,11 +1061,14 @@ mod tests {
             TextPipelineHooks {
                 command: ReleasedCommand::Utseg,
                 collect: crate::utseg::collect_utseg_batch_items,
-                integrate: |state: &mut HashMap<usize, Vec<usize>>,
+                integrate: |state: &mut HashMap<usize, UtteranceSegmentation>,
                             items,
                             responses: &[Vec<usize>]| {
                     for ((utterance, _), assignment) in items.iter().zip(responses) {
-                        state.insert(*utterance, assignment.clone());
+                        state.insert(
+                            *utterance,
+                            UtteranceSegmentation::unstated(assignment.clone()),
+                        );
                     }
                 },
                 apply: |file, state| {
@@ -1156,11 +1160,14 @@ mod tests {
             TextPipelineHooks {
                 command: ReleasedCommand::Utseg,
                 collect: crate::utseg::collect_utseg_batch_items,
-                integrate: |state: &mut HashMap<usize, Vec<usize>>,
+                integrate: |state: &mut HashMap<usize, UtteranceSegmentation>,
                             items,
                             responses: &[Vec<usize>]| {
                     for ((utterance, _), assignment) in items.iter().zip(responses) {
-                        state.insert(*utterance, assignment.clone());
+                        state.insert(
+                            *utterance,
+                            UtteranceSegmentation::unstated(assignment.clone()),
+                        );
                     }
                 },
                 apply: |file, state| {

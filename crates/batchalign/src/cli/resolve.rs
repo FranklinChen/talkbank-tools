@@ -83,6 +83,29 @@ impl ResolvedInputs {
         Ok(Self(paths))
     }
 
+    /// Keep the first spelling of each distinct existing path, and set aside
+    /// the refusal the run would have raised for each candidate that failed
+    /// to locate, instead of stopping at the first. For a plan, which reports
+    /// every miss and still describes the rest.
+    fn partition_candidates(
+        candidates: impl IntoIterator<Item = Result<ExistingInput, CliError>>,
+    ) -> (Self, Vec<CliError>) {
+        let mut seen = HashSet::new();
+        let mut paths = Vec::new();
+        let mut unresolved = Vec::new();
+        for candidate in candidates {
+            match candidate {
+                Ok(ExistingInput { spelled, identity }) => {
+                    if seen.insert(identity) {
+                        paths.push(spelled);
+                    }
+                }
+                Err(refusal) => unresolved.push(refusal),
+            }
+        }
+        (Self(paths), unresolved)
+    }
+
     /// The inputs as written (after list-directory resolution).
     pub fn as_paths(&self) -> &[PathBuf] {
         &self.0
@@ -121,15 +144,58 @@ pub fn resolve_inputs(
     output: Option<&Path>,
     in_place: bool,
 ) -> Result<ResolvedPaths, CliError> {
+    let LocatedCandidates {
+        candidates,
+        output_dir,
+    } = locate_candidates(source, output, in_place)?;
+    Ok(ResolvedPaths {
+        inputs: ResolvedInputs::from_candidates(candidates)?,
+        output_dir,
+    })
+}
+
+/// Resolve CLI path arguments for a plan (`--dry-run`): the same reading as
+/// [`resolve_inputs`], except that a candidate that does not exist does not
+/// stop the resolution. Each such miss is returned as the refusal the run
+/// would have raised, so the plan can report it and still describe the rest.
+pub fn resolve_inputs_for_plan(
+    source: InputSource<'_>,
+    output: Option<&Path>,
+    in_place: bool,
+) -> Result<(ResolvedPaths, Vec<CliError>), CliError> {
+    let LocatedCandidates {
+        candidates,
+        output_dir,
+    } = locate_candidates(source, output, in_place)?;
+    let (inputs, unresolved) = ResolvedInputs::partition_candidates(candidates);
+    Ok((ResolvedPaths { inputs, output_dir }, unresolved))
+}
+
+/// The path arguments read once: each candidate input with its existence
+/// check applied, in argument order, and the output directory they name.
+struct LocatedCandidates {
+    candidates: Vec<Result<ExistingInput, CliError>>,
+    output_dir: Option<PathBuf>,
+}
+
+/// The one reading of the path arguments: every candidate input with its
+/// existence check applied, and the output directory the arguments name.
+/// Both resolutions above consume this, so the legacy two-directory rule is
+/// stated once.
+fn locate_candidates(
+    source: InputSource<'_>,
+    output: Option<&Path>,
+    in_place: bool,
+) -> Result<LocatedCandidates, CliError> {
     let explicit_output = output.map(Path::to_path_buf);
     match source {
         InputSource::FileList(list_path) => {
             let entries = read_file_list(list_path)?;
-            let inputs = ResolvedInputs::from_candidates(
-                entries.into_iter().map(|entry| entry.locate(list_path)),
-            )?;
-            Ok(ResolvedPaths {
-                inputs,
+            Ok(LocatedCandidates {
+                candidates: entries
+                    .into_iter()
+                    .map(|entry| entry.locate(list_path))
+                    .collect(),
                 output_dir: explicit_output,
             })
         }
@@ -143,20 +209,16 @@ pub fn resolve_inputs(
                 && in_dir.is_dir()
                 && !out_dir.is_file()
             {
-                let inputs =
-                    ResolvedInputs::from_candidates([ExistingInput::locate_positional(in_dir)])?;
-                return Ok(ResolvedPaths {
-                    inputs,
+                return Ok(LocatedCandidates {
+                    candidates: vec![ExistingInput::locate_positional(in_dir)],
                     output_dir: Some(out_dir.clone()),
                 });
             }
-            let inputs = ResolvedInputs::from_candidates(
-                paths
+            Ok(LocatedCandidates {
+                candidates: paths
                     .iter()
-                    .map(|path| ExistingInput::locate_positional(path)),
-            )?;
-            Ok(ResolvedPaths {
-                inputs,
+                    .map(|path| ExistingInput::locate_positional(path))
+                    .collect(),
                 output_dir: explicit_output,
             })
         }
@@ -480,6 +542,37 @@ mod tests {
             false,
         );
         assert!(matches!(result, Err(CliError::InputMissing(path)) if path == missing));
+    }
+
+    /// A plan keeps every input that exists and sets aside the refusal the
+    /// run would have raised for each that does not, in argument order; the
+    /// strict resolution of the same arguments stops at the first miss.
+    #[test]
+    fn plan_resolution_partitions_missing_inputs_instead_of_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("a.cha");
+        write(&present, CHAT);
+        let absent = dir.path().join("absent.cha");
+        let also_absent = dir.path().join("gone.cha");
+        let paths = [absent.clone(), present.clone(), also_absent.clone()];
+
+        assert!(matches!(
+            resolve_inputs(InputSource::Paths(&paths), None, true),
+            Err(CliError::InputMissing(path)) if path == absent
+        ));
+
+        let (resolved, unresolved) =
+            resolve_inputs_for_plan(InputSource::Paths(&paths), None, true).unwrap();
+        assert_eq!(resolved.inputs.as_paths(), &[present]);
+        assert!(resolved.output_dir.is_none());
+        let missing: Vec<&PathBuf> = unresolved
+            .iter()
+            .map(|refusal| match refusal {
+                CliError::InputMissing(path) => path,
+                other => panic!("expected InputMissing, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(missing, vec![&absent, &also_absent]);
     }
 
     #[test]

@@ -80,7 +80,7 @@ export function JobCard({ job }: { job: JobListItem }) {
             <span>{host}</span>
           </>
         )}
-        {job.lang && !isDefaultLang(job.lang) && (
+        {!isDefaultLang(job.lang) && (
           <>
             <span className="text-zinc-300">&middot;</span>
             <span>{displayLang(job.lang)}</span>

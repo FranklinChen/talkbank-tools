@@ -4,11 +4,11 @@
 //!
 //! - **Per-file.** The command has no `--lang` at all. Each input file's
 //!   processing language is read from its own `@Languages:` header (morphotag,
-//!   translate) or is a constant the command owns (coref, which is
+//!   translate, align) or is a constant the command owns (coref, which is
 //!   English-only). A job-level language would be a placeholder, and the
 //!   2026-05-03 incident is what a placeholder costs.
 //! - **Job-level.** The command carries one resolved ISO code for every file
-//!   (utseg, compare).
+//!   (utseg).
 //!
 //! Before this module the two shapes were decided by a runtime check at
 //! dispatch: each dispatcher asked `job.dispatch.lang.as_resolved()` and
@@ -49,24 +49,35 @@ pub(crate) enum CommandLanguageSource {
 /// rule came to disagree with itself, which is what made coref undispatchable.
 pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguageSource {
     match command {
-        // No `--lang` on the CLI. Morphotag and translate resolve per file
-        // from `@Languages:`; coref is English-only and owns the constant.
-        // Native export carries the existing no-job-language wire value but
-        // never invokes linguistic resolution or reads a CHAT header.
+        // No `--lang` on the CLI. Morphotag, translate and compare (whose
+        // internal morphotag of the main transcript is the same per-file
+        // resolution) resolve per file from `@Languages:`; coref is
+        // English-only and owns the constant. Native export carries the
+        // existing no-job-language wire value but never invokes linguistic
+        // resolution or reads a CHAT header.
         ReleasedCommand::Morphotag
         | ReleasedCommand::Translate
         | ReleasedCommand::Coref
+        | ReleasedCommand::Compare
         | ReleasedCommand::Convert => CommandLanguageSource::PerFile,
+        // Align has no `--lang` either. Its pipeline has always read each
+        // file's language from `@Languages:` (the aligner and the UTR engine
+        // are admitted against that header, and the provenance stamp names
+        // it), yet its job record carried a hardcoded `eng` that no one
+        // declared and nothing read: a placeholder of the same shape as the
+        // morphotag one, declared per file since 2026-11-03. The FA worker a
+        // file reaches is keyed by that file's language, so there is no
+        // job-level worker to probe either; `runner::dispatch::fa_admission`
+        // probes per language as the files are read.
+        ReleasedCommand::Align => CommandLanguageSource::PerFile,
         // Everything else carries a real job-level language (or `auto`, which
         // ASR resolves before any language-bearing stage runs, or, for
         // transcription, a pair; see `language_pair_support`).
-        ReleasedCommand::Align
-        | ReleasedCommand::Transcribe
+        ReleasedCommand::Transcribe
         | ReleasedCommand::TranscribeS
         | ReleasedCommand::Utseg
         | ReleasedCommand::Benchmark
         | ReleasedCommand::Opensmile
-        | ReleasedCommand::Compare
         | ReleasedCommand::Avqi
         | ReleasedCommand::Diarize
         | ReleasedCommand::SpeakerIdentify => CommandLanguageSource::JobLevel,
@@ -288,14 +299,14 @@ mod tests {
                 ReleasedCommand::Morphotag
                 | ReleasedCommand::Translate
                 | ReleasedCommand::Coref
-                | ReleasedCommand::Convert => CommandLanguageSource::PerFile,
-                ReleasedCommand::Align
-                | ReleasedCommand::Transcribe
+                | ReleasedCommand::Compare
+                | ReleasedCommand::Convert
+                | ReleasedCommand::Align => CommandLanguageSource::PerFile,
+                ReleasedCommand::Transcribe
                 | ReleasedCommand::TranscribeS
                 | ReleasedCommand::Utseg
                 | ReleasedCommand::Benchmark
                 | ReleasedCommand::Opensmile
-                | ReleasedCommand::Compare
                 | ReleasedCommand::Avqi
                 | ReleasedCommand::Diarize
                 | ReleasedCommand::SpeakerIdentify => CommandLanguageSource::JobLevel,

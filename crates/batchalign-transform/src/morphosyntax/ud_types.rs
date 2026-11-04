@@ -2,8 +2,9 @@
 //! the dependency-relation labels, the `VerbForm` feature, and the
 //! per-token record (`UdWord`/`UdSentence`/`UdResponse`) that the
 //! pipeline marshals back from the Stanza worker, with its typed features
-//! ([`WordFeatures`], in `word_features`). Plus the small cleanup pass
-//! (`validate_and_clean`, `is_bogus_lemma`, `sanitize_mor_text`).
+//! ([`WordFeatures`], in `word_features`) and its admission
+//! ([`UdWordAdmissionError`]: the server refuses, never re-repairs, a value
+//! the worker's repair boundary owns). Plus `sanitize_mor_text`.
 
 mod word_features;
 
@@ -443,14 +444,77 @@ pub struct UdWordAnalysis {
     pub misc: Option<String>,
 }
 
+/// An analysis record arrived carrying a defect the worker's repair boundary
+/// removes and reports before sending: the server refuses it rather than
+/// repairing it a second time.
+///
+/// Typed rather than logged and rewritten. The server used to rewrite a
+/// padding relation to `dep` and a punctuation-only lemma to the surface form
+/// here (`validate_and_clean`), after the worker had already done both and
+/// reported them: the same repair ran twice, under two predicates that
+/// disagreed at the edges, and the file's provenance could count only the
+/// worker's. One of these reaching the server is a defect in the worker, and
+/// refusing it is what makes an unrepaired value unrepresentable in a
+/// [`UdWord`], as a padding feature already was.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UdWordAdmissionError {
+    /// A FEATS value is model padding.
+    #[error(transparent)]
+    PaddingFeature(#[from] UnrepairedPaddingFeature),
+    /// The relation is model padding (`<PAD>`, `<UNK>`), which the worker
+    /// repairs as `pad_relation`.
+    #[error(
+        "relation {relation:?} of word {word:?} is model padding, which the worker's repair boundary must rewrite and report before sending the analysis"
+    )]
+    PaddingRelation {
+        /// Surface form of the word.
+        word: String,
+        /// The relation as it arrived.
+        relation: String,
+    },
+    /// The lemma is punctuation only for a word that has letters, which the
+    /// worker repairs as `punctuation_lemma`.
+    #[error(
+        "lemma {lemma:?} of word {word:?} is punctuation only, which the worker's repair boundary must replace and report before sending the analysis"
+    )]
+    PunctuationLemma {
+        /// Surface form of the word.
+        word: String,
+        /// The lemma as it arrived.
+        lemma: String,
+    },
+}
+
 /// Every feature of an analysis record is the analysis's: this conversion
-/// is where that is stated, once. Fallible because the analysis's FEATS are
-/// admitted here: a padding value the worker failed to repair is refused
-/// ([`UnrepairedPaddingFeature`]) rather than written into `%mor`.
+/// is where that is stated, once. Fallible because the analysis is admitted
+/// here: a padding feature value, a padding relation or a punctuation-only
+/// lemma the worker failed to repair is refused ([`UdWordAdmissionError`])
+/// rather than written into `%mor` or `%gra`. The two value tests are the
+/// worker's own (`batchalign_types::worker_v2::{PaddingValue,
+/// is_punctuation_lemma}`), so the server cannot refuse what the worker
+/// admits or admit what the worker repairs.
 impl TryFrom<UdWordAnalysis> for UdWord {
-    type Error = UnrepairedPaddingFeature;
+    type Error = UdWordAdmissionError;
 
     fn try_from(word: UdWordAnalysis) -> Result<Self, Self::Error> {
+        if batchalign_types::worker_v2::PaddingValue::admit(&word.deprel).is_some() {
+            return Err(UdWordAdmissionError::PaddingRelation {
+                word: word.text,
+                relation: word.deprel,
+            });
+        }
+        // A multi-word token's range row carries no lemma of its own (the
+        // components carry the analysis), so only a syntactic word's lemma is
+        // judged, exactly as the worker judges it.
+        let is_syntactic_word = !matches!(word.id, UdId::Range(_, _));
+        if is_syntactic_word
+            && batchalign_types::worker_v2::is_punctuation_lemma(&word.text, &word.lemma)
+        {
+            return Err(UdWordAdmissionError::PunctuationLemma {
+                word: word.text,
+                lemma: word.lemma,
+            });
+        }
         Ok(Self {
             id: word.id,
             text: word.text,
@@ -617,41 +681,6 @@ pub struct UdResponse {
     /// Untrusted model sentences. Admit through `AdmittedUdResponse` before
     /// utterance injection or secondary-language merging; never select a prefix.
     pub sentences: Vec<UdSentence>,
-}
-
-/// Apply post-parse validation and cleanup to one Stanza-produced UD word.
-pub fn validate_and_clean(word: &mut UdWord) {
-    if word.deprel.starts_with('<') && word.deprel.ends_with('>') {
-        tracing::warn!(
-            deprel = %word.deprel,
-            text = %word.text,
-            "Stanza emitted pad deprel: replacing with 'dep'"
-        );
-        word.deprel = "dep".to_string();
-    }
-
-    if !matches!(word.id, UdId::Range(_, _)) && is_bogus_lemma(&word.text, &word.lemma) {
-        tracing::warn!(
-            lemma = %word.lemma,
-            text = %word.text,
-            "Stanza returned bogus lemma: falling back to surface form"
-        );
-        word.lemma = word.text.clone();
-    }
-}
-
-/// Detect when Stanza returns a pure-punctuation lemma for a word with letters.
-pub fn is_bogus_lemma(text: &str, lemma: &str) -> bool {
-    if text == lemma || lemma.is_empty() {
-        return false;
-    }
-
-    let text_has_letters = text.chars().any(|c| c.is_alphabetic());
-    let lemma_all_punct = lemma
-        .chars()
-        .all(|c| !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control());
-
-    text_has_letters && lemma_all_punct
 }
 
 /// Sanitize a string for use in a `%mor` field by replacing structural

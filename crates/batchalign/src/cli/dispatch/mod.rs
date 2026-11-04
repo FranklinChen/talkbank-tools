@@ -6,8 +6,10 @@
 //! target, local processing commands can auto-spawn a daemon or execute inline
 //! through the shared direct host.
 
+mod display;
 mod helpers;
 mod paths;
+mod plan;
 mod single;
 
 use std::time::Duration;
@@ -17,28 +19,99 @@ use crate::options::CommandOptions;
 use crate::worker::handle::WorkerRuntimeConfig;
 use crate::worker::pool::PoolConfig;
 use crate::{DirectHost, RegistryDiscovery, ReleasedCommand, prepare_workers};
-use crate::{api::JobInfo, api::JobStatus, config::ServerConfig};
+use crate::{api::JobInfo, api::JobStatus, api::LanguageSpec, config::ServerConfig};
 
 use crate::cli::client::{self, BatchalignClient};
-use crate::cli::daemon;
+use crate::cli::daemon::{self, RequestedRuntime, RuntimeRefusal};
+use crate::cli::discover::PassthroughMode;
 use crate::cli::error::CliError;
+use crate::cli::output::Overwrite;
 use crate::cli::progress::BatchProgress;
 use crate::cli::python::resolve_python_executable;
 
-use crate::cli::args::InputKind;
+use crate::cli::args::{Dashboard, InputKind, Progress};
+use crate::cli::daemon::ServerOrigin;
+use display::{BrowserEnv, Session, dashboard_launch};
 use helpers::{DirectProgressTracker, file_error_details, finish_terminal_job};
 use paths::prepare_paths_submission;
+pub use plan::Execution;
 use single::{ServerTarget, dispatch_single_server};
 
 // ---------------------------------------------------------------------------
 // Top-level dispatch router
 // ---------------------------------------------------------------------------
 
+/// Where the user asked the job to run: `--server URL`, `--no-server`,
+/// `--sequential`, or none of them.
+///
+/// Three flags encode one closed choice, and two of their combinations are
+/// meaningless (`--sequential` with `--server`, refused) or redundant
+/// (`--sequential` implies `--no-server`). [`ServerRequest::decide`] is the
+/// one place that reads the raw flags; the run and the `--dry-run` plan both
+/// route on its value, so the plan cannot route differently from the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerRequest<'a> {
+    /// `--server URL`: that server and no other (falling through to a local
+    /// daemon after the operator named another server would send paid work
+    /// to the wrong process).
+    Named(&'a str),
+    /// No server was named: this host decides.
+    Local(LocalRoute),
+}
+
+/// How a job with no named server runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalRoute {
+    /// The managed local daemon (started if `auto_daemon` allows), else a
+    /// loopback server already running, else "no server available".
+    Managed,
+    /// `--no-server` or `--sequential`: this process runs the job itself.
+    Direct(DirectPace),
+}
+
+/// The pace of a job this process runs itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DirectPace {
+    /// `--no-server`: the worker pool at its configured size.
+    Pooled,
+    /// `--sequential`: one file at a time, with the memory gate relaxed.
+    Sequential,
+}
+
+impl<'a> ServerRequest<'a> {
+    /// Read the three routing flags once. A named server with `--sequential`
+    /// or `--no-server` is refused: a named server runs at its own settings,
+    /// so "one at a time" cannot be honoured there, and "no server" contradicts
+    /// it. (`--server` may come from `BATCHALIGN_SERVER`, so the refusal names
+    /// the variable too; before 2026-11-04 `--no-server` was silently ignored
+    /// beside it.)
+    pub(super) fn decide(
+        server_arg: Option<&'a str>,
+        no_server: bool,
+        sequential: bool,
+    ) -> Result<Self, CliError> {
+        match (server_arg, no_server, sequential) {
+            (Some(_), _, true) => Err(CliError::InvalidArgument(
+                "--sequential and --server are mutually exclusive".into(),
+            )),
+            (Some(_), true, false) => Err(CliError::InvalidArgument(
+                "--no-server contradicts --server (or BATCHALIGN_SERVER): \
+                 drop one of them"
+                    .into(),
+            )),
+            (Some(server), false, false) => Ok(Self::Named(server)),
+            (None, _, true) => Ok(Self::Local(LocalRoute::Direct(DirectPace::Sequential))),
+            (None, true, false) => Ok(Self::Local(LocalRoute::Direct(DirectPace::Pooled))),
+            (None, false, false) => Ok(Self::Local(LocalRoute::Managed)),
+        }
+    }
+}
+
 /// Named dispatch request for one CLI processing invocation.
 #[derive(Debug)]
 pub struct DispatchRequest<'a> {
-    /// Primary language for the command.
-    pub lang: &'a str,
+    /// Job-level language for the command, already typed at the CLI.
+    pub lang: LanguageSpec,
     /// Requested number of speakers.
     pub num_speakers: u32,
     /// File extensions to discover.
@@ -58,10 +131,11 @@ pub struct DispatchRequest<'a> {
     pub subdir: Option<&'a str>,
     /// Optional lexicon path.
     pub lexicon: Option<&'a str>,
-    /// Whether to use the TUI.
-    pub use_tui: bool,
-    /// Whether to auto-open the dashboard.
-    pub open_dashboard: bool,
+    /// How a server-backed job's progress is shown (`--tui` / `--no-tui`).
+    pub progress: Progress,
+    /// Whether the job's dashboard page opens (`--open-dashboard` /
+    /// `--no-open-dashboard`, or once on the invocation that starts the daemon).
+    pub dashboard: Dashboard,
     /// Whether to force CPU execution for local worker processes.
     pub force_cpu: bool,
     /// Explicit Apple-GPU opt-in (`--allow-mps`), threaded to workers.
@@ -70,14 +144,20 @@ pub struct DispatchRequest<'a> {
     pub no_server: bool,
     /// Optional before-path input for incremental workflows.
     pub before: Option<&'a std::path::Path>,
-    /// Optional explicit worker count.
-    pub workers: Option<usize>,
-    /// Optional daemon startup timeout.
-    pub timeout: Option<crate::api::PositiveSeconds>,
+    /// `--workers` and `--timeout`, as passed: honoured by a daemon this
+    /// invocation starts or by direct execution, held against a reused
+    /// daemon's record, and refused by a server that records neither.
+    pub runtime: RequestedRuntime,
     /// Sequential mode: one worker, no memory gate, no server.
     pub sequential: bool,
     /// Override auto-detected memory tier (small, medium, large, fleet).
     pub memory_tier: Option<crate::types::runtime::MemoryTierKind>,
+    /// `--overwrite`: authority to replace a generated result file that already
+    /// exists beside its input. Absent, such a destination is refused before
+    /// submission (see `ResultDestinations::admit`).
+    pub overwrite: Option<Overwrite>,
+    /// Submit the job, or (`--dry-run`) plan and print it and stop.
+    pub execution: Execution,
 }
 
 /// Route a processing command to the appropriate execution host.
@@ -135,26 +215,38 @@ pub async fn dispatch(
         bank,
         subdir,
         lexicon,
-        use_tui,
-        open_dashboard,
+        progress,
+        dashboard,
         force_cpu,
         allow_mps,
         no_server,
         before,
-        workers,
-        timeout,
+        runtime,
         sequential,
         memory_tier,
+        overwrite,
+        execution,
     } = request;
     let command = options.command();
+    // Two facts about this process, read once: whether a person is at the
+    // terminal, and whether a harness forbade the browser. Each server-backed
+    // path below decides the dashboard from them and from how it came by its
+    // server.
+    let session = Session::of_stdout();
+    let browser = BrowserEnv::of_env();
 
-    let no_server = no_server || sequential;
-    let workers = if sequential { Some(1) } else { workers };
-    if sequential && server_arg.is_some() {
-        return Err(CliError::InvalidArgument(
-            "--sequential and --server are mutually exclusive".into(),
-        ));
-    }
+    let server = ServerRequest::decide(server_arg, no_server, sequential)?;
+    // `--sequential` is a cap of one, over whatever `--workers` said.
+    let runtime = match server {
+        ServerRequest::Local(LocalRoute::Direct(DirectPace::Sequential)) => RequestedRuntime {
+            workers: Some(crate::api::WorkerCap::literal::<1>()),
+            timeout: runtime.timeout,
+        },
+        ServerRequest::Named(_)
+        | ServerRequest::Local(LocalRoute::Managed | LocalRoute::Direct(DirectPace::Pooled)) => {
+            runtime
+        }
+    };
 
     if bank.is_some() || subdir.is_some() {
         eprintln!(
@@ -164,44 +256,81 @@ pub async fn dispatch(
         return Ok(());
     }
 
+    // `--dry-run`: everything up to submission, then the plan, then nothing.
+    // Decided here, after the argument checks every run makes and before any
+    // route can start a daemon, open a pool or submit.
+    if let Execution::PlanOnly { unresolved_inputs } = execution {
+        let plan = plan::build_plan(
+            plan::PlanRequest {
+                lang: &lang,
+                num_speakers,
+                input_kind,
+                server,
+                inputs,
+                out_dir,
+                options: &options,
+                lexicon,
+                before,
+                runtime,
+                memory_tier,
+                overwrite,
+                unresolved_inputs,
+            },
+            layout,
+        )
+        .await?;
+        println!("{plan}");
+        return Ok(());
+    }
+
     // 1. An explicit --server always identifies the execution host. Loopback
     // targets can safely send filesystem paths; other targets use content and
     // media-reference submission. Falling through to a healthy local daemon
     // after the operator named another server makes the producer identity
     // false and can send paid work to the wrong process.
-    if let Some(server) = server_arg {
-        let client = BatchalignClient::new()?;
-        let urls = client::parse_servers(server);
-        if urls.is_empty() {
-            eprintln!("error: no server URL provided");
+    let local = match server {
+        ServerRequest::Local(local) => local,
+        ServerRequest::Named(server) => {
+            let client = BatchalignClient::new()?;
+            let urls = client::parse_servers(server);
+            if urls.is_empty() {
+                eprintln!("error: no server URL provided");
+                return Ok(());
+            }
+
+            if urls.len() == 1 {
+                // A named server runs with the settings it was started with, and
+                // nothing here records them, so `--workers`/`--timeout` beside
+                // `--server` can only be refused, never applied or silently dropped.
+                RuntimeRefusal::admit_unrecorded(runtime, &urls[0])?;
+                let target = ServerTarget::parse_explicit(&urls[0], command)?;
+                return dispatch_single_server(
+                    &client,
+                    &target,
+                    &lang,
+                    num_speakers,
+                    input_kind,
+                    inputs,
+                    out_dir,
+                    &options,
+                    lexicon,
+                    before,
+                    progress,
+                    session,
+                    // A named server was running before this invocation looked.
+                    dashboard_launch(dashboard, ServerOrigin::AlreadyRunning, session, browser),
+                    overwrite,
+                )
+                .await;
+            }
+
+            eprintln!(
+                "error: multi-server dispatch (--server URL1,URL2) is not available in this version.\n\
+             Use --server with a single URL instead."
+            );
             return Ok(());
         }
-
-        if urls.len() == 1 {
-            let target = ServerTarget::parse_explicit(&urls[0], command)?;
-            return dispatch_single_server(
-                &client,
-                &target,
-                lang,
-                num_speakers,
-                input_kind,
-                inputs,
-                out_dir,
-                &options,
-                lexicon,
-                before,
-                use_tui,
-                open_dashboard,
-            )
-            .await;
-        }
-
-        eprintln!(
-            "error: multi-server dispatch (--server URL1,URL2) is not available in this version.\n\
-             Use --server with a single URL instead."
-        );
-        return Ok(());
-    }
+    };
 
     let mut cfg = load_config_from_layout(layout, None)?;
 
@@ -211,91 +340,105 @@ pub async fn dispatch(
         cfg.memory_tier = Some(tier);
     }
 
-    // 2. Auto-daemon routing applies only when no server was explicitly named.
-    let local_daemon_url = if !no_server && cfg.auto_daemon {
-        daemon::ensure_daemon(
-            layout,
-            &cfg,
-            daemon::DaemonRequest {
-                force_cpu,
-                allow_mps,
-                workers: workers.map(crate::api::NumWorkers),
-                timeout,
-            },
-        )
-        .await?
-    } else {
-        None
-    };
+    // A job this process runs itself skips every server step below.
+    let pace = match local {
+        LocalRoute::Direct(pace) => pace,
+        LocalRoute::Managed => {
+            // 2. Auto-daemon routing applies only when no server was explicitly named.
+            let local_daemon = if cfg.auto_daemon {
+                daemon::ensure_daemon(
+                    layout,
+                    &cfg,
+                    daemon::DaemonRequest {
+                        force_cpu,
+                        allow_mps,
+                        runtime,
+                    },
+                )
+                .await?
+            } else {
+                None
+            };
 
-    if let Some(local_daemon_url) = local_daemon_url.as_deref() {
-        eprintln!("Submitting to local daemon at {local_daemon_url}\n");
-        let client = BatchalignClient::new()?;
-        let target = ServerTarget::parse_shared_filesystem(local_daemon_url)?;
-        return dispatch_single_server(
-            &client,
-            &target,
-            lang,
-            num_speakers,
-            input_kind,
-            inputs,
-            out_dir,
-            &options,
-            lexicon,
-            before,
-            use_tui,
-            open_dashboard,
-        )
-        .await;
-    }
+            if let Some(local_daemon) = local_daemon {
+                let local_daemon_url = local_daemon.url.as_str();
+                eprintln!("Submitting to local daemon at {local_daemon_url}\n");
+                let client = BatchalignClient::new()?;
+                let target = ServerTarget::parse_shared_filesystem(local_daemon_url)?;
+                return dispatch_single_server(
+                    &client,
+                    &target,
+                    &lang,
+                    num_speakers,
+                    input_kind,
+                    inputs,
+                    out_dir,
+                    &options,
+                    lexicon,
+                    before,
+                    progress,
+                    session,
+                    // The one path that can have started the daemon: this is where the
+                    // default opens the dashboard, once.
+                    dashboard_launch(dashboard, local_daemon.origin, session, browser),
+                    overwrite,
+                )
+                .await;
+            }
 
-    // 3. Auto-detect a loopback server that was started outside the daemon
-    // state-file flow (for example by launchd or a foreground serve command).
-    // Prefer the port the server published over the one the config asked for.
-    // Computed INSIDE the guard: `--no-server` and `--sequential` never contact
-    // a server, so resolving one was pure waste on exactly the paths that opted
-    // out. `cfg` is already loaded, so this costs one small file read.
-    if !no_server
-        && let Some(local_url) = daemon::local_server_url(layout, cfg.port)
-        && let Some(health) = probe_local_server(&local_url).await
-    {
-        eprintln!("Using local server at {local_url} ({health})\n");
-        let client = BatchalignClient::new()?;
-        let target = ServerTarget::parse_shared_filesystem(&local_url)?;
-        return dispatch_single_server(
-            &client,
-            &target,
-            lang,
-            num_speakers,
-            input_kind,
-            inputs,
-            out_dir,
-            &options,
-            lexicon,
-            before,
-            use_tui,
-            open_dashboard,
-        )
-        .await;
-    }
+            // 3. Auto-detect a loopback server that was started outside the daemon
+            // state-file flow (for example by launchd or a foreground serve command).
+            // Prefer the port the server published over the one the config asked for.
+            // Reached only on the managed route: `--no-server` and `--sequential` never
+            // contact a server. `cfg` is already loaded, so this costs one small file read.
+            if let Some(local_url) = daemon::local_server_url(layout, cfg.port)
+                && let Some(health) = probe_local_server(&local_url).await
+            {
+                // Started outside the daemon flow, so nothing records its settings.
+                RuntimeRefusal::admit_unrecorded(runtime, &local_url)?;
+                eprintln!(
+                    "Using local server at {local_url} ({})\n",
+                    health_label(&health)
+                );
+                let client = BatchalignClient::new()?;
+                let target = ServerTarget::parse_shared_filesystem(&local_url)?;
+                return dispatch_single_server(
+                    &client,
+                    &target,
+                    &lang,
+                    num_speakers,
+                    input_kind,
+                    inputs,
+                    out_dir,
+                    &options,
+                    lexicon,
+                    before,
+                    progress,
+                    session,
+                    // Found running, started by something else.
+                    dashboard_launch(dashboard, ServerOrigin::AlreadyRunning, session, browser),
+                    overwrite,
+                )
+                .await;
+            }
 
-    // 4. If we reached here without --no-server or --sequential the user did
-    //    not explicitly request offline execution. Exit gracefully and create
-    //    the output directory so tools that check for its existence still
-    //    see a consistent post-run filesystem state.
-    if !no_server {
-        if let Some(dir) = out_dir {
-            let _ = std::fs::create_dir_all(dir);
+            // 4. The managed route found no server, and the user did not ask for
+            //    offline execution. Exit gracefully and create the output directory
+            //    so tools that check for its existence still see a consistent
+            //    post-run filesystem state.
+            if let Some(dir) = out_dir {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            eprintln!("no server available");
+            return Ok(());
         }
-        eprintln!("no server available");
-        return Ok(());
-    }
+    };
 
     // Direct local execution (--no-server / --sequential path)
     dispatch_direct_mode(
         cfg,
         layout.clone(),
-        lang,
+        &lang,
         num_speakers,
         input_kind,
         inputs,
@@ -305,9 +448,9 @@ pub async fn dispatch(
         before,
         force_cpu,
         allow_mps,
-        workers,
-        timeout,
-        sequential,
+        runtime,
+        pace,
+        overwrite,
     )
     .await
 }
@@ -316,7 +459,7 @@ pub async fn dispatch(
 async fn dispatch_direct_mode(
     mut cfg: ServerConfig,
     layout: RuntimeLayout,
-    lang: &str,
+    lang: &LanguageSpec,
     num_speakers: u32,
     input_kind: InputKind,
     inputs: &[std::path::PathBuf],
@@ -326,20 +469,16 @@ async fn dispatch_direct_mode(
     before: Option<&std::path::Path>,
     force_cpu: bool,
     allow_mps: bool,
-    workers: Option<usize>,
-    timeout: Option<crate::api::PositiveSeconds>,
-    sequential: bool,
+    runtime: RequestedRuntime,
+    pace: DirectPace,
+    overwrite: Option<Overwrite>,
 ) -> Result<(), CliError> {
-    if let Some(workers) = workers {
-        // `--workers N` is always an explicit override; `Some(_)`
-        // wins over the host-facts recommendation.
-        cfg.max_workers_per_job = Some(workers as u32);
-    }
-    if let Some(timeout) = timeout {
-        cfg.audio_task_timeout_s = Some(timeout);
-    }
-    if sequential {
-        apply_sequential_config(&mut cfg);
+    // `--workers N` and `--timeout S` are explicit overrides of the
+    // configured (or host-facts recommended) values.
+    runtime.apply_to(&mut cfg);
+    match pace {
+        DirectPace::Sequential => apply_sequential_config(&mut cfg),
+        DirectPace::Pooled => {}
     }
 
     let mapping_keys: Vec<String> = cfg
@@ -358,6 +497,8 @@ async fn dispatch_direct_mode(
         lexicon,
         before,
         &mapping_keys,
+        overwrite,
+        PassthroughMode::Copy,
     )?
     else {
         eprintln!("warning: no files found for {input_kind:?} input");
@@ -547,17 +688,20 @@ fn refuse_foreign_server_build(
 
 /// Probe the local server with a short timeout.
 ///
-/// Returns a human-readable status string if the server is healthy,
-/// `None` if unreachable or unhealthy. Uses a 500ms timeout so direct
-/// mode startup is not noticeably delayed when no server is running.
-async fn probe_local_server(url: &str) -> Option<String> {
+/// Returns the server's health if it answered as a Batchalign server, `None`
+/// if unreachable or unhealthy. Uses a 500ms timeout so direct mode startup
+/// is not noticeably delayed when no server is running.
+async fn probe_local_server(url: &str) -> Option<crate::api::HealthResponse> {
     let health_url = format!("{url}/health");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
         .build()
         .ok()?;
     let resp = client.get(&health_url).send().await.ok()?;
-    // Parsing IS the identification: `status` and `version` are required, so a
+    if !resp.status().is_success() {
+        return None;
+    }
+    // Parsed as the typed response, so a process that answers 200 with a
     // body that is not a Batchalign health response fails here rather than
     // arriving with defaults that agree with whatever was asked of it.
     let health: crate::api::HealthResponse = resp.json().await.ok()?;
@@ -567,15 +711,20 @@ async fn probe_local_server(url: &str) -> Option<String> {
     match health.status {
         crate::api::HealthStatus::Ok => {}
     }
-    let label = if health.active_jobs > 0 {
+    Some(health)
+}
+
+/// What a health response says about a server's capacity, as the CLI prints
+/// it when it submits to that server or plans to.
+fn health_label(health: &crate::api::HealthResponse) -> String {
+    if health.active_jobs > 0 {
         format!(
             "{} workers, {} active job(s)",
             health.workers_available, health.active_jobs
         )
     } else {
         format!("{} workers available", health.workers_available)
-    };
-    Some(label)
+    }
 }
 
 /// Apply `--sequential` overrides to a server config: disable memory gate,
@@ -597,6 +746,45 @@ mod tests {
     use super::*;
     use crate::api::MemoryMb;
     use crate::config::ServerConfig;
+
+    /// Every combination of the three routing flags lands on exactly one
+    /// route or one named refusal; none is silently ignored.
+    #[test]
+    fn the_routing_flags_decide_one_route_or_a_named_refusal() {
+        use super::{DirectPace, LocalRoute, ServerRequest};
+        let url = "http://127.0.0.1:9";
+        let decide = ServerRequest::decide;
+        assert_eq!(
+            decide(None, false, false).unwrap(),
+            ServerRequest::Local(LocalRoute::Managed)
+        );
+        assert_eq!(
+            decide(None, true, false).unwrap(),
+            ServerRequest::Local(LocalRoute::Direct(DirectPace::Pooled))
+        );
+        // `--sequential` implies running here, with or without `--no-server`.
+        for no_server in [false, true] {
+            assert_eq!(
+                decide(None, no_server, true).unwrap(),
+                ServerRequest::Local(LocalRoute::Direct(DirectPace::Sequential))
+            );
+        }
+        assert_eq!(
+            decide(Some(url), false, false).unwrap(),
+            ServerRequest::Named(url)
+        );
+        // A named server beside "run here" is refused, never silently preferred.
+        let contradiction = decide(Some(url), true, false).unwrap_err().to_string();
+        assert!(contradiction.contains("--no-server"), "{contradiction}");
+        assert!(
+            contradiction.contains("BATCHALIGN_SERVER"),
+            "{contradiction}"
+        );
+        for no_server in [false, true] {
+            let refused = decide(Some(url), no_server, true).unwrap_err().to_string();
+            assert!(refused.contains("--sequential and --server"), "{refused}");
+        }
+    }
 
     /// `--sequential` effectively disables the memory gate (threshold = 1 MB).
     /// `Some(MemoryMb(1))` keeps the resolved value at 1 MB; `None`
@@ -713,7 +901,7 @@ mod tests {
     async fn sequential_rejects_server_flag() {
         let result = dispatch(
             DispatchRequest {
-                lang: "eng",
+                lang: LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
                 num_speakers: 0,
                 input_kind: InputKind::Chat,
                 server_arg: Some("http://server-01:8001"),
@@ -723,16 +911,17 @@ mod tests {
                 bank: None,
                 subdir: None,
                 lexicon: None,
-                use_tui: false,
-                open_dashboard: false,
+                progress: Progress::Plain,
+                dashboard: Dashboard::Closed,
                 force_cpu: false,
                 allow_mps: false,
                 no_server: false,
                 before: None,
-                workers: None,
-                timeout: None,
+                runtime: RequestedRuntime::NONE,
                 sequential: true,
                 memory_tier: None,
+                overwrite: None,
+                execution: Execution::Submit,
             },
             // Deliberately a path that does not exist: the mutual-exclusion
             // check runs before any config is loaded, so a layout this test

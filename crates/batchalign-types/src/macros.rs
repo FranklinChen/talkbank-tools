@@ -358,3 +358,92 @@ macro_rules! numeric_id {
         }
     };
 }
+
+/// Declare a closed wire vocabulary: a fieldless enum whose every variant has
+/// ONE name, read by its serde form, its JSON Schema constants and `ALL`.
+///
+/// The variants, `ALL` and `wire_name` used to be written separately for each
+/// such enum (six copies in `worker_v2/responses.rs` alone), with nothing but
+/// a reader holding `ALL` complete: a variant added to the enum and omitted
+/// from `ALL` left every `match` arm accounted for and compiled. Generating all
+/// of them from this one invocation removes the possibility, as `infer_tasks!`
+/// does for `InferTask`.
+///
+/// `unknown` is the noun of the deserialization error (`unknown <noun> "x"`);
+/// `schema` is the description the JSON Schema carries.
+///
+/// ```ignore
+/// closed_wire_enum! {
+///     /// Why a feature value was removed.
+///     pub enum UdFeatureRepairKindV2 {
+///         unknown = "UD feature repair",
+///         schema = "Why a feature value ... Closed: ...",
+///         /// Padding as a value.
+///         PadFeatureValue => "pad_feature_value",
+///     }
+/// }
+/// ```
+macro_rules! closed_wire_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            unknown = $unknown:literal,
+            schema = $schema:literal,
+            $( $(#[$vmeta:meta])* $variant:ident => $wire:literal ),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        $vis enum $name {
+            $( $(#[$vmeta])* $variant, )+
+        }
+
+        impl $name {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Self] = &[ $( Self::$variant, )+ ];
+
+            /// The variant's one name: its wire form and its schema constant.
+            pub const fn wire_name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $wire, )+
+                }
+            }
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.wire_name())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let text = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|variant| variant.wire_name() == text)
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(format!(concat!("unknown ", $unknown, " {:?}"), text))
+                    })
+            }
+        }
+
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                let variants: Vec<serde_json::Value> = Self::ALL
+                    .iter()
+                    .map(|variant| serde_json::json!({"type": "string", "const": variant.wire_name()}))
+                    .collect();
+                schemars::json_schema!({
+                    "description": $schema,
+                    "oneOf": variants,
+                })
+            }
+        }
+    };
+}

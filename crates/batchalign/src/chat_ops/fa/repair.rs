@@ -36,7 +36,7 @@ use talkbank_model::model::{ChatFile, Line, Utterance};
 use super::EndOverlapPolicy;
 use super::main_bullets::{BulletMutability, ImposedBullets, KeptBulletError};
 use super::orchestrate::{
-    ClampedWordCounts, DroppedWordTiming, E704_TOLERANCE_MS, EndOverlapResolution,
+    ClampedWordCounts, DroppedWordTiming, E704_TOLERANCE_MS, EndOverlapResolution, StrippedTiming,
     clamp_words_past_bound, classify_end_overlap, earliest_word_timing_start,
     file_order_successor_start_ms, furthest_word_timing_end, strip_utterance_timing,
 };
@@ -329,7 +329,12 @@ pub(super) fn repair_bullets_under(
     // which under `!dry_run` IS `chat_file`. Only LIS removal remains.
     for &line_idx in &lis_removals {
         if let Some(utt) = get_utterance_mut(chat_file, line_idx) {
-            strip_utterance_timing(utt);
+            // The LIS decision above was recorded before this strip runs (a
+            // dry run records it and strips nothing), so the intervals the
+            // strip removes are not carried on it; the monotonicity effects
+            // are the typed route for removed timing, and repair's is a
+            // follow-up.
+            let StrippedTiming { words_dropped: _ } = strip_utterance_timing(utt);
         }
     }
 
@@ -570,7 +575,7 @@ fn resolve_boundary_average_pair(
             "boundary_averaged overlap={overlap}ms resolution=interleaved_words clamped_to={earlier_new_end_ms} machine={}_{} adjacent={earlier_speaker}:{earlier_line_idx} words_trimmed={} words_dropped={}",
             later_bullet.timing.start_ms,
             later_bullet.timing.end_ms,
-            words_clamped.trimmed(),
+            words_clamped.trimmed.len(),
             words_clamped.dropped.len(),
         ),
         EndOverlapResolution::CoverageOnly { .. }

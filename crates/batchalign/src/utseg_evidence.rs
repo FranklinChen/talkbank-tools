@@ -21,6 +21,13 @@ use batchalign_transform::utseg::UtsegBatchItem;
 /// this one is refused by name rather than read as though its shape were
 /// current.
 ///
+/// 5 since the local decision receipt lost its exact-retrace suppression
+/// revision and field: the pre-CHAT split now protects every exact repetition
+/// itself, on every policy, so a schema-4 artifact's `local_decision` could
+/// name a policy this build cannot replay, and its `assignments` could be
+/// ones no policy of this build derives. Refused by version rather than read
+/// as far as it deserializes.
+///
 /// 4 since a boundary model's revision became a required part of its identity.
 /// A schema-3 artifact is refused rather than read, and that is a semantic
 /// decision rather than a convenience: its revision, where it has one at all,
@@ -31,7 +38,7 @@ use batchalign_transform::utseg::UtsegBatchItem;
 /// and tells an operator to regenerate it, which is cheap: these sidecars are
 /// `--debug-dir` research artifacts, not a result cache, and no placeholder is
 /// invented for the ones that never recorded a revision.
-const SCHEMA_VERSION: u8 = 4;
+const SCHEMA_VERSION: u8 = 5;
 
 /// Location in transcribe at which utterance segmentation ran.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,10 +72,11 @@ impl fmt::Display for UtsegEvidencePhase {
 /// definition and the replay cannot drift from the writer.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct UtsegEvidenceTrace {
-    /// 4 since a boundary model's revision became required; 3 removed the
-    /// top-level `engine_version`, which inside transcribe carried the ASR
-    /// engine's version and never the segmenter's. Each item's prediction
-    /// already names its own source and model.
+    /// 5 since the local decision receipt lost its exact-retrace suppression
+    /// revision; 4 since a boundary model's revision became required; 3
+    /// removed the top-level `engine_version`, which inside transcribe
+    /// carried the ASR engine's version and never the segmenter's. Each
+    /// item's prediction already names its own source and model.
     schema_version: u8,
     phase: UtsegEvidencePhase,
     language: String,
@@ -135,30 +143,31 @@ impl UtsegEvidenceTrace {
                 words: request.words.clone(),
                 text: request.text.clone(),
                 prediction: match prediction {
-                    AdmittedUtsegPrediction::BoundaryModelWorkerDeclared { response, evidence } => {
-                        UtsegEvidencePrediction::BoundaryModel {
-                            assignments: response.assignments.clone(),
-                            evidence: evidence.clone(),
-                            local_decision: None,
-                        }
-                    }
+                    AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
+                        segmentation,
+                        evidence,
+                    } => UtsegEvidencePrediction::BoundaryModel {
+                        assignments: segmentation.assignments().to_vec(),
+                        evidence: evidence.clone(),
+                        local_decision: None,
+                    },
                     AdmittedUtsegPrediction::BoundaryModelLocallyReapplied {
-                        response,
+                        segmentation,
                         evidence,
                         receipt,
                     } => UtsegEvidencePrediction::BoundaryModel {
-                        assignments: response.assignments.clone(),
+                        assignments: segmentation.assignments().to_vec(),
                         evidence: evidence.clone(),
                         local_decision: Some(receipt.clone()),
                     },
-                    AdmittedUtsegPrediction::UnobservedAssignments { response } => {
+                    AdmittedUtsegPrediction::UnobservedAssignments { segmentation } => {
                         UtsegEvidencePrediction::UnobservedAssignments {
-                            assignments: response.assignments.clone(),
+                            assignments: segmentation.assignments().to_vec(),
                         }
                     }
-                    AdmittedUtsegPrediction::Constituency { response } => {
+                    AdmittedUtsegPrediction::Constituency { segmentation } => {
                         UtsegEvidencePrediction::Constituency {
-                            assignments: response.assignments.clone(),
+                            assignments: segmentation.assignments().to_vec(),
                         }
                     }
                 },
@@ -573,7 +582,8 @@ mod tests {
         UtsegWordBoundaryEvidenceV2,
     };
     use crate::utseg::AdmittedUtsegPrediction;
-    use batchalign_transform::utseg::{UtsegBatchItem, UtsegResponse};
+    use batchalign_transform::utseg::UtsegBatchItem;
+    use batchalign_types::segmentation::UtteranceSegmentation;
 
     /// A commit-shaped revision for fixtures. The evidence type admits nothing
     /// else, so a fixture can no longer carry a placeholder like `revision-1`.
@@ -590,23 +600,26 @@ mod tests {
         }
     }
 
+    /// A prediction admitted as a live one is: through `admit_prediction`,
+    /// so the fixture cannot carry assignments its evidence does not state.
     fn prediction() -> AdmittedUtsegPrediction {
-        AdmittedUtsegPrediction::BoundaryModelWorkerDeclared {
-            response: UtsegResponse {
-                assignments: vec![0, 1],
-            },
-            evidence: UtsegBoundaryModelEvidenceV2 {
-                model_id: "talkbank/utterance-boundary".to_owned(),
-                model_revision: test_commit(),
-                normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
-                adjacency_policy_revision:
-                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
-                word_evidence: vec![
-                    UtsegWordBoundaryEvidenceV2::NormalizationOmission,
-                    UtsegWordBoundaryEvidenceV2::ModelShortCircuit,
-                ],
-            },
-        }
+        let evidence = UtsegBoundaryModelEvidenceV2 {
+            model_id: "talkbank/utterance-boundary".to_owned(),
+            model_revision: test_commit(),
+            normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
+            adjacency_policy_revision:
+                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
+            word_evidence: vec![
+                UtsegWordBoundaryEvidenceV2::NormalizationOmission,
+                UtsegWordBoundaryEvidenceV2::ModelShortCircuit,
+            ],
+        };
+        admit_prediction(
+            &request(),
+            vec![0, 0],
+            UtsegPredictionOrigin::BoundaryModel(&evidence),
+        )
+        .expect("the fixture's assignments are the ones its evidence states")
     }
 
     #[test]
@@ -620,14 +633,14 @@ mod tests {
         .expect("parallel admitted predictions should form a trace");
 
         let value = serde_json::to_value(trace).expect("serialize evidence trace");
-        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["schema_version"], 5);
         assert_eq!(value["phase"], "pre_chat");
         assert_eq!(value["language"], "eng");
         assert!(value.get("engine_version").is_none());
         assert_eq!(value["items"][0]["words"][1], "there");
         assert_eq!(value["items"][0]["text"], "hello there");
         assert_eq!(value["items"][0]["prediction"]["source"], "boundary_model");
-        assert_eq!(value["items"][0]["prediction"]["assignments"][1], 1);
+        assert_eq!(value["items"][0]["prediction"]["assignments"][1], 0);
         assert_eq!(
             value["items"][0]["prediction"]["evidence"]["model_revision"],
             TEST_COMMIT
@@ -704,9 +717,7 @@ mod tests {
     #[test]
     fn a_source_that_names_nothing_contributes_no_engine_name() {
         let unobserved = AdmittedUtsegPrediction::UnobservedAssignments {
-            response: UtsegResponse {
-                assignments: vec![0, 0],
-            },
+            segmentation: UtteranceSegmentation::unstated(vec![0, 0]),
         };
         assert_eq!(joined(&[unobserved]), None);
     }
@@ -714,9 +725,7 @@ mod tests {
     #[test]
     fn engine_identities_list_each_distinct_source_and_are_absent_for_no_predictions() {
         let constituency = AdmittedUtsegPrediction::Constituency {
-            response: UtsegResponse {
-                assignments: vec![0, 0],
-            },
+            segmentation: UtteranceSegmentation::unstated(vec![0, 0]),
         };
         assert_eq!(
             joined(&[prediction(), constituency]),

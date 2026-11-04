@@ -10,6 +10,7 @@ use crate::options::{
 };
 use serde_json::json;
 
+use crate::api::{LanguageCode3, LanguageSpec};
 use crate::cli::args::InputKind;
 use crate::cli::args::{BenchArgs, BenchTarget, GlobalOpts};
 use crate::cli::dispatch;
@@ -17,21 +18,24 @@ use crate::cli::error::CliError;
 
 /// Language, speaker count and input kind for a bench target. The command is
 /// not here: it is the one `build_options` names.
-fn metadata(target: BenchTarget) -> (&'static str, u32, InputKind) {
+fn metadata(target: BenchTarget) -> (LanguageSpec, u32, InputKind) {
+    // The bench harness times English runs; the language is the same typed
+    // value `command_profile()` would carry, so dispatch types stay identical.
+    let english = LanguageSpec::Resolved(LanguageCode3::eng());
     match target {
-        BenchTarget::Align => ("eng", 1, InputKind::Chat),
-        BenchTarget::Transcribe => ("eng", 1, InputKind::Media),
-        BenchTarget::TranscribeS => ("eng", 1, InputKind::Media),
-        // PerFile commands carry the `"per-file"` wire string, matching
-        // `command_profile()` for these same commands. Bench harness uses
-        // the same profile so dispatch types stay identical.
-        BenchTarget::Morphotag => ("per-file", 1, InputKind::Chat),
-        BenchTarget::Translate => ("per-file", 1, InputKind::Chat),
-        BenchTarget::Coref => ("per-file", 1, InputKind::Chat),
-        BenchTarget::Utseg => ("eng", 1, InputKind::Chat),
-        BenchTarget::Benchmark => ("eng", 1, InputKind::Media),
-        BenchTarget::Opensmile => ("eng", 1, InputKind::Media),
-        BenchTarget::Compare => ("eng", 1, InputKind::Chat),
+        BenchTarget::Align => (english, 1, InputKind::Chat),
+        BenchTarget::Transcribe => (english, 1, InputKind::Media),
+        BenchTarget::TranscribeS => (english, 1, InputKind::Media),
+        // Per-file commands carry no job-level language, matching
+        // `command_profile()` for these same commands.
+        BenchTarget::Morphotag => (LanguageSpec::PerFile, 1, InputKind::Chat),
+        BenchTarget::Translate => (LanguageSpec::PerFile, 1, InputKind::Chat),
+        BenchTarget::Coref => (LanguageSpec::PerFile, 1, InputKind::Chat),
+        BenchTarget::Utseg => (english, 1, InputKind::Chat),
+        BenchTarget::Benchmark => (english, 1, InputKind::Media),
+        BenchTarget::Opensmile => (english, 1, InputKind::Media),
+        // Per-file, as `compare` itself submits: no job-level language.
+        BenchTarget::Compare => (LanguageSpec::PerFile, 1, InputKind::Chat),
     }
 }
 
@@ -144,7 +148,7 @@ pub async fn run(global: &GlobalOpts, args: &BenchArgs) -> Result<(), CliError> 
 
         dispatch::dispatch(
             dispatch::DispatchRequest {
-                lang,
+                lang: lang.clone(),
                 num_speakers,
                 input_kind,
                 server_arg: global.server.as_deref(),
@@ -154,16 +158,20 @@ pub async fn run(global: &GlobalOpts, args: &BenchArgs) -> Result<(), CliError> 
                 bank: None,
                 subdir: None,
                 lexicon: None,
-                use_tui: false,
-                open_dashboard: global.use_open_dashboard(),
+                // Timing runs print structured results; a TUI would hide them.
+                progress: crate::cli::args::Progress::Plain,
+                dashboard: global.dashboard.resolve(),
                 force_cpu: global.force_cpu,
                 allow_mps: global.allow_mps,
                 no_server: global.no_server,
                 before: None,
-                workers: global.workers,
-                timeout: global.timeout,
+                runtime: global.runtime(),
                 sequential: global.sequential,
                 memory_tier: global.memory_tier,
+                // Timing runs write under `--out`, an explicit directory,
+                // which is itself the authority to replace what is there.
+                overwrite: None,
+                execution: dispatch::Execution::Submit,
             },
             &crate::config::RuntimeLayout::from_env(),
         )
@@ -209,15 +217,14 @@ mod tests {
             server: None,
             no_server: false,
             media_cache: crate::cli::args::MediaCacheOpts::default(),
-            tui: false,
-            no_tui: false,
-            open_dashboard: true,
-            no_open_dashboard: false,
+            progress: crate::cli::args::ProgressFlags::default(),
+            dashboard: crate::cli::args::DashboardFlags::default(),
             debug_dir: None,
             engine_overrides: None,
             timeout: None,
             sequential: false,
             memory_tier: None,
+            dry_run: crate::cli::args::DryRunFlag::default(),
         }
     }
 
@@ -228,7 +235,6 @@ mod tests {
             out_dir: PathBuf::from("/tmp/out"),
             runs: 1,
             dataset: None,
-            workers: None,
             use_cache: false,
         }
     }
@@ -236,7 +242,7 @@ mod tests {
     #[test]
     fn metadata_align() {
         let (lang, n, exts) = metadata(BenchTarget::Align);
-        assert_eq!(lang, "eng");
+        assert_eq!(lang, LanguageSpec::Resolved(LanguageCode3::eng()));
         assert_eq!(n, 1);
         assert_eq!(exts, InputKind::Chat);
     }

@@ -5,6 +5,372 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- `--no-server` beside `--server` (or a `BATCHALIGN_SERVER` environment
+  variable) is refused, naming both. The named server used to win and
+  `--no-server` was silently ignored, so a user who set the variable once and
+  later asked to run locally sent the job to that server. The three routing
+  flags are now read once into one route that both the run and `--dry-run`
+  follow, so the plan cannot route differently from the run.
+- Rev.AI evidence cached before 2026-11-03 under a non-MP3 recording's old key
+  is found, not re-bought. That day the declaration of every non-MPEG upload
+  changed to its true container (`audio/wav`, `audio/flac`, `audio/ogg`,
+  `audio/aac`, `audio/mp4`), which changed such a recording's evidence key, so
+  its next `transcribe` would have paid Rev.AI again for a transcript the cache
+  already held. Each request now derives, beside its key, the key it had
+  before (`LegacyEvidenceKey`: `SameAsCurrent` when the two presentations are
+  equal, which is MPEG audio at a `.mp3` path; `Distinct` otherwise, so an
+  MPEG file under another name consults its old key too). A miss under the
+  current key consults the legacy key once, under `UseCache` and
+  `RequireCache` alike (a forced refresh consults neither), admits the stored
+  envelope against that key, stores the evidence under the current key through
+  the same writer a commit uses, drops any pending-job record the current key
+  held, and uses it; the run's evidence trace says `replayed_from_legacy_key`
+  and every later run says `replayed`. The legacy entry is left in place.
+- `--auto-speakers` with `--asr-engine tencent` is admitted when a dedicated
+  diarizer runs. The speaker plan refused the pair by name whenever the
+  recognizer was Tencent, because Tencent's integrated diarization must be
+  given a count; with `--diarization enabled` that diarization is not what
+  labels the speakers (the dedicated engine's labels replace the recognizer's,
+  and that engine infers the count), so the refusal was about a stage the run
+  does not use. `SpeakerPlan::admit` now decides on the pair (separation,
+  count): with a dedicated diarizer the recognizer is asked for no separation
+  of its own, whatever the count; Tencent alone with `--auto-speakers` is
+  still refused by name, and the message now also names `--diarization
+  enabled` as the way to have the count inferred.
+- `align` on a file whose `%wor` is complete runs without the recording. Media
+  resolution, conversion and probing ran for every file before the cheap
+  `%wor`-refresh path was reached, so an already-aligned transcript whose
+  recording was not where the search looked failed although nothing on that
+  path reads audio. The route is now decided once at admission
+  (`fa::AlignRoute::decide`): a declared no-op and a complete-`%wor` file take
+  `WithoutRecording`, whose file task holds no recording by type; everything
+  else takes `NeedsAudio`, the only route that resolves one (`ResolvedMedia`,
+  built in that arm alone). The refresh's output stamp says
+  `timing=refreshed_from_wor`. `--override-media-cache` (or
+  `--override-media-cache-tasks forced_alignment`) now asks for a complete
+  file to be aligned again from its recording, which is then required and
+  refused by name when missing; before, the flag never reached such a file.
+  When the refresh strips a backward utterance's retained timing (the anchor
+  drift shape), the completion report names those words as needing a run with
+  the recording (`needs_recording` cause) rather than as a measured removal
+  (`removed`), and the file finishes diagnosed. Two consequences of deciding
+  the route first: a `--before` prior beside a complete-`%wor` file is no
+  longer read, so that file is refreshed from its own `%wor` instead of being
+  aligned against the prior; and the stamp's `incremental` field is now a
+  fact about the run (a prior was aligned against) rather than about the
+  request, so a refresh never says it. Inside the pipeline the refresh is its
+  own entry (`refresh_from_complete_wor`) and the aligning entries take an
+  active attempt by type, so a preserved or complete file cannot reach them.
+- A repetition at a Whisper window seam that cannot be attributed is kept once
+  and marked, not refused. A long recording is decoded in windows that share
+  audio at each seam, and the two decodes of the shared stretch are
+  reconciled: a word both heard at the same time is one word. When the match
+  could not be attributed (two earlier observations fit the incoming one, the
+  one that fits is already claimed, or the matches cross), the whole recording
+  was refused ("Whisper overlap has ambiguous repeated observations"), so a
+  localized uncertainty about one word cost every other word. The reconciler
+  now keeps the earlier window's copies, drops the later window's, and records
+  the decision as a typed `SeamAmbiguity` (the seam's time, the text, the
+  window whose copy was dropped, the kept copy's interval) where the stitch is
+  decided. The record travels on the ASR response, is placed on the utterance
+  that keeps the copy once the utterances exist (by the copy's timing, which
+  retokenization keeps while it rewrites words), and is written there as a
+  `%com` tier by the same renderer as a dropped recognizer token
+  (`batchalign window seam at 30120 ms: repeated "go" kept once, review
+  here`). The job reports it as a new `window_seam_ambiguous` shortfall that
+  counts the seams and locates the first twenty utterances as written, so the
+  file finishes written with diagnostics (exit code 7) rather than clean. The
+  `eval utseg-replay` rebuild places the same records, so a retained seam
+  comment is reproduced rather than counted as a segmentation difference. An unambiguous overlap leaves no record and no comment.
+  The refusal path is deleted.
+- A job submission without a language is refused, and `align` is a per-file
+  command. The `POST /jobs` body's `lang` defaulted to `eng`, so a client that
+  omitted it had its job run as English with nothing said; the field is now
+  required, and a body without it is refused at deserialization naming the
+  field (the CLI and the dashboard always send one). The same default on the
+  job records the server returns is gone too, and so is the dashboard's own
+  `eng` fill for a record without a language. `align` has no `--lang` and has
+  always aligned each file under the language its `@Languages:` header
+  declares, yet its job record carried a hardcoded `eng` nobody declared; it
+  now carries `per-file` like `morphotag`'s, in the CLI, the dashboard and
+  submission validation (a job-level language on `align` is refused by name).
+  Two consequences inside the pipeline: a file with no `@Languages:`, or whose
+  first entry is not an ISO 639-3 code, is failed by name with no job language
+  to stand in for it (the old `--lang` fallback, and the two messages that
+  told the user to pass a flag align does not have, are deleted); and the FA
+  worker is probed per language inside the align dispatch
+  (`FaWorkerAdmission`), once per language per job, on the worker keyed by
+  the language the files actually declare, so the FA engine that namespaces a
+  file's cache rows is the one that aligns it. A job of several languages
+  probes each once; a language whose model cannot load fails its own files by
+  name while the others proceed.
+- `--dry-run` plans a job and stops. A new global flag resolves everything a
+  run resolves up to submission: the inputs discovered (a missing one is
+  listed as the refusal the run would raise, and the rest is still planned),
+  where the job would run (an explicit server, a local server already
+  answering, the daemon the run would start, or this process), where that
+  host would search for recordings, the engines and models as submitted, and
+  every result path with what writing it does to the file already there. It
+  prints the plan and exits 0 without submitting, starting a daemon, opening
+  a pool or calling a provider, and writes nothing, not even the output
+  directory or the pass-through copies. The plan is the same typed
+  `PreparedSubmission` the run hands the daemon, built by the same two
+  preparations (shared filesystem and content), so it cannot drift from the
+  run; the content preparation that lived inline in the server submission
+  path is now that second function. On a command with no job to plan
+  (`serve`, `jobs`, `doctor`, ...) the flag is refused by name rather than
+  accepted as a no-op. The CLI has no JSON output mode, so the plan is text.
+- A recognizer token CHAT cannot hold is named in the transcript, not only in
+  the log. Transcribe's last cleanup pass drops an ASR token of which no prefix
+  is a legal CHAT word (Whisper's bare `:`, symbol runs); the drop was a
+  `warn` line and nothing else, so a reader of the file could not tell a
+  dropped token from silence. The drop is now a typed record
+  (`DroppedAsrToken`) kept on the utterance that lost it, so it cannot drift
+  from the words it stood among, and written into the file by the record's
+  one renderer: a `%com` tier on the utterance (`batchalign dropped
+  recognizer token ':' at 300-400 ms: not representable in CHAT`), or, when
+  the utterance kept no word to write a line from, an `@Comment` in its
+  place prefixed with its speaker; before, such an utterance vanished
+  entirely. A control character, whitespace or the bullet delimiter in the
+  token is written as its code point so the comment line stays valid CHAT,
+  which the build's tests check with Chatter's full validation. The same
+  records are written to the run's `<stem>_dropped_tokens.json` debug
+  artifact beside the language-invalid word report, and the log line stays.
+- `transcribe` refuses to replace an existing `<media>.cha` beside the
+  recording unless `--overwrite` or an output directory authorizes it. Without
+  `-o`, transcribe writes its result next to the recording, and an earlier
+  transcript there (possibly hand-corrected) was replaced with nothing said,
+  after the ASR had been paid for. Each destination is now decided once at
+  admission, before any submission: fresh, a rewrite of the submitted source
+  (`align`, `morphotag` and the other in-place commands, unchanged), or a
+  replacement under an authority (`WriteDecision` in `cli/output.rs`). The
+  authority is a type only two places can mint: the new `--overwrite` flag,
+  and an explicit `-o DIR` (results were asked for under that directory). A
+  generated destination that exists with neither is refused naming the file
+  and both remedies, and no job, provider call or model run happens. The same
+  rule covers every generated file that is not its input: `benchmark`'s
+  `.cha` and CSV and `diarize`'s `.turns.json` beside the recording, and
+  `compare`'s `.compare.csv` beside the transcript, so those three commands
+  carry `--overwrite` too; the in-place commands do not offer it, since on
+  them it would change nothing.
+- `transcribe` and `diarize` require `--lang`; `auto` is the explicit opt-in
+  to detection. Both used to default to `eng`, so a recording in another
+  language that was run without the flag was transcribed, or its workers
+  selected, as English with nothing said. An invocation without `--lang` is
+  now refused by clap before anything is submitted, naming the flag
+  (`--lang <CODE|auto>`), and `--lang auto` asks the recognizer to detect one
+  language for the whole file as before. The flag is typed where it is
+  parsed: `transcribe` takes a code, `auto` or a code-switched pair
+  (`AsrLanguageRequest`), `diarize` a code or `auto` (`LanguageSelection`),
+  and the `per-file` wire value, or a pair on `diarize`, is refused at the
+  command line with the reason instead of surviving to submission. The CLI's
+  submission builders no longer re-parse a language string: the typed
+  `LanguageSpec` flows from the argument to the job. `utseg`, `benchmark`,
+  `opensmile`, `avqi` and `speaker-identify` take the same typed values and
+  keep their `eng` default, pinned by a test so a later removal is deliberate.
+  Scripts that relied on the default must add `--lang eng`. The desktop app
+  always sends a language and is unaffected.
+- An untimed utterance beside measured neighbours gets a bounded search
+  corridor, and is requested where it was refused before. Forced alignment
+  searches for the words of an utterance it has no timing for inside an order
+  corridor; in a region with more than one speaker that corridor's floor was
+  0 unless the same speaker had an earlier retained bullet or the joint
+  correspondence search named an obligatory preceding word, because a
+  one-word turn was allowed to interleave with the turn before it. A short
+  acknowledgement 16 s into a long recording therefore searched from 0, its
+  window exceeded the engine's 15 s budget, and it was refused before any
+  request; a listener found the word inside the corridor its measured
+  neighbours would have given. The corridor's edges are now typed with their
+  provenance: the nearest measured utterance before and after it in document
+  order, whatever the speaker (a turn with no overlap marker begins after the
+  turn before it ends and ends before the turn after it begins), the
+  recording's edge only when no measured utterance lies on that side, or an
+  overlap marker that withholds the bound. The same speaker's retained chain
+  and the obligatory words still narrow it. Heard words are unaffected: a
+  candidate hull keeps its same-speaker containment check, since where the
+  words were heard is the evidence. Grouping records each corridor as a
+  `search_corridor` decision (`search window 1600ms-15250ms from the order
+  corridor; floor: 1600ms from utterance 0's measurement; ceiling: 15250ms
+  from utterance 2's measurement`), carried into the FA evidence file as a
+  `search_corridor` field (schema 10), so a refused window is explained
+  beside its refusal. Files with unheard short turns between heard ones gain
+  requests, and timings, where they had none.
+- An utterance marked `+<` keeps its timing when its measured start precedes
+  the previous line's start. Forced alignment's timing-order pass used to
+  strip every word timing of such an utterance, because CHAT's start-order
+  rule forbids writing the earlier start on the later line; for a
+  seven-word turn measured to begin half a second early, that threw away
+  seven writable words to avoid one unwritable start, on a turn the
+  transcriber had already marked as overlapping the line before it. The
+  `+<` marker is now the evidence: the utterance's start is
+  raised to the previous accepted start, words wholly before that start
+  lose their timing, the word straddling it is cut to begin there, and the
+  rest keep their measured times, so the written file is valid CHAT with
+  the overlap the transcriber asserted now timed. An utterance without the
+  marker is stripped as before (the transcriber did not say the lines
+  overlap, so the early start is more likely a model error), as is a marked
+  one with no timed extent after the previous start. The decision is
+  recorded as `start_raised_to_preceding_start`; the completion account
+  reports a dropped word as `measured 26774-27174 dropped before the CHI
+  start 27333 (line index 7), to which the utterance's start was raised
+  from 26774 (+< overlap); first kept word trimmed 133 ms`. FA evidence
+  schema 9 becomes 10: the new `start_regression_raised` timing decision
+  carries `words_dropped` and a `words_trimmed` list with each cut word's
+  measured and kept extent, and the `words_trimmed` counts on the end
+  clamp and the kept-end yield become the same lists.
+- `ud_repairs=` counts every repair the morphotag worker makes, and each
+  repair is made once. The morphotag provenance comment counted the
+  dependency relations the worker rewrote and the padding feature values it
+  removed; two other rewrites were applied and counted nowhere: a
+  punctuation-only lemma on a lettered word replaced by the surface form
+  (`bonjour` lemmatized as `...`), and a misspelled feature name respelled
+  (Stanza's Italian `Verbform` written as `VerbForm`). Both are now reported
+  by the worker like the others and counted into `ud_repairs=`, so a file
+  that carries either says so, and the operator log line tallies them as
+  `punctuation_lemma` and `feature_name_alias`. Counts rise accordingly for
+  files the model does this to; Italian files with many finite verbs rise
+  the most. The lemma repair also ran twice: the worker replaced the lemma
+  and the server replaced it again on the way in, under a predicate of its
+  own that disagreed with the worker's at the edges (the same was true of a
+  padding relation, rewritten to `dep` on both sides). The server no longer
+  repairs anything: one predicate, Rust's, decides what a punctuation lemma
+  is on both sides (`batchalign_core.is_punctuation_lemma`, as
+  `repair_feats` already did for padding), the worker is the one repair
+  site, and the server refuses an analysis that still carries a value the
+  worker should have repaired, naming the word, instead of fixing it
+  silently. On the worker wire, the analyzed item carries one `repairs` list
+  of every kind, each entry tagged by the `field` it rewrote (`relation`,
+  `feature_value`, `feature_name`, `lemma`) with that field's own `kind`
+  inside; the separate `feature_repairs` list is gone.
+- `compare` loses two flags nothing read, and a gold typed with a typographic
+  apostrophe conforms. `compare --lang` reached the worker gateway and was
+  discarded there: the main transcript's morphotag has always read the
+  language from that file's own `@Languages:` header, as `morphotag` does, so
+  the flag only labelled the job record (and refused a corpus at submission by
+  a language that was not the one used). `compare` is now a per-file command
+  like `morphotag`: it submits `per-file`, takes no `--lang`, and is admitted
+  per file against the Stanza registry; a compare job persisted under an
+  earlier build with a job-level language is refused on restart with the
+  per-file message. `compare --num-speakers` went only into the job record and
+  is gone. In WER conforming, the contraction rules matched only the ASCII
+  apostrophe (U+0027), so a gold typed with the right single quotation mark
+  (U+2019, the curly apostrophe) in `he's` stayed one token while the
+  hypothesis typed with U+0027 became `he is`, and the pair was charged as an
+  error; both spellings are now one at the conformer's input, so U+2019
+  expands exactly as U+0027 does and an unexpanded `don't` in either spelling
+  equals the other. Scores of transcripts carrying U+2019 move accordingly.
+- `--tui` and `--open-dashboard` act, and the dashboard opens once. Each pair
+  of flags was two booleans with the positive one defaulting to true, so only
+  `--no-tui` and `--no-open-dashboard` ever changed anything, and on macOS
+  every interactive submission opened a browser tab: a shell loop over ten
+  directories opened ten. Each pair is now one value with two spellings
+  (passing both is refused at parse). Progress is the TUI or plain bars as
+  before. The dashboard page now opens, in an interactive terminal (stdout a
+  TTY; it was stderr), only on the submission that starts the local daemon;
+  later submissions reuse the daemon and leave the open page alone, and a
+  server the invocation did not start (`serve start`, launchd, `--server URL`)
+  never opens one. `--open-dashboard` opens this submission's page whether or
+  not the daemon was already running; `--no-open-dashboard` and the
+  `BATCHALIGN_NO_BROWSER` backstop never open one.
+- `--workers` and `--timeout` are refused, not ignored, when they would not be
+  honoured. A daemon fixes both when it starts, and the server has no request
+  that changes them. An invocation that passes either flag to a running
+  daemon started with another value used to print a note and proceed under
+  the daemon's values; it is now refused before anything is submitted (exit
+  code 2), naming the daemon's values and the requested ones and the two ways
+  out: `batchalign3 serve stop` and run the command again, or drop the flag.
+  Passing no flag, or the values the daemon was started with, proceeds as
+  before, and a daemon this invocation starts (or a `--no-server` run) honours
+  the flags as before. A server the CLI did not start (`serve start`, a
+  launchd service, `--server URL`) records neither setting, so either flag
+  beside it is refused the same way; it used to be dropped silently. `bench`
+  no longer declares its own `--workers`: it was never read, and clap preferred
+  it over the global flag for `bench ... --workers N`, so that spelling ran
+  under the daemon's cap; the global flag now applies. `--workers 0` (on a
+  processing command and on `serve start`) is refused with the instruction to
+  leave the flag out for auto-tune; it used to be forwarded as a cap of zero.
+- `--auto-speakers` is accepted whenever the speaker engine takes it. The
+  count was a property of the ASR plan, so every non-Rev `--asr-engine`
+  refused it, even with `--diarization enabled` and a dedicated engine
+  (pyannoteAI, pyannote, nemo) that infers the count. It is now the speaker
+  plan's: a dedicated diarizer takes it whatever the recognizer, Rev.AI's own
+  diarization takes it, and a recognizer that labels no speakers has nothing
+  to refuse. The one refusal left, named at submission, is `--asr-engine
+  tencent`, whose integrated diarization must be given the count. The other
+  speaker-count rules are unchanged (a count of 0 is refused; diarization
+  with a count of 1 is refused; counts above 255 are refused).
+- A Rev.AI upload declares the media type and file name of the container the
+  file is actually in, read from its bytes by ffprobe: `audio/wav` and
+  `provider-media.wav` for a WAV, `audio/flac`, `audio/ogg`, `audio/aac`,
+  `audio/mp4`, and `audio/mpeg` with `provider-media.mp3` for MPEG audio.
+  Every upload used to be declared `audio/mpeg` and named after the source
+  file's extension, which worked only because Rev.AI sniffs content. A file in
+  a container the probe has not measured, or one BA3 does not send as is
+  (Matroska, ASF), is refused by name before anything is uploaded. MP3 request
+  keys are unchanged, so cached MP3 evidence replays as before; a WAV, FLAC or
+  Ogg recording cached under the old declaration is a different evidence
+  identity and is fetched again on its next run. Renaming a file no longer
+  changes its identity, since the name was never what the provider received.
+- Waiting for a Rev.AI job is bounded, and one failed status poll no longer
+  ends it. A transcription is polled for at most two hours (language
+  identification for twenty minutes), and a dropped connection, 5xx or 429 on
+  a status poll is absorbed, up to five per wait. When either bound ends the
+  wait, the paid job is not abandoned: the file fails as `provider_transient`
+  with a message naming the Rev.AI job id and the cause, the job is recorded
+  in the evidence cache against its request, and the next run of that request
+  (the control plane's retry included) resumes the wait for the recorded job
+  instead of uploading again; a committed transcript, or Rev.AI's terminal
+  verdict on the job, removes the record. Before, a job Rev.AI reported in
+  progress forever held the file forever, and a single transient poll failure
+  was reported as the job's failure, so the retry re-submitted the media and
+  paid twice.
+- `align`'s completion report accounted for a word whose measured interval
+  the run itself removed while enforcing timing order (a start-regression
+  strip, a same-speaker end clamp, or a yield to a kept bullet) as
+  "no positive interval in the final output (1 answered, ...)", which was
+  false: the aligner had answered, and the finalizer removed the answer. In
+  one job 424 of 516 untimed words sat in that bucket and could not be split
+  by cause. Such a word now has the cause `removed`, recorded where the
+  removal happens, naming the rule, the boundary it enforced, the line that
+  supplied it and every interval taken away: for example `measured
+  3500-4200 dropped at the same-speaker bound 3000 (line index 7)` or
+  `measured 2 intervals 2000-3300 removed, utterance stripped: its start
+  2000 precedes the INV start 5000 (line index 7)`. In the stored and served
+  diagnostics it is `{"kind": "removed", "removals": [{"effect", "measured"}]}`.
+  FA evidence is now schema 9: every stripping timing decision carries the
+  `words_dropped` list the end clamp already had, and `dropped_word_timings`
+  includes those intervals; schema-8 artifacts lack the lists.
+- `transcribe`'s pre-CHAT boundary model could put the two copies of an exact
+  repetition in different utterances, so `yeah I I went` with a model boundary
+  after the first `I` was written as `Yeah I .` and `I went .` with no `[/]`.
+  The cut now runs after the same exact-repetition analysis retrace detection
+  uses and is not made inside a repetition: `Yeah I [/] I went .`. The
+  offline replay policy `suppress-earlier-adjacent-boundaries-preserve-exact-retraces-v1`
+  (`eval transcribe-replay --utseg-policy`), which was the only route to that
+  guard, is gone, and retained utseg evidence is now schema 5; schema-4
+  artifacts are refused by name and must be regenerated.
+- The boundary model's question and exclamation predictions reach the
+  written CHAT. Both of `transcribe`'s passes and standalone `utseg` wrote `.`
+  at every model boundary; an utterance the model closed as a question now
+  ends `?`, and as an exclamation `!`. The last child of a post-CHAT split
+  still keeps the parent's own terminator, and a Stanza constituency boundary
+  still writes a period. With the pinned Chatter the terminator is set on the
+  child after the split; the next Chatter release's split plan takes it per
+  child and replaces that step.
+- A post-CHAT utterance split (standalone `utseg` and `transcribe`'s second
+  pass) in an English file (`@Languages` names `eng` first) now capitalizes
+  the first word of every new child under the same rule the pre-CHAT pass
+  applies to every utterance, on the main tier and its `%wor` word; children
+  used to begin lowercase (`and he likes cake .`). Other languages are
+  unchanged.
+- In-place CHAT outputs, CSV sidecars, evidence documents, the consolidated
+  `compare.csv` and merge-verify's deliverables were written with a
+  truncating write, on the daemon's side and on the CLI's copy-back, so a
+  crash, a kill or a full disk mid-write left the user's only `.cha`
+  truncated. All now go through the crate's atomic writer (write beside,
+  fsync, rename): the previous file stays whole until the new one lands. A
+  stamp-only rerun still touches nothing, and an output path that is a
+  symlink is still written through.
 - Job details stay mounted while background server discovery refines an already
   resolved record. Output-location failures retain their explicit Retry action
   instead of disappearing into an implicit lookup on remount.

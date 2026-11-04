@@ -97,30 +97,111 @@ impl StatingContainer {
     }
 }
 
-/// The measured demuxers, by ffprobe's `format_name` matched whole, and the
-/// first audio stream's codec where the demuxer alone does not decide. The
-/// catch-all is over ffprobe's open vocabulary: an unmeasured demuxer is
-/// refused by name, never trusted.
-fn classify(format_name: &str, codec_name: &str) -> Option<Classified> {
-    match format_name {
-        "mp3" => Some(Classified::Walk(WalkReason::MpegAudio)),
-        "aac" => Some(Classified::Walk(WalkReason::Adts)),
-        // Every PCM codec ffmpeg knows is spelled `pcm_*`; a WAV holding
-        // anything else has an estimated length.
-        "wav" => Some(match codec_name.starts_with("pcm_") {
-            true => Classified::Stating(StatingContainer::PcmWav),
-            false => Classified::Walk(WalkReason::CompressedWav),
-        }),
-        "flac" => Some(Classified::Stating(StatingContainer::Flac)),
-        "mov,mp4,m4a,3gp,3g2,mj2" => Some(Classified::Stating(StatingContainer::IsoMedia)),
-        "ogg" => Some(Classified::Stating(StatingContainer::Ogg)),
-        "matroska,webm" => Some(Classified::Stating(StatingContainer::Matroska)),
-        "asf" => Some(Classified::Stating(StatingContainer::Asf)),
-        _ => None,
+/// The container a file is in: the demuxer families this crate has measured,
+/// read from the file's header, never from its name.
+///
+/// ONE table of containers, consulted by two questions. The duration route
+/// below asks what a container's stated length is worth; the Rev.AI upload
+/// asks what type and name to declare for the bytes it sends. Both used to be
+/// answerable only here, in the walk-or-state table, so the upload had no
+/// container to ask and declared `audio/mpeg` for everything. The identity is
+/// now its own closed set, and the route is derived from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaContainer {
+    /// MPEG audio (MP3, MP2): ffprobe's `mp3` demuxer.
+    MpegAudio,
+    /// ADTS AAC: `aac`.
+    Adts,
+    /// RIFF WAVE, whatever codec it holds: `wav`.
+    Wav,
+    /// FLAC: `flac`.
+    Flac,
+    /// The ISO base media family (MP4, M4A, MOV): `mov,mp4,m4a,3gp,3g2,mj2`.
+    IsoMedia,
+    /// Ogg: `ogg`.
+    Ogg,
+    /// Matroska and WebM: `matroska,webm`.
+    Matroska,
+    /// ASF (WMA): `asf`.
+    Asf,
+}
+
+impl MediaContainer {
+    /// The container ffprobe's `format_name` names, matched whole. The
+    /// catch-all is over ffprobe's open vocabulary: an unmeasured demuxer is
+    /// `None`, which every caller refuses by name rather than trusting.
+    fn of_demuxer(format_name: &str) -> Option<Self> {
+        match format_name {
+            "mp3" => Some(Self::MpegAudio),
+            "aac" => Some(Self::Adts),
+            "wav" => Some(Self::Wav),
+            "flac" => Some(Self::Flac),
+            "mov,mp4,m4a,3gp,3g2,mj2" => Some(Self::IsoMedia),
+            "ogg" => Some(Self::Ogg),
+            "matroska,webm" => Some(Self::Matroska),
+            "asf" => Some(Self::Asf),
+            _ => None,
+        }
     }
 }
 
+/// What a measured container's stated length is worth, given the first audio
+/// stream's codec where the container alone does not decide. Exhaustive, so a
+/// new container must take a side.
+fn classify(container: MediaContainer, codec_name: &str) -> Classified {
+    match container {
+        MediaContainer::MpegAudio => Classified::Walk(WalkReason::MpegAudio),
+        MediaContainer::Adts => Classified::Walk(WalkReason::Adts),
+        // Every PCM codec ffmpeg knows is spelled `pcm_*`; a WAV holding
+        // anything else has an estimated length.
+        MediaContainer::Wav => match codec_name.starts_with("pcm_") {
+            true => Classified::Stating(StatingContainer::PcmWav),
+            false => Classified::Walk(WalkReason::CompressedWav),
+        },
+        MediaContainer::Flac => Classified::Stating(StatingContainer::Flac),
+        MediaContainer::IsoMedia => Classified::Stating(StatingContainer::IsoMedia),
+        MediaContainer::Ogg => Classified::Stating(StatingContainer::Ogg),
+        MediaContainer::Matroska => Classified::Stating(StatingContainer::Matroska),
+        MediaContainer::Asf => Classified::Stating(StatingContainer::Asf),
+    }
+}
+
+/// A header answer admitted: a measured container and the first audio stream.
+struct AdmittedHeader {
+    container: MediaContainer,
+    stream: HeaderStream,
+    format: HeaderFormat,
+}
+
 impl HeaderAnswer {
+    /// Admit the answer, or refuse it: no audio stream, or an unmeasured
+    /// demuxer. The one reading for both questions asked of a header.
+    fn admit(self, input: &str) -> Result<AdmittedHeader, ProbeError> {
+        let Self { streams, format } = self;
+        let stream = streams
+            .into_iter()
+            .next()
+            .ok_or_else(|| ProbeError::NoAudioStream {
+                input: input.to_owned(),
+            })?;
+        let container = MediaContainer::of_demuxer(&format.format_name).ok_or_else(|| {
+            ProbeError::UnmeasuredContainer {
+                input: input.to_owned(),
+                demuxer: format.format_name.clone(),
+            }
+        })?;
+        Ok(AdmittedHeader {
+            container,
+            stream,
+            format,
+        })
+    }
+
+    /// Which container this file is in.
+    pub(super) fn container(self, input: &str) -> Result<MediaContainer, ProbeError> {
+        Ok(self.admit(input)?.container)
+    }
+
     /// Decide the route for this file.
     ///
     /// The table is the policy, and every row was measured (see
@@ -139,22 +220,14 @@ impl HeaderAnswer {
     /// A walked container's stated length is never parsed, so whatever
     /// ffprobe printed for it cannot fail the probe.
     pub(super) fn route(self, input: &str) -> Result<DurationRoute, ProbeError> {
-        let Self { streams, format } = self;
-        let stream = streams
-            .into_iter()
-            .next()
-            .ok_or_else(|| ProbeError::NoAudioStream {
-                input: input.to_owned(),
-            })?;
-        let container = match classify(&format.format_name, &stream.codec_name) {
-            Some(Classified::Walk(reason)) => return Ok(DurationRoute::Walk(reason)),
-            Some(Classified::Stating(container)) => container,
-            None => {
-                return Err(ProbeError::UnmeasuredContainer {
-                    input: input.to_owned(),
-                    demuxer: format.format_name,
-                });
-            }
+        let AdmittedHeader {
+            container,
+            stream,
+            format,
+        } = self.admit(input)?;
+        let container = match classify(container, &stream.codec_name) {
+            Classified::Walk(reason) => return Ok(DurationRoute::Walk(reason)),
+            Classified::Stating(container) => container,
         };
         let stated = match container.statement() {
             Statement::AudioStream => stream.duration,
@@ -316,13 +389,51 @@ mod tests {
         ));
     }
 
-    /// A demuxer nobody has measured is refused by name, never trusted.
+    /// A demuxer nobody has measured is refused by name, never trusted, by
+    /// both questions asked of a header.
     #[test]
     fn an_unmeasured_demuxer_is_refused_by_name() {
         match answer("aiff", "pcm_s16be", Some("1.0")).route("x") {
             Err(ProbeError::UnmeasuredContainer { demuxer, .. }) => assert_eq!(demuxer, "aiff"),
             other => panic!("expected a refusal, got {other:?}"),
         }
+        match answer("aiff", "pcm_s16be", Some("1.0")).container("x") {
+            Err(ProbeError::UnmeasuredContainer { demuxer, input }) => {
+                assert_eq!(demuxer, "aiff");
+                assert_eq!(input, "x");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The container table, row by row: every measured demuxer names its
+    /// container whatever codec it holds, and the name is the whole
+    /// `format_name`, so a family's first member alone does not match.
+    #[test]
+    fn every_measured_demuxer_names_its_container() {
+        for (demuxer, codec, container) in [
+            ("mp3", "mp3", MediaContainer::MpegAudio),
+            ("aac", "aac", MediaContainer::Adts),
+            ("wav", "pcm_s16le", MediaContainer::Wav),
+            ("wav", "adpcm_ima_wav", MediaContainer::Wav),
+            ("flac", "flac", MediaContainer::Flac),
+            ("mov,mp4,m4a,3gp,3g2,mj2", "aac", MediaContainer::IsoMedia),
+            ("ogg", "opus", MediaContainer::Ogg),
+            ("matroska,webm", "opus", MediaContainer::Matroska),
+            ("asf", "wmav2", MediaContainer::Asf),
+        ] {
+            assert_eq!(
+                answer(demuxer, codec, None)
+                    .container("x")
+                    .expect("measured"),
+                container,
+                "{demuxer}"
+            );
+        }
+        assert!(matches!(
+            answer("mov", "aac", None).container("x"),
+            Err(ProbeError::UnmeasuredContainer { .. })
+        ));
     }
 
     #[test]

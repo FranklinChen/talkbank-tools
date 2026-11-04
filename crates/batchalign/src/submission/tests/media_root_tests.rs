@@ -7,8 +7,8 @@ use crate::options::{AbsoluteMediaRoot, AlignOptions};
 async fn media_root_submission_refuses_relative_before_creating_job_directories() {
     let temp = tempfile::tempdir().unwrap();
     let mut submission = morphotag_submission(false);
+    // Align is per-file like morphotag, so the language stays `PerFile`.
     submission.command = ReleasedCommand::Align;
-    submission.lang = LanguageSpec::Resolved(crate::api::LanguageCode3::eng());
     submission.files = vec![FilePayload {
         filename: "sample.cha".into(),
         content: "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\tI go .\n@End\n".into(),

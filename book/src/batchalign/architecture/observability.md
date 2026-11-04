@@ -399,6 +399,36 @@ may overlap; their endpoints must not be interpreted as a shared acoustic cut.
 Schema-7 pieces remain readable without `context`. A consumer that assumes
 nonoverlapping request windows must explicitly refuse schema 8 until updated.
 
+FA evidence schema 9 gives every stripping timing decision
+(`start_regression_stripped`, `zero_duration_clamp_stripped`, and a
+`yielded_to_kept_bullet` whose outcome is `stripped`) a `words_dropped` list
+of the measured word intervals the strip removed, the records
+`end_clamped_interleaved_words` already carried, and `dropped_word_timings`
+includes them with the start or end the utterance conflicted with as
+`bound_ms`. A schema-8 artifact has no such lists and does not read as a
+schema-9 one; a consumer that joins removed intervals to the completion
+account's `removed` causes must refuse schema 8 by name.
+
+FA evidence schema 10 adds the `start_regression_raised` timing decision: a
+start regression on an utterance marked `+<` is raised to the preceding start
+instead of stripped. It carries `words_dropped` (the words wholly before the
+new start) and `words_trimmed`, a list of the words cut to begin at the new
+start, each with `measured_start_ms`/`measured_end_ms` and the kept
+`start_ms`/`end_ms`. The matching removal effect, also
+`start_regression_raised`, appears in `dropped_word_timings` (with the
+preceding start as `bound_ms`) and in the completion account's `removed`
+causes. In the same bump the `words_trimmed` count on
+`end_clamped_interleaved_words` and on a `yielded_to_kept_bullet`
+`start_moved` outcome becomes a list of the same records. Schema 10 also adds
+the `search_corridor` decision and its `search_corridor` field on the decision
+record: the window an order corridor gave an untimed utterance (`start_ms`,
+`end_ms`) with the provenance of each edge (`floor`, `ceiling`: a
+`measured` edge with its `ms` and the `utterance` that supplied it, the
+`recording_edge`, `marked_overlap_unbounded` on a floor whose utterance is
+itself marked `+<`, or `following_overlaps` on a ceiling, with the marked
+utterance that stopped the chain). A schema-9 reader has no arm for the new kinds and reads a
+count where a list now is, so it must refuse schema 10 by name.
+
 ### Submit-path retries
 
 `BatchalignClient::submit_job` (`crates/batchalign/src/cli/client.rs`)

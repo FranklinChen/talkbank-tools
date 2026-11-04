@@ -177,6 +177,25 @@ batchalign3 transcribe input/ -o output/ --asr-engine whisper --lang=eng
   in deserialization otherwise), from both producers, and so is each fitted
   boundary: the projection returns a refusal rather than an infinite position
   if a run of bounds near `f64::MAX` seconds overflows the fit's sum.
+- Window seams. A long recording is decoded in windows that share some audio
+  at each seam (`WindowOwnedWhisperPipeline` on the Python side sends each
+  window's observations unmerged, with the samples it owns), and Rust
+  reconciles the two decodes of the shared stretch once, in
+  `crates/batchalign/src/worker/whisper_windows.rs`: a word both windows heard
+  at the same time in the shared audio is kept once. When the match cannot be
+  attributed (two earlier observations fit the incoming one, the one that
+  fits is already claimed, or the matches cross), the reconciler keeps the
+  earlier window's copy, drops the later window's, and records the decision
+  (`SeamAmbiguity`: the seam's time, the text, the window whose copy was
+  dropped). The record is placed on the utterance that keeps the copy
+  (`asr_postprocess::place_seam_ambiguities`, by the copy's timing, which
+  retokenization keeps while it rewrites word text) and written there as a
+  `%com` tier (`batchalign window seam at 30120 ms: repeated "go" kept once,
+  review here`), the same mechanism as a dropped recognizer token; the job
+  reports it as the `window_seam_ambiguous` shortfall, so the file finishes
+  diagnosed (exit code 7), not clean. Until 2026-11-03 this case refused the
+  whole recording ("Whisper overlap has ambiguous repeated observations").
+  An unambiguous overlap leaves no record.
 - No per-language overrides of the generation config. Until 2026-09-22 a
   Cantonese block set `no_timestamps_token_id = 50363` and nine
   `alignment_heads` at layers 5 to 10: whisper-small's values, inherited from

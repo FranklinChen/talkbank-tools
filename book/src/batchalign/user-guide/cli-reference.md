@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Current
-**Last updated:** 2026-10-24 21:32 EDT
+**Last updated:** 2026-11-03 23:37 EST
 
 This page documents the current public `batchalign3` CLI surface. For anything
 you are scripting against, confirm with `batchalign3 <command> --help`.
@@ -33,25 +33,62 @@ Global options go before the command name.
 | Option | Meaning |
 | --- | --- |
 | `-v`, `-vv`, `-vvv` | Increase verbosity |
-| `--workers N` | Maximum concurrent files per job (default: auto-tune; GPU commands default to 1). Auto-tune is `(ram_total_mb / 16 GB).clamp(1, 8)` for GPU-bound work. |
+| `--workers N` | Maximum concurrent files per job (default: auto-tune; GPU commands default to 1). Auto-tune is `(ram_total_mb / 16 GB).clamp(1, 8)` for GPU-bound work. A positive count: `--workers 0` is refused; leave the flag out for auto-tune. A daemon fixes this value when it starts, so the flag is honoured by a daemon this invocation starts and by a `--no-server` run. A running daemon started with another value refuses the invocation before anything is submitted, naming both values and the two ways out: `batchalign3 serve stop` and run the command again (the CLI starts a daemon with the requested values), or drop the flag. A server not started by this CLI (`serve start`, a launchd service, `--server URL`) records neither setting, so any `--workers`/`--timeout` beside it is refused the same way. |
 | `--force-cpu` | Disable MPS/CUDA and force CPU-only models |
 | `--server URL` | Server to submit to. Env fallback: `BATCHALIGN_SERVER`. A loopback URL reads inputs by path; another host receives transcript text only, so commands whose inputs are recordings are refused for it. See [Server Mode](server-mode.md). |
-| `--override-media-cache` | Bypass the media analysis cache (audio tasks only; text NLP tasks are not cached at all) |
+| `--override-media-cache` | Bypass the media analysis cache (audio tasks only; text NLP tasks are not cached at all). For `align`, also asks for a file whose `%wor` is already complete to be aligned again from its recording, which is then required; without the flag such a file is refreshed from its own `%wor` with no recording read. |
 | `--require-media-cache` | Require reusable evidence at cache-backed media stages; a miss fails instead of authorizing inference. Conflicts with both cache-override forms. |
 | `--require-media-cache-tasks TASKS` | Require evidence only for named cache-backed tasks; may combine with disjoint task refreshes, e.g. require `utr_asr` while refreshing `forced_alignment`. Conflicts with global require/refresh. |
-| `--override-media-cache-tasks TASKS` | Bypass only named audio-evidence caches (comma-separated: `forced_alignment`, `utr_asr`, `rev_asr_evidence`, `speaker_diarization_raw_evidence`) |
+| `--override-media-cache-tasks TASKS` | Bypass only named audio-evidence caches (comma-separated: `forced_alignment`, `utr_asr`, `rev_asr_evidence`, `speaker_diarization_raw_evidence`). Naming `forced_alignment` also asks `align` to re-align a complete-`%wor` file from its recording, as `--override-media-cache` does. |
 | `--debug-dir PATH` | Directory for pipeline debug artifacts (CHAT/JSON fixtures for offline replay). Env fallback: `BATCHALIGN_DEBUG_DIR` |
 | `--memory-tier {small,medium,large,fleet}` | Override the auto-detected memory tier (forces worker bootstrap and memory budgets for that tier regardless of actual system RAM) |
-| `--timeout SECONDS` | Operator override for the audio-task transport timeout. For ASR, the default is DERIVED per request from the audio's own duration (`DecodeBudgetSeconds`, `crates/batchalign-types/src/worker_v2/requests.rs`) plus a fixed margin, not a flat number; `--timeout` can only RAISE that derived ceiling, never lower it below what the request's own decode budget needs. Forced alignment and speaker diarization still use a flat default (1800 = 30 min) unless overridden. A positive whole number of seconds: `--timeout 0` is refused; leave the flag out for the built-in ceiling. |
-| `--tui` / `--no-tui` | Toggle full-screen TUI for server-backed jobs (`DirectHost` local runs stay on terminal progress bars) |
-| `--open-dashboard` / `--no-open-dashboard` | Toggle browser auto-open for submitted server job pages (macOS only, interactive TTY only) |
+| `--timeout SECONDS` | Operator override for the audio-task transport timeout. For ASR, the default is DERIVED per request from the audio's own duration (`DecodeBudgetSeconds`, `crates/batchalign-types/src/worker_v2/requests.rs`) plus a fixed margin, not a flat number; `--timeout` can only RAISE that derived ceiling, never lower it below what the request's own decode budget needs. Forced alignment and speaker diarization still use a flat default (1800 = 30 min) unless overridden. A positive whole number of seconds: `--timeout 0` is refused; leave the flag out for the built-in ceiling. Fixed when a daemon starts, and honoured or refused on a reused daemon exactly as `--workers` is. |
+| `--tui` / `--no-tui` | Two spellings of one choice for server-backed jobs: the full-screen TUI (the default, in an interactive terminal) or simple progress bars (`DirectHost` local runs stay on terminal progress bars). Passing both is refused. |
+| `--open-dashboard` / `--no-open-dashboard` | Two spellings of one choice for the submitted job's dashboard page (macOS only, interactive terminal only): `--open-dashboard` opens it for this submission even when the daemon was already running; `--no-open-dashboard` never opens it; with neither flag it opens once, on the invocation that starts the daemon. Passing both is refused. |
 | `--engine-overrides JSON` | Per-engine PARAMETERS, as a `{string:string}` JSON object, e.g. `{"qwen_model":"Qwen/Qwen3-ASR-0.6B-hf","qwen_device":"cpu"}`. Forwarded to the worker as opaque knobs. The `asr` / `fa` / `utr` / `translate` keys additionally select an engine and beat the per-command flags; see "Engine selection" below. The payload is parsed once, while the command line is parsed, so an invalid one is rejected before anything runs. A bare engine name (`--engine-overrides whisper`) is reported as the wrong-flag mistake it is, naming `--asr-engine` and its siblings, rather than as malformed JSON. |
 | `--sequential` | Process files one at a time with a single worker. No memory gate, no server. Ideal for small jobs on laptops |
 | `--no-server` | Skip auto-detection of a local server; force direct in-process execution |
+| `--dry-run` | Plan the job and stop: see [Dry run](#dry-run). Only a processing command has a job to plan; on any other command the flag is refused. |
 
 BA2 compatibility flags (`--memlog`, `--mem-guard`, `--adaptive-workers`,
 `--pool`, `--shared-models`, etc.) have been removed. If your scripts use them,
 remove them.
+
+## Dry run
+
+`--dry-run` resolves everything a run resolves up to the moment it would
+submit, prints the plan, and exits 0. Nothing is submitted, no daemon is
+started, no worker pool is opened and no provider is called. The plan is the
+very submission the run would have sent (the same `JobSubmission` and admitted
+output destinations the run hands the daemon), so it cannot drift from what
+the run does; what differs is only what is withheld.
+
+```bash
+batchalign3 --dry-run transcribe recordings/ --lang eng
+```
+
+The plan names: where the job would run (an explicit `--server`, a local
+server already answering, the daemon the run would start, or this process
+directly); the output directory; where the execution host would search for
+recordings (its media roots and mapping keys, read from a running server's
+health or from the configuration the daemon would start with); the language,
+speaker count and typed options (engines and models, exactly as submitted);
+every input with each result it would write, and what writing it does to the
+file already there (`new file`, `rewrites the input`, or `replaces an
+existing file` with the authority that allows it); and how many non-input
+neighbours would be copied through to the output directory. Nothing is
+written: not the output directory, not the pass-through copies.
+
+An input path that does not exist does not end the plan: the refusal the run
+would raise for it is listed under `unresolved inputs`, the rest is planned,
+and the exit code is still 0. A refusal that would stop the run before
+submission for another reason (an existing `<media>.cha` without
+`--overwrite`, a server of another build, a language the command cannot
+take) stops the dry run the same way, with the same message: the plan reports
+what the run would do, and the run would refuse.
+
+A running server may be asked for its health, which the run would also ask
+before submitting; a daemon that is not running is described, never started.
 
 ## Engine selection
 
@@ -67,6 +104,22 @@ name, like `batchalign3 transcribe in/ --asr-engine paraformer`.
 | `--main-bullets {derive,keep,exact}` | `align` | Whether utterance bullets on the input may change. Default `derive` recomputes them from aligned words; `keep` leaves every given bullet unchanged and fits `%wor` word timings inside it; `exact` also keeps every utterance without a bullet without one (its words are untimed). No raw FA cache-key change. |
 | `--end-overlap-policy {clamp-all-adjacent,preserve-cross-speaker}` | `align` | Same-speaker (default, `preserve-cross-speaker`) or every adjacent pair (`clamp-all-adjacent`) end overlap resolved from measured word hulls. Cross-speaker overlap is left alone under the default, since it is ordinary conversation. No raw FA cache-key change. |
 | `--translate-engine NAME` | `translate` | Translation engine. |
+
+## Language
+
+`--lang` is also a per-command flag. On `transcribe` and `diarize` it is
+**required**: a 3-letter ISO 639-3 code such as `eng` or `yue`, or `auto` to
+let the engine detect one language for the whole recording (`transcribe` also
+parses a code-switched pair such as `eng,spa`; see its page). There is no
+default language on these two commands: a recording processed under a language
+nobody chose is a silent error, so an invocation without `--lang` is refused
+before anything is submitted, naming the flag and `auto`. `utseg`,
+`benchmark`, `opensmile`, `avqi` and `speaker-identify` take the same `--lang`
+values and still default to `eng`. `align`, `morphotag`, `translate`, `coref`
+and `compare` take no `--lang`: they read each file's `@Languages:` header,
+and their job records say `per-file` (align's said `eng` until 2026-11-03, a
+placeholder nothing read). A file without the header, or whose first entry is
+not an ISO 639-3 code, is failed by name; nothing stands in for it.
 
 Each flag's `--help` lists every value it accepts, derived from the engine
 enum itself, so the advertised set and the accepted set are the same list. An
@@ -116,21 +169,27 @@ batchalign3 morphotag corpus/ -o output/ --sequential
 
 ## Dashboard browser auto-open
 
-On macOS, when you run a processing command interactively (e.g.,
-`batchalign3 transcribe corpus/ output/`), the CLI automatically opens the
-job's dashboard page in your default browser. This lets you monitor progress
-in real time.
+On macOS, when a processing command run interactively (e.g.,
+`batchalign3 transcribe corpus/ output/ --lang eng`) starts the local daemon, the CLI
+opens the job's dashboard page in your default browser, once. Later
+submissions reuse the running daemon and do not open another tab: its page
+is already open, or you closed it on purpose, and a shell loop over ten
+directories should not open ten tabs. Pass `--open-dashboard` to open this
+submission's page anyway, and `--no-open-dashboard` to never open one.
 
 Direct local execution does not submit an HTTP job, so there is no dashboard
 page to open. In that mode, `--open-dashboard` is a no-op and the CLI shows
 local terminal progress inline instead.
 
-The dashboard auto-open is **only** triggered when:
+The dashboard opens **only** when all of these hold:
 
-- Running on macOS (no-op on Linux/Windows)
-- stderr is connected to an interactive terminal (TTY)
+- Running on macOS (no-op on Linux/Windows; the URL is printed everywhere)
+- stdout is connected to an interactive terminal (TTY)
 - `--no-open-dashboard` was not passed
 - The `BATCHALIGN_NO_BROWSER` environment variable is not set
+- Either `--open-dashboard` was passed, or this invocation started the
+  daemon (a reused daemon, a server started with `serve start`, and a
+  `--server URL` were all running before the invocation looked)
 
 It will **not** fire in non-interactive contexts: cron jobs, CI pipelines,
 SSH sessions without a display, piped output, or scripts. To suppress it

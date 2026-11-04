@@ -66,20 +66,21 @@ admission before writing; acoustic eligibility alone is not write permission.
 ## Quick start
 
 ```bash
-# Turns JSON for every audio file in a directory (auto-detect speaker count)
-batchalign3 diarize recordings/ -o turns/
+# Turns JSON for every audio file in a directory (auto-detect speaker count).
+# `--lang` is required: a code, or `auto`.
+batchalign3 diarize recordings/ -o turns/ --lang eng
 
 # One file, with a known speaker count
-batchalign3 diarize session.mp3 -o turns/ --num-speakers 2
+batchalign3 diarize session.mp3 -o turns/ --lang eng --num-speakers 2
 
 # Explicitly use paid pyannoteAI Precision-2 (requires its API key)
-batchalign3 diarize session.mp3 -o turns/ --speaker-engine pyannote-ai
+batchalign3 diarize session.mp3 -o turns/ --lang eng --speaker-engine pyannote-ai
 
 # Then repair a transcript's speaker attribution with chatter
 chatter rediarize session.cha --turns turns/session.turns.json
 
 # Split an existing completely word-timed transcript with declared identities
-batchalign3 diarize session.cha -o corrected/ --speaker-map PAR0=CHI,PAR1=MOT
+batchalign3 diarize session.cha -o corrected/ --lang eng --speaker-map PAR0=CHI,PAR1=MOT
 ```
 
 ---
@@ -116,10 +117,11 @@ flowchart TD
 | --- | --- | --- |
 | `PATHS...` | | Media files/directories without a mapping; CHAT files/directories with `--speaker-map` |
 | `-o, --output DIR` | | Output directory for `.turns.json` artifacts or mapped CHAT |
+| `--overwrite` | off | Replace an existing `.turns.json` beside the recording. Without it, and without `-o DIR`, an existing artifact is refused before anything is submitted, naming the file. `--speaker-map` rewrites the transcript it was given and needs no authority. |
 | `--speaker-map MAP` | absent | Select timed-CHAT splitting with explicit `PAR0=CHI,PAR1=MOT` mappings to existing participants |
 | `--num-speakers N` | auto-detect | Expected speaker count, 2 or more. Omit unless known: auto-detection is the point of the engine. A count of 1 is refused when the arguments are parsed |
 | `--speaker-engine {pyannote,pyannote-ai,nemo}` | `pyannote` | Local TalkBank Pyannote, paid pyannoteAI Precision-2, or local NeMo |
-| `--lang CODE` | `eng` | 3-letter ISO code for worker-pool selection only; diarization itself is language-independent |
+| `--lang CODE\|auto` | required | 3-letter ISO 639-3 code, or `auto`, for worker-pool selection only; diarization itself is language-independent. There is no default: the language is recorded in the job and must be the one the operator chose, so an invocation without `--lang` is refused before anything is submitted. A code-switched pair is refused here; it belongs to `transcribe`. |
 
 ---
 

@@ -53,6 +53,7 @@ flowchart TD
 | --- | --- |
 | `PATHS...` | Input audio files (`.mp3`, `.mp4`, `.wav`) or directories |
 | `-o`, `--output DIR` | Output directory |
+| `--overwrite` | Replace existing benchmark results (`.cha` and CSV) beside the recording. Without it, and without `-o DIR`, an existing result is refused before anything is submitted, naming the file. |
 
 ### benchmark options
 

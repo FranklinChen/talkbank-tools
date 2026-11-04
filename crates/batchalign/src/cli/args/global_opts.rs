@@ -11,27 +11,22 @@ pub struct GlobalOpts {
     pub verbose: u8,
 
     /// Maximum concurrent files per job (default: auto-tune; GPU commands
-    /// default to 1).
+    /// default to 1). A positive count; leave it out for auto-tune.
     ///
-    /// Applies to new daemons (auto-spawned or `--no-server` direct
-    /// runs). When reusing an existing daemon (the common server-mode
-    /// path), the per-job parallelism was fixed at the daemon's startup
-    /// and `--workers` here does NOT override it, pass `--no-server`
-    /// or restart the daemon to change the parallelism. A note is
-    /// printed when `--workers` is provided but reuse is happening.
+    /// A daemon fixes this when it starts. The flag is honoured by a daemon
+    /// this invocation starts and by a `--no-server` run; a running daemon
+    /// that was started with another value refuses the invocation (nothing
+    /// is submitted), naming both values: stop it with `batchalign3 serve
+    /// stop` and run the command again, or drop the flag.
     #[arg(long, global = true)]
-    pub workers: Option<usize>,
+    pub workers: Option<crate::api::WorkerCap>,
 
     /// Inference timeout in seconds for audio tasks (ASR, FA, speaker).
-    /// Increase for very long recordings (default: 1800 = 30 minutes).
+    /// Increase for very long recordings (default: 1800 = 30 minutes). A
+    /// positive count; leave it out for the built-in ceiling.
     ///
-    /// Applies to new daemons (auto-spawned or `--no-server` direct
-    /// runs). When reusing an existing daemon (the common server-mode
-    /// path), the per-task ceiling was fixed at the daemon's startup
-    /// and `--timeout` here does NOT override it, pass `--no-server`
-    /// or restart the daemon to change the ceiling. A note is printed
-    /// when `--timeout` is provided but reuse is happening. Must be
-    /// positive; leave it out for the built-in ceiling.
+    /// A daemon fixes this when it starts, and it is honoured or refused
+    /// exactly as `--workers` is.
     #[arg(long, global = true)]
     pub timeout: Option<crate::api::PositiveSeconds>,
 
@@ -61,26 +56,14 @@ pub struct GlobalOpts {
     #[command(flatten)]
     pub media_cache: MediaCacheOpts,
 
-    /// Use full-screen TUI dashboard instead of progress bars (default for
-    /// interactive terminals). Pass --no-tui to use simple progress bars.
-    #[arg(long, action = ArgAction::SetTrue, default_value_t = true, global = true)]
-    pub tui: bool,
+    /// `--tui` / `--no-tui`: the two spellings of one [`Progress`] choice.
+    #[command(flatten)]
+    pub progress: ProgressFlags,
 
-    /// Disable full-screen TUI; use simple progress bars instead.
-    #[arg(long = "no-tui", action = ArgAction::SetTrue, global = true)]
-    pub no_tui: bool,
-
-    /// Auto-open the submitted job in the browser dashboard after submission.
-    /// Pass --no-open-dashboard to disable.
-    ///
-    /// Currently only macOS launches a browser automatically; other platforms
-    /// still print the dashboard URL for manual use.
-    #[arg(long, action = ArgAction::SetTrue, default_value_t = true, global = true)]
-    pub open_dashboard: bool,
-
-    /// Disable browser auto-open for submitted dashboard job pages.
-    #[arg(long = "no-open-dashboard", action = ArgAction::SetTrue, global = true)]
-    pub no_open_dashboard: bool,
+    /// `--open-dashboard` / `--no-open-dashboard`: the two spellings of one
+    /// [`Dashboard`] choice.
+    #[command(flatten)]
+    pub dashboard: DashboardFlags,
 
     /// Directory for pipeline debug artifacts (CHAT/JSON fixtures for
     /// offline replay). Also enables dashboard algorithm trace collection.
@@ -115,6 +98,44 @@ pub struct GlobalOpts {
     /// behavior on large machines.
     #[arg(long, global = true, value_name = "TIER")]
     pub memory_tier: Option<crate::types::runtime::MemoryTierKind>,
+
+    /// `--dry-run`: plan the job and stop.
+    #[command(flatten)]
+    pub dry_run: DryRunFlag,
+}
+
+/// `--dry-run` at the Clap boundary. The field is private: the flag is
+/// readable only as the [`RequestedExecution`] it selects.
+#[derive(Args, Debug, Clone, Default)]
+pub struct DryRunFlag {
+    /// Plan the job and stop. Discover the inputs, decide every output
+    /// destination, resolve the engines and the media places, name the daemon
+    /// or server that would run it, print the plan, and exit 0: nothing is
+    /// submitted, no daemon is started and no provider is called. The plan is
+    /// the very submission the run would have sent, not a description beside
+    /// it. Only a processing command has a job to plan; on any other command
+    /// the flag is refused.
+    #[arg(long, action = ArgAction::SetTrue, global = true)]
+    dry_run: bool,
+}
+
+/// Whether the invocation submits its job or only plans and prints it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestedExecution {
+    /// Submit the job (the default).
+    Submit,
+    /// `--dry-run`: plan, print, exit 0.
+    PlanOnly,
+}
+
+impl DryRunFlag {
+    /// The one choice the flag makes.
+    pub fn resolve(&self) -> RequestedExecution {
+        match self.dry_run {
+            true => RequestedExecution::PlanOnly,
+            false => RequestedExecution::Submit,
+        }
+    }
 }
 
 /// Mutually constrained media-evidence cache flags at the Clap boundary.
@@ -124,7 +145,10 @@ pub struct GlobalOpts {
 /// compatibility flags remain separate because existing scripts use them.
 #[derive(Args, Debug, Clone, Default)]
 pub struct MediaCacheOpts {
-    /// Bypass the media analysis cache.
+    /// Bypass the media analysis cache. For `align` it also asks for a
+    /// transcript whose `%wor` is already complete to be aligned again from
+    /// its recording, which is then required; without it such a file is
+    /// refreshed from its own `%wor` and the recording is not read.
     #[arg(
         long,
         global = true,
@@ -149,7 +173,9 @@ pub struct MediaCacheOpts {
     pub require_media_cache_tasks: Vec<String>,
 
     /// Bypass cache only for specific tasks (comma-separated).
-    /// Honored for audio tasks: `forced_alignment`, `utr_asr`.
+    /// Honored for audio tasks: `forced_alignment`, `utr_asr`. Naming
+    /// `forced_alignment` also asks `align` to re-align a complete-`%wor`
+    /// transcript from its recording, as `--override-media-cache` does.
     /// Batchalign3 does not cache text-NLP tasks, so
     /// `morphosyntax`/`utterance_segmentation`/`translation` are
     /// accepted but are no-ops.
@@ -164,13 +190,105 @@ pub struct MediaCacheOpts {
 }
 
 impl GlobalOpts {
-    /// Whether to use the full-screen TUI (resolves --tui / --no-tui).
-    pub fn use_tui(&self) -> bool {
-        self.tui && !self.no_tui
+    /// The daemon settings this invocation asked for, built once from
+    /// `--workers` and `--timeout`.
+    pub fn runtime(&self) -> crate::cli::daemon::RequestedRuntime {
+        crate::cli::daemon::RequestedRuntime {
+            workers: self.workers,
+            timeout: self.timeout,
+        }
     }
+}
 
-    /// Whether to auto-open the browser dashboard (resolves --open-dashboard / --no-open-dashboard).
-    pub fn use_open_dashboard(&self) -> bool {
-        self.open_dashboard && !self.no_open_dashboard
+/// How a server-backed job's progress is shown in the terminal.
+///
+/// One value from two spellings. `--tui` and `--no-tui` used to be two
+/// `bool`s read through `tui && !no_tui`, with `--tui` defaulting to true, so
+/// the positive flag could never change anything: only `--no-tui` acted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// The full-screen TUI, when the session is interactive (the default).
+    Tui,
+    /// Simple progress bars.
+    Plain,
+}
+
+/// Whether the submitted job's dashboard page opens in the browser.
+///
+/// Three states, because the default is neither of the two flags: with no
+/// flag the page opens once, when this invocation started the daemon, so a
+/// shell loop over ten directories opens one tab. `--open-dashboard` used to
+/// default to true and be read as `open_dashboard && !no_open_dashboard`, so
+/// it was a no-op and every submission opened a tab; `--no-open-dashboard`
+/// alone acted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dashboard {
+    /// `--open-dashboard`: open the page for this submission, in an
+    /// interactive session, whether or not the daemon was already running.
+    Open,
+    /// `--no-open-dashboard`: never open a browser.
+    Closed,
+    /// Neither flag: open the page only when this invocation started the
+    /// daemon.
+    OnDaemonStart,
+}
+
+/// The `--tui` / `--no-tui` pair at the Clap boundary.
+///
+/// The fields are private: the pair is readable only as the one [`Progress`]
+/// it resolves to, and clap refuses both flags together, so there is no
+/// `(true, true)` to decide.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProgressFlags {
+    /// Show the full-screen TUI for server-backed jobs (the default in an
+    /// interactive terminal).
+    #[arg(long, action = ArgAction::SetTrue, global = true, conflicts_with = "no_tui")]
+    tui: bool,
+
+    /// Show simple progress bars instead of the full-screen TUI.
+    #[arg(long = "no-tui", action = ArgAction::SetTrue, global = true)]
+    no_tui: bool,
+}
+
+impl ProgressFlags {
+    /// The one choice the two spellings make. Neither flag is the TUI.
+    pub fn resolve(&self) -> Progress {
+        match (self.tui, self.no_tui) {
+            (_, true) => Progress::Plain,
+            (true, false) | (false, false) => Progress::Tui,
+        }
+    }
+}
+
+/// The `--open-dashboard` / `--no-open-dashboard` pair at the Clap boundary.
+///
+/// Private fields and a clap conflict, as [`ProgressFlags`].
+#[derive(Args, Debug, Clone, Default)]
+pub struct DashboardFlags {
+    /// Open the submitted job's dashboard page in the browser, even when the
+    /// daemon was already running. Without either flag the page opens once,
+    /// when this invocation starts the daemon. Only macOS launches a browser;
+    /// other platforms print the URL.
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        global = true,
+        conflicts_with = "no_open_dashboard"
+    )]
+    open_dashboard: bool,
+
+    /// Never open the browser for submitted dashboard job pages.
+    #[arg(long = "no-open-dashboard", action = ArgAction::SetTrue, global = true)]
+    no_open_dashboard: bool,
+}
+
+impl DashboardFlags {
+    /// The one choice the two spellings make.
+    pub fn resolve(&self) -> Dashboard {
+        match (self.open_dashboard, self.no_open_dashboard) {
+            (_, true) => Dashboard::Closed,
+            (true, false) => Dashboard::Open,
+            (false, false) => Dashboard::OnDaemonStart,
+        }
     }
 }

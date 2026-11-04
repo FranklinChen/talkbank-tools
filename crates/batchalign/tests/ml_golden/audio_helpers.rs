@@ -135,7 +135,7 @@ pub(crate) async fn transcribe_audio_clip(
     assert_valid_chat_structure(&outputs[0], label);
 }
 
-pub(crate) async fn align_audio_clip(audio_name: &str, chat_name: &str, lang: &str, label: &str) {
+pub(crate) async fn align_audio_clip(audio_name: &str, chat_name: &str, label: &str) {
     let session =
         require_live_direct(InferTask::Fa, "Direct session does not support FA infer").await;
     let jobs = LiveDirectJobClient::new(&session);
@@ -164,7 +164,8 @@ pub(crate) async fn align_audio_clip(audio_name: &str, chat_name: &str, lang: &s
     let (info, outputs) = jobs
         .submit_paths_job(
             ReleasedCommand::Align,
-            lang,
+            // Align is per-file: each file's language is its `@Languages:`.
+            "per-file",
             vec![fixtures.stripped_chat.to_string_lossy().into()],
             vec![output_path.to_string_lossy().into()],
             options,

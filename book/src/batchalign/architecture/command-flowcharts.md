@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-03 23:37 EST
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -18,12 +18,13 @@ mode, UTR pre-pass behavior, and incremental processing.
 ```mermaid
 flowchart TD
     start([align invoked]) --> read[Read CHAT file]
-    read --> admit[Admit source-bound word-timing plan\nand active incremental prior]
-    admit --> resolve_audio[Resolve audio file]
+    read --> admit[Admit source-bound word-timing plan]
+    admit --> reuse_check{"AlignRoute::decide:\ncomplete reusable %wor and\nno --override-media-cache?"}
+    reuse_check -->|Yes: no recording read| reuse[Refresh main-tier bullets from %wor\nmechanically, resolve overlap, THEN\noptionally regenerate %wor from the\nresolved state]
+    reuse_check -->|No: NeedsAudio| prior[Admit declared --before prior, if any]
+    prior --> resolve_audio[Resolve audio file]
     resolve_audio --> ensure_wav[ensure_wav: convert mp4→wav if needed]
-    ensure_wav --> reuse_check{Complete reusable\n%wor timing?}
-    reuse_check -->|Yes| reuse[Refresh main-tier bullets from %wor\nmechanically, resolve overlap, THEN\noptionally regenerate %wor from the\nresolved state]
-    reuse_check -->|No| count[count_utterance_timing → timed, untimed]
+    ensure_wav --> count[count_utterance_timing → timed, untimed]
     reuse --> done([Output .cha file])
 
     count --> utr_check{untimed > 0?}

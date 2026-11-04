@@ -11,8 +11,10 @@ async fn retained_cache_cli_replays_legacy_evidence_without_mutating_database() 
     let root = tempfile::tempdir().unwrap();
     let digest = "1".repeat(64);
     // Independent wire fixture: request-key field order is part of revision 2.
+    // An MP3's presentation, the one upload whose declaration never changed,
+    // so legacy MP3 evidence is exactly what this build still replays.
     let canonical = format!(
-        r#"{{"domain":"rev_asr_evidence","schema_version":2,"provider_media_blake3":"{digest}","preparation_recipe":"source_bytes_legacy_audio_mpeg_v1","upload_file_name":"provider-media.wav","upload_mime":"audio/mpeg","upload_metadata":"batchalign3_1111111111111111","requested_language":"eng","expected_speakers":1,"request_policy_revision":"langid-skip-itn-v1","model_revision":"revai:asynchronous-transcript-v1"}}"#
+        r#"{{"domain":"rev_asr_evidence","schema_version":2,"provider_media_blake3":"{digest}","preparation_recipe":"source_bytes_legacy_audio_mpeg_v1","upload_file_name":"provider-media.mp3","upload_mime":"audio/mpeg","upload_metadata":"batchalign3_1111111111111111","requested_language":"eng","expected_speakers":1,"request_policy_revision":"langid-skip-itn-v1","model_revision":"revai:asynchronous-transcript-v1"}}"#
     );
     let key = blake3::hash(canonical.as_bytes()).to_hex().to_string();
     let mut trace: serde_json::Value = serde_json::from_str(&canonical).unwrap();
@@ -146,7 +148,7 @@ async fn conflicting_cache_http_policy_is_rejected_without_creating_job() {
         .client()
         .post(format!("{}/jobs", session.base_url()))
         .json(&json!({
-            "command": "align", "lang": "eng", "num_speakers": 1,
+            "command": "align", "lang": "per-file", "num_speakers": 1,
             "files": [{"filename": "sample.cha", "content": MINIMAL_CHAT}],
             "options": {"command": "align", "require_media_cache_tasks": ["utr_asr"],
                 "override_media_cache_tasks": ["utr_asr"]}

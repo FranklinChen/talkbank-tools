@@ -178,6 +178,10 @@ pub(crate) enum DispatchPlanRefusal {
     MediaRoot(#[from] crate::options::MediaRootRefusal),
     #[error(transparent)]
     AsrPolicy(#[from] crate::transcribe::TranscribeAsrPlanError),
+    /// The job's speaker count or separation is not one the engines the run
+    /// involves can take.
+    #[error(transparent)]
+    SpeakerPolicy(#[from] crate::transcribe::SpeakerPlanError),
     /// The persisted options could not be read into a plan at all.
     #[error("command plan could not be built from job options")]
     Options,
@@ -246,7 +250,6 @@ impl TranscribeDispatchPlan {
             .ok_or(DispatchPlanRefusal::Options)?;
         let with_utseg = runtime_flag(job, "utseg", true);
         let with_morphosyntax = runtime_flag(job, "morphosyntax", false);
-        let speaker_backend = diarize.then(|| resolve_speaker_backend(speaker_engine));
 
         // Refuse a language with no segmenter HERE, before a single ASR
         // request is dispatched. Whether utterance segmentation can run at all
@@ -261,10 +264,16 @@ impl TranscribeDispatchPlan {
         // dropped silently.
         let asr = crate::transcribe::TranscribeAsrPlan::from_request(
             AsrBackend::try_from_engine(&asr_engine)?,
-            auto_speakers,
-            job.dispatch.num_speakers.0 as usize,
             &engine_extras,
             &job.dispatch.lang,
+        )?;
+        // The speaker plan is admitted against the recognizer, so a count an
+        // engine the run involves cannot take is refused here, by name, and
+        // the recognizer path never sees the count at all.
+        let speakers = crate::transcribe::SpeakerPlan::admit(
+            crate::transcribe::SpeakerCount::admit(auto_speakers, job.dispatch.num_speakers)?,
+            crate::transcribe::SpeakerSeparation::from_request(diarize, speaker_engine),
+            Some(asr.backend()),
         )?;
 
         let plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
@@ -277,8 +286,7 @@ impl TranscribeDispatchPlan {
             kernel_plan: kernel_plan_for_job(job, host_policy),
             base_options: TranscribeOptions {
                 plan,
-                diarize,
-                speaker_backend,
+                speakers,
                 with_morphosyntax,
                 cache_policies,
                 write_wor: wor_tier.should_write(),
@@ -308,8 +316,6 @@ pub(crate) struct BenchmarkDispatchPlan {
     pub mwt: MwtDict,
     /// Whether the hypothesis CHAT output should merge abbreviations.
     pub should_merge_abbrev: bool,
-    /// The one language the recording and its gold transcript are scored in.
-    pub lang: crate::api::LanguageCode3,
 }
 
 impl BenchmarkDispatchPlan {
@@ -321,16 +327,13 @@ impl BenchmarkDispatchPlan {
         // Refused here, once, for the whole job. This used to be a check inside
         // each file's retry loop that failed the file and continued, so every
         // retry attempt failed the same way and the file ended with no terminal
-        // state recorded.
-        let lang = match &job.dispatch.lang {
-            crate::api::LanguageSpec::Resolved(code) => code.clone(),
-            crate::api::LanguageSpec::Auto
-            | crate::api::LanguageSpec::Pair(_)
-            | crate::api::LanguageSpec::PerFile => {
-                return Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(
-                    job.dispatch.lang.clone(),
-                ));
-            }
+        // state recorded. The code itself is read by the ASR plan below; the
+        // comparison takes none (each transcript's `@Languages:` decides its
+        // morphotag), so nothing here keeps it.
+        let crate::api::LanguageSpec::Resolved(_) = &job.dispatch.lang else {
+            return Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(
+                job.dispatch.lang.clone(),
+            ));
         };
         let cache_policy = resolve_cache_overrides(job)?.policy_for(CacheTaskName::RevAsrEvidence);
         let BenchmarkDispatchParams {
@@ -342,27 +345,33 @@ impl BenchmarkDispatchPlan {
         } = extract_benchmark_dispatch_params(&job.dispatch.options, cache_policy)
             .ok_or(DispatchPlanRefusal::Options)?;
 
+        // A refusal here means a persisted job names an engine this build
+        // cannot run. Submission validation refuses those up front, so
+        // reaching this arm means the job predates the check. The refusal is
+        // PROPAGATED: `.ok()?` used to turn it into `None`, which routing
+        // dropped silently.
+        let asr = crate::transcribe::TranscribeAsrPlan::from_request(
+            AsrBackend::try_from_engine(&asr_engine)?,
+            &engine_extras,
+            &job.dispatch.lang,
+        )?;
+        // Benchmark scores the recognizer alone: its count reaches the
+        // recognizer's own diarization and nothing else.
+        let speakers = crate::transcribe::SpeakerPlan::admit(
+            crate::transcribe::SpeakerCount::admit(false, job.dispatch.num_speakers)?,
+            crate::transcribe::SpeakerSeparation::RecognizerOnly,
+            Some(asr.backend()),
+        )?;
+
         Ok(Self {
             kernel_plan: kernel_plan_for_job(job, host_policy),
             base_options: TranscribeOptions {
-                // A refusal here means a persisted job names an engine this
-                // build cannot run. Submission validation refuses those up
-                // front, so reaching this arm means the job predates the
-                // check. The refusal is PROPAGATED: `.ok()?` used to turn it
-                // into `None`, which routing dropped silently.
                 plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
-                    crate::transcribe::TranscribeAsrPlan::from_request(
-                        AsrBackend::try_from_engine(&asr_engine)?,
-                        false,
-                        job.dispatch.num_speakers.0 as usize,
-                        &engine_extras,
-                        &job.dispatch.lang,
-                    )?,
+                    asr,
                     false,
                     crate::params::UtsegFallbackPolicy::Refuse,
                 )?,
-                diarize: false,
-                speaker_backend: None,
+                speakers,
                 with_morphosyntax: false,
                 cache_policies: TranscribeCachePolicies::uniform(cache_policy),
                 write_wor: wor_tier.should_write(),
@@ -371,7 +380,6 @@ impl BenchmarkDispatchPlan {
             },
             mwt: MwtDict::default(),
             should_merge_abbrev: merge_abbrev.should_merge(),
-            lang,
         })
     }
 }
@@ -459,7 +467,7 @@ impl MediaAnalysisDispatchPlan {
                 };
                 Ok(Self::Diarize {
                     kernel_plan: kernel_plan_for_job(job, host_policy),
-                    backend: resolve_selected_speaker_backend(options.speaker_engine),
+                    backend: options.speaker_engine.worker_backend(),
                     // The option type admits only a count a diarizer can answer
                     // (at least two, or absent for automatic); the worker
                     // request still speaks the provider's own parameter.
@@ -508,22 +516,6 @@ fn runtime_flag(job: &RunnerJobSnapshot, key: &str, default: bool) -> bool {
         .get(key)
         .and_then(|value| value.as_bool())
         .unwrap_or(default)
-}
-
-/// Resolve the dedicated speaker backend from `engine_overrides`.
-fn resolve_speaker_backend(engine: Option<crate::options::SpeakerEngineName>) -> SpeakerBackendV2 {
-    resolve_selected_speaker_backend(
-        engine.unwrap_or(crate::options::SpeakerEngineName::PyannoteAi),
-    )
-}
-
-/// Lower one already-selected speaker engine to its worker-protocol backend.
-fn resolve_selected_speaker_backend(engine: crate::options::SpeakerEngineName) -> SpeakerBackendV2 {
-    match engine {
-        crate::options::SpeakerEngineName::PyannoteAi => SpeakerBackendV2::PyannoteAi,
-        crate::options::SpeakerEngineName::Pyannote => SpeakerBackendV2::Pyannote,
-        crate::options::SpeakerEngineName::Nemo => SpeakerBackendV2::Nemo,
-    }
 }
 
 #[cfg(test)]

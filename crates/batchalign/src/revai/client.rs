@@ -13,8 +13,9 @@ use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 
-use crate::api::AudioPositionSeconds;
+use crate::api::{AudioPositionSeconds, RevAiJobId};
 
+use super::poll::{Awaited, PollEnd, PollPolicy, PollTiming, PolledJob, Progress, SubmittedJob};
 use super::types::{
     Job, JobStatus, LangIdJob, LangIdJobStatus, LangIdResult, RevTranscriptEvidence, SubmitOptions,
     TimedWord, Transcript,
@@ -394,6 +395,71 @@ impl RevAiError {
     }
 }
 
+/// A failure sorted by its verdict, so a match on it is a match on what to do.
+///
+/// The one route from a [`RevAiError`] to a decision: the upload loop and the
+/// poll both consume this rather than re-reading [`RevAiError::disposition`]
+/// and a status code of their own. Each arm's payload can only be built here,
+/// so a [`TerminalFailure`] in hand is proof the table called it terminal.
+#[derive(Debug)]
+pub(crate) enum ClassifiedFailure {
+    Transient(TransientFailure),
+    Terminal(TerminalFailure),
+    AccountRefused(AccountRefusal),
+}
+
+/// A failure the table judged transient: the same request may succeed later.
+#[derive(Debug)]
+pub(crate) struct TransientFailure(RevAiError);
+
+/// A failure the table judged terminal: repeating the request cannot help.
+#[derive(Debug)]
+pub(crate) struct TerminalFailure(RevAiError);
+
+/// Rev.AI refusing the account itself.
+#[derive(Debug)]
+pub(crate) struct AccountRefusal(RevAiError);
+
+impl TransientFailure {
+    /// The failure itself, once the verdict has been acted on.
+    pub(crate) fn into_error(self) -> RevAiError {
+        self.0
+    }
+}
+
+impl TerminalFailure {
+    /// The failure itself, once the verdict has been acted on.
+    pub(crate) fn into_error(self) -> RevAiError {
+        self.0
+    }
+}
+
+impl AccountRefusal {
+    /// The failure itself, once the verdict has been acted on.
+    pub(crate) fn into_error(self) -> RevAiError {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TransientFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl RevAiError {
+    /// Sort this failure by its verdict, consuming it.
+    pub(crate) fn classify(self) -> ClassifiedFailure {
+        match self.disposition() {
+            RevAiDisposition::Transient => ClassifiedFailure::Transient(TransientFailure(self)),
+            RevAiDisposition::Terminal => ClassifiedFailure::Terminal(TerminalFailure(self)),
+            RevAiDisposition::AccountRefused => {
+                ClassifiedFailure::AccountRefused(AccountRefusal(self))
+            }
+        }
+    }
+}
+
 impl From<RevAiError> for crate::error::ServerError {
     /// The ONLY route from a Rev.AI failure into the control plane.
     ///
@@ -425,6 +491,9 @@ pub struct RevAiClient {
     client: DeadlineClient,
     endpoints: RevAiEndpoints,
     upload_retry_backoff: UploadRetryBackoff,
+    /// Where a job wait's time comes from: real for production, virtual for a
+    /// test that needs a deadline to pass without the wall clock doing so.
+    poll_timing: PollTiming,
 }
 
 impl RevAiClient {
@@ -438,10 +507,12 @@ impl RevAiClient {
             client: DeadlineClient::new()?,
             endpoints: RevAiEndpoints::production(),
             upload_retry_backoff: UploadRetryBackoff::Exponential,
+            poll_timing: PollTiming::Real,
         })
     }
 
-    /// A client pointed at a local test server, with the backoff removed.
+    /// A client pointed at a local test server, with the backoff removed and
+    /// the poll clock virtual.
     ///
     /// The only other constructor is [`new`][Self::new], which is always the
     /// production endpoint, so no production path can reach a different host:
@@ -456,6 +527,7 @@ impl RevAiClient {
                 language_id: format!("{speech_to_text_base}/languageid"),
             },
             upload_retry_backoff: UploadRetryBackoff::None,
+            poll_timing: PollTiming::Virtual,
         }
     }
 
@@ -509,10 +581,15 @@ impl RevAiClient {
                         // Retry only what the error itself says is worth
                         // retrying, rather than re-deciding the 5xx boundary
                         // here in a second place.
-                        match error.disposition() {
-                            RevAiDisposition::Transient => attempts_failed.push(error),
-                            RevAiDisposition::Terminal | RevAiDisposition::AccountRefused => {
-                                return Err(error);
+                        match error.classify() {
+                            ClassifiedFailure::Transient(failure) => {
+                                attempts_failed.push(failure.into_error());
+                            }
+                            ClassifiedFailure::Terminal(failure) => {
+                                return Err(failure.into_error());
+                            }
+                            ClassifiedFailure::AccountRefused(refusal) => {
+                                return Err(refusal.into_error());
                             }
                         }
                         continue;
@@ -531,7 +608,7 @@ impl RevAiClient {
     }
 
     /// Fetch the current status for one previously submitted job.
-    fn get_job_details(&self, job_id: &str) -> Result<Job> {
+    fn get_job_details(&self, job_id: &RevAiJobId) -> Result<Job> {
         let resp = self
             .client
             .get(format!("{}/jobs/{job_id}", self.endpoints.speech_to_text))
@@ -552,7 +629,7 @@ impl RevAiClient {
     }
 
     /// Download the transcript for a completed job.
-    fn get_transcript(&self, job_id: &str) -> Result<RevTranscriptEvidence> {
+    fn get_transcript(&self, job_id: &RevAiJobId) -> Result<RevTranscriptEvidence> {
         let resp = self
             .client
             .get(format!(
@@ -577,53 +654,60 @@ impl RevAiClient {
         retain_transcript_body(resp.bytes()?.to_vec())
     }
 
+    /// Upload media, wait for its job under `policy`, and download the
+    /// transcript.
+    ///
+    /// `Ok(Awaited::Unfinished)` is a paid job the wait did not see finish; it
+    /// names the job so the caller can record it and a later run can resume
+    /// it with [`Self::resume_transcription_blocking`] instead of paying again.
     pub(super) fn transcribe_bytes_blocking(
         &self,
         bytes: &[u8],
         file_name: &str,
         mime: &str,
         opts: &SubmitOptions,
-        max_poll_secs: u64,
-    ) -> Result<TranscriptResult> {
+        policy: PollPolicy,
+    ) -> Result<Awaited<TranscriptResult>> {
         let job = self.submit_media_bytes(bytes, file_name, mime, opts)?;
-        self.poll_and_download(&job.id, 5, max_poll_secs)
+        self.await_transcription(SubmittedJob::named(job.id), policy)
     }
 
-    /// Poll a previously submitted job until it completes, then download it.
-    ///
-    /// Returns a [`TranscriptResult`] that includes the detected language
-    /// (when `language: "auto"` was used at submission time).
-    fn poll_and_download(
+    /// Wait for a job an earlier run submitted and left unfinished, then
+    /// download its transcript. Uploads nothing.
+    pub(super) fn resume_transcription_blocking(
         &self,
-        job_id: &str,
-        initial_interval_secs: u64,
-        max_interval_secs: u64,
-    ) -> Result<TranscriptResult> {
-        let mut interval = initial_interval_secs;
-        let mut attempts: u32 = 0;
+        job: SubmittedJob,
+        policy: PollPolicy,
+    ) -> Result<Awaited<TranscriptResult>> {
+        self.await_transcription(job, policy)
+    }
 
-        loop {
-            let job = self.get_job_details(job_id)?;
-            match job.status {
-                JobStatus::InProgress => {
-                    thread::sleep(Duration::from_secs(interval));
-                    attempts += 1;
-                    if attempts.is_multiple_of(3) {
-                        interval = (interval * 2).min(max_interval_secs);
-                    }
-                }
-                JobStatus::Transcribed => {
-                    let transcript = self.get_transcript(job_id)?;
-                    return Ok(TranscriptResult {
-                        transcript,
-                        detected_language: job.language,
-                    });
-                }
-                JobStatus::Failed => {
-                    let detail = job.failure_detail.unwrap_or_else(|| "unknown error".into());
-                    return Err(RevAiError::JobFailed(detail));
-                }
+    /// Poll a submitted transcription job until the wait ends, then download
+    /// a finished job's transcript.
+    ///
+    /// The wait is the [`super::poll`] typestate: it cannot run without a
+    /// deadline, and a transient status failure cannot end it. Rev.AI's own
+    /// verdict on the job (failed, or a terminal refusal of the poll) is the
+    /// error it was; an unfinished job is returned by name, not as an error.
+    fn await_transcription(
+        &self,
+        job: SubmittedJob,
+        policy: PollPolicy,
+    ) -> Result<Awaited<TranscriptResult>> {
+        match job
+            .begin::<TranscriptionJob>(policy, self.poll_timing)
+            .run(self)
+        {
+            PollEnd::Ready(job_id, detected_language) => {
+                let transcript = self.get_transcript(&job_id)?;
+                Ok(Awaited::Ready(TranscriptResult {
+                    transcript,
+                    detected_language,
+                }))
             }
+            PollEnd::Unfinished(unfinished) => Ok(Awaited::Unfinished(unfinished)),
+            PollEnd::Rejected(failure) => Err(failure.into_error()),
+            PollEnd::Refused(refusal) => Err(refusal.into_error()),
         }
     }
 
@@ -663,7 +747,7 @@ impl RevAiClient {
     }
 
     /// Poll a language identification job status.
-    fn get_langid_job(&self, job_id: &str) -> Result<LangIdJob> {
+    fn get_langid_job(&self, job_id: &RevAiJobId) -> Result<LangIdJob> {
         let resp = self
             .client
             .get(format!("{}/jobs/{job_id}", self.endpoints.language_id))
@@ -684,7 +768,7 @@ impl RevAiClient {
     }
 
     /// Download the language identification result for a completed job.
-    fn get_langid_result(&self, job_id: &str) -> Result<LangIdResult> {
+    fn get_langid_result(&self, job_id: &RevAiJobId) -> Result<LangIdResult> {
         let resp = self
             .client
             .get(format!(
@@ -708,41 +792,69 @@ impl RevAiClient {
         Ok(resp.json()?)
     }
 
+    /// Upload media for language identification, wait for its job under
+    /// `policy`, and download the result. The same bounded wait as a
+    /// transcription; an unfinished identification is returned by name.
     pub(super) fn identify_language_bytes_blocking(
         &self,
         bytes: &[u8],
         file_name: &str,
         mime: &str,
-        max_poll_secs: u64,
-    ) -> Result<LangIdResult> {
+        policy: PollPolicy,
+    ) -> Result<Awaited<LangIdResult>> {
         let job = self.submit_langid_bytes(bytes, file_name, mime)?;
-        self.poll_langid_blocking(&job.id, max_poll_secs)
+        match SubmittedJob::named(job.id)
+            .begin::<LanguageIdJob>(policy, self.poll_timing)
+            .run(self)
+        {
+            PollEnd::Ready(job_id, ()) => Ok(Awaited::Ready(self.get_langid_result(&job_id)?)),
+            PollEnd::Unfinished(unfinished) => Ok(Awaited::Unfinished(unfinished)),
+            PollEnd::Rejected(failure) => Err(failure.into_error()),
+            PollEnd::Refused(refusal) => Err(refusal.into_error()),
+        }
     }
+}
 
-    fn poll_langid_blocking(&self, job_id: &str, max_poll_secs: u64) -> Result<LangIdResult> {
-        let mut interval: u64 = 3;
-        let mut attempts: u32 = 0;
+/// A transcription job, as the poll typestate reads it. Ready carries the
+/// language Rev.AI detected (`None` when a concrete language was submitted).
+struct TranscriptionJob;
 
-        loop {
-            let status = self.get_langid_job(job_id)?;
-            match status.status {
-                LangIdJobStatus::InProgress => {
-                    thread::sleep(Duration::from_secs(interval));
-                    attempts += 1;
-                    if attempts.is_multiple_of(3) {
-                        interval = (interval * 2).min(max_poll_secs);
-                    }
-                }
-                LangIdJobStatus::Completed => {
-                    return self.get_langid_result(job_id);
-                }
-                LangIdJobStatus::Failed => {
-                    let detail = status
-                        .failure_detail
-                        .unwrap_or_else(|| "unknown error".into());
-                    return Err(RevAiError::JobFailed(detail));
-                }
-            }
+impl PolledJob for TranscriptionJob {
+    type Ready = Option<String>;
+
+    fn progress(client: &RevAiClient, job: &RevAiJobId) -> Result<Progress<Self::Ready>> {
+        let details = client.get_job_details(job)?;
+        match details.status {
+            JobStatus::InProgress => Ok(Progress::InProgress),
+            JobStatus::Transcribed => Ok(Progress::Ready(details.language)),
+            // Rev.AI's own verdict on the job, handed to the one failure table
+            // (which calls it terminal) rather than ended here.
+            JobStatus::Failed => Err(RevAiError::JobFailed(
+                details
+                    .failure_detail
+                    .unwrap_or_else(|| "unknown error".into()),
+            )),
+        }
+    }
+}
+
+/// A language-identification job, as the poll typestate reads it. Its result
+/// is a separate download, so Ready carries nothing.
+struct LanguageIdJob;
+
+impl PolledJob for LanguageIdJob {
+    type Ready = ();
+
+    fn progress(client: &RevAiClient, job: &RevAiJobId) -> Result<Progress<Self::Ready>> {
+        let status = client.get_langid_job(job)?;
+        match status.status {
+            LangIdJobStatus::InProgress => Ok(Progress::InProgress),
+            LangIdJobStatus::Completed => Ok(Progress::Ready(())),
+            LangIdJobStatus::Failed => Err(RevAiError::JobFailed(
+                status
+                    .failure_detail
+                    .unwrap_or_else(|| "unknown error".into()),
+            )),
         }
     }
 }
@@ -1113,8 +1225,9 @@ mod transport_failure_tests {
                     skip_postprocessing: Some(true),
                     metadata: None,
                 },
-                1,
+                PollPolicy::TRANSCRIPTION,
             )
+            .map(|_| ())
             .expect_err("test: a hung-up endpoint cannot produce a transcript");
 
         let server_error = ServerError::from(error);
@@ -1123,5 +1236,301 @@ mod transport_failure_tests {
             FailureCategory::ProviderTransient,
             "a dropped connection to Rev.AI is a transient provider failure, got: {server_error}"
         );
+    }
+}
+
+/// The bounded wait, driven through the production path (`submit`, then the
+/// poll typestate, then the transcript download) against a scripted loopback
+/// Rev.AI. The client's clock is virtual, so a deadline passes in no wall time.
+#[cfg(test)]
+mod wait_tests {
+    use super::super::poll::{PollDeadline, PollInterval, TransientBudget, UnfinishedCause};
+    use super::super::scripted_server::{ScriptedReply, ScriptedRevServer, SeenRequest};
+    use super::*;
+
+    const SUBMITTED: ScriptedReply =
+        ScriptedReply::Json(r#"{"id":"job-1","status":"in_progress"}"#);
+    const IN_PROGRESS: ScriptedReply =
+        ScriptedReply::Json(r#"{"id":"job-1","status":"in_progress"}"#);
+    const TRANSCRIBED: ScriptedReply =
+        ScriptedReply::Json(r#"{"id":"job-1","status":"transcribed","language":"en"}"#);
+    const FAILED: ScriptedReply = ScriptedReply::Json(
+        r#"{"id":"job-1","status":"failed","failure_detail":"media holds no speech"}"#,
+    );
+    const TRANSCRIPT: ScriptedReply = ScriptedReply::Json(r#"{"monologues":[]}"#);
+    /// Rev.AI's service failing on a status poll: transient by the table.
+    const UNAVAILABLE: ScriptedReply = ScriptedReply::Status(503);
+
+    fn options() -> SubmitOptions {
+        SubmitOptions {
+            language: "en".to_string(),
+            speakers_count: Some(2),
+            skip_postprocessing: Some(true),
+            metadata: None,
+        }
+    }
+
+    /// A policy whose numbers a test can reason about: a budget of two
+    /// transient failures, a ten-second deadline, five-second polls.
+    fn policy() -> PollPolicy {
+        PollPolicy {
+            deadline: PollDeadline::of(Duration::from_secs(10)),
+            transient_budget: TransientBudget::of(2),
+            interval: PollInterval {
+                initial: Duration::from_secs(5),
+                max: Duration::from_secs(5),
+            },
+        }
+    }
+
+    /// A policy under which the deadline never comes first.
+    fn without_deadline_pressure() -> PollPolicy {
+        PollPolicy {
+            deadline: PollDeadline::of(Duration::from_secs(3600)),
+            ..policy()
+        }
+    }
+
+    fn transcribe(
+        server: &ScriptedRevServer,
+        policy: PollPolicy,
+    ) -> Result<Awaited<TranscriptResult>> {
+        RevAiClient::for_test(&server.speech_to_text_base).transcribe_bytes_blocking(
+            b"media bytes",
+            "provider-media.mp3",
+            "audio/mpeg",
+            &options(),
+            policy,
+        )
+    }
+
+    fn seen(method: &str, path: &str) -> SeenRequest {
+        SeenRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    fn unfinished(
+        awaited: Result<Awaited<TranscriptResult>>,
+    ) -> super::super::poll::UnfinishedRevJob {
+        match awaited {
+            Ok(Awaited::Unfinished(unfinished)) => unfinished,
+            Ok(Awaited::Ready(_)) => panic!("the wait was expected to end unfinished"),
+            Err(error) => panic!("the wait was expected to end unfinished, not fail: {error}"),
+        }
+    }
+
+    /// The ordinary wait: in progress twice, then transcribed, then the
+    /// transcript is downloaded once.
+    #[test]
+    fn a_job_that_finishes_is_polled_until_transcribed_then_downloaded() {
+        let server = ScriptedRevServer::start(vec![
+            SUBMITTED,
+            IN_PROGRESS,
+            IN_PROGRESS,
+            TRANSCRIBED,
+            TRANSCRIPT,
+        ]);
+        match transcribe(&server, without_deadline_pressure()) {
+            Ok(Awaited::Ready(result)) => {
+                let (_, detected) = result.into_parts();
+                assert_eq!(detected.as_deref(), Some("en"));
+            }
+            Ok(Awaited::Unfinished(unfinished)) => {
+                panic!("finished job left unfinished: {unfinished}")
+            }
+            Err(error) => panic!("finished job failed: {error}"),
+        }
+        assert_eq!(
+            server.seen(),
+            vec![
+                seen("POST", "/speechtotext/v1/jobs"),
+                seen("GET", "/speechtotext/v1/jobs/job-1"),
+                seen("GET", "/speechtotext/v1/jobs/job-1"),
+                seen("GET", "/speechtotext/v1/jobs/job-1"),
+                seen("GET", "/speechtotext/v1/jobs/job-1/transcript"),
+            ]
+        );
+    }
+
+    /// RED FIRST: one transient failure of a status poll used to end the job
+    /// (the poll's `?`), and the file's retry then re-submitted and re-paid.
+    /// The budget absorbs it and the wait goes on to the transcript.
+    #[test]
+    fn one_transient_poll_failure_is_absorbed_and_the_job_still_completes() {
+        let server = ScriptedRevServer::start(vec![
+            SUBMITTED,
+            IN_PROGRESS,
+            UNAVAILABLE,
+            TRANSCRIBED,
+            TRANSCRIPT,
+        ]);
+        assert!(
+            matches!(
+                transcribe(&server, without_deadline_pressure()),
+                Ok(Awaited::Ready(_))
+            ),
+            "a 503 on one status poll must not end the job"
+        );
+        let polls = server
+            .seen()
+            .iter()
+            .filter(|request| request.path == "/speechtotext/v1/jobs/job-1")
+            .count();
+        assert_eq!(polls, 3, "in progress, the failed poll, transcribed");
+        assert_eq!(
+            server.seen().last(),
+            Some(&seen("GET", "/speechtotext/v1/jobs/job-1/transcript"))
+        );
+    }
+
+    /// The transport fault the fleet met on 2026-09-03, on a status poll: the
+    /// connection goes away with no answer. Transient by the table, absorbed
+    /// like a 503, and the job still completes.
+    #[test]
+    fn a_hung_up_status_poll_is_absorbed_and_the_job_still_completes() {
+        let server = ScriptedRevServer::start(vec![
+            SUBMITTED,
+            ScriptedReply::HangUp,
+            TRANSCRIBED,
+            TRANSCRIPT,
+        ]);
+        assert!(
+            matches!(
+                transcribe(&server, without_deadline_pressure()),
+                Ok(Awaited::Ready(_))
+            ),
+            "a dropped connection on one status poll must not end the job"
+        );
+        assert_eq!(
+            server.seen().last(),
+            Some(&seen("GET", "/speechtotext/v1/jobs/job-1/transcript"))
+        );
+    }
+
+    /// Budget plus one transient failures end the wait with the job named and
+    /// every failure recorded, in order; the job is not abandoned.
+    #[test]
+    fn exceeding_the_transient_budget_hands_the_job_back_by_name() {
+        let server = ScriptedRevServer::start(vec![SUBMITTED, UNAVAILABLE]);
+        let unfinished = unfinished(transcribe(&server, without_deadline_pressure()));
+        assert_eq!(unfinished.job, "job-1");
+        match &unfinished.cause {
+            UnfinishedCause::TransientBudgetExhausted { budget, failures } => {
+                assert_eq!(*budget, TransientBudget::of(2));
+                assert_eq!(
+                    failures.len(),
+                    3,
+                    "budget of two, plus the one that exhausted it"
+                );
+                assert!(
+                    failures.iter().all(|failure| failure.contains("503")),
+                    "{failures:?}"
+                );
+            }
+            UnfinishedCause::DeadlineExceeded { .. } => panic!("the budget ran out first"),
+        }
+        assert!(unfinished.to_string().contains("job-1"), "{unfinished}");
+        let polls = server
+            .seen()
+            .iter()
+            .filter(|request| request.path == "/speechtotext/v1/jobs/job-1")
+            .count();
+        assert_eq!(polls, 3, "no poll after the budget is exhausted");
+    }
+
+    /// RED FIRST: a job Rev.AI reported in progress forever held the file
+    /// forever. The deadline ends the wait with the job named; the virtual
+    /// clock advances by the interval per wait, so ten seconds pass in two
+    /// polls and no wall time.
+    #[test]
+    fn a_job_in_progress_past_the_deadline_is_handed_back_by_name() {
+        let server = ScriptedRevServer::start(vec![SUBMITTED, IN_PROGRESS]);
+        let unfinished = unfinished(transcribe(&server, policy()));
+        assert_eq!(unfinished.job, "job-1");
+        match &unfinished.cause {
+            UnfinishedCause::DeadlineExceeded { deadline, elapsed } => {
+                assert_eq!(*deadline, PollDeadline::of(Duration::from_secs(10)));
+                assert!(*elapsed >= Duration::from_secs(10), "{elapsed:?}");
+            }
+            UnfinishedCause::TransientBudgetExhausted { .. } => {
+                panic!("every poll answered; nothing was transient")
+            }
+        }
+        let polls = server
+            .seen()
+            .iter()
+            .filter(|request| request.path == "/speechtotext/v1/jobs/job-1")
+            .count();
+        assert_eq!(
+            polls, 2,
+            "two five-second waits reach the ten-second deadline"
+        );
+    }
+
+    /// Rev.AI's own verdict on the job ends the wait at once, as the terminal
+    /// failure it is: no further poll, no transcript request.
+    #[test]
+    fn a_failed_job_ends_the_wait_immediately_as_a_terminal_failure() {
+        let server = ScriptedRevServer::start(vec![SUBMITTED, FAILED]);
+        let error = transcribe(&server, without_deadline_pressure())
+            .map(|_| ())
+            .expect_err("Rev.AI failed the job");
+        assert!(
+            matches!(error, RevAiError::JobFailed(ref detail) if detail == "media holds no speech"),
+            "{error}"
+        );
+        assert_eq!(error.disposition(), RevAiDisposition::Terminal);
+        assert_eq!(
+            server.seen(),
+            vec![
+                seen("POST", "/speechtotext/v1/jobs"),
+                seen("GET", "/speechtotext/v1/jobs/job-1"),
+            ]
+        );
+    }
+
+    /// A terminal refusal of the poll itself (the job is gone) ends the wait
+    /// at once too; only transient failures consume budget.
+    #[test]
+    fn a_terminal_poll_refusal_ends_the_wait_immediately() {
+        let server = ScriptedRevServer::start(vec![SUBMITTED, ScriptedReply::Status(404)]);
+        let error = transcribe(&server, without_deadline_pressure())
+            .map(|_| ())
+            .expect_err("the job is gone");
+        assert!(
+            matches!(
+                error,
+                RevAiError::ApiError {
+                    endpoint: RevAiEndpoint::JobDetails,
+                    status: 404,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(server.seen().len(), 2, "no poll after a terminal refusal");
+    }
+
+    /// Resuming an earlier run's job uploads nothing: the first request is the
+    /// status poll of the named job.
+    #[test]
+    fn resuming_a_named_job_polls_it_without_submitting() {
+        let server = ScriptedRevServer::start(vec![IN_PROGRESS, TRANSCRIBED, TRANSCRIPT]);
+        let client = RevAiClient::for_test(&server.speech_to_text_base);
+        let awaited = client
+            .resume_transcription_blocking(
+                SubmittedJob::named(RevAiJobId::try_new("job-1").expect("a job id")),
+                without_deadline_pressure(),
+            )
+            .expect("the resumed job finishes");
+        assert!(matches!(awaited, Awaited::Ready(_)));
+        let requests = server.seen();
+        assert!(
+            requests.iter().all(|request| request.method == "GET"),
+            "a resume must not upload: {requests:?}"
+        );
+        assert_eq!(requests[0], seen("GET", "/speechtotext/v1/jobs/job-1"));
     }
 }

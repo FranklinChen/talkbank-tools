@@ -1,7 +1,7 @@
 # Rev.AI Integration
 
 **Status:** Current
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-11-03 23:58 EST
 
 Rev.AI is the default ASR engine for `batchalign3 transcribe`, and the default
 UTR engine for `batchalign3 align`.
@@ -59,17 +59,31 @@ quality adjudication against the audio.
 BA3's durable Rev cache therefore keys the exact provider-visible media bytes
 and their upload presentation, not an assumption that two encodings “sound the
 same.” Re-encoding produces a different evidence entry and can incur a new Rev
-call. Renaming or copying byte-identical media with the same extension reuses
-the existing entry; changing the extension deliberately does not, because the
-multipart filename is provider-visible.
+call. Renaming or copying byte-identical media reuses the existing entry,
+whatever the file is called: the upload's declared type and file name come from
+the container ffprobe reads in the bytes, never from the extension, so a WAV
+renamed `.mp3` is still uploaded as a WAV and keys the same.
 
 Current production preparation preserves source bytes. It presents them with a
-stable digest-derived metadata label, a normalized filename that retains only
-the source extension, and BA3's historical `audio/mpeg` multipart type. This
-describes the current request exactly; it is not a claim that the historical
-MIME choice is ideal. Alternative PCM, FLAC, MIME, or padding recipes must be
-revisioned and evaluated as separate evidence identities before becoming a
-default.
+stable digest-derived metadata label and a multipart file name
+`provider-media.<ext>` and media type that are both the probed container's:
+`mp3` and `audio/mpeg`, `wav` and `audio/wav`, `flac` and `audio/flac`, `ogg`
+and `audio/ogg`, `aac` and `audio/aac`, `mp4` and `audio/mp4`, under the
+preparation recipe `source_bytes_declared_container_v1`. MPEG audio keeps the
+historical recipe `source_bytes_legacy_audio_mpeg_v1`, because its declaration
+was already true, so an MPEG recording at a `.mp3` path has the request key it
+always had. Before 2026-11-03 every upload was declared `audio/mpeg` and named
+after the source extension, which worked only because Rev.AI sniffs content; a
+recording cached under that presentation (a WAV, FLAC, Ogg, AAC or MP4, or an
+MPEG file under another name) is a different evidence identity today, and its
+first run under the new key finds the old entry by consulting the key it had
+then, stores the evidence under the new key and uses it, with no second
+fetch; see the transcribe page's note on the evidence key. A file in a container the probe
+has not measured (AIFF, say), or one BA3 does not upload as is (Matroska and
+ASF, which media conversion turns into WAV before any engine sees them), is
+refused by name rather than declared as something it is not. Alternative PCM,
+FLAC or padding recipes must still be revisioned and evaluated as separate
+evidence identities before becoming a default.
 
 ## Retain a reproducible Rev evidence record
 
@@ -121,6 +135,41 @@ condition after the colon.
 Until 2026-09-03 every Rev.AI failure was flattened into
 `error_category: validation`, which reads as "you sent bad input" and hid the
 fact that a batch was worth retrying.
+
+## When a job takes too long, or a status poll fails
+
+After the upload, BA3 polls the job's status until Rev.AI reports it
+transcribed or failed. That wait is bounded, and a failure of a single poll
+does not end it:
+
+- **Deadline.** A transcription is polled for at most two hours (a
+  language-identification job, under `--lang auto`, for twenty minutes). The
+  bound is BA3's limit on how long one worker is held by one job, not a claim
+  about Rev.AI's turnaround.
+- **Transient poll failures.** A dropped connection, a 5xx or a 429 on a
+  status poll is absorbed: the wait continues after the usual interval. Five
+  such failures in one wait exhaust the budget and end it.
+
+Either way the wait ends, the job is **not abandoned**. It stays submitted and
+paid for at Rev.AI, the file is reported as a `provider_transient` failure whose
+message names the Rev.AI job id and the reason (`still in progress after 7200s,
+past the 7200s polling deadline`, or the list of poll failures), and the job is
+recorded in the evidence cache against the request that submitted it. The next
+run of the same request, which includes the control plane's own retry of the
+file, finds that record and **resumes the wait for the recorded job instead of
+uploading again**; when its transcript arrives it is committed under the usual
+key and the record is removed. Rev.AI's own verdict that a resumed job failed,
+or that it no longer exists, removes the record too, so the run after that
+submits afresh.
+
+Before 2026-11-03 the wait had no bound, so a job Rev.AI reported in progress
+forever held the file forever, and one transient failure of a status poll was
+reported as the job's failure, so the retry re-submitted the media and paid
+twice for one recording.
+
+An unfinished language-identification job is not recorded: the transcription
+falls back to `auto` and reads the detected language from the completed job,
+as it does when identification fails.
 
 ## Privacy note
 

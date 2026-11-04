@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdLemmaRepairKindV2",
+  "description": "Why a lemma a worker received from Stanza is not the lemma in the analysis it returned. Closed: a worker cannot report a lemma repair not named here.",
+  "oneOf": [
+    {
+      "type": "string",
+      "const": "punctuation_lemma"
+    }
+  ]
+}

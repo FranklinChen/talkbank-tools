@@ -113,6 +113,24 @@ the two cannot disagree. It is always present, and empty when the run discarded
 nothing: an absent key and an empty one read identically to a consumer that does
 not know which schema version wrote the file.
 
+### Search corridors: `search_corridor`
+
+A `search_corridor` decision (schema 10) records the window grouping admitted
+for an untimed utterance whose words utterance timing recovery could only
+bound, not place: the order corridor between its measured neighbours. It is
+not a review item. The decision carries `search_corridor`, an object with the
+admitted window (`start_ms`, `end_ms`; an admitted endpoint anchor may have
+narrowed it) and the provenance of each edge, `floor` and `ceiling`, each
+tagged by `kind`: `measured` (the edge's `ms` and the zero-based `utterance`
+that supplied it), `recording_edge` (no measured utterance on that side),
+`marked_overlap_unbounded` (a floor: the utterance's own overlap marker
+withholds it) or `following_overlaps` (a ceiling: the next utterance is marked
+as overlapping, which stops the chain of following measurements). In the
+domain it is
+`batchalign_transform::decisions::SearchCorridor`, whose `Display` is the only
+source of the prose `reason`. A `window_refused` decision on the same line
+follows it, so a refused corridor is explained beside its refusal.
+
 ### Refused windows: `refused_window`
 
 A `window_refused` decision records that no alignment request was made for an

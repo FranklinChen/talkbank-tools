@@ -40,6 +40,7 @@ mod num2text_baseline;
 mod ordinal_por;
 mod prepare;
 mod retrace;
+mod seam;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -48,17 +49,22 @@ mod utterance;
 pub mod word_segmentation;
 
 use batchalign_types::domain::AudioPositionSeconds;
+use batchalign_types::segmentation::BoundaryTerminator;
 use serde::{Deserialize, Serialize};
 
 pub use asr_types::{AsrNormalizedText, AsrRawText, ChatWordContent, ChatWordText, SpeakerIndex};
 pub use chunking::{
+    PrechatSplit, RetraceAnalyzedChunk, SegmentationShapeError, SegmentedChunk,
     finalize_words_to_chunks, finalize_words_to_chunks_with_snapshot,
-    split_prepared_chunk_by_assignments,
 };
+pub use cleanup::DroppedAsrToken;
+pub(crate) use cleanup::{InitialCapSlot, initial_cap_slot};
 pub use compounds::merge_compounds;
+pub(crate) use english_caps::capitalize_first;
 pub use expand::write_word_forms;
 pub use han_script::{AlignedNormalization, HanScriptNormalization, NormalizationChangedLength};
 pub use num2text::expand_number;
+pub use seam::{SeamAmbiguity, UnplacedSeams, WindowOrdinal, place_seam_ambiguities};
 pub use snapshot::AsrPipelineSnapshot;
 pub use timing::{
     AdmittedInterval, IntervalBound, IntervalRefusal, PositiveInterval, UntimedCause, WordTiming,
@@ -66,14 +72,14 @@ pub use timing::{
 pub use utterance::{
     chunk_monologues, chunk_monologues_with_snapshot, finalize_utterances, prepare_asr_chunks,
     prepare_monologue_words, prepare_monologue_words_with_snapshot, process_raw_asr,
-    utterances_from_prepared_chunks,
+    utterances_from_prepared_chunks, utterances_from_segmented_chunks,
 };
 
 use prepare::trim_word_boundaries;
 pub use prepare::{
     is_cjk_ideograph, prepare_words_pre_expansion, prepare_words_pre_expansion_with_snapshot,
 };
-pub use retrace::{ExactRetraceAnalysis, analyze_exact_retraces};
+pub(crate) use retrace::analyze_exact_retraces;
 pub use word_segmentation::{PlannedSegmentation, SegmentationPlan, SegmentationRefusal};
 
 // ---------------------------------------------------------------------------
@@ -218,6 +224,26 @@ pub enum SynthesisCause {
     /// The source ended the utterance with a mark CHAT cannot write as a
     /// terminator.
     UnwritableMark(UnwritableEndMark),
+    /// The boundary model cut the chunk here and predicted this terminator,
+    /// and the recognizer gave none of its own.
+    ModelBoundary(BoundaryTerminator),
+}
+
+/// The CHAT terminator a predicted sentence-end kind is written as.
+///
+/// The one place a [`BoundaryTerminator`] becomes a [`Terminator`], for the
+/// pre-CHAT pass (through [`UtteranceEnd::terminator`]) and the post-CHAT
+/// split alike.
+pub fn chat_terminator(
+    kind: BoundaryTerminator,
+    location: talkbank_model::Location,
+) -> talkbank_model::model::Terminator {
+    use talkbank_model::model::Terminator;
+    match kind {
+        BoundaryTerminator::Period => Terminator::Period { location },
+        BoundaryTerminator::Question => Terminator::Question { location },
+        BoundaryTerminator::Exclamation => Terminator::Exclamation { location },
+    }
 }
 
 /// How an utterance ends: with the terminator its source observed, or with
@@ -226,7 +252,8 @@ pub enum SynthesisCause {
 /// A field of the utterance, never a word: a terminator is not content, and
 /// a word list cannot say which of its tokens the pipeline invented. CHAT has
 /// no notation for a terminator nobody heard, so a synthesized end is written
-/// as `.` ([`Self::terminator`]) and reported beside the transcript instead.
+/// as `.`, or as the terminator the boundary model predicted
+/// ([`Self::terminator`]), and reported beside the transcript instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "UtteranceEndRepr", into = "UtteranceEndRepr")]
 pub enum UtteranceEnd {
@@ -248,14 +275,20 @@ impl UtteranceEnd {
         .map(Self::Observed)
     }
 
-    /// The terminator CHAT is written with: the observed one, or a period for
-    /// a synthesized end. The one place that period is chosen.
+    /// The terminator CHAT is written with: the observed one, the one the
+    /// boundary model predicted, or a period for an end synthesized with no
+    /// prediction behind it. The one place that period is chosen.
     pub fn terminator(&self) -> talkbank_model::model::Terminator {
         match self {
             Self::Observed(terminator) => terminator.clone(),
-            Self::Synthesized(_) => talkbank_model::model::Terminator::Period {
-                location: talkbank_model::Location::Unlocated,
-            },
+            Self::Synthesized(SynthesisCause::ModelBoundary(kind)) => {
+                chat_terminator(*kind, talkbank_model::Location::Unlocated)
+            }
+            Self::Synthesized(SynthesisCause::NoMark | SynthesisCause::UnwritableMark(_)) => {
+                talkbank_model::model::Terminator::Period {
+                    location: talkbank_model::Location::Unlocated,
+                }
+            }
         }
     }
 }
@@ -310,6 +343,21 @@ pub struct Utterance {
     /// the primary language. Used for `[- lang]` code-switching precodes in CHAT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+    /// Recognizer tokens this utterance lost because no CHAT-legal prefix of
+    /// them exists (the sanitizer's final pass). Carried on the utterance so
+    /// the record cannot drift from the words it stood among, and written
+    /// into the transcript as a `%com` tier on this line, or as an `@Comment`
+    /// in its place when no word survived. Empty for almost every utterance;
+    /// absent from the serialized form then, so earlier snapshots still read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_tokens: Vec<DroppedAsrToken>,
+    /// Repetitions at a Whisper window seam whose kept copy lies in this
+    /// utterance (see [`seam`]). Placed by [`place_seam_ambiguities`] once the
+    /// utterances exist, and written as a `%com` tier on this line, by the
+    /// same renderer as a dropped token. Empty for almost every utterance and
+    /// absent from the serialized form then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seam_ambiguities: Vec<SeamAmbiguity>,
 }
 
 /// One monologue's words after stages 1-4 (final CHAT word forms), before

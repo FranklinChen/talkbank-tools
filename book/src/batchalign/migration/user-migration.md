@@ -110,12 +110,17 @@ If you transcribe English audio, your commands work exactly as before:
 # BA2: --lang defaults to "eng", no need to type it
 batchalign transcribe recordings/ output/
 
-# BA3, same default, same behavior
-batchalign3 transcribe recordings/ -o output/
+# BA3: name the language (or `auto`); there is no default
+batchalign3 transcribe recordings/ -o output/ --lang eng
 ```
 
-The only required change is the binary name (`batchalign3`) and the preferred
-output flag (`-o` instead of positional). `--lang` still defaults to `"eng"`.
+Three changes: the binary name (`batchalign3`), the preferred output flag
+(`-o` instead of positional), and `--lang`, which `transcribe` and `diarize`
+now require. BA2 silently transcribed every recording as English when the
+flag was omitted; BA3 refuses the invocation before anything is submitted,
+naming the flag, and `--lang auto` is the explicit way to ask the recognizer
+to detect the language. The other `--lang` commands (`utseg`, `benchmark`,
+`opensmile`, `avqi`, `speaker-identify`) keep BA2's `eng` default for now.
 You do not need to type `--lang eng` unless you want to be explicit.
 
 **New in BA3: `--lang auto`.** This is an *optional* feature for bilingual or

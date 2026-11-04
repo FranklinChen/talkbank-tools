@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-03 23:37 EST
 
 ## Overview
 
@@ -126,10 +126,16 @@ batchalign3 [--server http://<your-server>:8001] align input/ output/ --lang eng
   │  ┌──── For each .cha file (sequential, each has its own audio) ────┐
   │  │                                                                   │
   │  │  1. PARSE                                                         │
-  │  │     Source-bound adaptive word-timing admission                                │
-  │  │     Validate retained CHAT; carry pending timing obligation                                  │
+  │  │     Source-bound adaptive word-timing admission                   │
+  │  │     Validate retained CHAT; carry pending timing obligation       │
   │  │                                                                   │
-  │  │  2. MEDIA RESOLUTION                                              │
+  │  │  1a. ROUTE DECISION (AlignRoute::decide)                          │
+  │  │     NoAlign, or every word already has reusable %wor and no       │
+  │  │     re-alignment asked (--override-media-cache):                  │
+  │  │       finish WITHOUT the recording; steps 2-5 do not run         │
+  │  │     otherwise: NeedsAudio, steps 2-5 run                          │
+  │  │                                                                   │
+  │  │  2. MEDIA RESOLUTION (NeedsAudio only)                            │
   │  │     paths_mode:                                                   │
   │  │       look alongside .cha for matching stem with known extensions │
   │  │     content mode / shared-fs remap:                               │
@@ -137,7 +143,7 @@ batchalign3 [--server http://<your-server>:8001] align input/ output/ --lang eng
   │  │       source_dir when the server shares that filesystem           │
   │  │       or local media_mappings / explicit --media-dir             │
   │  │                                                                   │
-  │  │  3. MEDIA CONVERSION (ensure_wav)                ◄── THIS STEP    │
+  │  │  3. MEDIA CONVERSION (ensure_wav, NeedsAudio only) ◄── THIS STEP │
   │  │     .wav/.mp3/.flac/.ogg → pass through unchanged                │
   │  │     .mp4/.m4a/.webm/.wma → ffmpeg convert to WAV, cache result   │
   │  │       fingerprint: full-file BLAKE3 + versioned recipe    │

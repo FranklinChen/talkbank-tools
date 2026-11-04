@@ -1029,7 +1029,11 @@ impl UtrAlignmentPlan {
             for planned in utterances.into_iter().take(span.owned()) {
                 plan.utterances
                     .push(planned.evidence.placed_after(region_start));
-                plan.search_envelopes.push(planned.envelope);
+                plan.search_envelopes.push(
+                    planned
+                        .envelope
+                        .map(|envelope| envelope.placed_after(region_start)),
+                );
             }
         }
         plan

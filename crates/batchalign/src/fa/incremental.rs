@@ -19,13 +19,13 @@ use crate::chat_ops::{ChatFile, Line, Utterance};
 use crate::error::ServerError;
 use crate::params::{AudioContext, FaParams};
 use crate::runner::util::ProgressSender;
-use crate::types::results::FaResult;
+use crate::types::results::{FaResult, RecordingRead};
 use batchalign_transform::diff::UtteranceDelta;
 use batchalign_transform::diff::preserve::{TierKind, copy_dependent_tiers};
 use tracing::info;
 
+use super::AdmittedFaResult;
 use super::units::{FaDispatchInputs, resolve_group_timings};
-use super::{AdmittedFaResult, FaAdmission};
 use crate::chat_ops::fa::Grouping;
 
 /// Completely admitted prior CHAT. Its timing may be reused only after this
@@ -58,19 +58,20 @@ impl RetainedFaPrior {
 ///
 /// # It takes the MODEL, not a serialization of one
 ///
-/// The caller holds the "after" document as a parsed [`FaInputDocument`]. It
-/// used to serialize that model, hand over the string, and this function
-/// parsed it back TWICE: once for the diff (throwing the parse errors away
-/// into a `_`) and once more for a mutable target, with a third parse inside
-/// the `process_fa` fallback. Four parses and a serialization per incremental
-/// file, all to recover a document the caller already had.
+/// The caller holds the "after" document as a parsed active attempt
+/// (`ActiveFaInput`, from `ActiveAlignment::attempt`). It used to serialize
+/// that model, hand over the string, and this function parsed it back TWICE:
+/// once for the diff (throwing the parse errors away into a `_`) and once more
+/// for a mutable target, with a third parse inside the `process_fa` fallback.
+/// Four parses and a serialization per incremental file, all to recover a
+/// document the caller already had.
 ///
-/// Both paths consume a source-produced disposition admitted before inference.
-/// An active model carries that admission through UTR; a declared no-op keeps
-/// its exact original bytes and cannot enter the UTR mutation phase.
+/// The attempt carries its source admission through UTR. A declared no-op and
+/// a complete-`%wor` file never reach this entry: `AlignRoute::decide` sends
+/// them to the no-recording route at admission, prior or no prior.
 pub(crate) async fn process_fa_incremental(
     before: &RetainedFaPrior,
-    after: super::FaInputDocument<'_>,
+    active: super::ActiveFaInput<'_>,
     audio: &AudioContext<'_>,
     worker_lang: &crate::api::LanguageCode3,
     services: super::FaServices<'_>,
@@ -79,17 +80,6 @@ pub(crate) async fn process_fa_incremental(
 ) -> Result<AdmittedFaResult, ServerError> {
     use batchalign_transform::diff::{DiffSummary, diff_chat};
 
-    let active = match after {
-        super::FaInputDocument::Preserved(source) => {
-            return Ok(FaAdmission::pass_through(
-                source,
-                fa_params.gap_healing,
-                fa_params.engine.as_wire_name(),
-                services.cache_namespace,
-            ));
-        }
-        super::FaInputDocument::Active(active) => active,
-    };
     let before_file = before.file.document();
     let deltas = diff_chat(before_file, &active.chat_file);
     let summary = DiffSummary::from_deltas(&deltas);
@@ -108,15 +98,8 @@ pub(crate) async fn process_fa_incremental(
     if summary.unchanged == 0 && summary.speaker_changed == 0 && summary.timing_only == 0 {
         // The AST entry point, not `process_fa`: the document is already
         // parsed, and `process_fa` exists only to parse a string into one.
-        return super::run_fa_from_ast(
-            super::FaInputDocument::Active(active),
-            audio,
-            worker_lang,
-            services,
-            fa_params,
-            progress,
-        )
-        .await;
+        return super::run_fa_from_ast(active, audio, worker_lang, services, fa_params, progress)
+            .await;
     }
 
     // The "after" document's own model is the mutation target. It used to be a
@@ -193,6 +176,9 @@ pub(crate) async fn process_fa_incremental(
                 fa_params.gap_healing,
                 fa_params.engine.as_wire_name(),
                 services.cache_namespace,
+                // The recording was resolved for this route even though every
+                // group was answered from the prior's `%wor`.
+                RecordingRead::Read,
             )
             .with_written_decisions(written),
         );
@@ -293,6 +279,7 @@ pub(crate) async fn process_fa_incremental(
         timing_decisions,
         gap_healing: fa_params.gap_healing,
         fallback_events,
+        recording: RecordingRead::Read,
     })
 }
 

@@ -1,5 +1,7 @@
 use super::*;
-use crate::api::ReleasedCommand;
+use crate::api::{
+    AsrLanguageRequest, LanguageCode3, LanguageSelection, LanguageSpec, ReleasedCommand,
+};
 use crate::cli::args::InputKind;
 use crate::options::{
     AsrEngineName, CommandOptions, FaEngineName, TranslateEngineName, UtrEngine as AppUtrEngine,
@@ -42,7 +44,14 @@ fn typed_options_for(args: &[&str]) -> CommandOptions {
 
 #[test]
 fn auto_speakers_roundtrips_and_conflicts_with_explicit_count() {
-    let options = typed_options_for(&["batchalign3", "transcribe", "input.wav", "--auto-speakers"]);
+    let options = typed_options_for(&[
+        "batchalign3",
+        "transcribe",
+        "--lang",
+        "eng",
+        "input.wav",
+        "--auto-speakers",
+    ]);
     let encoded = serde_json::to_value(&options).expect("wire options");
     let decoded: CommandOptions = serde_json::from_value(encoded).expect("wire roundtrip");
     assert_eq!(decoded, options);
@@ -54,6 +63,8 @@ fn auto_speakers_roundtrips_and_conflicts_with_explicit_count() {
         Cli::try_parse_from([
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "input.wav",
             "--auto-speakers",
             "--num-speakers",
@@ -65,13 +76,15 @@ fn auto_speakers_roundtrips_and_conflicts_with_explicit_count() {
         Cli::try_parse_from([
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "input.wav",
             "--num-speakers",
             "0"
         ])
         .is_err()
     );
-    let default = typed_options_for(&["batchalign3", "transcribe", "input.wav"]);
+    let default = typed_options_for(&["batchalign3", "transcribe", "--lang", "eng", "input.wav"]);
     let mut old_wire = serde_json::to_value(default).expect("wire options");
     old_wire
         .as_object_mut()
@@ -573,7 +586,7 @@ fn parse_transcribe_with_lang() {
         "--whisperx",
     ]);
     if let Commands::Transcribe(a) = &cli.command {
-        assert_eq!(a.lang, "spa");
+        assert_eq!(a.lang, AsrLanguageRequest::One(LanguageCode3::spa()));
         assert_eq!(a.num_speakers, 3);
         assert!(a.asr.whisperx);
     } else {
@@ -581,14 +594,99 @@ fn parse_transcribe_with_lang() {
     }
 }
 
+/// `transcribe --lang` is required, so a recording is never transcribed
+/// under a language nobody chose. The refusal names the flag and its
+/// explicit detection spelling, `auto`.
 #[test]
-fn parse_transcribe_lang_auto() {
+fn transcribe_requires_lang_and_names_auto_in_the_refusal() {
+    assert_parse_error_contains(
+        &["batchalign3", "transcribe", "audio/"],
+        &["required arguments were not provided", "--lang <CODE|auto>"],
+    );
+}
+
+/// `auto` is the explicit opt-in to detection; a code is one language; a
+/// code-switched pair parses (and is withheld later, at submission). The
+/// per-file wire value is refused here, by name, because no recognizer can
+/// take it.
+#[test]
+fn transcribe_lang_admits_auto_a_code_and_a_pair_but_not_per_file() {
     let cli = Cli::parse_from(["batchalign3", "transcribe", "audio/", "--lang", "auto"]);
-    if let Commands::Transcribe(a) = &cli.command {
-        assert_eq!(a.lang, "auto", "--lang auto must pass through as-is");
-    } else {
+    let Commands::Transcribe(a) = &cli.command else {
         panic!("expected Transcribe");
-    }
+    };
+    assert_eq!(a.lang, AsrLanguageRequest::Detect);
+    assert_eq!(
+        CommonOpts::command_profile(&cli.command).lang,
+        LanguageSpec::Auto
+    );
+
+    let cli = Cli::parse_from(["batchalign3", "transcribe", "audio/", "--lang", "yue"]);
+    let Commands::Transcribe(a) = &cli.command else {
+        panic!("expected Transcribe");
+    };
+    assert_eq!(a.lang, AsrLanguageRequest::One(LanguageCode3::yue()));
+
+    let cli = Cli::parse_from(["batchalign3", "transcribe", "audio/", "--lang", "eng,spa"]);
+    let Commands::Transcribe(a) = &cli.command else {
+        panic!("expected Transcribe");
+    };
+    assert!(matches!(a.lang, AsrLanguageRequest::Pair(_)));
+
+    assert_parse_error_contains(
+        &["batchalign3", "transcribe", "audio/", "--lang", "per-file"],
+        &["--lang", "per-file"],
+    );
+}
+
+/// `diarize --lang` is required like `transcribe`'s, admits a code or `auto`,
+/// and refuses a pair and `per-file` where the text is parsed.
+#[test]
+fn diarize_requires_lang_and_admits_a_code_or_auto() {
+    assert_parse_error_contains(
+        &["batchalign3", "diarize", "audio/"],
+        &["required arguments were not provided", "--lang <CODE|auto>"],
+    );
+    let cli = Cli::parse_from(["batchalign3", "diarize", "audio/", "--lang", "auto"]);
+    let Commands::Diarize(a) = &cli.command else {
+        panic!("expected Diarize");
+    };
+    assert_eq!(a.lang, LanguageSelection::Auto);
+    assert_eq!(
+        CommonOpts::command_profile(&cli.command).lang,
+        LanguageSpec::Auto
+    );
+    let cli = Cli::parse_from(["batchalign3", "diarize", "audio/", "--lang", "yue"]);
+    let Commands::Diarize(a) = &cli.command else {
+        panic!("expected Diarize");
+    };
+    assert_eq!(a.lang, LanguageSelection::Declared(LanguageCode3::yue()));
+    assert_parse_error_contains(
+        &["batchalign3", "diarize", "audio/", "--lang", "eng,spa"],
+        &["--lang", "one language"],
+    );
+    assert_parse_error_contains(
+        &["batchalign3", "diarize", "audio/", "--lang", "per-file"],
+        &["--lang", "per-file"],
+    );
+}
+
+/// The other `--lang` commands keep their English default. Pinned so that
+/// removing one of these defaults is a deliberate change, as transcribe's and
+/// diarize's were, not a side effect of typing the flag.
+#[rstest]
+#[case(&["batchalign3", "utseg", "corpus/"])]
+#[case(&["batchalign3", "benchmark", "audio/"])]
+#[case(&["batchalign3", "opensmile", "in/", "out/"])]
+#[case(&["batchalign3", "avqi", "in/", "out/"])]
+#[case(&["batchalign3", "speaker-identify", "corpus/", "--threshold", "0.5", "--enroll", "0-1000:CHI"])]
+fn other_lang_commands_still_default_to_english(#[case] args: &[&str]) {
+    let cli = Cli::parse_from(args);
+    assert_eq!(
+        CommonOpts::command_profile(&cli.command).lang,
+        LanguageSpec::Resolved(LanguageCode3::eng()),
+        "default language changed for {args:?}"
+    );
 }
 
 #[test]
@@ -596,6 +694,8 @@ fn parse_transcribe_asr_engine_override() {
     let cli = Cli::parse_from([
         "batchalign3",
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
         "--asr-engine-custom",
         "tencent",
@@ -648,6 +748,8 @@ fn transcribe_s_typed_options_carry_utseg_fallback_stanza() {
     let opts = typed_options_for(&[
         "batchalign3",
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
         "--diarize",
         "--utseg-fallback-stanza",
@@ -685,7 +787,7 @@ fn parse_utseg_with_utseg_fallback_stanza() {
 fn utseg_fallback_default_is_refuse() {
     // Without the flag, every utseg-invoking subcommand must default
     // to refusing the Stanza substitution (BUG-032 invariant).
-    let opts = typed_options_for(&["batchalign3", "transcribe", "audio/"]);
+    let opts = typed_options_for(&["batchalign3", "transcribe", "--lang", "eng", "audio/"]);
     match opts {
         CommandOptions::Transcribe(o) => assert!(
             !o.utseg_fallback.is_allowed(),
@@ -709,6 +811,8 @@ fn utseg_fallback_allowed_when_flag_passed() {
     let opts = typed_options_for(&[
         "batchalign3",
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
         "--utseg-fallback-stanza",
     ]);
@@ -811,7 +915,7 @@ fn parse_morphotag_with_before() {
 }
 
 #[rstest]
-#[case(&["batchalign3", "transcribe", "audio/", "--before", "old/"])]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "audio/", "--before", "old/"])]
 #[case(&["batchalign3", "translate", "corpus/", "--before", "old/"])]
 #[case(&["batchalign3", "coref", "corpus/", "--before", "old/"])]
 #[case(&["batchalign3", "compare", "corpus/", "--before", "old/"])]
@@ -847,7 +951,7 @@ fn parse_utseg_with_file_list_lang_and_speakers() {
         "inputs.txt",
     ]);
     if let Commands::Utseg(a) = &cli.command {
-        assert_eq!(a.lang, "spa");
+        assert_eq!(a.lang, LanguageSelection::Declared(LanguageCode3::spa()));
         assert_eq!(a.num_speakers, 3);
         assert_eq!(a.common.file_list.as_deref(), Some(Path::new("inputs.txt")));
         assert!(a.common.paths.is_empty());
@@ -876,7 +980,7 @@ fn parse_opensmile_with_bank_and_subdir() {
         assert_eq!(args.input_dir, PathBuf::from("input/"));
         assert_eq!(args.output_dir, PathBuf::from("output/"));
         assert_eq!(args.feature_set, "ComParE_2016");
-        assert_eq!(args.lang, "spa");
+        assert_eq!(args.lang, LanguageSelection::Declared(LanguageCode3::spa()));
         assert_eq!(args.bank.as_deref(), Some("phon-data"));
         assert_eq!(args.subdir.as_deref(), Some("Eng-NA"));
     } else {
@@ -980,24 +1084,120 @@ fn parse_server_env() {
     assert_eq!(cli.global.server.as_deref(), Some("http://myhost:8000"));
 }
 
+/// `--workers` is a positive cap: zero, which used to be accepted and
+/// forwarded to the daemon as a cap of zero that meant auto-tune, is refused
+/// with the instruction to leave the flag out.
 #[test]
-fn parse_open_dashboard() {
-    let cli = Cli::parse_from(["batchalign3", "--open-dashboard", "align", "corpus/"]);
-    assert!(cli.global.open_dashboard);
-    assert!(!cli.global.no_open_dashboard);
+fn workers_flag_is_a_positive_cap_and_refuses_zero() {
+    let cli = Cli::parse_from(["batchalign3", "--workers", "4", "align", "corpus/"]);
+    assert_eq!(cli.global.workers.map(crate::api::WorkerCap::get), Some(4));
+    let refused = Cli::try_parse_from(["batchalign3", "--workers", "0", "align", "corpus/"])
+        .expect_err("--workers 0 is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("leave --workers out for auto-tune"),
+        "{refused}"
+    );
+    assert!(
+        Cli::try_parse_from(["batchalign3", "--workers", "two", "align", "corpus/"]).is_err(),
+        "a worker cap is a whole number"
+    );
 }
 
+/// The two daemon settings leave the parser as one value, built once.
 #[test]
-fn parse_no_open_dashboard() {
-    let cli = Cli::parse_from(["batchalign3", "--no-open-dashboard", "align", "corpus/"]);
-    assert!(cli.global.open_dashboard);
-    assert!(cli.global.no_open_dashboard);
+fn global_runtime_is_built_from_both_flags() {
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "--workers",
+        "4",
+        "--timeout",
+        "3600",
+        "align",
+        "corpus/",
+    ]);
+    let runtime = cli.global.runtime();
+    assert_eq!(runtime.workers.map(crate::api::WorkerCap::get), Some(4));
+    assert_eq!(
+        runtime.timeout.map(crate::api::PositiveSeconds::get),
+        Some(3600)
+    );
+    let none = Cli::parse_from(["batchalign3", "align", "corpus/"]);
+    assert!(none.global.runtime().is_none());
+}
+
+/// `--open-dashboard` and `--no-open-dashboard` are the two spellings of one
+/// value, and neither is the third state: open once, when the daemon starts.
+/// The pair used to be two `bool`s with the positive one defaulting to true,
+/// so `--open-dashboard` changed nothing.
+#[test]
+fn dashboard_flags_resolve_to_one_value() {
+    use crate::cli::args::Dashboard;
+    let resolve = |args: &[&str]| Cli::parse_from(args).global.dashboard.resolve();
+    assert_eq!(
+        resolve(&["batchalign3", "--open-dashboard", "align", "corpus/"]),
+        Dashboard::Open
+    );
+    assert_eq!(
+        resolve(&["batchalign3", "--no-open-dashboard", "align", "corpus/"]),
+        Dashboard::Closed
+    );
+    assert_eq!(
+        resolve(&["batchalign3", "align", "corpus/"]),
+        Dashboard::OnDaemonStart
+    );
+    assert!(
+        Cli::try_parse_from([
+            "batchalign3",
+            "--open-dashboard",
+            "--no-open-dashboard",
+            "align",
+            "corpus/"
+        ])
+        .is_err(),
+        "both spellings at once is refused at parse"
+    );
+}
+
+/// `compare` takes neither `--lang` nor `--num-speakers`: the language is each
+/// transcript's own (the job-level code it took was discarded at the worker
+/// gateway) and the speaker count went only into the job record.
+#[test]
+fn compare_refuses_the_flags_it_never_read() {
+    for args in [
+        ["batchalign3", "compare", "--lang", "eng", "corpus/"],
+        ["batchalign3", "compare", "--num-speakers", "2", "corpus/"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err(), "{args:?} is refused");
+    }
+}
+
+/// `--tui` and `--no-tui` are the two spellings of one value; neither is the
+/// TUI. `--tui` used to default to true behind `tui && !no_tui`, a no-op.
+#[test]
+fn progress_flags_resolve_to_one_value() {
+    use crate::cli::args::Progress;
+    let resolve = |args: &[&str]| Cli::parse_from(args).global.progress.resolve();
+    assert_eq!(
+        resolve(&["batchalign3", "--tui", "align", "corpus/"]),
+        Progress::Tui
+    );
+    assert_eq!(
+        resolve(&["batchalign3", "--no-tui", "align", "corpus/"]),
+        Progress::Plain
+    );
+    assert_eq!(resolve(&["batchalign3", "align", "corpus/"]), Progress::Tui);
+    assert!(
+        Cli::try_parse_from(["batchalign3", "--tui", "--no-tui", "align", "corpus/"]).is_err(),
+        "both spellings at once is refused at parse"
+    );
 }
 
 #[rstest]
 #[case(&["batchalign3", "align", "--wor", "--nowor", "corpus/"], &["--wor", "--nowor"])]
 #[case(&["batchalign3", "align", "--merge-abbrev", "--no-merge-abbrev", "corpus/"], &["--merge-abbrev", "--no-merge-abbrev"])]
-#[case(&["batchalign3", "transcribe", "--wor", "--nowor", "audio/"], &["--wor", "--nowor"])]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--wor", "--nowor", "audio/"], &["--wor", "--nowor"])]
 #[case(&["batchalign3", "morphotag", "--retokenize", "--keeptokens", "corpus/"], &["--retokenize", "--keeptokens"])]
 #[case(&["batchalign3", "morphotag", "--skipmultilang", "--multilang", "corpus/"], &["--skipmultilang", "--multilang"])]
 fn conflicting_flags_are_rejected(#[case] args: &[&str], #[case] expected_fragments: &[&str]) {
@@ -1070,7 +1270,7 @@ fn parse_avqi() {
     if let Commands::Avqi(args) = &cli.command {
         assert_eq!(args.input_dir, PathBuf::from("input/"));
         assert_eq!(args.output_dir, PathBuf::from("output/"));
-        assert_eq!(args.lang, "eng");
+        assert_eq!(args.lang, LanguageSelection::Declared(LanguageCode3::eng()));
     } else {
         panic!("expected Avqi");
     }
@@ -1090,12 +1290,16 @@ fn parse_bench_options() {
         "4",
         "--use-cache",
     ]);
+    // `--workers` after `bench` is the GLOBAL flag, the one dispatch reads.
+    // `bench` used to declare its own `--workers`, which clap preferred for
+    // this spelling and which nothing read, so `bench ... --workers 4` ran
+    // under the daemon's own cap.
+    assert_eq!(cli.global.workers.map(crate::api::WorkerCap::get), Some(4));
     if let Commands::Bench(args) = &cli.command {
         assert_eq!(args.command, BenchTarget::TranscribeS);
         assert_eq!(args.in_dir, PathBuf::from("input/"));
         assert_eq!(args.out_dir, PathBuf::from("output/"));
         assert_eq!(args.runs, 3);
-        assert_eq!(args.workers, Some(4));
         assert!(args.use_cache);
     } else {
         panic!("expected Bench");
@@ -1369,7 +1573,7 @@ fn legacy_align_alias_precedence_matches_documented_order() {
 
 #[test]
 fn build_options_transcribe_defaults() {
-    let cli = Cli::parse_from(["batchalign3", "transcribe", "audio/"]);
+    let cli = Cli::parse_from(["batchalign3", "transcribe", "--lang", "eng", "audio/"]);
     let opts = build_typed_options(&cli.command, &cli.global)
         .expect("enrollments validate")
         .unwrap();
@@ -1386,10 +1590,10 @@ fn build_options_transcribe_defaults() {
 }
 
 #[rstest]
-#[case(&["batchalign3", "transcribe", "--whisperx", "audio/"], AsrEngineName::WhisperX)]
-#[case(&["batchalign3", "transcribe", "--whisper-oai", "audio/"], AsrEngineName::WhisperOai)]
-#[case(&["batchalign3", "transcribe", "--whisper", "audio/"], AsrEngineName::Whisper)]
-#[case(&["batchalign3", "transcribe", "--asr-engine-custom", "tencent", "audio/"], AsrEngineName::HkTencent)]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--whisperx", "audio/"], AsrEngineName::WhisperX)]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--whisper-oai", "audio/"], AsrEngineName::WhisperOai)]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--whisper", "audio/"], AsrEngineName::Whisper)]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--asr-engine-custom", "tencent", "audio/"], AsrEngineName::HkTencent)]
 fn build_options_transcribe_asr_engine(#[case] args: &[&str], #[case] expected: AsrEngineName) {
     let opts = typed_options_for(args);
     match opts {
@@ -1400,7 +1604,14 @@ fn build_options_transcribe_asr_engine(#[case] args: &[&str], #[case] expected: 
 
 #[test]
 fn build_options_transcribe_diarize() {
-    let cli = Cli::parse_from(["batchalign3", "transcribe", "--diarize", "audio/"]);
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "transcribe",
+        "--lang",
+        "eng",
+        "--diarize",
+        "audio/",
+    ]);
     let opts = build_typed_options(&cli.command, &cli.global)
         .expect("enrollments validate")
         .unwrap();
@@ -1415,6 +1626,8 @@ fn build_options_transcribe_accepts_explicit_speaker_engine() {
     let cli = Cli::parse_from([
         "batchalign3",
         "transcribe",
+        "--lang",
+        "eng",
         "--diarize",
         "--speaker-engine",
         "pyannote",
@@ -1434,7 +1647,14 @@ fn build_options_transcribe_accepts_explicit_speaker_engine() {
 
 #[test]
 fn build_options_transcribe_diarize_matches_batchalign2_baseline_defaults() {
-    let cli = Cli::parse_from(["batchalign3", "transcribe", "--diarize", "audio/"]);
+    let cli = Cli::parse_from([
+        "batchalign3",
+        "transcribe",
+        "--lang",
+        "eng",
+        "--diarize",
+        "audio/",
+    ]);
     let opts = build_typed_options(&cli.command, &cli.global)
         .expect("enrollments validate")
         .unwrap();
@@ -1451,7 +1671,7 @@ fn build_options_transcribe_diarize_matches_batchalign2_baseline_defaults() {
         other => panic!("expected TranscribeS, got {other:?}"),
     }
 
-    assert_eq!(profile.lang, "eng");
+    assert_eq!(profile.lang, LanguageSpec::Resolved(LanguageCode3::eng()));
     assert_eq!(profile.num_speakers, 2);
     // The KIND, not a list. Asserting the list pinned `["mp3","mp4","wav"]`
     // and so locked in a set narrower than what the pipeline can process:
@@ -1470,10 +1690,19 @@ fn build_options_transcribe_diarize_matches_batchalign2_baseline_defaults() {
 #[test]
 fn legacy_transcribe_aliases_match_canonical_options() {
     assert_typed_options_equivalent(
-        &["batchalign3", "transcribe", "--whisper", "audio/"],
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
+            "--whisper",
+            "audio/",
+        ],
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine",
             "whisper",
             "audio/",
@@ -1481,10 +1710,19 @@ fn legacy_transcribe_aliases_match_canonical_options() {
         "hidden --whisper should match canonical --asr-engine whisper",
     );
     assert_typed_options_equivalent(
-        &["batchalign3", "transcribe", "--whisperx", "audio/"],
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
+            "--whisperx",
+            "audio/",
+        ],
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine",
             "whisperx",
             "audio/",
@@ -1492,10 +1730,19 @@ fn legacy_transcribe_aliases_match_canonical_options() {
         "hidden --whisperx should match canonical --asr-engine whisperx",
     );
     assert_typed_options_equivalent(
-        &["batchalign3", "transcribe", "--whisper-oai", "audio/"],
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
+            "--whisper-oai",
+            "audio/",
+        ],
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine",
             "whisper-oai",
             "audio/",
@@ -1503,15 +1750,39 @@ fn legacy_transcribe_aliases_match_canonical_options() {
         "hidden --whisper-oai should match canonical --asr-engine whisper-oai",
     );
     assert_typed_options_equivalent(
-        &["batchalign3", "transcribe", "--rev", "audio/"],
-        &["batchalign3", "transcribe", "--asr-engine", "rev", "audio/"],
-        "hidden --rev should match canonical --asr-engine rev",
-    );
-    assert_typed_options_equivalent(
-        &["batchalign3", "transcribe", "--diarize", "audio/"],
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
+            "--rev",
+            "audio/",
+        ],
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
+            "--asr-engine",
+            "rev",
+            "audio/",
+        ],
+        "hidden --rev should match canonical --asr-engine rev",
+    );
+    assert_typed_options_equivalent(
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
+            "--diarize",
+            "audio/",
+        ],
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "enabled",
             "audio/",
@@ -1519,10 +1790,19 @@ fn legacy_transcribe_aliases_match_canonical_options() {
         "hidden --diarize should match canonical --diarization enabled",
     );
     assert_typed_options_equivalent(
-        &["batchalign3", "transcribe", "--nodiarize", "audio/"],
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
+            "--nodiarize",
+            "audio/",
+        ],
+        &[
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "disabled",
             "audio/",
@@ -1537,6 +1817,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine-custom",
             "tencent",
             "--whisper",
@@ -1545,6 +1827,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine-custom",
             "tencent",
             "audio/",
@@ -1555,6 +1839,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine",
             "rev",
             "--whisper",
@@ -1563,6 +1849,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--asr-engine",
             "whisper",
             "audio/",
@@ -1573,6 +1861,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "disabled",
             "--diarize",
@@ -1581,6 +1871,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "enabled",
             "audio/",
@@ -1591,6 +1883,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "enabled",
             "--nodiarize",
@@ -1599,6 +1893,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "disabled",
             "audio/",
@@ -1609,6 +1905,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--diarize",
             "--nodiarize",
             "audio/",
@@ -1616,6 +1914,8 @@ fn legacy_transcribe_alias_precedence_matches_documented_order() {
         &[
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "--diarization",
             "enabled",
             "audio/",
@@ -1676,17 +1976,31 @@ fn build_options_merge_abbrev_matrix_for_processing_commands() {
             "align honors no-merge-abbrev",
         ),
         (
-            vec!["batchalign3", "transcribe", "audio/"],
+            vec!["batchalign3", "transcribe", "--lang", "eng", "audio/"],
             false,
             "transcribe defaults to no merge-abbrev",
         ),
         (
-            vec!["batchalign3", "transcribe", "--merge-abbrev", "audio/"],
+            vec![
+                "batchalign3",
+                "transcribe",
+                "--lang",
+                "eng",
+                "--merge-abbrev",
+                "audio/",
+            ],
             true,
             "transcribe enables merge-abbrev",
         ),
         (
-            vec!["batchalign3", "transcribe", "--no-merge-abbrev", "audio/"],
+            vec![
+                "batchalign3",
+                "transcribe",
+                "--lang",
+                "eng",
+                "--no-merge-abbrev",
+                "audio/",
+            ],
             false,
             "transcribe honors no-merge-abbrev",
         ),
@@ -1802,17 +2116,31 @@ fn build_options_wor_matrix_for_processing_commands() {
             "align honors --nowor",
         ),
         (
-            vec!["batchalign3", "transcribe", "audio/"],
+            vec!["batchalign3", "transcribe", "--lang", "eng", "audio/"],
             false,
             "transcribe defaults to omitting %wor",
         ),
         (
-            vec!["batchalign3", "transcribe", "--wor", "audio/"],
+            vec![
+                "batchalign3",
+                "transcribe",
+                "--lang",
+                "eng",
+                "--wor",
+                "audio/",
+            ],
             true,
             "transcribe honors --wor",
         ),
         (
-            vec!["batchalign3", "transcribe", "--nowor", "audio/"],
+            vec![
+                "batchalign3",
+                "transcribe",
+                "--lang",
+                "eng",
+                "--nowor",
+                "audio/",
+            ],
             false,
             "transcribe honors --nowor",
         ),
@@ -2078,7 +2406,7 @@ fn required_asr_cli_policy_roundtrips_and_rejects_conflicts() {
 
 #[test]
 fn standalone_diarize_defaults_to_local_pyannote_without_paid_inference() {
-    let cli = Cli::parse_from(["batchalign3", "diarize", "audio/"]);
+    let cli = Cli::parse_from(["batchalign3", "diarize", "--lang", "eng", "audio/"]);
     let opts = build_typed_options(&cli.command, &cli.global)
         .expect("enrollments validate")
         .unwrap();
@@ -2096,6 +2424,8 @@ fn standalone_diarize_accepts_explicit_pyannote_ai() {
     let cli = Cli::parse_from([
         "batchalign3",
         "diarize",
+        "--lang",
+        "eng",
         "--speaker-engine",
         "pyannote-ai",
         "audio/",
@@ -2117,6 +2447,8 @@ fn standalone_diarize_mapping_selects_chat_inputs_and_checked_options() {
     let cli = Cli::parse_from([
         "batchalign3",
         "diarize",
+        "--lang",
+        "eng",
         "transcripts/",
         "--speaker-map",
         "PAR0=CHI,PAR1=MOT",
@@ -2139,6 +2471,8 @@ fn standalone_diarize_mapping_selects_chat_inputs_and_checked_options() {
         &[
             "batchalign3",
             "diarize",
+            "--lang",
+            "eng",
             "transcripts/",
             "--speaker-map",
             "PAR0=Ä",
@@ -2177,19 +2511,18 @@ fn require_media_cache_conflicts_with_every_refresh_form() {
 // -----------------------------------------------------------------------
 
 #[rstest]
-#[case(&["batchalign3", "align", "corpus/"], ReleasedCommand::Align, "eng", 1, InputKind::Chat)]
-#[case(&["batchalign3", "transcribe", "audio/"], ReleasedCommand::Transcribe, "eng", 2, InputKind::Media)]
-#[case(&["batchalign3", "transcribe", "--diarize", "audio/"], ReleasedCommand::TranscribeS, "eng", 2, InputKind::Media)]
+// align has no `--lang` either: its job record is `per-file`, never `eng`.
+#[case(&["batchalign3", "align", "corpus/"], ReleasedCommand::Align, "per-file", 1, InputKind::Chat)]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "audio/"], ReleasedCommand::Transcribe, "eng", 2, InputKind::Media)]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--diarize", "audio/"], ReleasedCommand::TranscribeS, "eng", 2, InputKind::Media)]
 // per-file commands: translate/morphotag/coref. The `lang` field on
-// CommandProfile carries the wire string `"per-file"`, which parses to
-// `LanguageSpec::PerFile` at submission. No English placeholder ever
-// appears for these commands in job records, dashboards, or worker
-// pre-warming.
+// CommandProfile is `LanguageSpec::PerFile`, written `per-file`. No English
+// placeholder ever appears for these commands in job records, dashboards, or
+// worker pre-warming.
 #[case(&["batchalign3", "translate", "corpus/"], ReleasedCommand::Translate, "per-file", 1, InputKind::Chat)]
 #[case(&["batchalign3", "morphotag", "corpus/"], ReleasedCommand::Morphotag, "per-file", 1, InputKind::Chat)]
 #[case(&["batchalign3", "coref", "corpus/"], ReleasedCommand::Coref, "per-file", 1, InputKind::Chat)]
-#[case(&["batchalign3", "compare", "corpus/"], ReleasedCommand::Compare, "eng", 2, InputKind::Chat)]
-#[case(&["batchalign3", "compare", "--lang", "spa", "--num-speakers", "3", "corpus/"], ReleasedCommand::Compare, "spa", 3, InputKind::Chat)]
+#[case(&["batchalign3", "compare", "corpus/"], ReleasedCommand::Compare, "per-file", 1, InputKind::Chat)]
 #[case(&["batchalign3", "utseg", "--lang", "spa", "--num-speakers", "3", "corpus/"], ReleasedCommand::Utseg, "spa", 3, InputKind::Chat)]
 #[case(&["batchalign3", "benchmark", "audio/"], ReleasedCommand::Benchmark, "eng", 2, InputKind::Media)]
 #[case(&["batchalign3", "opensmile", "in/", "out/"], ReleasedCommand::Opensmile, "eng", 1, InputKind::Media)]
@@ -2212,7 +2545,13 @@ fn command_profile_matches_expected(
         expected_cmd,
         "command mismatch for {args:?}"
     );
-    assert_eq!(profile.lang, expected_lang, "lang mismatch for {args:?}");
+    // The spec's text is what the job record writes, so the cases stay
+    // readable as the strings an operator sees.
+    assert_eq!(
+        profile.lang.to_string(),
+        expected_lang,
+        "lang mismatch for {args:?}"
+    );
     assert_eq!(
         profile.num_speakers, expected_speakers,
         "num_speakers mismatch for {args:?}"
@@ -2259,7 +2598,7 @@ fn translate_rejects_lang_flag_for_ba2_parity() {
 
 #[rstest]
 #[case(&["batchalign3", "align", "x/"])]
-#[case(&["batchalign3", "transcribe", "x/"])]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "x/"])]
 #[case(&["batchalign3", "translate", "x/"])]
 #[case(&["batchalign3", "morphotag", "x/"])]
 #[case(&["batchalign3", "coref", "x/"])]
@@ -2283,6 +2622,85 @@ fn common_opts_non_processing_commands_return_none(#[case] args: &[&str]) {
     assert!(
         common_opts(&cli.command).is_none(),
         "common_opts should be None for {args:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// --dry-run: one global flag, read as the execution it selects
+// -----------------------------------------------------------------------
+
+#[test]
+fn dry_run_is_global_and_resolves_to_plan_only() {
+    use crate::cli::args::RequestedExecution;
+    let before = Cli::parse_from([
+        "batchalign3",
+        "--dry-run",
+        "transcribe",
+        "--lang",
+        "eng",
+        "audio/",
+    ]);
+    assert_eq!(
+        before.global.dry_run.resolve(),
+        RequestedExecution::PlanOnly
+    );
+    let after = Cli::parse_from([
+        "batchalign3",
+        "transcribe",
+        "--lang",
+        "eng",
+        "audio/",
+        "--dry-run",
+    ]);
+    assert_eq!(after.global.dry_run.resolve(), RequestedExecution::PlanOnly);
+    let without = Cli::parse_from(["batchalign3", "transcribe", "--lang", "eng", "audio/"]);
+    assert_eq!(without.global.dry_run.resolve(), RequestedExecution::Submit);
+}
+
+// -----------------------------------------------------------------------
+// --overwrite: the flag mints the authority on every command that carries it
+// -----------------------------------------------------------------------
+
+/// Every command whose `--help` offers `--overwrite` must hand its authority
+/// to dispatch; otherwise the flag would parse and change nothing. Commands
+/// that rewrite the file they were given do not offer it at all.
+#[rstest]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "audio/"])]
+#[case(&["batchalign3", "benchmark", "audio/"])]
+#[case(&["batchalign3", "diarize", "--lang", "eng", "audio/"])]
+#[case(&["batchalign3", "compare", "corpus/"])]
+fn overwrite_flag_reaches_dispatch(#[case] args: &[&str]) {
+    let without = Cli::parse_from(args);
+    assert_eq!(extract_overwrite(&without.command), None, "{args:?}");
+    let with: Vec<&str> = args.iter().copied().chain(["--overwrite"]).collect();
+    let cli = Cli::parse_from(&with);
+    assert_eq!(
+        extract_overwrite(&cli.command),
+        Some(crate::cli::output::Overwrite::by_flag()),
+        "{with:?}"
+    );
+    let help = render_subcommand_help(args[1]);
+    assert!(
+        help.contains("--overwrite"),
+        "{} help lacks --overwrite",
+        args[1]
+    );
+}
+
+#[rstest]
+#[case("align")]
+#[case("morphotag")]
+#[case("utseg")]
+#[case("translate")]
+#[case("coref")]
+fn in_place_commands_do_not_offer_overwrite(#[case] command: &str) {
+    assert!(
+        !render_subcommand_help(command).contains("--overwrite"),
+        "{command} rewrites the file it is given; --overwrite would be a no-op"
+    );
+    assert_parse_error_contains(
+        &["batchalign3", command, "--overwrite", "corpus/"],
+        &["unexpected argument '--overwrite'"],
     );
 }
 
@@ -2355,6 +2773,8 @@ fn engine_overrides_bare_engine_name_names_the_engine_flag() {
             "--engine-overrides",
             "whisper",
             "transcribe",
+            "--lang",
+            "eng",
             "audio/",
         ],
         &["--asr-engine"],
@@ -2424,6 +2844,8 @@ fn build_options_engine_overrides_multiple_commands() {
                 "--engine-overrides",
                 r#"{"asr": "tencent"}"#,
                 "transcribe",
+                "--lang",
+                "eng",
                 "audio/",
             ],
             "transcribe",
@@ -2461,6 +2883,8 @@ fn engine_overrides_accept_qwen_model_and_device_extras() {
         "--engine-overrides",
         r#"{"asr":"qwen","qwen_model":"Qwen/Qwen3-ASR-0.6B","qwen_device":"cuda"}"#,
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
     ]);
     let opts = build_typed_options(&cli.command, &cli.global)
@@ -2528,6 +2952,8 @@ fn engine_overrides_extras_survive_without_asr_field() {
         "--engine-overrides",
         r#"{"qwen_model":"Qwen/Qwen3-ASR-0.6B"}"#,
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
     ]);
     let opts = build_typed_options(&cli.command, &cli.global)
@@ -2732,7 +3158,15 @@ fn parse_transcribe_paraformer_resolves_to_funaudio_with_checkpoint() {
 fn every_asr_engine_is_selectable_by_its_wire_name() {
     for engine in AsrEngineName::ALL {
         let name = engine.wire_name();
-        let cli = Cli::parse_from(["batchalign3", "transcribe", "audio/", "--asr-engine", name]);
+        let cli = Cli::parse_from([
+            "batchalign3",
+            "transcribe",
+            "--lang",
+            "eng",
+            "audio/",
+            "--asr-engine",
+            name,
+        ]);
         let Commands::Transcribe(a) = &cli.command else {
             panic!("expected Transcribe");
         };
@@ -2755,6 +3189,8 @@ fn an_unknown_asr_engine_name_is_rejected_at_parse_time() {
     let error = Cli::try_parse_from([
         "batchalign3",
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
         "--asr-engine",
         "paraformr",
@@ -2774,6 +3210,8 @@ fn the_legacy_custom_engine_flag_still_resolves() {
     let cli = Cli::parse_from([
         "batchalign3",
         "transcribe",
+        "--lang",
+        "eng",
         "audio/",
         "--asr-engine-custom",
         "funaudio",
@@ -2796,6 +3234,8 @@ fn the_legacy_whisper_oai_spelling_still_resolves() {
         let cli = Cli::parse_from([
             "batchalign3",
             "transcribe",
+            "--lang",
+            "eng",
             "audio/",
             "--asr-engine",
             spelling,
@@ -3043,7 +3483,7 @@ fn an_engine_overrides_utr_key_selects_the_utr_engine() {
 #[case(&["batchalign3", "align", "input/", "--fa-engine", "cantnese"], "cantnese")]
 #[case(&["batchalign3", "align", "input/", "--fa-engine-custom", "wav2vec_fa_cant"], "wav2vec_fa_cant")]
 #[case(&["batchalign3", "translate", "input/", "--translate-engine", "aliyn"], "aliyn")]
-#[case(&["batchalign3", "transcribe", "audio/", "--asr-engine", "paraformr"], "paraformr")]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "audio/", "--asr-engine", "paraformr"], "paraformr")]
 #[case(&["batchalign3", "benchmark", "audio/", "--asr-engine-custom", "paraformr"], "paraformr")]
 fn an_unknown_engine_name_is_rejected_at_parse_time(#[case] argv: &[&str], #[case] typed: &str) {
     let error = Cli::try_parse_from(argv).expect_err("a misspelled engine must not parse");

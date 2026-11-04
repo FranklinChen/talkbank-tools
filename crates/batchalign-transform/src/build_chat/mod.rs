@@ -58,6 +58,12 @@ pub enum BuildChatError {
     #[error("failed to create parser: {0}")]
     ParserInit(String),
 
+    /// A dropped-token comment rendered as blank text, which an `@Comment`
+    /// refuses. Unreachable by construction (the renderer always writes
+    /// words), carried as the model's refusal rather than unwrapped.
+    #[error("a dropped-token comment rendered blank")]
+    BlankComment,
+
     /// An utterance body could not be parsed as CHAT.
     #[error("failed to parse utterance for speaker {speaker}: {message}")]
     Utterance {

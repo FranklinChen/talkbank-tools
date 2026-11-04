@@ -537,6 +537,25 @@ impl DebugDumper {
         info!(%filename, report = %path.display(), "language-invalid words dumped");
     }
 
+    /// Dump the recognizer tokens the sanitizer dropped as unrepresentable in
+    /// CHAT, beside the transcript that names each in a comment.
+    pub(crate) fn dump_dropped_tokens(&self, filename: &str, tokens: &impl serde::Serialize) {
+        let Some(dir) = self.ensure_dir() else {
+            return;
+        };
+        let stem = Self::stem(filename);
+        let path = dir.join(format!("{stem}_dropped_tokens.json"));
+        match serde_json::to_string_pretty(tokens) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    debug!(%e, "failed to write dropped-token report");
+                }
+            }
+            Err(e) => debug!(%e, "failed to serialize dropped-token report"),
+        }
+        info!(%filename, report = %path.display(), "dropped tokens dumped");
+    }
+
     /// Retain the exact same-job diarization turns used by transcribe.
     ///
     /// Unlike older debug dumps, this method does not swallow an enabled
@@ -690,16 +709,14 @@ mod tests {
     async fn rev_evidence_dump_is_durable_joined_and_collision_resistant() {
         let dir = tempfile::tempdir().expect("tempdir");
         let audio = dir.path().join("sample.wav");
-        tokio::fs::write(&audio, b"provider media")
-            .await
-            .expect("write audio");
+        crate::media::probe::fixtures::write_pcm_wav(&audio, 0);
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
             &crate::types::revai_language::RevLanguage::admit(
                 &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
             )
             .expect("Rev.AI recognizes English"),
-            NumSpeakers(2),
+            crate::transcribe::SpeakerCount::admit(false, NumSpeakers(2)).expect("a count"),
             &RevAsrModelRevision::current(),
         )
         .await
@@ -759,6 +776,7 @@ mod tests {
                 needs_review: true,
                 refused_window: None,
                 split_window: None,
+                search_corridor: None,
             }],
             timing_decisions: vec![FaTimingDecisionTrace::StartRegressionStripped {
                 line_idx: 7,
@@ -769,9 +787,10 @@ mod tests {
                 previous_line_idx: 6,
                 previous_utterance_idx: 1,
                 previous_speaker: "PAR1".to_owned(),
+                words_dropped: Vec::new(),
             }],
-            // A start regression discards no word timing, so this stays
-            // empty; the artifact still carries the section.
+            // This strip removed no timed word, so the flat section stays
+            // empty; the artifact still carries it.
             dropped_word_timings: Vec::new(),
             gap_healing: "Heal".to_owned(),
             violations: Vec::new(),

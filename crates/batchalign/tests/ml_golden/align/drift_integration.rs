@@ -83,7 +83,7 @@ async fn drift_micase_all_eight_failures() {
 
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        outcomes.push(run_one_file(&jobs, f, "eng").await);
+        outcomes.push(run_one_file(&jobs, f).await);
     }
     assert_all_files_pass("drift_micase_all_eight_failures", &outcomes);
 }
@@ -115,7 +115,7 @@ async fn drift_samtale_seiden2() {
     }
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        outcomes.push(run_one_file(&jobs, f, "dan").await);
+        outcomes.push(run_one_file(&jobs, f).await);
     }
     assert_all_files_pass("drift_samtale_seiden2", &outcomes);
 }
@@ -152,7 +152,7 @@ async fn drift_biling_mle_mpf_28() {
     }
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        outcomes.push(run_one_file(&jobs, f, "fra").await);
+        outcomes.push(run_one_file(&jobs, f).await);
     }
     assert_all_files_pass("drift_biling_mle_mpf_28", &outcomes);
 }
@@ -184,7 +184,7 @@ async fn drift_rhd_minga044() {
     }
     let mut outcomes: Vec<FileOutcome> = Vec::new();
     for f in &staged {
-        outcomes.push(run_one_file(&jobs, f, "eng").await);
+        outcomes.push(run_one_file(&jobs, f).await);
     }
     assert_all_files_pass("drift_rhd_minga044", &outcomes);
 }

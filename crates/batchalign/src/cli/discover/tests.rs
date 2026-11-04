@@ -1,5 +1,6 @@
 use super::*;
 use crate::cli::args::InputKind;
+use crate::cli::discover::PassthroughMode;
 use std::fs;
 use std::path::PathBuf;
 
@@ -63,6 +64,7 @@ fn discover_skips_dummy() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
     assert!(out.path().join("dummy.cha").exists());
@@ -102,6 +104,7 @@ fn copy_nonmatching_preserves_structure() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
     assert!(out.path().join("sub").join("b.txt").exists());
@@ -125,6 +128,7 @@ fn copy_nonmatching_withholds_provenance_json() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
 
@@ -155,6 +159,7 @@ fn copy_nonmatching_withholds_dotted_provenance_json() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
 
@@ -173,6 +178,7 @@ fn copy_nonmatching_withholds_provenance_json_in_any_case() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
 
@@ -191,6 +197,7 @@ fn copy_nonmatching_still_copies_media_alongside_chat_input() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Align,
+        PassthroughMode::Copy,
     )
     .unwrap();
 
@@ -217,6 +224,7 @@ fn copy_nonmatching_never_copies_the_chat_file_itself() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Align,
+        PassthroughMode::Copy,
     )
     .unwrap();
 
@@ -239,6 +247,7 @@ fn copy_nonmatching_skips_generation() {
         out.path(),
         InputKind::Media,
         ReleasedCommand::Transcribe,
+        PassthroughMode::Copy,
     )
     .unwrap();
     assert!(!out.path().join("a.txt").exists());
@@ -441,6 +450,7 @@ fn build_server_names_dir_input() {
         &outputs,
         &inputs,
         Some(&out),
+        None,
     )
     .unwrap();
     let names = plan
@@ -474,6 +484,7 @@ fn build_server_names_individual_files() {
         &[oa, ob],
         &inputs,
         Some(&dir.path().join("out")),
+        None,
     )
     .unwrap();
     let names = plan
@@ -499,6 +510,7 @@ fn copy_nonmatching_in_place_skips() {
         dir.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
     // No error, no crash, just a no-op
@@ -511,7 +523,14 @@ fn copy_nonmatching_all_generation_commands() {
         let out = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("extra.txt"), "text").unwrap();
 
-        copy_nonmatching(dir.path(), out.path(), InputKind::Chat, cmd).unwrap();
+        copy_nonmatching(
+            dir.path(),
+            out.path(),
+            InputKind::Chat,
+            cmd,
+            PassthroughMode::Copy,
+        )
+        .unwrap();
         // Generation commands skip all copying
         assert!(
             !out.path().join("extra.txt").exists(),
@@ -603,6 +622,7 @@ fn discover_recursive_mixed_extensions() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
     assert!(out.path().join("session1/notes.txt").exists());
@@ -654,6 +674,7 @@ fn discover_recursive_skips_nested_dummy() {
         out.path(),
         InputKind::Chat,
         ReleasedCommand::Morphotag,
+        PassthroughMode::Copy,
     )
     .unwrap();
     assert!(out.path().join("sub/dummy.cha").exists());

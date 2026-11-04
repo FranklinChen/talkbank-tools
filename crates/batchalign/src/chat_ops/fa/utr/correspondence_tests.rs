@@ -248,8 +248,16 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
         "host",
         "missing"
       ],
-      "floor_ms": 100,
-      "ceiling_ms": 480,
+      "floor": {
+        "kind": "preceding_measured",
+        "ms": 100,
+        "utterance": 0
+      },
+      "ceiling": {
+        "kind": "following_measured",
+        "ms": 380,
+        "utterance": 2
+      },
       "scope": {
         "kind": "order_corridor"
       }
@@ -277,9 +285,11 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
         )
         .unwrap();
     assert_eq!(
-        (search.start_ms, search.end_ms),
-        (200, 480),
-        "the proved first word bounds onset; the backchannel does not bound the missing end"
+        (search.span.start_ms, search.span.end_ms),
+        (200, 380),
+        "the proved first word bounds onset; the following turn carries no overlap marker, so \
+         its earliest heard token's end bounds the missing end (2026-11-03; it used to be the \
+         same speaker's later turn, 480, since a backchannel was allowed to interleave)"
     );
     let mut wrong_source = words;
     wrong_source[1].text = "different".to_owned();
@@ -298,7 +308,11 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
 
 #[test]
 fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time() {
-    let mut chat = admitted_dialogue("*PAR:\thost missing .\n*INV:\tyes .");
+    // The following turn is marked `+<`: it overlaps this one, so its heard
+    // word bounds nothing here and the corridor's ceiling is the recording's
+    // own edge (an unmarked following turn would bound it, see
+    // `partial_search_bounds_only_the_endpoint_actually_observed`).
+    let mut chat = admitted_dialogue("*PAR:\thost missing .\n*INV:\t+< yes .");
     let result = inject_spaced(&mut chat, &tokens("host yes"));
     assert_eq!(result.injected(), 1);
     let words: Vec<_> = ["host", "missing"]
@@ -323,7 +337,7 @@ fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time()
                 &recording,
             )
             .unwrap();
-        assert_eq!((search.start_ms, search.end_ms), (100, end));
+        assert_eq!((search.span.start_ms, search.span.end_ms), (100, end));
         let grouping =
             super::super::grouping::group_utterances(&chat, 500, &recording, &result.anchors);
         assert!(
@@ -362,12 +376,16 @@ fn partial_search_bounds_only_the_endpoint_actually_observed() {
     };
     use talkbank_model::{UtteranceIdx, WordIdx};
 
-    // The other speaker's following word cannot bound an absent endpoint:
-    // that speaker may interleave. This speaker's own proved endpoint can.
+    // This speaker's own proved endpoint bounds that side exactly (380). An
+    // absent endpoint is bounded by the nearest measured neighbour in
+    // document order: the other speaker's following turn carries no overlap
+    // marker, so it begins after this turn ends, and the end of its earliest
+    // heard token (60_080) is the ceiling where the recording's end (70_000)
+    // used to be (2026-11-03).
     for (source, expected) in [
         ("missing red blue", (100, 380)),
-        ("red blue missing", (200, 70_000)),
-        ("missing red blue missing", (100, 70_000)),
+        ("red blue missing", (200, 60_080)),
+        ("missing red blue missing", (100, 60_080)),
     ] {
         let mut chat = admitted_dialogue(&format!(
             "*PAR:\tbefore .\n*PAR:\t{source} .\n*INV:\tafter ."
@@ -404,7 +422,11 @@ fn partial_search_bounds_only_the_endpoint_actually_observed() {
                 &recording,
             )
             .unwrap();
-        assert_eq!((window.start_ms, window.end_ms), expected, "{source}");
+        assert_eq!(
+            (window.span.start_ms, window.span.end_ms),
+            expected,
+            "{source}"
+        );
         // Neither a reordered address nor a substituted lexical census may
         // reuse the producer's endpoint capability.
         let mut foreign = words.clone();
@@ -455,8 +477,16 @@ fn obligatory_ambiguous_boundaries_keep_every_candidate_and_nested_provider_end(
         "host",
         "missing"
       ],
-      "floor_ms": 100,
-      "ceiling_ms": 580,
+      "floor": {
+        "kind": "preceding_measured",
+        "ms": 100,
+        "utterance": 0
+      },
+      "ceiling": {
+        "kind": "following_measured",
+        "ms": 480,
+        "utterance": 2
+      },
       "scope": {
         "kind": "order_corridor"
       }
@@ -556,7 +586,7 @@ fn ambiguous_interleaving_search_keeps_all_candidates_across_host_crop() {
                 .expect("recording"),
         )
         .expect("other-speaker crop cannot discard a candidate");
-    assert_eq!((span.start_ms, span.end_ms), (1740, 3400));
+    assert_eq!((span.span.start_ms, span.span.end_ms), (1740, 3400));
     let recording =
         super::super::coordinates::Recording::of_duration(super::super::coordinates::Ms(4000))
             .expect("recording");
@@ -633,8 +663,16 @@ fn interleaved_search_refuses_candidate_hulls_outside_retained_same_speaker_boun
       "words": [
         "yes"
       ],
-      "floor_ms": 200,
-      "ceiling_ms": 1000,
+      "floor": {
+        "kind": "preceding_measured",
+        "ms": 500,
+        "utterance": 1
+      },
+      "ceiling": {
+        "kind": "following_measured",
+        "ms": 1000,
+        "utterance": 3
+      },
       "scope": {
         "kind": "order_corridor"
       }

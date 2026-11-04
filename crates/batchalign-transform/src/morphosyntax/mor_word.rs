@@ -29,13 +29,139 @@ impl MorPos {
     }
 }
 
-/// Map a single UD word into a CHAT `%mor` item.
-pub fn map_ud_word(ud: &UdWord, ctx: &MappingContext) -> Result<Mor, MappingError> {
-    map_ud_mor_word(ud, ctx).map(Mor::new)
+/// A CHAT tag-marker separator that the morphosyntax payload keeps as a
+/// `%mor` item: the vocative marker `‡` (U+2021) and the tag marker `„`
+/// (U+201E). The payload sends them to the model like words (the parse keeps
+/// its punctuation token), and the model echoes them back as tokens; this type
+/// is what such a token is recognized AS, once, at [`Self::classify`].
+///
+/// The comma `,` is also a tag-marker separator in CHAT (Chatter's
+/// `is_tag_marker_separator`, `talkbank_model::alignment::helpers`, keeps all
+/// three as `%mor` items), but it is written through its own lemma branch
+/// (`cm|cm`, [`map_actual_punct`]) and is not one of these. This is the
+/// model-token side, keyed by the surface text the payload sent; the resting
+/// shape, which needs Chatter's extractor to carry the separator kind on the
+/// extracted word, is a `WordRole` decided where the word is born, as special
+/// forms are. Until then the token is classified here, once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagMarker {
+    /// `‡` (U+2021), the vocative or summons marker.
+    Vocative,
+    /// `„` (U+201E), the tag marker.
+    Tag,
 }
 
-/// Map a single UD word into one `%mor` word: one chunk, by type.
-pub(super) fn map_ud_mor_word(ud: &UdWord, ctx: &MappingContext) -> Result<MorWord, MappingError> {
+impl TagMarker {
+    /// The vocative marker's one spelling in CHAT.
+    const VOCATIVE: &'static str = "\u{2021}";
+    /// The tag marker's one spelling in CHAT.
+    const TAG: &'static str = "\u{201E}";
+
+    /// The one classifier: the marker `text` is, or `None` for every other
+    /// text. The crate spells the same two marks by hand elsewhere
+    /// (`build_chat::tag_marker_separator`, `retokenize::parse_helpers`,
+    /// `asr_postprocess::MOR_PUNCT`, `compare::engine`); this is the primitive
+    /// those sites can be brought onto.
+    pub fn of_text(text: &str) -> Option<Self> {
+        match text {
+            Self::VOCATIVE => Some(Self::Vocative),
+            Self::TAG => Some(Self::Tag),
+            _ => None,
+        }
+    }
+
+    /// What a model token is to the `%mor` writer, decided once: a marker, or
+    /// a lexical word the generic path may write. Classified on the text rather
+    /// than the model's lemma, because the text is ours and the lemma is the
+    /// model's. The only way to mint a [`Lexical`] from a model token, so the
+    /// generic path cannot be handed a marker.
+    pub fn classify(ud: &UdWord) -> Classified<'_> {
+        match Self::of_text(&ud.text) {
+            Some(marker) => Classified::Marker(marker),
+            None => Classified::Lexical(Lexical(ud)),
+        }
+    }
+
+    /// The marker as written in CHAT.
+    pub const fn chat_text(self) -> &'static str {
+        match self {
+            Self::Vocative => Self::VOCATIVE,
+            Self::Tag => Self::TAG,
+        }
+    }
+
+    /// The `%mor` item written for this marker: the ONE place its spelling
+    /// lives.
+    ///
+    /// PENDING O5a (Franklin's open decision): today the marker is written as
+    /// `punct|‡` and `punct|„`, and in Japanese as `cm|‡` and `cm|„`, which is
+    /// exactly what the generic word path produced for a `PUNCT` token before
+    /// this type existed (the Japanese branch writes every `PUNCT` token's
+    /// category as `cm`). CLAN's convention is `beg|beg` for `‡` and `end|end`
+    /// for `„` (Chatter's `is_tag_marker_separator` names it). This function
+    /// keeps the current spelling so that O5a changes exactly one function,
+    /// and nothing else, when it is decided.
+    pub fn mor(self, ctx: &MappingContext) -> MorWord {
+        let category = match lang2(&ctx.lang) {
+            "ja" => MorPos::JapaneseComma,
+            _ => MorPos::Upos(UniversalPos::Punct),
+        };
+        MorWord::new(
+            PosCategory::new(category.name()),
+            MorStem::new(self.chat_text()),
+        )
+    }
+}
+
+/// A model token that is not a tag marker: the only input the generic word
+/// path ([`map_ud_mor_word`]) accepts, so a marker cannot reach it and its
+/// spelling cannot arise there. Minted by [`TagMarker::classify`] for a model
+/// token, and by [`Self::curated`] for a reading a curated table synthesized.
+#[derive(Debug, Clone, Copy)]
+pub struct Lexical<'a>(&'a UdWord);
+
+impl<'a> Lexical<'a> {
+    /// A curated table's reading (`UdWord::curated_reading`): its surface
+    /// comes from the table's own allowlist (Italian compound imperatives and
+    /// mis-splits), never from the model, so it is lexical by provenance.
+    /// Scoped to this module tree: a model token takes the classifier.
+    pub(super) fn curated(word: &'a UdWord) -> Self {
+        Self(word)
+    }
+
+    /// The word.
+    pub fn word(self) -> &'a UdWord {
+        self.0
+    }
+}
+
+/// What one model token is to the `%mor` writer.
+#[derive(Debug, Clone, Copy)]
+pub enum Classified<'a> {
+    /// A tag marker, written by [`TagMarker::mor`].
+    Marker(TagMarker),
+    /// A word, written by the generic word path.
+    Lexical(Lexical<'a>),
+}
+
+/// Map a single UD word into a CHAT `%mor` item: a marker through
+/// [`TagMarker::mor`], every other token through the generic word path.
+pub fn map_ud_word(ud: &UdWord, ctx: &MappingContext) -> Result<Mor, MappingError> {
+    match TagMarker::classify(ud) {
+        Classified::Marker(marker) => Ok(Mor::new(marker.mor(ctx))),
+        Classified::Lexical(word) => map_ud_mor_word(word, ctx).map(Mor::new),
+    }
+}
+
+/// Map a single lexical UD word into one `%mor` word: one chunk, by type.
+///
+/// Takes a [`Lexical`], never a bare `UdWord`: a tag marker cannot be given
+/// to this path, so its spelling belongs to [`TagMarker::mor`] alone.
+pub(super) fn map_ud_mor_word(
+    word: Lexical<'_>,
+    ctx: &MappingContext,
+) -> Result<MorWord, MappingError> {
+    let ud = word.word();
     if matches!(ud.lemma.as_str(), "." | "!" | "?" | "," | "$,") {
         return Ok(map_actual_punct(ud));
     }
@@ -81,9 +207,9 @@ pub(super) fn map_ud_mor_word(ud: &UdWord, ctx: &MappingContext) -> Result<MorWo
 
 fn map_actual_punct(ud: &UdWord) -> MorWord {
     let (pos_name, stem) = if ud.lemma == "," || ud.lemma == "$," {
-        ("cm", "cm")
+        (MorPos::JapaneseComma.name(), "cm")
     } else {
-        ("punct", ud.lemma.as_str())
+        (UniversalPos::Punct.to_chat_pos_name(), ud.lemma.as_str())
     };
 
     MorWord::new(PosCategory::new(pos_name), MorStem::new(stem))
@@ -241,6 +367,150 @@ mod tests {
     #[test]
     fn clean_lemma_keeps_a_leading_zero_intact() {
         assert_eq!(clean_lemma("0zero", "zero"), "0zero");
+    }
+
+    /// A model token for one of the two markers, as Stanza echoes it: text
+    /// and lemma the marker, category `PUNCT`, attached to word `head`.
+    fn marker_token(id: usize, text: &str, head: usize) -> UdWord {
+        UdWord::try_from(crate::morphosyntax::UdWordAnalysis {
+            id: crate::morphosyntax::UdId::Single(id),
+            text: text.to_string(),
+            lemma: text.to_string(),
+            upos: UdPunctable::Value(UniversalPos::Punct),
+            xpos: None,
+            feats: None,
+            head,
+            deprel: "punct".to_string(),
+            deps: None,
+            misc: None,
+        })
+        .expect("a marker token carries nothing the admission refuses")
+    }
+
+    fn rendered(mor: &Mor) -> String {
+        let mut out = String::new();
+        mor.write_chat(&mut out).expect("a %mor item writes");
+        out
+    }
+
+    /// PENDING O5a: the spelling written for each marker today, pinned so
+    /// the decision (`beg|beg` / `end|end` versus `punct|`) changes this
+    /// test and `TagMarker::mor` together, and nothing else. Japanese writes
+    /// `cm|`, as the generic path did for every `PUNCT` token there.
+    #[test]
+    fn tag_marker_spelling_is_pending_o5a() {
+        let lang = |code: &str| MappingContext {
+            lang: talkbank_model::model::LanguageCode::new(code).expect("valid test language code"),
+        };
+        let (eng, jpn) = (lang("eng"), lang("jpn"));
+        assert_eq!(
+            rendered(&Mor::new(TagMarker::Vocative.mor(&eng))),
+            "punct|\u{2021}"
+        );
+        assert_eq!(
+            rendered(&Mor::new(TagMarker::Tag.mor(&eng))),
+            "punct|\u{201E}"
+        );
+        assert_eq!(
+            rendered(&Mor::new(TagMarker::Vocative.mor(&jpn))),
+            "cm|\u{2021}"
+        );
+        assert_eq!(rendered(&Mor::new(TagMarker::Tag.mor(&jpn))), "cm|\u{201E}");
+        assert_eq!(TagMarker::of_text("\u{2021}"), Some(TagMarker::Vocative));
+        assert!(matches!(
+            TagMarker::classify(&marker_token(1, "\u{2021}", 0)),
+            Classified::Marker(TagMarker::Vocative)
+        ));
+        assert!(matches!(
+            TagMarker::classify(&marker_token(1, "\u{201E}", 0)),
+            Classified::Marker(TagMarker::Tag)
+        ));
+        assert!(matches!(
+            TagMarker::classify(&marker_token(1, ",", 0)),
+            Classified::Lexical(_)
+        ));
+    }
+
+    /// RED FIRST: the generic word path wrote `punct|„` itself from the
+    /// model's lemma, so the marker's spelling lived in the same code as
+    /// every word's. The generic path now takes a `Lexical`, which only the
+    /// classifier mints for a model token, so it cannot be given a marker:
+    /// `map_ud_mor_word(&marker_token(..), &ctx)` no longer compiles. The
+    /// one place a marker can still arrive is as a component of a multi-word
+    /// token, and that is refused there, by name.
+    #[test]
+    fn a_tag_marker_cannot_be_a_clitic() {
+        use crate::morphosyntax::assemble_mors;
+        let ctx = MappingContext {
+            lang: talkbank_model::model::LanguageCode::new("eng")
+                .expect("valid test language code"),
+        };
+        let main = UdWord::try_from(crate::morphosyntax::UdWordAnalysis {
+            id: crate::morphosyntax::UdId::Single(1),
+            text: "hello".to_string(),
+            lemma: "hello".to_string(),
+            upos: UdPunctable::Value(UniversalPos::Intj),
+            xpos: None,
+            feats: None,
+            head: 0,
+            deprel: "root".to_string(),
+            deps: None,
+            misc: None,
+        })
+        .expect("test analysis is admitted");
+        let refused = assemble_mors(&[main, marker_token(2, "\u{201E}", 1)], &ctx);
+        assert!(
+            matches!(
+                refused,
+                Err(MappingError::TagMarkerAsClitic {
+                    marker: TagMarker::Tag
+                })
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// A sentence with a marker token writes the marker through its own
+    /// renderer, with the relation the model gave it, and every other token
+    /// through the generic path: the output is what it was, by a route that
+    /// classifies the token once.
+    #[test]
+    fn a_sentence_writes_a_tag_marker_through_its_own_renderer() {
+        use crate::morphosyntax::{UdId, UdSentence, UdWordAnalysis, map_ud_sentence};
+        let word = |id: usize, text: &str, upos: UniversalPos, head: usize, deprel: &str| {
+            UdWord::try_from(UdWordAnalysis {
+                id: UdId::Single(id),
+                text: text.to_string(),
+                lemma: text.to_string(),
+                upos: UdPunctable::Value(upos),
+                xpos: None,
+                feats: None,
+                head,
+                deprel: deprel.to_string(),
+                deps: None,
+                misc: None,
+            })
+            .expect("test analysis is admitted")
+        };
+        let sentence = UdSentence {
+            words: vec![
+                word(1, "hello", UniversalPos::Intj, 0, "root"),
+                marker_token(2, "\u{201E}", 1),
+                word(3, "there", UniversalPos::Adv, 1, "advmod"),
+                word(4, ".", UniversalPos::Punct, 1, "punct"),
+            ],
+        };
+        let ctx = MappingContext {
+            lang: talkbank_model::model::LanguageCode::new("eng")
+                .expect("valid test language code"),
+        };
+        let (mors, gras) = map_ud_sentence(&sentence, &ctx).expect("the sentence maps");
+        // The terminator is no `%mor` item; its relation closes the `%gra`.
+        let written: Vec<String> = mors.iter().map(rendered).collect();
+        assert_eq!(written, ["intj|hello", "punct|\u{201E}", "adv|there"]);
+        assert_eq!(gras.len(), 4, "three chunks and the mapped terminator");
+        assert_eq!((gras[1].index, gras[1].head), (2, 1));
+        assert_eq!(gras[1].relation.as_str(), "PUNCT");
     }
 
     #[test]

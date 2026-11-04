@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UdRepairV2",
+  "description": "One repair a worker made inside an analysis it returned: which field of\nwhich word, and what changed.\n\nThe ONE list an analyzed item carries ([`MorphosyntaxItemResultV2::Analyzed`]):\nevery repair site in the worker produces a value of this type and nothing\nelse, so the provenance count that reads the list cannot miss a kind, and\na repair that lives in a log line only is the shape this type exists to\nend. Tagged by the field repaired (`field`), with each variant's own\nreason (`kind`) inside, so the tag is closed in two steps: the field here,\nthe reason in the field's own kind enum.",
+  "oneOf": [
+    {
+      "description": "A dependency relation was rewritten.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string",
+          "const": "relation"
+        }
+      },
+      "$ref": "#/$defs/UdRelationRepairV2",
+      "required": [
+        "field"
+      ]
+    },
+    {
+      "description": "A feature value was removed.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string",
+          "const": "feature_value"
+        }
+      },
+      "$ref": "#/$defs/UdFeatureRepairV2",
+      "required": [
+        "field"
+      ]
+    },
+    {
+      "description": "A feature name was respelled.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string",
+          "const": "feature_name"
+        }
+      },
+      "$ref": "#/$defs/UdFeatureNameRepairV2",
+      "required": [
+        "field"
+      ]
+    },
+    {
+      "description": "A lemma was replaced by its word's surface form.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string",
+          "const": "lemma"
+        }
+      },
+      "$ref": "#/$defs/UdLemmaRepairV2",
+      "required": [
+        "field"
+      ]
+    }
+  ],
+  "$defs": {
+    "PaddingValue": {
+      "description": "A feature value that is model padding: an angle-bracketed placeholder such as <PAD> or <UNK>.",
+      "type": "string",
+      "pattern": "^<.*>$"
+    },
+    "UdFeatureNameRepairKindV2": {
+      "description": "Why a Universal Dependencies feature name a worker received from Stanza is not the name in the analysis it returned. Closed: a worker cannot report a feature name repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "feature_name_alias"
+        }
+      ]
+    },
+    "UdFeatureNameRepairV2": {
+      "description": "One feature name a worker respelled inside an analysis it returned.\n\nThe worker is the only witness, as for every repair: the misspelled name\nis not in the analysis the server receives. Stanza's Italian model writes\n`Verbform=Fin`, which every consumer of `VerbForm` would read as no form\nat all; respelling it is a rewrite of what the model said, so it is\nreported like one.",
+      "type": "object",
+      "properties": {
+        "from_name": {
+          "description": "The name the model produced, verbatim (`Verbform`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which repair this is.",
+          "$ref": "#/$defs/UdFeatureNameRepairKindV2"
+        },
+        "to_name": {
+          "description": "The UD name applied in its place (`VerbForm`).",
+          "type": "string"
+        },
+        "word": {
+          "description": "Surface form of the word the feature belongs to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "from_name",
+        "to_name"
+      ]
+    },
+    "UdFeatureRepairKindV2": {
+      "description": "Why a Universal Dependencies feature value a worker received from Stanza is absent from the analysis it returned. Closed: a worker cannot report a feature repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_feature_value"
+        }
+      ]
+    },
+    "UdFeatureRepairV2": {
+      "description": "One feature value a worker removed from an analysis it returned.\n\nThe worker is the only witness, as for a relation repair: the removed value\nis not in the analysis the server receives. Each removed value is its own\nrepair, so `Case=Nom,<PAD>` losing `<PAD>` is one repair and keeps `Nom`.",
+      "type": "object",
+      "properties": {
+        "feature": {
+          "description": "The feature whose value it was (`Case`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which repair this is.",
+          "$ref": "#/$defs/UdFeatureRepairKindV2"
+        },
+        "removed_value": {
+          "description": "The removed value, verbatim (`<PAD>`): padding, by type.",
+          "$ref": "#/$defs/PaddingValue"
+        },
+        "word": {
+          "description": "Surface form of the word the value was removed from.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "feature",
+        "removed_value"
+      ]
+    },
+    "UdLemmaRepairKindV2": {
+      "description": "Why a lemma a worker received from Stanza is not the lemma in the analysis it returned. Closed: a worker cannot report a lemma repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "punctuation_lemma"
+        }
+      ]
+    },
+    "UdLemmaRepairV2": {
+      "description": "One lemma a worker replaced inside an analysis it returned, by the\nsurface form of its word.\n\nDeserialized through [`is_punctuation_lemma`]: a reported lemma repair\nwhose lemma is not punctuation-only for its word is refused where the\nresponse is read, as a feature repair of a non-padding value is. The\nlemma applied is the word itself, so it is not carried twice.",
+      "type": "object",
+      "properties": {
+        "from_lemma": {
+          "description": "The lemma the model produced, verbatim (`...`): punctuation-only for\n`word`, by admission.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which repair this is.",
+          "$ref": "#/$defs/UdLemmaRepairKindV2"
+        },
+        "word": {
+          "description": "Surface form of the word, which is also the lemma applied.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "from_lemma"
+      ]
+    },
+    "UdRelationRepairKindV2": {
+      "description": "Why one Universal Dependencies relation a worker received from Stanza is not the relation it applied. Closed: a worker cannot report a repair not named here.",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pad_relation"
+        },
+        {
+          "type": "string",
+          "const": "relation_case"
+        },
+        {
+          "type": "string",
+          "const": "relation_alias"
+        },
+        {
+          "type": "string",
+          "const": "unknown_relation"
+        },
+        {
+          "type": "string",
+          "const": "cue_root_promotion"
+        }
+      ]
+    },
+    "UdRelationRepairV2": {
+      "description": "One relation rewrite a worker made inside an analysis it returned.\n\nCarries what it takes to attribute the rewrite as well as count it: the\nword it was made on, and both relations. The worker is the only witness,\nbecause the relation Stanza produced does not survive into the analysis it\nsends: by the time the server sees the item, the repaired relation is the\nonly one there.",
+      "type": "object",
+      "properties": {
+        "from_relation": {
+          "description": "The relation the model produced, verbatim.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which rewrite this is.",
+          "$ref": "#/$defs/UdRelationRepairKindV2"
+        },
+        "to_relation": {
+          "description": "The relation applied in its place, which the worker admits is a UD\nrelation before it builds this value.",
+          "type": "string"
+        },
+        "word": {
+          "description": "Surface form of the word whose relation was rewritten, so a reader can\nfind it in the transcript.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "word",
+        "from_relation",
+        "to_relation"
+      ]
+    }
+  }
+}

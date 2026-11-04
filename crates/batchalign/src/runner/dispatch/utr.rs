@@ -11,7 +11,7 @@ use crate::revai::FetchedRevAsrEvidence;
 use std::path::Path;
 
 use super::options::ResolvedUtrStrategy;
-use crate::api::{DurationMs, LanguageCode3, NumSpeakers};
+use crate::api::{DurationMs, LanguageCode3};
 use crate::cache::{
     InferenceLease, UtrAsrCacheEligibility, UtrAsrCacheNamespace, UtteranceCache, tasks,
 };
@@ -493,7 +493,9 @@ async fn infer_utr_asr_response(
             let request = crate::revai::RevAsrEvidenceRequest::new(
                 provider_media,
                 &lang,
-                NumSpeakers(1),
+                // One speaker: UTR recovers timing for a transcript whose
+                // speakers are already known, and asks Rev.AI to separate none.
+                crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
                 &crate::revai::RevAsrModelRevision::current(),
             )
             .map_err(|error| crate::error::ServerError::Persistence(error.to_string()))?;
@@ -521,7 +523,9 @@ async fn infer_utr_asr_response(
                     backend,
                     audio_path,
                     lang: &context.asr_language(),
-                    num_speakers: NumSpeakers(1),
+                    // UTR never asks a provider to separate speakers: the
+                    // count of one it used to pass meant exactly this.
+                    diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
                     extras: &no_extras,
                     gpu: context.services.gpu,
                     decode_budget,
@@ -962,6 +966,7 @@ mod utr_token_conversion_tests {
 
     fn response(tokens: Vec<AsrToken>) -> AsrResponse {
         AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens,
             lang: LanguageCode3::eng(),
             model: None,
@@ -1185,7 +1190,7 @@ mod utr_evidence_cache_tests {
     async fn unavailable_provider_retains_admitted_document_and_records_the_cause() {
         let temp = tempfile::tempdir().unwrap();
         let audio = temp.path().join("audio.wav");
-        tokio::fs::write(&audio, b"provider media").await.unwrap();
+        crate::media::probe::fixtures::write_pcm_wav(&audio, 0);
         let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
             .await
             .unwrap();
@@ -1195,7 +1200,7 @@ mod utr_evidence_cache_tests {
                 &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
             )
             .unwrap(),
-            NumSpeakers(1),
+            crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
             &RevAsrModelRevision::current(),
         )
         .await
@@ -1276,9 +1281,7 @@ mod utr_evidence_cache_tests {
     async fn rev_utr_replays_raw_evidence_without_a_second_paid_call() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let audio = tempdir.path().join("audio.wav");
-        tokio::fs::write(&audio, b"provider media")
-            .await
-            .expect("write audio");
+        crate::media::probe::fixtures::write_pcm_wav(&audio, 0);
         let cache_dir = tempdir.path().join("cache");
         let cache = UtteranceCache::sqlite(Some(cache_dir.clone()))
             .await
@@ -1289,7 +1292,7 @@ mod utr_evidence_cache_tests {
                 &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
             )
             .expect("Rev.AI recognizes English"),
-            NumSpeakers(1),
+            crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
             &RevAsrModelRevision::current(),
         )
         .await
@@ -1356,14 +1359,14 @@ mod utr_evidence_cache_tests {
     async fn task_scoped_required_asr_cold_miss_never_calls_provider() {
         let root = tempfile::tempdir().unwrap();
         let audio = root.path().join("audio.wav");
-        tokio::fs::write(&audio, b"synthetic media").await.unwrap();
+        crate::media::probe::fixtures::write_pcm_wav(&audio, 0);
         let request = RevAsrEvidenceRequest::from_audio(
             &audio,
             &crate::types::revai_language::RevLanguage::admit(
                 &crate::api::AsrLanguageRequest::One(LanguageCode3::eng()),
             )
             .unwrap(),
-            NumSpeakers(1),
+            crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
             &RevAsrModelRevision::current(),
         )
         .await
@@ -1500,6 +1503,7 @@ mod utr_evidence_cache_tests {
         );
 
         let response = crate::transcribe::AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: Vec::new(),
             lang: LanguageCode3::eng(),
             source_monologues: None,

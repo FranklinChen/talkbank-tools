@@ -107,6 +107,30 @@ pub struct UtteranceDesc {
     /// Detected language for this utterance, parsed. When set and different
     /// from the primary language, a `[- lang]` precode is prepended.
     pub lang: Option<LanguageCode>,
+    /// Recognizer tokens the utterance lost to CHAT legality, each written as
+    /// a `%com` tier on its line, or as an `@Comment` in the utterance's
+    /// place when it kept no word to write a line from.
+    pub dropped_tokens: Vec<asr_postprocess::DroppedAsrToken>,
+    /// Repetitions at a Whisper window seam whose kept copy is in this
+    /// utterance, each written as a `%com` tier on its line.
+    pub seam_ambiguities: Vec<asr_postprocess::SeamAmbiguity>,
+}
+
+impl UtteranceDesc {
+    /// Every comment this utterance carries, in writing order: lost tokens,
+    /// then seams. The same list [`asr_postprocess::Utterance::comment_texts`]
+    /// gives, built from the same records.
+    pub fn comment_texts(&self) -> Vec<String> {
+        self.dropped_tokens
+            .iter()
+            .map(asr_postprocess::DroppedAsrToken::comment_text)
+            .chain(
+                self.seam_ambiguities
+                    .iter()
+                    .map(asr_postprocess::SeamAmbiguity::comment_text),
+            )
+            .collect()
+    }
 }
 
 /// An utterance's content: word-level tokens with how the utterance ends, or

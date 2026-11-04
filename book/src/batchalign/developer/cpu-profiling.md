@@ -157,7 +157,7 @@ into specific call paths.
 
 ```bash
 cargo install samply
-samply record ./target/release/batchalign3 transcribe input/ -o out/
+samply record ./target/release/batchalign3 transcribe input/ -o out/ --lang eng
 # Opens Firefox profiler with the trace.
 ```
 

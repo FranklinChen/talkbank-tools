@@ -24,7 +24,7 @@ fn attempt_with_options(words: &str, options: &str) -> (talkbank_model::ChatFile
     .expect("complete named source admission");
     match read.attempt() {
         FaInputDocument::Active(active) => (active.chat_file, active.admission),
-        FaInputDocument::Preserved(_) => panic!("ordinary source must align"),
+        FaInputDocument::Preserved => panic!("ordinary source must align"),
     }
 }
 
@@ -73,6 +73,7 @@ fn result(file: talkbank_model::ChatFile) -> FaResult<talkbank_model::ChatFile> 
         WordGapHealing::PreserveMeasured,
         "test_engine",
         &FaCacheNamespace::for_test("test-build"),
+        crate::types::results::RecordingRead::Read,
     )
 }
 
@@ -326,6 +327,7 @@ fn real_injection_retains_exact_word_intervals_through_written_chat() {
             true,
             false,
             crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
+            crate::provenance::AlignTiming::Aligned,
         ))
         .expect("provenance preserves the timing census")
         .with_abbreviations_merged()
@@ -480,7 +482,7 @@ fn attempt_with_diary(
     .expect("a diary note is admitted");
     match read.attempt() {
         FaInputDocument::Active(active) => (active.chat_file, active.admission),
-        FaInputDocument::Preserved(_) => panic!("ordinary source must align"),
+        FaInputDocument::Preserved => panic!("ordinary source must align"),
     }
 }
 
@@ -717,4 +719,426 @@ fn an_untranscribed_turn_has_no_lexical_timing_obligation() {
             .shortfalls
             .is_empty()
     );
+}
+
+/// Admit a source of several utterances, each given as its whole main
+/// tier line (`*SPK:\twords .`), with the speakers it names declared.
+fn attempt_lines(lines: &[&str]) -> (talkbank_model::ChatFile, FaAdmission) {
+    let mut speakers: Vec<&str> = Vec::new();
+    for line in lines {
+        let code = line
+            .strip_prefix('*')
+            .and_then(|rest| rest.split(':').next())
+            .expect("a main tier line names its speaker");
+        if !speakers.contains(&code) {
+            speakers.push(code);
+        }
+    }
+    let participants = speakers
+        .iter()
+        .map(|code| format!("{code} Speaker"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ids = speakers
+        .iter()
+        .map(|code| format!("@ID:\teng|test|{code}|||||Speaker|||\n"))
+        .collect::<String>();
+    let body = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    let source = format!(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\t{participants}\n{ids}@Media:\tinput, audio, unlinked\n{body}@End\n"
+    );
+    let read = crate::fa::read_fa_source_named(
+        &source,
+        TranscriptName::Named(
+            FileStem::from_path(std::path::Path::new("input.cha")).expect("name"),
+        ),
+        crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
+    )
+    .expect("complete named source admission");
+    match read.attempt() {
+        FaInputDocument::Active(active) => (active.chat_file, active.admission),
+        FaInputDocument::Preserved => panic!("ordinary source must align"),
+    }
+}
+
+/// Give utterance `index` the timing an aligner's answer leaves on it before
+/// finalization: one measured interval per lexical word, in order, and the
+/// bullet over `bullet`. No `%wor` yet: the write phase adds it after timing
+/// order is enforced, as in a run.
+fn time_utterance(
+    file: &mut talkbank_model::ChatFile,
+    index: usize,
+    bullet: (u64, u64),
+    word_spans: &[(u64, u64)],
+) {
+    let utterance = (&mut file.lines)
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Utterance(utterance) => Some(utterance.as_mut()),
+            _ => None,
+        })
+        .nth(index)
+        .expect("the fixture has this utterance");
+    let mut spans = word_spans.iter();
+    walk_words_mut(
+        utterance.main.content.content.as_mut_slice(),
+        None,
+        &mut |leaf| {
+            let word = match leaf {
+                WordItemMut::Word(word) => word,
+                WordItemMut::ReplacedWord(replaced) => &mut replaced.word,
+                WordItemMut::Separator(_) => return,
+            };
+            if counts_for_tier(word, TierDomain::Wor) {
+                let (start_ms, end_ms) = spans.next().expect("one span per lexical word");
+                word.inline_bullet = Some(Bullet::new(Location::Unlocated, *start_ms, *end_ms));
+            }
+        },
+    );
+    assert!(spans.next().is_none(), "every span names a word");
+    utterance.main.content.bullet =
+        Some(Bullet::new(Location::Unlocated, bullet.0, bullet.1).into());
+}
+
+/// Finalize `file` the way a run with no fresh injection does: impose
+/// bullets, enforce timing order, rewrite `%wor` where a word changed, and
+/// retain the decisions, so the result carries the timing effects the run
+/// produced exactly as production carries them. Every adjacent end overlap
+/// is clamped, whatever the speakers, so a fixture can exercise the clamp
+/// without a same-speaker pair.
+fn finalized(file: talkbank_model::ChatFile) -> FaResult<talkbank_model::ChatFile> {
+    finalized_under(
+        file,
+        crate::chat_ops::fa::EndOverlapPolicy::ClampAllAdjacent,
+    )
+}
+
+/// [`finalized`] under a chosen end-overlap policy: the default
+/// (`PreserveCrossSpeaker`) leaves two speakers' overlapping turns alone, which
+/// a fixture about a transcribed overlap needs.
+fn finalized_under(
+    mut file: talkbank_model::ChatFile,
+    end_overlap_policy: crate::chat_ops::fa::EndOverlapPolicy,
+) -> FaResult<talkbank_model::ChatFile> {
+    use crate::chat_ops::fa::{
+        BulletRepairPolicy, ExistingWorBoundaryPolicy, FaDecisions, FaProjection,
+        FaProjectionPolicy, MainBulletAuthority, WordEndPolicy,
+        projection_without_injection_with_touched, retain_decision_evidence,
+    };
+    let projection = FaProjection::new(
+        FaProjectionPolicy::new(
+            WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
+            ExistingWorBoundaryPolicy::Preserve,
+            end_overlap_policy,
+        ),
+        MainBulletAuthority::DeriveFromWords,
+    );
+    let touched: Vec<UtteranceIdx> = (0..file.utterances().count())
+        .map(UtteranceIdx::new)
+        .collect();
+    let finalized = projection_without_injection_with_touched(projection, true, touched)
+        .then_finalize(&mut file, BulletRepairPolicy::Disabled)
+        .expect("finalization under the default policy holds");
+    let written = retain_decision_evidence(
+        &mut file,
+        FaDecisions::without_injection(Vec::new(), Vec::new(), finalized),
+    );
+    result(file).with_written_decisions(written)
+}
+
+/// RED FIRST: the aligner answered every word of the second utterance, and
+/// Pass 1 stripped the whole utterance because its measured start precedes
+/// the first utterance's. The account used to say "no positive interval"
+/// for words the run itself untimed; it now names the removal, with each
+/// measured interval the strip took away.
+#[test]
+fn words_stripped_for_a_start_regression_are_reported_as_removed_with_their_measured_spans() {
+    let (mut file, admission) = attempt_lines(&["*INV:\thello world .", "*CHI:\tyes please ."]);
+    time_utterance(
+        &mut file,
+        0,
+        (5_000, 6_800),
+        &[(5_000, 5_800), (6_000, 6_800)],
+    );
+    // Measured, answered, and starting before the preceding utterance.
+    time_utterance(
+        &mut file,
+        1,
+        (2_000, 3_300),
+        &[(2_000, 2_500), (2_700, 3_300)],
+    );
+    let shortfalls = admission
+        .finish(finalized(file))
+        .expect("partial timing is written")
+        .into_document()
+        .shortfalls;
+    insta::assert_json_snapshot!(shortfalls, @r#"
+    [
+      {
+        "kind": "timing_incomplete",
+        "required_words": 4,
+        "untimed_words": 2,
+        "untimed_utterances": 1,
+        "first_untimed": [
+          {
+            "utterance": 2,
+            "main_tier": "*CHI:\tyes please .",
+            "words": 2,
+            "untimed_words": 2,
+            "cause": {
+              "kind": "removed",
+              "removals": [
+                {
+                  "effect": {
+                    "kind": "start_regression_stripped",
+                    "utterance_start_ms": 2000,
+                    "preceding_start_ms": 5000,
+                    "preceding_line_idx": 7,
+                    "preceding_speaker": "INV"
+                  },
+                  "measured": [
+                    {
+                      "word_index": 0,
+                      "tier": "main_tier",
+                      "start_ms": 2000,
+                      "end_ms": 2500
+                    },
+                    {
+                      "word_index": 1,
+                      "tier": "main_tier",
+                      "start_ms": 2700,
+                      "end_ms": 3300
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+    "#);
+    insta::assert_snapshot!(shortfalls[0].detail_lines().join("\n"), @"*CHI:	yes please .   (2 of 2 words untimed: measured 2 intervals 2000-3300 removed, utterance stripped: its start 2000 precedes the INV start 5000 (line index 7))");
+}
+
+/// RED FIRST: the same speaker's next utterance starts inside the measured
+/// last word of this one, so the end clamp dropped that word's interval.
+/// The account names the drop, the bound, and the interval that was lost,
+/// instead of counting the answered request as if it had yielded nothing.
+#[test]
+fn a_word_dropped_at_a_same_speaker_bound_is_reported_as_removed_with_its_measured_span() {
+    let (mut file, admission) = attempt_lines(&["*PAR:\thello world .", "*PAR:\tagain ."]);
+    time_utterance(
+        &mut file,
+        0,
+        (1_000, 4_200),
+        &[(1_000, 1_800), (3_500, 4_200)],
+    );
+    time_utterance(&mut file, 1, (3_000, 3_300), &[(3_000, 3_300)]);
+    let shortfalls = admission
+        .finish(finalized(file))
+        .expect("partial timing is written")
+        .into_document()
+        .shortfalls;
+    insta::assert_json_snapshot!(shortfalls, @r#"
+    [
+      {
+        "kind": "timing_incomplete",
+        "required_words": 3,
+        "untimed_words": 1,
+        "untimed_utterances": 1,
+        "first_untimed": [
+          {
+            "utterance": 1,
+            "main_tier": "*PAR:\thello world .",
+            "words": 2,
+            "untimed_words": 1,
+            "cause": {
+              "kind": "removed",
+              "removals": [
+                {
+                  "effect": {
+                    "kind": "end_clamped_interleaved_words",
+                    "bound_ms": 3000,
+                    "next_line_idx": 7
+                  },
+                  "measured": [
+                    {
+                      "word_index": 1,
+                      "tier": "main_tier",
+                      "start_ms": 3500,
+                      "end_ms": 4200
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+    "#);
+    insta::assert_snapshot!(shortfalls[0].detail_lines().join("\n"), @"*PAR:	hello world .   (1 of 2 words untimed: measured 3500-4200 dropped at the same-speaker bound 3000 (line index 7))");
+}
+
+/// The fixture behind the three start-regression tests below: a child turn
+/// timed first, then an adult turn whose measured start precedes the
+/// child's. `adult_main_tier` is the adult's whole main tier line, with or
+/// without the `+<` overlap marker; `adult_words` are its measured word
+/// intervals, in order, and its bullet is their hull. Finalized under the
+/// default end-overlap policy, which leaves cross-speaker overlap alone, so
+/// what the tests observe is Pass 1's start-order decision and nothing else.
+fn start_regression_fixture(
+    adult_main_tier: &str,
+    adult_words: &[(u64, u64)],
+) -> crate::fa::AlignedOutput {
+    let (mut file, admission) = attempt_lines(&["*CHI:\tthe cat jumped .", adult_main_tier]);
+    time_utterance(
+        &mut file,
+        0,
+        (27_333, 28_000),
+        &[(27_333, 27_500), (27_550, 27_800), (27_850, 28_000)],
+    );
+    let hull = (
+        adult_words.first().expect("a timed adult turn").0,
+        adult_words.last().expect("a timed adult turn").1,
+    );
+    time_utterance(&mut file, 1, hull, adult_words);
+    admission
+        .finish(finalized_under(
+            file,
+            crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY,
+        ))
+        .expect("partial timing is written")
+        .into_document()
+}
+
+/// RED FIRST: the adult's turn is marked `+<` (it overlaps the child's), and
+/// its measured start precedes the child's start. CHAT cannot write the
+/// earlier start on the later line, but the transcriber said the turns
+/// overlap, so the start is raised to the child's start and every word with
+/// extent after it is kept: the first word, wholly before that start, loses
+/// its interval; the second, straddling it, is trimmed to it; the rest keep
+/// their measured times. The account names the one removed interval with the
+/// raise that removed it, the written CHAT carries the raised bullet and the
+/// trimmed word, and Chatter accepts the file.
+#[test]
+fn an_overlap_marked_start_regression_is_raised_to_the_preceding_start_and_keeps_its_later_words() {
+    let document = start_regression_fixture(
+        "*INV:\t+< you can keep going .",
+        &[
+            (26_774, 27_174),
+            (27_200, 27_600),
+            (27_700, 28_300),
+            (28_400, 28_900),
+        ],
+    );
+    let text = document.document.as_str();
+    assert!(
+        text.contains("*INV:\t+< you can keep going . \u{15}27333_28900\u{15}\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "%wor:\tyou can \u{15}27333_27600\u{15} keep \u{15}27700_28300\u{15} going \
+             \u{15}28400_28900\u{15} .\n"
+        ),
+        "{text}"
+    );
+    batchalign_transform::parse_and_validate(
+        text,
+        talkbank_model::ParseValidateOptions::default().with_validation(),
+    )
+    .expect("the raised start is valid CHAT: start order holds across the two lines");
+    let shortfalls = document.shortfalls;
+    insta::assert_json_snapshot!(shortfalls, @r#"
+    [
+      {
+        "kind": "timing_incomplete",
+        "required_words": 7,
+        "untimed_words": 1,
+        "untimed_utterances": 1,
+        "first_untimed": [
+          {
+            "utterance": 2,
+            "main_tier": "*INV:\t+< you can keep going .",
+            "words": 4,
+            "untimed_words": 1,
+            "cause": {
+              "kind": "removed",
+              "removals": [
+                {
+                  "effect": {
+                    "kind": "start_regression_raised",
+                    "utterance_start_ms": 26774,
+                    "preceding_start_ms": 27333,
+                    "preceding_line_idx": 7,
+                    "preceding_speaker": "CHI",
+                    "words_trimmed": [
+                      {
+                        "word_index": 1,
+                        "tier": "main_tier",
+                        "measured_start_ms": 27200,
+                        "measured_end_ms": 27600,
+                        "start_ms": 27333,
+                        "end_ms": 27600
+                      }
+                    ]
+                  },
+                  "measured": [
+                    {
+                      "word_index": 0,
+                      "tier": "main_tier",
+                      "start_ms": 26774,
+                      "end_ms": 27174
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+    "#);
+    insta::assert_snapshot!(shortfalls[0].detail_lines().join("\n"), @"*INV:	+< you can keep going .   (1 of 4 words untimed: measured 26774-27174 dropped before the CHI start 27333 (line index 7), to which the utterance's start was raised from 26774 (+< overlap); first kept word trimmed 133 ms)");
+}
+
+/// The same turn without the `+<` marker: the transcriber did not say the
+/// lines overlap, so an earlier measured start is more likely a misplaced
+/// request than real speech, and the utterance is stripped as before.
+#[test]
+fn an_unmarked_start_regression_is_still_stripped() {
+    let document = start_regression_fixture(
+        "*INV:\tyou can keep going .",
+        &[
+            (26_774, 27_174),
+            (27_200, 27_600),
+            (27_700, 28_300),
+            (28_400, 28_900),
+        ],
+    );
+    let text = document.document.as_str();
+    assert!(text.contains("*INV:\tyou can keep going .\n"), "{text}");
+    assert!(!text.contains("%wor:\tyou"), "{text}");
+    let shortfalls = document.shortfalls;
+    assert_eq!(shortfalls.len(), 1);
+    insta::assert_snapshot!(shortfalls[0].detail_lines().join("\n"), @"*INV:	you can keep going .   (4 of 4 words untimed: measured 4 intervals 26774-28900 removed, utterance stripped: its start 26774 precedes the CHI start 27333 (line index 7))");
+}
+
+/// A `+<` turn whose every measured word ends before the preceding start has
+/// nothing a raise could keep: raising would leave a bullet with no timed
+/// word inside it. It is stripped, and reported as a strip, not a raise.
+#[test]
+fn an_overlap_marked_start_regression_with_nothing_after_the_preceding_start_is_stripped() {
+    let document =
+        start_regression_fixture("*INV:\t+< you can .", &[(26_000, 26_400), (26_500, 27_000)]);
+    let text = document.document.as_str();
+    assert!(text.contains("*INV:\t+< you can .\n"), "{text}");
+    let shortfalls = document.shortfalls;
+    assert_eq!(shortfalls.len(), 1);
+    insta::assert_snapshot!(shortfalls[0].detail_lines().join("\n"), @"*INV:	+< you can .   (2 of 2 words untimed: measured 2 intervals 26000-27000 removed, utterance stripped: its start 26000 precedes the CHI start 27333 (line index 7))");
 }

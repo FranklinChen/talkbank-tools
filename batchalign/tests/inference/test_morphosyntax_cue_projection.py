@@ -169,6 +169,7 @@ def test_realigned_cue_projection_preserves_closed_dependency_graph(
         if rows[-1]["head"] != 0
         else [
             {
+                "field": "relation",
                 "kind": "cue_root_promotion",
                 "word": "beta",
                 "from_relation": "dep",
@@ -380,6 +381,7 @@ def test_cue_repair_is_excluded_by_position_not_by_surface_text():
     assert result.error is None
     assert result.result["repairs"] == [
         {
+            "field": "relation",
             "kind": "relation_alias",
             "word": ".",
             "from_relation": "iob",

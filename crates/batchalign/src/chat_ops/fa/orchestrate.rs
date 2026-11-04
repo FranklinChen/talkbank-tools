@@ -127,19 +127,34 @@ impl TimedUtterance {
 }
 
 /// Proof that `utterance`'s timing was just removed: bullet, main-tier word
-/// timings, and `%wor` are all gone.
+/// timings, and `%wor` are all gone; and the record of every measured word
+/// interval the strip took away.
 ///
 /// Returned rather than left implicit (2026-09-01 review, item 9) so a
 /// caller stripping an utterance is handed the fact that any
 /// [`TimedUtterance`] proof obtained for it earlier is now stale, instead of
-/// having to remember that on its own. No caller of this crate currently
-/// needs to ACT on the value (the write phase re-derives timing fresh at
-/// write time regardless, which is what actually closes the gap this type
-/// documents), so it is not `#[must_use]`; it exists so the signature itself
-/// states what stripping does, rather than a caller having to trust a
-/// comment.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct StrippedTiming;
+/// having to remember that on its own.
+///
+/// `words_dropped` is born here because this is the last moment the word
+/// timings exist (2026-11-03): a strip used to reduce them to nothing,
+/// and the completion account then described the stripped words as having
+/// had "no positive interval from their requests", which was false, since
+/// the aligner had answered and the run itself removed the answer. Every
+/// strip now hands its caller the intervals it removed, in the same per-tier
+/// numbering [`clamp_words_within`] uses for a dropped word, so a
+/// [`MonotonicityEffect`] that strips can carry them exactly as the end
+/// clamp already carries its `words_dropped`. `#[must_use]` so a strip site
+/// has to decide what becomes of the record; a site that discards it on
+/// purpose (an utterance not in the recording, whose words owe no timing;
+/// repair's LIS removal, whose decision is recorded before it strips) says
+/// so by destructuring.
+#[must_use = "a strip removes measured word timing; carry the record or state why not"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StrippedTiming {
+    /// The measured word intervals the strip removed, main tier then `%wor`,
+    /// each in its own tier's word order. Empty when no word was timed.
+    pub(super) words_dropped: Vec<DroppedWordTiming>,
+}
 
 /// Proof that FA results were injected into a file, carrying what that decided.
 ///
@@ -228,6 +243,49 @@ pub enum MonotonicityEffect {
         previous_utterance_idx: UtteranceIdx,
         /// Speaker on the line that supplied `previous_start_ms`.
         previous_speaker: String,
+        /// The measured word intervals the strip removed, one record per
+        /// word and tier (2026-11-03). A strip takes a whole
+        /// utterance's timing, so this is every timed word it had; the
+        /// completion account reports each as removed by this effect rather
+        /// than as never answered.
+        words_dropped: Vec<DroppedWordTiming>,
+    },
+    /// A later utterance started before the greatest preceding start, and
+    /// the transcriber had marked it as overlapping the preceding utterance
+    /// (`+<`), so instead of losing its timing its start was raised to that
+    /// preceding start and the words with extent after it were kept
+    /// (2026-11-03). CHAT cannot write the earlier start on the later line
+    /// (the start-order rule, E362), and the line order is the contributor's;
+    /// the marker is the evidence that the early start is overlap rather
+    /// than a misplaced request, so what can be written is.
+    StartRegressionRaised {
+        /// Affected line index, including headers.
+        line_idx: usize,
+        /// Stable ordinal among utterances only.
+        utterance_idx: UtteranceIdx,
+        /// Speaker on the affected utterance.
+        speaker: String,
+        /// Measured start that regressed; no longer written anywhere.
+        start_ms: u64,
+        /// Greatest preceding start in document order: the bullet's new start.
+        previous_start_ms: u64,
+        /// Line that supplied `previous_start_ms`.
+        previous_line_idx: usize,
+        /// Stable ordinal of the preceding utterance.
+        previous_utterance_idx: UtteranceIdx,
+        /// Speaker on the line that supplied `previous_start_ms`.
+        previous_speaker: String,
+        /// Words whose measured interval ended at or before the new start:
+        /// no extent survived, so their timing was removed, one record per
+        /// word and tier.
+        words_dropped: Vec<DroppedWordTiming>,
+        /// Words straddling the new start, cut to begin there: one record
+        /// per word and tier, with the measured and the kept extent, so a
+        /// reader can see by how much. Both lists are empty when the bullet
+        /// alone reached back before the new start (its first timed word did
+        /// not): a legitimate raise that removed no measurement, which the
+        /// completion account therefore never has to explain.
+        words_trimmed: Vec<TrimmedWordTiming>,
     },
     /// Clamping an earlier utterance to the next start would have made it
     /// zero-width, so the earlier timing was removed.
@@ -250,6 +308,9 @@ pub enum MonotonicityEffect {
         next_utterance_idx: UtteranceIdx,
         /// Speaker on the following line.
         next_speaker: String,
+        /// The measured word intervals the strip removed, as on
+        /// [`Self::StartRegressionStripped`].
+        words_dropped: Vec<DroppedWordTiming>,
     },
     /// A same-speaker end overlap was resolved because only the bullet's
     /// inherited coverage overshot the next utterance's start: no measured
@@ -283,8 +344,10 @@ pub enum MonotonicityEffect {
         edge: OverlapEdge,
         /// Following start used as the new end.
         clamped_to_ms: u64,
-        /// Words cut to a shorter positive extent, still keeping a timing.
-        words_trimmed: usize,
+        /// Words cut to a shorter positive extent, still keeping a timing:
+        /// one record per word and tier, with the measured and kept extent
+        /// (a count until 2026-11-03).
+        words_trimmed: Vec<TrimmedWordTiming>,
         /// Words whose start was at or past the bound: no timing survived.
         /// One record per word, not just a count (2026-09-02): each is a
         /// MEASURED (or transcript-carried) extent this run threw away, not
@@ -327,8 +390,9 @@ pub enum KeptBulletYield {
         from_ms: u64,
         /// Start after the move: the kept end.
         to_ms: u64,
-        /// Leading words cut to a shorter positive extent.
-        words_trimmed: usize,
+        /// Leading words cut to a shorter positive extent: one record per
+        /// word and tier, with the measured and kept extent.
+        words_trimmed: Vec<TrimmedWordTiming>,
         /// Leading words with no extent left after the kept end.
         words_dropped: Vec<DroppedWordTiming>,
     },
@@ -338,6 +402,9 @@ pub enum KeptBulletYield {
         start_ms: u64,
         /// End of the stripped bullet.
         end_ms: u64,
+        /// The measured word intervals the strip removed, as on
+        /// [`MonotonicityEffect::StartRegressionStripped`].
+        words_dropped: Vec<DroppedWordTiming>,
     },
 }
 
@@ -345,14 +412,16 @@ impl MonotonicityEffect {
     /// The utterance whose WORD timings this effect may have changed, if
     /// any (2026-09-01 review, item 13).
     ///
-    /// Only `EndClampedInterleavedWords` clamps a word, and only on its
-    /// `edge.utterance_idx` side (the `next` side is never touched under
-    /// any resolution). `EndClampedCoverageOnly` and
+    /// `EndClampedInterleavedWords` clamps words on its `edge.utterance_idx`
+    /// side only (the `next` side is never touched under any resolution);
+    /// a kept-end yield's `StartMoved` and a `StartRegressionRaised` cut the
+    /// leading words of the utterance whose start moved, when any reached
+    /// back before the new start. `EndClampedCoverageOnly` and
     /// `EndClampedBoundaryFromWords` move only a BULLET, which `%wor` does
-    /// not encode, so they do not make `%wor` stale. The two stripped
-    /// variants remove an utterance's timing (and its `%wor`, if any)
-    /// outright rather than leaving a mismatch, so there is nothing for the
-    /// write phase to regenerate.
+    /// not encode, so they do not make `%wor` stale; so does a raise or a
+    /// yield that cut no word. The stripping variants remove an utterance's
+    /// timing (and its `%wor`, if any) outright rather than leaving a
+    /// mismatch, so there is nothing for the write phase to regenerate.
     ///
     /// This is the typed refusal item 13 asks for: an utterance this run
     /// never touched, and whose words this pass never mutated, produces NO
@@ -373,7 +442,18 @@ impl MonotonicityEffect {
                         ..
                     },
                 ..
-            } => match *words_trimmed > 0 || !words_dropped.is_empty() {
+            } => match !words_trimmed.is_empty() || !words_dropped.is_empty() {
+                true => Some(*utterance_idx),
+                false => None,
+            },
+            // A raise moves the bullet, which `%wor` does not encode; it
+            // touches words only when one straddled or preceded the new start.
+            Self::StartRegressionRaised {
+                utterance_idx,
+                words_dropped,
+                words_trimmed,
+                ..
+            } => match !words_trimmed.is_empty() || !words_dropped.is_empty() {
                 true => Some(*utterance_idx),
                 false => None,
             },
@@ -1139,41 +1219,51 @@ pub struct DroppedWordTiming {
     pub measured: TimeSpan,
 }
 
-/// How many words a clamp cut, split by what actually happened to each and,
-/// for trims, by tier.
+/// A word a clamp cut to a shorter positive extent: the extent it had, and
+/// the extent it kept. Unlike a [`DroppedWordTiming`], the word still carries
+/// its new timing in the AST; the record exists so a reader of the effect can
+/// see by how much the word was cut without diffing two files, which the
+/// start-regression raise reports ("first kept word trimmed 133 ms").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrimmedWordTiming {
+    /// This word's position among the words visited on its own tier, in
+    /// document order (see [`WordTier`]).
+    pub word_index: usize,
+    /// Which tier this word's timing lives on.
+    pub tier: WordTier,
+    /// The extent the word had before the cut.
+    pub measured: TimeSpan,
+    /// The extent it kept, inside the bound.
+    pub kept: TimeSpan,
+}
+
+/// What a clamp cut, split by what actually happened to each word.
 ///
 /// The former return type (`usize`) conflated two different facts: a word
 /// TRIMMED to a shorter positive extent, which still carries its own new
-/// timing in the AST, so a count is all a caller needs; and a word DROPPED
-/// because nothing inside the bound survived, which is a MEASURED timing this
-/// pass threw away with nothing else left to reconstruct it from. `dropped`
-/// is therefore a `Vec`, not a second `usize`: a caller that only needs
-/// "how many" reads `.len()`, and nothing keeps a separately-incremented
-/// count that could drift from the list it is supposedly counting (shape D).
-///
-/// Trims are counted per tier because the `%wor` write phase needs to know
-/// whether the MAIN tier changed (it regenerates `%wor` from the main tier);
-/// a drop already carries its tier in [`DroppedWordTiming`].
+/// timing in the AST; and a word DROPPED because nothing inside the bound
+/// survived, which is a MEASURED timing this pass threw away with nothing
+/// else left to reconstruct it from. Both are now lists of records, not
+/// counts: a caller that only needs "how many" reads `.len()`, and nothing
+/// keeps a separately-incremented count that could drift from the list it is
+/// supposedly counting (shape D). Each record carries its tier, which the
+/// `%wor` write phase reads to learn whether the MAIN tier changed (it
+/// regenerates `%wor` from the main tier).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ClampedWordCounts {
-    /// Main-tier words cut to a shorter positive extent.
-    trimmed_main_tier: usize,
-    /// `%wor` words cut to a shorter positive extent.
-    trimmed_wor: usize,
+    /// Words cut to a shorter positive extent, with what they lost. One
+    /// record per word and tier.
+    pub trimmed: Vec<TrimmedWordTiming>,
     /// Words with no positive extent inside the bound. One record per word.
     pub dropped: Vec<DroppedWordTiming>,
 }
 
 impl ClampedWordCounts {
-    /// Words cut to a shorter positive extent, on either tier. A count only:
-    /// the AST itself still holds each one's new timing.
-    pub(super) fn trimmed(&self) -> usize {
-        self.trimmed_main_tier + self.trimmed_wor
-    }
-
     /// Whether any main-tier word was trimmed or dropped.
     pub(super) fn cut_main_tier(&self) -> bool {
-        self.trimmed_main_tier > 0
+        self.trimmed
+            .iter()
+            .any(|trimmed| trimmed.tier == WordTier::MainTier)
             || self
                 .dropped
                 .iter()
@@ -1186,14 +1276,17 @@ impl ClampedWordCounts {
         &mut self,
         word_index: usize,
         tier: WordTier,
+        measured: TimeSpan,
         outcome: super::postprocess::WordClampOutcome,
     ) -> Option<Bullet> {
         match outcome {
             super::postprocess::WordClampOutcome::Trimmed(timing) => {
-                match tier {
-                    WordTier::MainTier => self.trimmed_main_tier += 1,
-                    WordTier::Wor => self.trimmed_wor += 1,
-                }
+                self.trimmed.push(TrimmedWordTiming {
+                    word_index,
+                    tier,
+                    measured,
+                    kept: *timing,
+                });
                 Some(timing.bullet())
             }
             super::postprocess::WordClampOutcome::DroppedPastBound { measured } => {
@@ -1220,7 +1313,7 @@ impl ClampedWordCounts {
             span.start_ms.max(bound.start_ms),
             span.end_ms.min(bound.end_ms),
         );
-        word.inline_bullet = self.record(word_index, tier, outcome);
+        word.inline_bullet = self.record(word_index, tier, span, outcome);
     }
 }
 
@@ -1232,6 +1325,36 @@ pub(super) fn clamp_words_past_bound(
     bound_ms: u64,
 ) -> ClampedWordCounts {
     clamp_words_within(utterance, TimeSpan::new(0, bound_ms))
+}
+
+/// Clamp every word timing in `utterance` that starts before `bound_ms`:
+/// the mirror of [`clamp_words_past_bound`], for a bullet start that moved
+/// forward. Only the START side is cut; a word's end is left as measured.
+pub(super) fn clamp_words_before_bound(
+    utterance: &mut Utterance,
+    bound_ms: u64,
+) -> ClampedWordCounts {
+    clamp_words_within(utterance, TimeSpan::new(bound_ms, u64::MAX))
+}
+
+/// Move an utterance's bullet start forward to `to_ms` and cut its words to
+/// begin there: words wholly before `to_ms` lose their timing, a word
+/// straddling it is trimmed to it, the rest are untouched. The one verb for
+/// a forward start move; Pass 1's start-regression raise and the kept-end
+/// yield (`--main-bullets keep`) both go through it, so neither can move
+/// the bullet without cutting the words, or the reverse. The caller has
+/// already decided the move is valid (the bullet has extent past `to_ms`).
+fn raise_bullet_start(utterance: &mut Utterance, to_ms: u64) -> ClampedWordCounts {
+    if let Some(bullet) = utterance
+        .main
+        .content
+        .bullet
+        .as_mut()
+        .and_then(talkbank_model::BulletState::as_parsed_mut)
+    {
+        bullet.timing.start_ms = to_ms;
+    }
+    clamp_words_before_bound(utterance, to_ms)
 }
 
 /// Clamp every word timing in `utterance` into `bound`, on whichever
@@ -1434,7 +1557,7 @@ impl EndOverlapResolution {
             ),
             Self::InterleavedWords => format!(
                 "end_truncated_by={overlap_ms}ms clamped_to={clamped_to_ms}                  cuts_word_timing=true resolution=interleaved_words                  words_trimmed={} words_dropped={} cause=adjacent_utterance_overlap",
-                words_clamped.trimmed(),
+                words_clamped.trimmed.len(),
                 words_clamped.dropped.len()
             ),
         }
@@ -1602,15 +1725,162 @@ struct StartOrderEntry {
     start_ms: u64,
     end_ms: u64,
     mutability: BulletMutability,
+    /// What the transcriber said about this utterance's relation to the one
+    /// before it: the evidence a start regression is resolved by.
+    overlap: TranscribedOverlap,
+}
+
+/// Whether the transcriber marked an utterance as overlapping the utterance
+/// before it. Read from the parsed model's linkers, where Chatter puts the
+/// `+<` ("lazy overlap precedes") marker; never a flag a caller sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscribedOverlap {
+    /// The main tier begins with `+<`: this turn starts while the previous
+    /// turn is still going.
+    PrecedesMarked,
+    /// No such marker: the transcriber placed this turn after the previous.
+    Unmarked,
+}
+
+impl TranscribedOverlap {
+    fn of(utterance: &Utterance) -> Self {
+        match super::overlaps_previous_utterance(utterance) {
+            true => Self::PrecedesMarked,
+            false => Self::Unmarked,
+        }
+    }
+}
+
+/// Why a start regression was resolved by stripping rather than raising:
+/// named where the choice is made, so the decision record cannot re-derive
+/// it from other facts and drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripCause {
+    /// The utterance carries no `+<` marker: the transcriber placed it after
+    /// the previous turn, so an earlier measured start is more likely a
+    /// misplaced request than real speech.
+    NoOverlapMarker,
+    /// The utterance is marked `+<`, but nothing of it lies after the
+    /// preceding start: the bullet ends at or before it, or every timed word
+    /// does, so a raise would keep a bullet with no timed word inside it.
+    NothingAfterPrecedingStart,
+    /// The entry's line held no utterance. Unreachable by construction
+    /// (`enforce_start_order` builds entries from utterance lines only);
+    /// named rather than folded into another cause so that, were it ever
+    /// reached, the record would say what happened.
+    NoUtteranceLine,
+}
+
+impl StripCause {
+    /// The `cause=` value in the decision reason.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoOverlapMarker => "no_overlap_marker",
+            Self::NothingAfterPrecedingStart => "nothing_after_preceding_start",
+            Self::NoUtteranceLine => "no_utterance_line",
+        }
+    }
+}
+
+/// A revisable bullet whose measured start precedes the greatest start
+/// accepted before it. CHAT's start-order rule forbids writing that start on
+/// this line, so the regression must be resolved before the file is written.
+/// Minted only by [`Self::detect`], which owns the comparison, so holding one
+/// proves the regression; [`Self::resolve`] is the only way out, and which
+/// way it goes is decided by the utterance's own overlap evidence, not by
+/// the caller.
+struct StartRegression<'entries> {
+    /// The regressing utterance.
+    entry: &'entries StartOrderEntry,
+    /// The utterance that supplied the greatest preceding start.
+    previous: &'entries StartOrderEntry,
+}
+
+/// How a [`StartRegression`] was resolved in the file.
+#[derive(Debug)]
+enum StartRegressionResolution {
+    /// The whole utterance's timing was removed, for the named cause.
+    Stripped {
+        /// What the strip removed.
+        timing: StrippedTiming,
+        /// Why a raise was not made.
+        cause: StripCause,
+    },
+    /// The transcriber marked the overlap (`+<`): the bullet now starts at
+    /// the preceding start, words wholly before it lost their timing, the
+    /// word straddling it was cut to begin there, and the rest keep their
+    /// measured times.
+    RaisedToPrecedingStart {
+        /// Words whose measured interval ended at or before the new start.
+        words_dropped: Vec<DroppedWordTiming>,
+        /// Words cut to begin at the new start, with what they lost.
+        words_trimmed: Vec<TrimmedWordTiming>,
+    },
+}
+
+impl<'entries> StartRegression<'entries> {
+    /// `Some` exactly when `entry` starts before `previous`: the one place
+    /// the start-order comparison is made for a revisable bullet.
+    fn detect(
+        entry: &'entries StartOrderEntry,
+        previous: &'entries StartOrderEntry,
+    ) -> Option<Self> {
+        (entry.start_ms < previous.start_ms).then_some(Self { entry, previous })
+    }
+
+    /// Resolve the regression in `chat_file`, by the utterance's own overlap
+    /// evidence. The record of every measured interval removed or cut comes
+    /// back for the effect; nothing else about the file is read or changed.
+    fn resolve(self, chat_file: &mut ChatFile) -> StartRegressionResolution {
+        let stripped = |timing, cause| StartRegressionResolution::Stripped { timing, cause };
+        let Line::Utterance(utterance) = &mut chat_file.lines.as_mut_slice()[self.entry.line_idx]
+        else {
+            return stripped(
+                StrippedTiming {
+                    words_dropped: Vec::new(),
+                },
+                StripCause::NoUtteranceLine,
+            );
+        };
+        let new_start = self.previous.start_ms;
+        match self.entry.overlap {
+            TranscribedOverlap::Unmarked => stripped(
+                strip_utterance_timing(utterance),
+                StripCause::NoOverlapMarker,
+            ),
+            TranscribedOverlap::PrecedesMarked => {
+                // A raise keeps the bullet only if it still has extent past
+                // the new start and, when any word is timed, at least one
+                // timed word ends after it. An utterance with a bullet and no
+                // timed word at all (a transcript carrying bullets alone) is
+                // raised: the raise loses nothing it has.
+                let timed_extent_survives = furthest_word_timing_end(utterance)
+                    .is_none_or(|furthest_end| furthest_end > new_start);
+                if self.entry.end_ms <= new_start || !timed_extent_survives {
+                    return stripped(
+                        strip_utterance_timing(utterance),
+                        StripCause::NothingAfterPrecedingStart,
+                    );
+                }
+                let cut = raise_bullet_start(utterance, new_start);
+                StartRegressionResolution::RaisedToPrecedingStart {
+                    words_dropped: cut.dropped,
+                    words_trimmed: cut.trimmed,
+                }
+            }
+        }
+    }
 }
 
 /// Pass 1: file-order start monotonicity.
 ///
 /// Kept starts are a FIXED skeleton. A revisable bullet must start at or
 /// after the greatest start accepted before it and at or before the next kept
-/// start after it; one that falls outside is the one stripped, recorded as a
-/// start regression (below the preceding start) or as having yielded to the
-/// next kept start (above it). A kept start that regresses below an earlier
+/// start after it; one that falls outside is the one resolved, recorded as a
+/// start regression (below the preceding start; see [`StartRegression`],
+/// which raises an utterance the transcriber marked `+<` and strips any
+/// other) or as having yielded to the next kept start (above it). A kept
+/// start that regresses below an earlier
 /// kept start cannot be fixed without changing a kept bullet, so it is left
 /// and recorded as unresolved; it does not lower the running start, so what
 /// follows is judged as though it had been stripped. With no kept bullet this
@@ -1642,6 +1912,7 @@ fn enforce_start_order(
             start_ms: bullet.timing.start_ms,
             end_ms: bullet.timing.end_ms,
             mutability: imposed.mutability(utterance_idx, bullet)?,
+            overlap: TranscribedOverlap::of(utterance),
         });
     }
 
@@ -1657,13 +1928,16 @@ fn enforce_start_order(
         }
     }
 
+    // Decisions read `entries`, a snapshot taken above, so a stripped line
+    // can be stripped the moment it is decided: the effect then carries the
+    // measured word intervals the strip removed, which exist nowhere else
+    // once the strip has run.
     let mut last_accepted: Option<usize> = None;
     let mut last_kept: Option<usize> = None;
-    let mut strip = Vec::new();
     for (position, entry) in entries.iter().enumerate() {
         let below = last_accepted
             .map(|p| &entries[p])
-            .filter(|previous| entry.start_ms < previous.start_ms);
+            .and_then(|previous| StartRegression::detect(entry, previous));
         match entry.mutability {
             BulletMutability::ReadOnly(_) => {
                 match last_kept
@@ -1690,30 +1964,67 @@ fn enforce_start_order(
                     .map(|p| &entries[p])
                     .filter(|kept| entry.start_ms > kept.start_ms);
                 match (below, above) {
-                    (Some(previous), _) => {
-                        decisions.push(start_order_record(
-                            entry,
-                            MonotonicityStrategy::TimingStripped,
-                            format!(
-                                "non_monotonic start_ms={} previous_start_ms={} \
-                                 previous_line_idx={} previous_speaker={}",
-                                entry.start_ms,
-                                previous.start_ms,
-                                previous.line_idx,
-                                previous.speaker
-                            ),
-                        ));
-                        effects.push(MonotonicityEffect::StartRegressionStripped {
-                            line_idx: entry.line_idx,
-                            utterance_idx: entry.utterance_idx,
-                            speaker: entry.speaker.clone(),
-                            start_ms: entry.start_ms,
-                            previous_start_ms: previous.start_ms,
-                            previous_line_idx: previous.line_idx,
-                            previous_utterance_idx: previous.utterance_idx,
-                            previous_speaker: previous.speaker.clone(),
-                        });
-                        strip.push(entry.line_idx);
+                    (Some(regression), _) => {
+                        let previous = regression.previous;
+                        let conflict = format!(
+                            "non_monotonic start_ms={} previous_start_ms={} \
+                             previous_line_idx={} previous_speaker={}",
+                            entry.start_ms, previous.start_ms, previous.line_idx, previous.speaker
+                        );
+                        match regression.resolve(chat_file) {
+                            StartRegressionResolution::Stripped {
+                                timing: StrippedTiming { words_dropped },
+                                cause,
+                            } => {
+                                decisions.push(start_order_record(
+                                    entry,
+                                    MonotonicityStrategy::TimingStripped,
+                                    format!("{conflict} cause={}", cause.as_str()),
+                                ));
+                                effects.push(MonotonicityEffect::StartRegressionStripped {
+                                    line_idx: entry.line_idx,
+                                    utterance_idx: entry.utterance_idx,
+                                    speaker: entry.speaker.clone(),
+                                    start_ms: entry.start_ms,
+                                    previous_start_ms: previous.start_ms,
+                                    previous_line_idx: previous.line_idx,
+                                    previous_utterance_idx: previous.utterance_idx,
+                                    previous_speaker: previous.speaker.clone(),
+                                    words_dropped,
+                                });
+                            }
+                            StartRegressionResolution::RaisedToPrecedingStart {
+                                words_dropped,
+                                words_trimmed,
+                            } => {
+                                decisions.push(start_order_record(
+                                    entry,
+                                    MonotonicityStrategy::StartRaisedToPrecedingStart,
+                                    format!(
+                                        "{conflict} overlap_marker=+< words_dropped={} \
+                                         words_trimmed={}",
+                                        words_dropped.len(),
+                                        words_trimmed.len()
+                                    ),
+                                ));
+                                effects.push(MonotonicityEffect::StartRegressionRaised {
+                                    line_idx: entry.line_idx,
+                                    utterance_idx: entry.utterance_idx,
+                                    speaker: entry.speaker.clone(),
+                                    start_ms: entry.start_ms,
+                                    previous_start_ms: previous.start_ms,
+                                    previous_line_idx: previous.line_idx,
+                                    previous_utterance_idx: previous.utterance_idx,
+                                    previous_speaker: previous.speaker.clone(),
+                                    words_dropped,
+                                    words_trimmed,
+                                });
+                                // The raised bullet starts exactly at the
+                                // preceding start, so `last_accepted`, which
+                                // already names that start, stays as it is;
+                                // the snapshot entry still holds the old one.
+                            }
+                        }
                     }
                     (None, Some(kept)) => {
                         decisions.push(start_order_record(
@@ -1725,6 +2036,7 @@ fn enforce_start_order(
                                 entry.start_ms, kept.start_ms, kept.line_idx, kept.speaker
                             ),
                         ));
+                        let StrippedTiming { words_dropped } = strip_entry_timing(chat_file, entry);
                         effects.push(MonotonicityEffect::YieldedToKeptBullet {
                             line_idx: entry.line_idx,
                             utterance_idx: entry.utterance_idx,
@@ -1736,26 +2048,36 @@ fn enforce_start_order(
                             outcome: KeptBulletYield::Stripped {
                                 start_ms: entry.start_ms,
                                 end_ms: entry.end_ms,
+                                words_dropped,
                             },
                         });
-                        strip.push(entry.line_idx);
                     }
                     (None, None) => last_accepted = Some(position),
                 }
             }
         }
     }
-
-    for line_idx in strip {
-        if let Line::Utterance(utterance) = &mut chat_file.lines.as_mut_slice()[line_idx] {
-            strip_utterance_timing(utterance);
-        }
-    }
     Ok(())
 }
 
+/// Strip the utterance a Pass 1 entry describes. An entry is built only from
+/// an utterance line ([`enforce_start_order`] reads them through
+/// `utterances_indexed`), so the line is one; the record of what the strip
+/// removed is handed back for the effect.
+fn strip_entry_timing(chat_file: &mut ChatFile, entry: &StartOrderEntry) -> StrippedTiming {
+    match &mut chat_file.lines.as_mut_slice()[entry.line_idx] {
+        Line::Utterance(utterance) => strip_utterance_timing(utterance),
+        // Unreachable by construction of `entry`; an empty record is the
+        // truthful answer for a line with no utterance to strip.
+        _ => StrippedTiming {
+            words_dropped: Vec::new(),
+        },
+    }
+}
+
 /// The one record shape Pass 1 writes: every start-order decision needs
-/// review, since each either removed timing or left a conflict in place.
+/// review, since each removed timing, moved a start off its measurement, or
+/// left a conflict in place.
 fn start_order_record(
     entry: &StartOrderEntry,
     strategy: batchalign_transform::decisions::MonotonicityStrategy,
@@ -2099,6 +2421,12 @@ fn resolve_revisable_prev(
             ),
             true,
         ));
+        // Strip first: the effect carries the word intervals the strip
+        // removed, which are gone once it has run.
+        let words_dropped = match &mut chat_file.lines.as_mut_slice()[prev_idx] {
+            Line::Utterance(prev_utt) => strip_utterance_timing(prev_utt).words_dropped,
+            _ => Vec::new(),
+        };
         effects.push(MonotonicityEffect::ZeroDurationClampStripped {
             line_idx: prev_idx,
             utterance_idx: edge.utterance_idx,
@@ -2109,10 +2437,8 @@ fn resolve_revisable_prev(
             next_line_idx: next_idx,
             next_utterance_idx: edge.next_utterance_idx,
             next_speaker: edge.next_speaker,
+            words_dropped,
         });
-        if let Line::Utterance(prev_utt) = &mut chat_file.lines.as_mut_slice()[prev_idx] {
-            strip_utterance_timing(prev_utt);
-        }
         return;
     }
 
@@ -2233,7 +2559,7 @@ fn resolve_revisable_prev(
             effects.push(MonotonicityEffect::EndClampedInterleavedWords {
                 edge,
                 clamped_to_ms: next_start,
-                words_trimmed: words_clamped.trimmed(),
+                words_trimmed: words_clamped.trimmed,
                 words_dropped: words_clamped.dropped,
             });
         }
@@ -2322,40 +2648,30 @@ fn yield_next_to_kept_end(
     };
     let (strategy, outcome, needs_review, cause) = match yielded {
         KeptEndYield::Strip => {
-            strip_utterance_timing(next_utt);
+            let StrippedTiming { words_dropped } = strip_utterance_timing(next_utt);
             (
                 MonotonicityStrategy::TimingStripped,
                 KeptBulletYield::Stripped {
                     start_ms: next_start,
                     end_ms: next_end,
+                    words_dropped,
                 },
                 true,
                 "no_room_after_kept_end",
             )
         }
         KeptEndYield::StartToKeptEnd | KeptEndYield::LeadingWordsClamped => {
-            if let Some(bullet) = next_utt
-                .main
-                .content
-                .bullet
-                .as_mut()
-                .and_then(talkbank_model::BulletState::as_parsed_mut)
-            {
-                bullet.timing.start_ms = kept_end;
-            }
-            let words = match yielded {
-                KeptEndYield::LeadingWordsClamped => {
-                    clamp_words_within(next_utt, TimeSpan::new(kept_end, next_end))
-                }
-                KeptEndYield::StartToKeptEnd | KeptEndYield::Strip => ClampedWordCounts::default(),
-            };
-            let cut_any = words.trimmed() > 0 || !words.dropped.is_empty();
+            // Under `StartToKeptEnd` no word reaches back before the kept
+            // end, so the shared verb finds nothing to cut and both lists
+            // come back empty; the classification above is what says so.
+            let words = raise_bullet_start(next_utt, kept_end);
+            let cut_any = !words.trimmed.is_empty() || !words.dropped.is_empty();
             (
                 MonotonicityStrategy::YieldedToKeptBullet,
                 KeptBulletYield::StartMoved {
                     from_ms: next_start,
                     to_ms: kept_end,
-                    words_trimmed: words.trimmed(),
+                    words_trimmed: words.trimmed,
                     words_dropped: words.dropped,
                 },
                 cut_any,
@@ -2394,9 +2710,11 @@ fn yield_next_to_kept_end(
 /// `enforce_monotonicity` strips a main-tier bullet when it is non-monotonic
 /// (backward relative to the previous utterance).  However, if the utterance
 /// also carries a `%wor` tier with the same backward timestamps, the NEXT
-/// re-run will enter the `has_reusable_wor_timing` fast path, call
-/// `refresh_existing_alignment`, and reconstruct the backward bullet from
-/// the stale `%wor` data, reintroducing the E362 violation.
+/// re-run will take the complete-`%wor` refresh route
+/// (`AlignRoute::decide` on `has_reusable_wor_timing`,
+/// `fa::refresh_from_complete_wor`), call `refresh_existing_alignment`, and
+/// reconstruct the backward bullet from the stale `%wor` data, reintroducing
+/// the E362 violation.
 ///
 /// This function removes the `%wor` tier from every utterance that
 /// `enforce_monotonicity` stripped, breaking the re-run cycle:
@@ -2407,9 +2725,10 @@ fn yield_next_to_kept_end(
 ///          → full FA re-aligns → correct timing
 /// ```
 ///
-/// Call this immediately after `enforce_monotonicity` wherever the
-/// `has_reusable_wor_timing` fast path is used:
-/// - `run_fa_from_ast` fast-path return in `batchalign/src/fa/mod.rs`
+/// Call this immediately after `enforce_monotonicity` wherever complete
+/// `%wor` is refreshed rather than re-measured:
+/// - `refresh_from_complete_wor` in `batchalign/src/fa/mod.rs`
+/// - the all-reusable return of `process_fa_incremental`
 ///
 /// `decisions` must be the slice returned by `enforce_monotonicity`.
 /// Only decisions with `module == DecisionModule::Monotonicity` and
@@ -2639,14 +2958,50 @@ pub(super) fn collect_wor_backed_span(utterance: &Utterance) -> Option<WordTimin
     )
 }
 
-/// Strip timing and %wor from a single utterance.
+/// Strip timing and %wor from a single utterance, recording the measured
+/// word intervals it removes.
+///
+/// The record is read before anything is removed, over the same words and
+/// in the same per-tier numbering [`clamp_words_within`] visits: every
+/// main-tier word leaf (replaced words at their original), then every `%wor`
+/// word. A word timed on both tiers yields one record per tier, as a clamp
+/// drop does.
 pub(super) fn strip_utterance_timing(utt: &mut Utterance) -> StrippedTiming {
+    let mut words_dropped = Vec::new();
+    let mut main_word_idx = 0usize;
+    walk_words(&utt.main.content.content, None, &mut |leaf| {
+        let word = match leaf {
+            WordItem::Word(word) => word,
+            WordItem::ReplacedWord(replaced) => &replaced.word,
+            WordItem::Separator(_) => return,
+        };
+        if let Some(measured) = super::get_word_timing(word) {
+            words_dropped.push(DroppedWordTiming {
+                word_index: main_word_idx,
+                tier: WordTier::MainTier,
+                measured,
+            });
+        }
+        main_word_idx += 1;
+    });
+    if let Some(wor) = utt.wor_tier() {
+        for (wor_word_idx, word) in wor.words().enumerate() {
+            if let Some(measured) = super::get_word_timing(word) {
+                words_dropped.push(DroppedWordTiming {
+                    word_index: wor_word_idx,
+                    tier: WordTier::Wor,
+                    measured,
+                });
+            }
+        }
+    }
+
     utt.main.content.bullet = None;
     strip_timing_from_content(&mut utt.main.content.content);
     // Remove %wor tiers.
     utt.dependent_tiers
         .retain(|t| !matches!(t.tier, DependentTier::Wor(_)));
-    StrippedTiming
+    StrippedTiming { words_dropped }
 }
 
 /// Every source of structured decision records one FA run can produce.

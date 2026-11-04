@@ -162,7 +162,9 @@ impl WerNormalization {
     /// 10. **Passthrough**: unrecognized words pass through lowercased.
     pub fn conform_word_into(self, word: &str, result: &mut Vec<String>) {
         let trimmed = word.trim();
-        let w = trimmed.to_lowercase();
+        // Lowercase, then one spelling of the apostrophe, so every rule
+        // below matches a word however its transcript typed it.
+        let w = Apostrophe::canonicalize(trimmed.to_lowercase());
 
         if let Some((a, b)) = COMPOUND_MAP.get(&w) {
             push_token(result, a.clone());
@@ -248,6 +250,58 @@ impl WerNormalization {
     }
 }
 
+/// The two spellings of the apostrophe a transcript may carry: the closed set
+/// the conformer accepts, and the one it reasons in.
+///
+/// Every contraction rule above is written with the ASCII apostrophe (`'s`,
+/// `i'd`, `this'll`, and the `don't` it emits). A gold transcript typed on a
+/// keyboard that curls quotes carries U+2019 instead, so `he’s` matched no
+/// rule and stayed one token while the hypothesis `he's` became `he is`, and
+/// the two were charged as an error. The spellings are canonicalized once, at
+/// the conformer's input, so no rule needs a second spelling and a word
+/// with U+2019 that no rule expands still equals its ASCII twin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Apostrophe {
+    /// U+0027 APOSTROPHE, the canonical spelling and the one the rules use.
+    Ascii,
+    /// U+2019 RIGHT SINGLE QUOTATION MARK, the typographic apostrophe.
+    RightSingleQuotationMark,
+}
+
+impl Apostrophe {
+    /// The character of each spelling. The typographic one is an escape, never
+    /// a raw character in source, so the file stays ASCII and the code point
+    /// is visible to a reader.
+    const fn character(self) -> char {
+        match self {
+            Self::Ascii => '\'',
+            Self::RightSingleQuotationMark => '\u{2019}',
+        }
+    }
+
+    /// Which spelling `c` is, if it is an apostrophe at all.
+    fn of(c: char) -> Option<Self> {
+        [Self::Ascii, Self::RightSingleQuotationMark]
+            .into_iter()
+            .find(|spelling| spelling.character() == c)
+    }
+
+    /// `word` with every apostrophe in the canonical spelling. A word with
+    /// none passes through untouched, without a second allocation.
+    fn canonicalize(word: String) -> String {
+        if word.contains(Self::RightSingleQuotationMark.character()) {
+            word.chars()
+                .map(|c| match Self::of(c) {
+                    Some(_) => Self::Ascii.character(),
+                    None => c,
+                })
+                .collect()
+        } else {
+            word
+        }
+    }
+}
+
 /// Append `token` unless it is empty.
 ///
 /// Every branch of `conform_word_into` appends through here. A split can
@@ -326,6 +380,42 @@ mod tests {
             WerNormalization::English.conform_words(&s(&["I'm"])),
             s(&["i", "am"])
         );
+    }
+
+    /// A gold typed with the typographic apostrophe (U+2019) conforms exactly
+    /// as its ASCII twin: the contraction rules fire, and a word no rule
+    /// expands still equals the hypothesis spelled with U+0027.
+    #[test]
+    fn a_typographic_apostrophe_conforms_like_the_ascii_one() {
+        // U+2019 RIGHT SINGLE QUOTATION MARK, written as an escape on purpose.
+        let curly = |word: &str| word.replace('\'', "\u{2019}");
+        for (ascii, expected) in [
+            ("he's", vec!["he", "is"]),
+            ("I've", vec!["i", "have"]),
+            ("she'd", vec!["she", "had"]),
+            ("I'm", vec!["i", "am"]),
+            ("this'll", vec!["this", "will"]),
+            ("don't", vec!["don't"]),
+        ] {
+            let gold = curly(ascii);
+            assert_ne!(gold, ascii, "the fixture carries U+2019");
+            assert_eq!(
+                WerNormalization::English.conform_words(&s(&[&gold])),
+                s(&expected),
+                "{gold}"
+            );
+            assert_eq!(
+                WerNormalization::English.conform_words(&s(&[&gold])),
+                WerNormalization::English.conform_words(&s(&[ascii])),
+                "{gold} conforms as {ascii}"
+            );
+        }
+        assert_eq!(Apostrophe::of('\''), Some(Apostrophe::Ascii));
+        assert_eq!(
+            Apostrophe::of('\u{2019}'),
+            Some(Apostrophe::RightSingleQuotationMark)
+        );
+        assert_eq!(Apostrophe::of('`'), None, "a backtick is not an apostrophe");
     }
 
     #[test]

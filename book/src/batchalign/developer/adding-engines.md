@@ -115,15 +115,17 @@ Where the engine is named depends on when the server needs it:
   advertises and which jobs are accepted. Whether the FA engine is NAMED is
   read at dispatch: `WorkerPool::ensure_command_capabilities` loads the task
   on the selected worker and returns `LoadedCapabilities` (the task it loaded
-  and the report taken after that load), and the forced-alignment arm in
-  `runner/routing.rs` reads the engine with `FaCacheNamespace::from_loaded`
+  and the report taken after that load), and the FA dispatch's per-language
+  gate (`FaWorkerAdmission` in `runner/dispatch/fa_admission.rs`, probing the
+  worker keyed by each file's declared language) reads the engine with
+  `FaCacheNamespace::from_loaded`
   (`crates/batchalign/src/engine_reports.rs`). That constructor refuses a
   report taken after another task loaded, an engine still unnamed after the
   load, and a worker that does not support FA. So a lazily loading worker, or
   a registry daemon probed before it loaded FA, still advertises and accepts
   `align`; dispatch loads FA and reads the engine then. `FaCacheNamespace` is
-  a plain newtype over `ReportedEngineName`, and that dispatch arm is the only
-  place a pre-dispatch identity is required; no catalog field declares one.
+  a plain newtype over `ReportedEngineName`, and that gate is the only place a
+  pre-dispatch identity is required; no catalog field declares one.
 
 **Capability gate (critical):** The `_capabilities()` function in `_handlers.py`
 uses **import probes** to decide which infer tasks to advertise. If you add a new

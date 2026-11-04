@@ -94,22 +94,35 @@ flowchart TD
 
 ## Prerequisites
 
-Before alignment can begin, three steps must succeed:
+Before alignment can begin, these steps must succeed:
 
 0. **Input admission**: the transcript is parsed once and admitted, and its
    `@Media` declaration is decided, before any media is resolved or any
    inference runs. See [What align accepts](#what-align-accepts).
-1. **Media resolution**: The server locates the audio file for the CHAT
-   file from server-visible local paths, either alongside it (paths mode),
-   through a shared `source_dir`, via local `media_mappings`, or via an
-   explicit `--media-dir`. See
-   [Media Conversion](media-conversion.md#media-resolution).
-2. **Media conversion**: If the audio is in a container format that
-   `soundfile` cannot read (MP4, M4A, WebM, WMA), it is automatically
-   converted to 16 kHz mono WAV via ffmpeg and cached at
+0a. **Route decision** (`fa::AlignRoute::decide`, once per file, at
+   admission): whether the recording is read at all. A declared no-op
+   (`@Options: NoAlign`) and a file whose every alignable word already
+   carries reusable `%wor` (and that did not ask for re-alignment, see
+   [Step 0](#step-0-cheap-reuse-for-already-word-timed-files)) finish on
+   `AlignRoute::WithoutRecording`: no recording is resolved, converted or
+   opened, and a missing one is not an error. Every other file takes
+   `AlignRoute::NeedsAudio`, the only route whose task holds a
+   `ResolvedMedia`, and the two steps below run for it alone. Until
+   2026-11-03 media resolution ran for every file before this was known, so a
+   complete-`%wor` file whose recording was not where the search looked
+   failed although nothing on its route reads audio.
+1. **Media resolution** (`NeedsAudio` only): The server locates the audio
+   file for the CHAT file from server-visible local paths, either alongside
+   it (paths mode), through a shared `source_dir`, via local
+   `media_mappings`, or via an explicit `--media-dir`. See
+   [Media Conversion](media-conversion.md#media-resolution). A recording
+   that cannot be found fails the file by name, listing every place searched.
+2. **Media conversion** (`NeedsAudio` only): If the audio is in a container
+   format that `soundfile` cannot read (MP4, M4A, WebM, WMA), it is
+   automatically converted to 16 kHz mono WAV via ffmpeg and cached at
    `~/.batchalign3/media_cache/`. See [ensure_wav](media-conversion.md#ensure_wav-conversion-cache).
 
-All three happen in the Rust server before any Python worker is invoked.
+All of this happens in the Rust server before any Python worker is invoked.
 
 ### What align accepts
 
@@ -189,27 +202,36 @@ flowchart TD
     host{"direct or<br/>--server?"}
     direct["DirectHost<br/>inline execution"]
     server["ServerBackend<br/>queued paths_mode job"]
-    media["Resolve media on the<br/>execution host"]
+    parse["Parse CHAT → ChatFile AST<br/>(single parse, admission)"]
+    route{"AlignRoute::decide"}
+    norec["WithoutRecording:<br/>NoAlign pass-through, or<br/>refresh_from_complete_wor<br/>(no media, no worker)"]
+    media["NeedsAudio: resolve media<br/>on the execution host"]
     wav["ensure_wav()<br/>container → cached WAV if needed"]
-    parse["Parse CHAT → ChatFile AST<br/>(single parse)"]
     utr["UTR: mutate ChatFile in-place<br/>(no serialize)"]
-    fa["run_fa_from_ast(ChatFile)<br/>FA grouping + worker dispatch<br/>(no re-parse)"]
+    fa["run_fa_from_ast(ActiveFaInput)<br/>FA grouping + worker dispatch<br/>(no re-parse)"]
     inject["Inject timings + %wor"]
     finalize["FaFinalized<br/>optional repair, then typed monotonicity"]
     serial["Serialize ChatFile → CHAT text<br/>(single serialize)"]
 
     start --> host
-    host --> direct --> media
-    host --> server --> media
-    media --> wav --> parse --> utr --> fa --> inject --> finalize --> serial
+    host --> direct --> parse
+    host --> server --> parse
+    parse --> route
+    route --> norec --> finalize
+    route --> media --> wav --> utr --> fa --> inject --> finalize --> serial
 ```
 
 **Key functions:**
+- `AlignRoute::decide(FaWorkingDocument, RealignmentRequest)`: decides once,
+  at admission, whether the recording is read at all; only `NeedsAudio`
+  resolves media
 - `run_utr_pass(&mut ChatFile, ...)`: mutates AST, returns `UtrResult`
-- `run_fa_from_ast(FaInputDocument, ...)`: accepts the admitted AST directly
-  and returns the admitted, writable result; every path ends in
-  `FaAdmission::finish`, which takes the draft through the media/timing
-  transition and the output gate
+- `run_fa_from_ast(ActiveFaInput, ...)`: accepts an active attempt (a file
+  with words to align, by type) and returns the admitted, writable result;
+  every path ends in `FaAdmission::finish`, which takes the draft through the
+  media/timing transition and the output gate
+- `refresh_from_complete_wor(&CompleteWor, ...)`: the complete-`%wor` route,
+  reached only through the proof `AlignRoute::decide` issues
 
 ## Pipeline: UTR then FA
 
@@ -220,10 +242,35 @@ Alignment runs as a two-step pipeline:
 
 ### Step 0: Cheap reuse for already word-timed files
 
-Before UTR or FA grouping, `align` now checks whether the parsed file already
-contains a complete reusable `%wor` tier. This is the cheapest safe rerun path
-for files that have already been aligned once and are being passed through
-`align` again.
+At admission, `align` checks whether the parsed file already contains a
+complete reusable `%wor` tier. This is the cheapest safe rerun path for files
+that have already been aligned once and are being passed through `align`
+again, and since 2026-11-03 it is its own route
+(`AlignRoute::WithoutRecording(RefreshOnly)`, run by
+`fa::refresh_from_complete_wor`): the recording is not resolved or opened, so
+an aligned transcript can be re-run with its recording absent (archived, on
+another machine) and still get its bullets refreshed. The output's stamp says
+so: `timing=refreshed_from_wor` beside `fa=`, a field a run that aligned
+against audio never writes.
+
+`--override-media-cache` (or `--override-media-cache-tasks forced_alignment`)
+is the request to align such a file again from its recording: the route is
+then `NeedsAudio`, the recording is required and a missing one is refused by
+name, and the file's `%wor` is recomputed. Before 2026-11-03 the flag never
+reached a complete-`%wor` file (the refresh ran before any cache was
+consulted), so nothing short of deleting the `%wor` by hand could ask for a
+re-alignment.
+
+The refresh can still leave words untimed: a previous run may have written
+backward `%wor` (UTR anchor drift placing an utterance in the preceding task's
+audio window), and the finalizer strips such an utterance's timing and removes
+its `%wor` so the next run does not reconstruct the backward bullet. Because
+this run read no audio, nothing in it could time those words again, and the
+completion report says so: the file is written diagnosed with a
+`timing_incomplete` shortfall whose cause for each such utterance is
+`needs_recording` ("retained %wor timing removed as out of order while
+refreshing bullets with no recording read; these words need a run with the
+recording"). A plain `align` with the recording present then times them.
 
 The important detail is that this check is **not** based only on
 `main`-tier `Word.inline_bullet`. After a CHAT parse roundtrip, main-tier word
@@ -591,8 +638,28 @@ turn order while permitting disjoint adjacent-speaker episodes; extending a
 following speaker's run requires source-observed overlap continuations. Reference
 words cannot be assigned twice or stolen from later turns by an independent
 local match. Common endpoint proof permits hints, while mandatory but ambiguous
-words retain their full candidate hull as search-only evidence. These envelopes
-use retained same-speaker bounds rather than another speaker's provisional crop.
+words retain their full candidate hull as search-only evidence. A candidate
+hull is checked for containment against retained same-speaker bounds only,
+never another speaker's provisional crop: its words were heard, and where they
+were heard is the evidence. An order corridor for words that were NOT heard is
+bounded differently (2026-11-03): by the nearest measured utterance before and
+after it in document order, whatever the speaker, because a turn that carries
+no overlap marker begins after the turn before it ends and ends before the turn
+after it begins. Each edge of the corridor records where it came from
+(`CorridorFloor`, `CorridorCeiling` in `chat_ops/fa/utr/search.rs`): a
+preceding or following measurement (a retained bullet's inner edge, a proved
+provider token's outer edge, or a required word's candidate extremum) with the
+utterance that supplied it; the recording's own edge, only when no measured
+utterance lies on that side; or an overlap marker that withholds the bound: the
+searched utterance's own `+<` withholds its floor (a listened `+<` turn began
+before the previous turn's start, so neither of that turn's edges may cut the
+search), and a `+<` on the following utterance withholds the ceiling, since
+that turn overlaps this one. The same speaker's retained
+chain and the joint producer's obligatory words can only narrow it further. A
+corridor therefore cannot start at 0 beside a measured neighbour: before this,
+an unheard one-word acknowledgement between two heard turns searched from 0,
+exceeded the engine budget in a long recording, and was refused before any
+request, although the word was there, inside the bounded corridor.
 Original bullets and output-completion requirements are unchanged. This bounded
 model does not cover arbitrary reordering or prove acoustic speaker identity.
 See [implementation and limits](../developer/backchannel-aware-alignment.md#bounded-partial-order-correspondence-kernel).
@@ -699,7 +766,8 @@ utterances after it, and inside any retained non-overlap bullets around it.
 When both sides are bounded that way and the bounds contain its own proved
 words, the plan gives it an `order_corridor` search envelope between those
 neighbouring proved timings (`chat_ops/fa/utr/interior.rs`; the decision
-records `bounded_search_window`). Forced alignment may search the utterance's
+records `bounded_search_window`), each edge naming the utterance it was read
+from. Forced alignment may search the utterance's
 words inside it; it never becomes a bullet, so it stays distinct from an
 endpoint-proved timing. An unbounded side, contradictory bounds or provider
 timing out of token order give no corridor, and the utterance keeps the
@@ -712,6 +780,13 @@ endpoint keeps the wider obligation; an interior anchor cannot replace it.
 This avoids searching past a known ending merely because the beginning is
 unresolved. Ordinary bounded request padding remains separate. The narrower
 window is not a final timing and does not certify acoustic correctness.
+Grouping records every corridor-localized utterance as a `search_corridor`
+decision (not a review item) carrying the admitted window and the provenance
+of each edge, so the evidence can say `search window 1600ms-15250ms from the
+order corridor; floor: 1600ms from utterance 0's measurement; ceiling: 15250ms
+from utterance 2's measurement`, and a refusal that follows it on the same
+line is explained by it. In the FA evidence file the decision carries the same
+facts as a `search_corridor` field (schema 10).
 
 Complete lexical coverage does not by itself establish word-boundary accuracy,
 and partial or unmatched states require an explicit abstention or fallback in
@@ -1133,7 +1208,7 @@ flowchart TD
     fa_ok{"All groups<br/>resolved?"}
     finalize["FaFinalized<br/>optional bullet repair first"]
     mono["enforce_monotonicity_with_policy()<br/>strip non-monotonic starts<br/>clamp ends per typed policy<br/>(chat_ops/fa/orchestrate.rs)"]
-    mono_warn["WARN monotonicity:<br/>end_clamped / start_stripped<br/>for affected utterances"]
+    mono_warn["WARN monotonicity:<br/>end_clamped_* / timing_stripped /<br/>start_raised_to_preceding_start<br/>for affected utterances"]
     post_val["Post-validation<br/>(warn-only, never fatal)"]
     out["Serialize → CHAT<br/>write output"]
     fa_err{"Error type?"}
@@ -1380,7 +1455,8 @@ decision strategies have different severity and review priority:
 | `end_clamped_coverage_only` | Only the bullet's inherited coverage overshot the next utterance's start; no measured word conflicted | **No** | Informational; automatic |
 | `end_clamped_boundary_from_words` | Both bullets' inherited boundary replaced by their measured word hulls; the words never conflicted | **No** | Informational; automatic |
 | `end_clamped_interleaved_words` | The words themselves interleave, or the next utterance has none: a genuine conflict | **Yes** | Adjudicate; the bullet and every affected word were clamped together |
-| `start_stripped` | Utterance start precedes previous accepted start, full timing removed | **Yes** | Review utterance; may indicate transcript/audio reordering |
+| `timing_stripped` (start regression) | Utterance start precedes the previous accepted start and the utterance carries no `+<` overlap marker (or carries one but has no timed extent after that start); full timing removed | **Yes** | Review utterance; may indicate transcript/audio reordering |
+| `start_raised_to_preceding_start` | Utterance start precedes the previous accepted start and the transcriber marked the utterance `+<` (it overlaps the previous one); the start is raised to the previous start, words wholly before it lose their timing, the word straddling it is cut to it, the rest keep their measured times | **Yes** | Review the dropped and trimmed words; the raise itself is what CHAT's start-order rule allows of a transcribed overlap |
 | `kept_bullet_left_unresolved` | Under `--main-bullets keep`, two kept bullets overlap, or one starts before an earlier one; neither changed | **Yes** for a same-speaker overlap or a backward start; **No** for a cross-speaker overlap | Review the input's own bullets; the run did not touch them |
 | `yielded_to_kept_bullet` | Under `--main-bullets keep`, a derived bullet overlapping a kept one moved its start to the kept end | **Yes** only if a word was cut | Informational unless words were cut |
 | `words_untimed_for_kept_absence` | Under `--main-bullets exact`, an utterance the input left without a bullet had words the aligner timed; their timings were removed so it stays without one | No | Informational: the reason lists where each word had been placed |
@@ -1427,8 +1503,9 @@ WARN monotonicity: strategy="end_clamped_interleaved_words" speaker=PAR line_idx
              cuts_word_timing=true resolution=interleaved_words
              words_trimmed=1 words_dropped=0 cause=adjacent_utterance_overlap"
 
-WARN monotonicity: strategy="start_stripped" speaker=INV line_idx=23
-     reason="start_before_previous=130000 previous_start=131500"
+WARN monotonicity: strategy="timing_stripped" speaker=INV line_idx=23
+     reason="non_monotonic start_ms=130000 previous_start_ms=131500
+             previous_line_idx=22 previous_speaker=CHI cause=no_overlap_marker"
 ```
 
 `words_trimmed` and `words_dropped` are two different facts, not one count: a
@@ -1439,8 +1516,11 @@ single `words_clamped` count could not tell these apart, so a caller reading
 the log could not tell whether a review was looking at a word that merely
 got shorter or one that lost its timing outright. Both are carried the same
 way through `MonotonicityEffect::EndClampedInterleavedWords` and its
-`FaTimingDecisionTrace` wire form, and the dropped side is not a count at all:
-it is one record per word, carrying the extent that was lost.
+`FaTimingDecisionTrace` wire form, and neither side is a count: each is one
+record per word, a dropped word's carrying the extent that was lost and a
+trimmed word's carrying the extent it had and the extent it kept (the
+trimmed side was a count until FA evidence schema 10). The log line prints
+the two lengths.
 
 Those discarded extents are also written to the run's evidence artifact as a
 flat `dropped_word_timings` section, so a reviewer can recover every
@@ -1493,14 +1573,42 @@ words ended after their own bullet (in one 253-file corpus, 30,858 word slots
 did) and, under the former any-speaker default, real cross-speaker overlap
 was cut as well.
 
-`start_stripped` is a genuine alignment concern, the utterance's start
-timestamp precedes the previous accepted start, which means time went backwards
-in the file. This happens when text and audio order diverge (overlapping speech,
-post-hoc transcript restructuring). The utterance's timing is completely removed
-and its structured decision record has `needs_review=true`.
+A start regression (`reason="non_monotonic ..."`) is a genuine alignment
+concern: the utterance's measured start precedes the previous accepted start,
+which means time went backwards in the file. This happens when text and audio
+order diverge (overlapping speech, post-hoc transcript restructuring). CHAT's
+start-order rule (E362) forbids writing the earlier start on the later line,
+and the line order is the contributor's, so Pass 1 resolves the regression by
+the utterance's own overlap evidence (`StartRegression::resolve` in
+`fa/orchestrate.rs`, 2026-11-03):
+
+- **Marked `+<`** (the parsed model's `LazyOverlapPrecedes` linker): the
+  transcriber said this turn starts while the previous one is still going, so
+  an early measured start is overlap, not a misplaced request. The start is
+  raised to the previous accepted start; words whose measured interval ends
+  at or before it lose their timing (`words_dropped`, one record per word),
+  the word straddling it is cut to begin there (`words_trimmed`, with its
+  measured and kept extent), and the rest keep their measured times. The
+  effect is `start_regression_raised`, strategy
+  `start_raised_to_preceding_start`. For example, an adult's seven-word
+  phrase measured to begin half a second before the child's turn it overlaps
+  used to lose all seven timings to avoid one unwritable start; the raise
+  keeps the six words with extent after the child's start.
+- **Unmarked**: the transcriber placed this turn after the previous one, so
+  the earlier start is more likely a model error. The utterance's timing is
+  completely removed (`start_regression_stripped`, strategy
+  `timing_stripped`), as before.
+- **Marked `+<` with nothing after the previous start** (the bullet ends at
+  or before it, or every timed word does): a raise would keep a bullet with
+  no timed word inside it, so the utterance is stripped and recorded as a
+  strip, with `cause=nothing_after_preceding_start` in the reason.
+
+Every start-order decision has `needs_review=true`. A raised utterance's
+start is the greatest accepted start, so what follows is judged against it
+exactly as before.
 
 These warnings are **not errors**: they indicate normal behavior on overlapping
-or densely-annotated speech.  High volumes of `start_stripped` warnings on a
+or densely-annotated speech.  High volumes of start-regression warnings on a
 file that previously aligned cleanly are a signal that the transcript was
 restructured after the last alignment run.
 
@@ -1578,7 +1686,8 @@ document later: by then those passes, and the UTR pre-pass (whose two-pass
 recovery writes ordinary `Authoritative` bullets onto utterances the input left
 unbulleted), have changed it, and `BulletSource` cannot tell the difference. So
 `MainBulletAuthority::bind` runs at the single parse in the align dispatch,
-before UTR, and the result travels with the model in `FaInputDocument`. Each
+before UTR, and the result travels with the model (`FaWorkingDocument`, then
+whichever route it takes: `CompleteWor` or `ActiveAlignment`). Each
 input bullet is classified as a `GivenMainBullet`: `Extent` and `Empty` are
 kept (`KeptBullet`); `Backward` refuses the file with `GivenBulletError::Backward`.
 Recovered, unparsed source is refused as `GivenBulletError::Unparsed`; it
@@ -1961,9 +2070,37 @@ The file is still written, with every timing that was measured, and is reported
 untimed, and the first utterances with their cause (no request was made
 because the utterance's audio window was refused; no request was made because
 the audio left for a run of untimed utterances could not contain their words;
+the run measured the words' intervals and then removed them itself while
+enforcing timing order, with the rule and every removed interval named;
 requests covered it and no positive interval resulted, with what those
 requests yielded counted; or nothing the run recorded explains it). It is never certified as completely aligned, and it is
 never discarded.
+
+#### A word the run itself untimed
+
+Timing order enforcement ([Monotonicity Invariant](#monotonicity-invariant)) can
+remove a measured interval after the aligner answered: Pass 1 strips a whole
+utterance whose start precedes an earlier start (or, when the utterance is
+marked `+<`, raises its start to that earlier start and drops only the words
+wholly before it), Pass 2 drops the words of a
+same-speaker utterance that lie at or past the next utterance's start, and
+under `--main-bullets keep` a derived bullet that cannot fit beside a kept
+one is stripped or loses its leading words. Such a word is reported as
+`removed`, never as "no positive interval from its requests": the request
+answered, and the finalizer took the answer away. The cause is recorded
+where the removal happens. Every stripping effect carries `words_dropped`,
+the measured intervals it removed (the end clamp already did), and the
+completion account reads those effect records before it consults what the
+requests yielded, so the misstatement has no route left. Each `removed`
+cause lists its removals, one per effect, each with the rule, the boundary
+it enforced, the line that supplied the boundary, and the intervals taken
+away; the report renders it as, for example, `measured 3500-4200 dropped at
+the same-speaker bound 3000 (line index 7)`, `measured 2 intervals
+2000-3300 removed, utterance stripped: its start 2000 precedes the INV start
+5000 (line index 7)`, or `measured 26774-27174 dropped before the CHI start
+27333 (line index 7), to which the utterance's start was raised from 26774
+(+< overlap); first kept word trimmed 133 ms`. Line indices count every line
+of the file from 0, headers included, as the decision records do.
 
 ### One measurement: `wav2vec` and `whisper` on the same file
 
@@ -2542,7 +2679,8 @@ utterances in text order, tracking the last accepted start
 timestamp. Any utterance whose start precedes the previous accepted
 start has its timing stripped entirely, utterance bullet, inline
 word bullets, and the `%wor` tier are all removed (the structured
-`start_stripped` decision records the event; see the
+`timing_stripped` decision records the event; an utterance marked `+<` is
+raised to the previous start instead, see the
 [Monotonicity warnings table](#monotonicity-warnings)). The
 utterance is left as plain untimed text, identical to how it would
 look before alignment.

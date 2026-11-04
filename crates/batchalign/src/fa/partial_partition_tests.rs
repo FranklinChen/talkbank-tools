@@ -236,7 +236,7 @@ async fn request_context_preserves_partial_partition_output() {
             review_level: ReviewLevel::None,
         };
         let result = run_fa_from_ast(
-            working.attempt(),
+            active_attempt(&working),
             &audio,
             &crate::api::LanguageCode3::eng(),
             FaServices {
@@ -259,7 +259,7 @@ async fn request_context_preserves_partial_partition_output() {
             panic!("anchored trace")
         };
         assert_eq!(pieces.len(), plan.units().count());
-        assert_eq!(trace.evidence_schema_version, 8);
+        assert_eq!(trace.evidence_schema_version, 10);
         for (trace_piece, unit) in pieces.iter().zip(plan.units()) {
             let context = trace_piece.context.as_ref().expect("schema 8 context");
             assert_eq!(
@@ -355,7 +355,7 @@ async fn request_context_preserves_partial_partition_output() {
             // evidence. No provider/model work or compensating tier creation.
             params.wor_tier = WorTierPolicy::Omit;
             let omitted = run_fa_from_ast(
-                working.attempt(),
+                active_attempt(&working),
                 &audio,
                 &crate::api::LanguageCode3::eng(),
                 FaServices {
@@ -455,4 +455,12 @@ async fn request_context_preserves_partial_partition_output() {
         ),
     ]
     "#);
+}
+
+/// The active attempt of a fixture the test knows is aligned, not preserved.
+fn active_attempt(working: &crate::fa::FaWorkingDocument) -> ActiveFaInput<'_> {
+    match working.attempt() {
+        FaInputDocument::Active(active) => active,
+        FaInputDocument::Preserved => panic!("the fixture is aligned, not preserved"),
+    }
 }

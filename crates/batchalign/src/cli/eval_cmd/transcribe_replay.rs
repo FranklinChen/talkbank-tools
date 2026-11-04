@@ -20,7 +20,6 @@ use crate::transcribe::replay::{
     admit_legacy_replay_manifest, file_blake3_hex, write_legacy_replay_manifest,
 };
 use crate::transcribe::{TranscribeCachePolicies, TranscribeOptions};
-use crate::types::worker_v2::SpeakerBackendV2;
 use crate::types::worker_v2::UtsegAdjacencyPolicyRevisionV2;
 use crate::utseg::{TranscribeUtsegExecution, UtsegDecisionPolicy};
 use crate::{RegistryDiscovery, prepare_workers};
@@ -111,14 +110,22 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
             .map(ToOwned::to_owned);
         let opts = TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
-                crate::transcribe::ReplayAsrPlan::for_legacy_replay(args.num_speakers, &lang)?,
+                crate::transcribe::ReplayAsrPlan::for_legacy_replay(&lang)?,
                 utseg_execution.pre_chat_policy().is_some()
                     || utseg_execution.post_chat_policy().is_some(),
                 args.utseg_fallback_stanza.into(),
             )
             .map_err(|error| CliError::InvalidArgument(error.to_string()))?,
-            diarize: args.diarize,
-            speaker_backend: args.diarize.then_some(SpeakerBackendV2::PyannoteAi),
+            // Replay runs no recognizer; its dedicated turns, when requested,
+            // come from the manifest under the default engine's name.
+            speakers: crate::transcribe::SpeakerPlan::admit(
+                crate::transcribe::SpeakerCount::admit(
+                    false,
+                    crate::api::NumSpeakers(args.num_speakers),
+                )?,
+                crate::transcribe::SpeakerSeparation::from_request(args.diarize, None),
+                None,
+            )?,
             with_morphosyntax: false,
             // These policies are unreachable in the replay typestate. Keeping
             // them fail-closed protects against a future routing regression.
@@ -274,12 +281,6 @@ fn policy_receipt_name(policy: UtsegDecisionPolicy) -> &'static str {
         UtsegDecisionPolicy::ReapplyBoundaryModel(
             UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
         ) => "suppress-earlier-adjacent-nonordinary-v1",
-        UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(
-            UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-        ) => "suppress-earlier-adjacent-boundaries-preserve-exact-retraces-v1",
-        UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(
-            UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
-        ) => "suppress-earlier-adjacent-nonordinary-preserve-exact-retraces-v1",
     }
 }
 
@@ -288,11 +289,6 @@ fn selected_policy(args: &TranscribeReplayRunArgs) -> UtsegDecisionPolicy {
         TranscribeReplayUtsegPolicy::WorkerDeclared => UtsegDecisionPolicy::WorkerDeclared,
         TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesV1 => {
             UtsegDecisionPolicy::ReapplyBoundaryModel(
-                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-            )
-        }
-        TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesPreserveExactRetracesV1 => {
-            UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
             )
         }
@@ -380,6 +376,7 @@ mod tests {
         std::fs::write(
             &asr,
             serde_json::to_vec(&AsrResponse {
+                seam_ambiguities: Vec::new(),
                 tokens: vec![AsrToken {
                     text: "hello".into(),
                     start_s: at(0.0),
@@ -458,14 +455,14 @@ mod tests {
     fn post_only_candidate_scope_holds_the_pre_chat_policy_at_production() {
         let mut args = run_args(
             false,
-            TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesPreserveExactRetracesV1,
+            TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesV1,
         );
         args.utseg_passes = TranscribeReplayUtsegPasses::PolicyOnPostChatOnly;
         assert_eq!(
             admit_utseg_execution(&args).expect("phase-specific execution"),
             TranscribeUtsegExecution::PreAndPostChat {
                 pre_chat: UtsegDecisionPolicy::WorkerDeclared,
-                post_chat: UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(
+                post_chat: UtsegDecisionPolicy::ReapplyBoundaryModel(
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
                 ),
             }
@@ -476,13 +473,13 @@ mod tests {
     fn pre_only_candidate_scope_holds_the_post_chat_policy_at_production() {
         let mut args = run_args(
             false,
-            TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesPreserveExactRetracesV1,
+            TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesV1,
         );
         args.utseg_passes = TranscribeReplayUtsegPasses::PolicyOnPreChatOnly;
         assert_eq!(
             admit_utseg_execution(&args).expect("phase-specific execution"),
             TranscribeUtsegExecution::PreAndPostChat {
-                pre_chat: UtsegDecisionPolicy::ReapplyBoundaryModelPreservingExactRetraces(
+                pre_chat: UtsegDecisionPolicy::ReapplyBoundaryModel(
                     UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
                 ),
                 post_chat: UtsegDecisionPolicy::WorkerDeclared,

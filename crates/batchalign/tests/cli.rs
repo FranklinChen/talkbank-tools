@@ -786,6 +786,8 @@ fn cli_transcribe_explicit_remote_server_refuses_unshippable_audio() {
         .cmd()
         .args([
             "transcribe",
+            "--lang",
+            "eng",
             input.to_str().unwrap(),
             "-o",
             output.to_str().unwrap(),
@@ -1324,7 +1326,7 @@ fn diarize_missing_media_error_names_the_path() {
     let harness = CliHarness::new();
     let result = harness
         .cmd()
-        .args(["diarize", "/nonexistent/dir/absent.wav"])
+        .args(["diarize", "--lang", "eng", "/nonexistent/dir/absent.wav"])
         .timeout(CliRunBudget::ServerRoundTrip.as_duration())
         .output()
         .unwrap();

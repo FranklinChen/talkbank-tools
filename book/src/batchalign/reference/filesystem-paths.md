@@ -33,10 +33,13 @@ created with the umask's default mode. Every reader of them is the same
 user's CLI, server or worker daemons; no documented reader runs under another
 account, so a setup that shares a state directory between accounts is not
 supported. Reports a command is asked to write elsewhere (`compare-runs`
-output, `eval utr-alignment` evidence) get the mode `std::fs::write` would
-give them, `0666` less the umask (`0644` under the usual `022`). The Rust
-writers go through `atomic_file::write_atomically`, whose `Audience` argument
-(`Owner` or `UmaskDefault`) states which.
+output, `eval utr-alignment` evidence), and the CHAT, CSV and evidence
+outputs of every command, get the mode `std::fs::write` would give them,
+`0666` less the umask (`0644` under the usual `022`). The Rust writers go
+through `atomic_file::write_atomically`, whose `Audience` argument (`Owner`
+or `UmaskDefault`) states which. A `UmaskDefault` file replaced in place is
+a fresh file with the default mode, not the mode of the file it replaced,
+and an existing leaf symlink at its path is written through.
 
 Every read-modify-write of a state file, and every single-writer slot, holds
 an exclusive OS lock on a dedicated `<file>.lock` beside it, through one

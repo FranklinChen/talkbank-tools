@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn dedicated_speaker_diarization_runs_when_backend_is_available_even_if_asr_has_labels() {
     let response = AsrResponse {
+        seam_ambiguities: Vec::new(),
         tokens: vec![AsrToken {
             text: "hello".into(),
             start_s: at(0.0),
@@ -15,8 +16,12 @@ fn dedicated_speaker_diarization_runs_when_backend_is_available_even_if_asr_has_
         source_monologues: None,
     };
 
-    assert!(
-        should_run_dedicated_speaker_diarization(&response, Some(SpeakerBackendV2::Pyannote)),
+    assert_eq!(
+        dedicated_diarization_to_run(
+            crate::transcribe::SpeakerPlan::for_test(2, Some(SpeakerBackendV2::Pyannote)),
+            &response
+        ),
+        Some(SpeakerBackendV2::Pyannote),
         "explicit diarization should still run even when ASR already carries first-pass speaker labels"
     );
 }
@@ -24,14 +29,19 @@ fn dedicated_speaker_diarization_runs_when_backend_is_available_even_if_asr_has_
 #[test]
 fn dedicated_speaker_diarization_skips_when_response_is_empty() {
     let response = AsrResponse {
+        seam_ambiguities: Vec::new(),
         tokens: vec![],
         lang: LanguageCode3::eng(),
         model: None,
         source_monologues: None,
     };
 
-    assert!(
-        !should_run_dedicated_speaker_diarization(&response, Some(SpeakerBackendV2::Pyannote)),
+    assert_eq!(
+        dedicated_diarization_to_run(
+            crate::transcribe::SpeakerPlan::for_test(2, Some(SpeakerBackendV2::Pyannote)),
+            &response
+        ),
+        None,
         "empty ASR responses should not trigger dedicated speaker diarization"
     );
 }
@@ -56,6 +66,7 @@ async fn speaker_diarization_stage_skips_when_backend_is_unavailable() {
     );
     let mut ctx = ctx
         .admit_response(AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![AsrToken {
                 text: "hello".into(),
                 start_s: at(0.0),
@@ -93,7 +104,7 @@ async fn no_utseg_bypasses_the_pre_chat_worker_for_a_supported_language() {
     let services = PipelineServices::new(&pool, &cache);
     let audio_path = tempdir.path().join("sample.wav");
     let mut opts = test_transcribe_options(None);
-    opts.diarize = false;
+    opts.speakers = crate::transcribe::SpeakerPlan::for_test(2, None);
     let ctx = TranscribePipelineContext::new_with_rev_inference(
         &audio_path,
         services,
@@ -104,6 +115,7 @@ async fn no_utseg_bypasses_the_pre_chat_worker_for_a_supported_language() {
     );
     let ctx = ctx
         .admit_response(AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "hello".into(),
@@ -161,6 +173,7 @@ async fn diarization_boundary_splits_timed_asr_words_before_chat_build() {
     );
     let mut ctx = ctx
         .admit_response(AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![
                 AsrToken {
                     text: "bonjour".into(),
@@ -247,6 +260,7 @@ async fn transcribe_speaker_projection_refuses_unwritable_requested_evidence() {
         &PRODUCTION_REV_INFERENCE,
     )
     .admit_response(AsrResponse {
+        seam_ambiguities: Vec::new(),
         tokens: vec![AsrToken {
             text: "hello".into(),
             start_s: at(0.0),
@@ -354,7 +368,7 @@ async fn build_chat_stage_resolves_auto_to_detected_language() {
 
     // Opts with lang="auto": simulates --lang auto from CLI
     let mut opts = test_transcribe_options_in(None, crate::api::LanguageSpec::Auto);
-    opts.diarize = false;
+    opts.speakers = crate::transcribe::SpeakerPlan::for_test(2, None);
 
     let ctx = TranscribePipelineContext::new_with_rev_inference(
         &audio_path,
@@ -368,6 +382,7 @@ async fn build_chat_stage_resolves_auto_to_detected_language() {
     // ASR response with detected language "spa"
     let ctx = ctx
         .admit_response(AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![AsrToken {
                 text: "hola".into(),
                 start_s: at(0.0),
@@ -415,7 +430,7 @@ async fn postprocess_stage_resolves_auto_before_chat_build() {
     let audio_path = tempdir.path().join("sample.wav");
 
     let mut opts = test_transcribe_options_in(None, crate::api::LanguageSpec::Auto);
-    opts.diarize = false;
+    opts.speakers = crate::transcribe::SpeakerPlan::for_test(2, None);
 
     let ctx = TranscribePipelineContext::new_with_rev_inference(
         &audio_path,
@@ -427,6 +442,7 @@ async fn postprocess_stage_resolves_auto_before_chat_build() {
     );
     let ctx = ctx
         .admit_response(AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![AsrToken {
                 text: "hola".into(),
                 start_s: at(0.0),
@@ -482,6 +498,7 @@ async fn an_asr_response_with_no_tokens_is_refused_naming_the_asr_stage() {
     );
     let ctx = ctx
         .admit_response(AsrResponse {
+            seam_ambiguities: Vec::new(),
             tokens: vec![],
             lang: LanguageCode3::fra(),
             model: None,
@@ -500,4 +517,122 @@ async fn an_asr_response_with_no_tokens_is_refused_naming_the_asr_stage() {
         ),
         "the refusal must name the ASR stage, got: {refusal:?}"
     );
+}
+
+/// A repetition at a Whisper window seam that the reconciler kept once
+/// (`worker::whisper_windows`) travels on the response through the lowering
+/// (including the monotone fit of the overlapping copies), is placed on the
+/// utterance that keeps the copy, is written there as a `%com`, and is the one
+/// shortfall assembly records, located in the written document, so the file
+/// finishes diagnosed (exit 7) rather than clean, and rather than refused.
+#[tokio::test]
+async fn a_window_seam_kept_once_is_written_as_a_comment_and_reported_as_a_shortfall() {
+    use crate::worker::asr_result_v2::test_fixtures::{test_requested, window_response};
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
+        .await
+        .expect("cache");
+    let pool = WorkerPool::new(PoolConfig::for_tests());
+    let services = PipelineServices::new(&pool, &cache);
+    let audio_path = tempdir.path().join("sample.wav");
+    let opts = test_transcribe_options(None);
+    let ctx = TranscribePipelineContext::new_with_rev_inference(
+        &audio_path,
+        services,
+        &opts,
+        DebugDumper::disabled(),
+        UtsegEvidenceSink::Disabled,
+        &PRODUCTION_REV_INFERENCE,
+    );
+    // Window 0 heard "go" twice in the audio it shares with window 1 (owned
+    // up to 22.0 s); window 1 (from 19.0 s, owning from 22.0 s) heard "go"
+    // once there, at 20.0-22.0 s. Which of window 0's copies it repeats
+    // cannot be told, so window 1's copy is dropped and the seam recorded.
+    let response = crate::worker::asr_result_v2::parse_asr_response_v2(
+        &window_response(
+            serde_json::json!([
+                {"text":"we", "start_s":19.0, "end_s":19.4},
+                {"text":"go", "start_s":20.0, "end_s":22.0},
+                {"text":"go", "start_s":20.5, "end_s":22.5},
+                {"text":"now.", "start_s":24.0, "end_s":24.5}]),
+            serde_json::json!([
+                {"text":"go", "start_s":1.0, "end_s":3.0},
+                {"text":"then", "start_s":11.0, "end_s":11.4},
+                {"text":"home.", "start_s":11.5, "end_s":12.0}]),
+        ),
+        Some(&LanguageCode3::eng()),
+        &test_requested(),
+        crate::types::worker_v2::AsrBackendV2::LocalWhisper,
+    )
+    .expect("the recording is transcribed, with the seam recorded");
+    assert_eq!(response.seam_ambiguities.len(), 1);
+    let ctx = ctx.admit_response(response).expect("resolved ASR response");
+
+    let ctx = stage_asr_postprocess(ctx).await.expect("postprocess");
+    let placed: Vec<usize> = ctx
+        .state
+        .utterances
+        .iter()
+        .map(|utterance| utterance.seam_ambiguities.len())
+        .collect();
+    assert_eq!(
+        placed.first(),
+        Some(&1),
+        "the record sits on the utterance that keeps the copy: {placed:?}"
+    );
+    assert!(
+        placed.iter().skip(1).all(|&records| records == 0),
+        "and on no other: {placed:?}"
+    );
+
+    let ctx = stage_build_chat(ctx).await.expect("build chat");
+    let Built::Admitted(ChatReady {
+        document,
+        shortfalls,
+        ..
+    }) = ctx.state
+    else {
+        panic!("the transcript is legal CHAT; the seam is a shortfall, not a finding");
+    };
+    let chat = document.as_str();
+    // Retrace detection reads the two kept copies as a repetition, which is
+    // what they look like once the seam decision is made; the comment says
+    // why there are two. The pause before "now" cuts the turn there, so the
+    // utterance that keeps the copy ends with a synthesized period. The
+    // comment is the line after it, and the only comment in the file.
+    assert!(
+        chat.contains(
+            "*PAR0:\tWe go [/] go . \u{15}19000_22500\u{15}\n%com:\tbatchalign window seam at \
+             22000 ms: repeated \"go\" kept once, review here\n"
+        ),
+        "{chat}"
+    );
+    assert_eq!(chat.matches("%com:").count(), 1, "{chat}");
+    let [
+        Shortfall::WindowSeamAmbiguous {
+            seams: 1,
+            first_seams,
+        },
+    ] = shortfalls.as_slice()
+    else {
+        panic!("one seam shortfall, got {shortfalls:?}");
+    };
+    let [record] = first_seams.as_slice() else {
+        panic!("one seam record, got {first_seams:?}");
+    };
+    assert!(
+        record.location.to_string().contains("We go [/] go ."),
+        "the record locates the written utterance: {}",
+        record.location
+    );
+    assert_eq!(record.seam_ms, 22_000);
+    assert_eq!(record.text, "go");
+    assert_eq!(record.dropped_from_window, 1);
+    // The shortfall is what makes the written file diagnosed rather than
+    // clean: the route the CLI reports as exit code 7.
+    assert!(matches!(
+        OutputReport::of(&ProducedOutput::Admitted(document), &shortfalls),
+        OutputReport::Diagnosed(_)
+    ));
 }

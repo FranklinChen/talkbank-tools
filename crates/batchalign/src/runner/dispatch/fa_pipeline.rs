@@ -6,15 +6,18 @@ use std::sync::Arc;
 use crate::api::{DisplayPath, LanguageCode3, NumWorkers};
 use crate::cache::UtteranceCache;
 use crate::engine_reports::FaCacheNamespace;
-use crate::fa::{AdmittedFaResult, FaServices};
+use crate::fa::{
+    ActiveAlignment, AdmittedFaResult, AlignRoute, FaServices, NoRecordingRoute, RealignmentRequest,
+};
 use crate::options::EngineBackend as _;
 use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
+use crate::provenance::AlignTiming;
 use crate::provenance::UtrRecovery;
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
-use crate::worker::pool::WorkerPool;
+use crate::worker::pool::{GpuModelPlan, WorkerPool};
 use async_trait::async_trait;
 use tracing::{info, warn};
 
@@ -29,10 +32,11 @@ use super::super::util::{
     drain_supervised_file_tasks, probe_audio_duration, spawn_observed_progress_forwarder,
     spawn_supervised_file_task,
 };
-use super::FaDispatchPlan;
 use super::audio_output::{ChatOutput, FileOutput, MergeAbbreviations};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
+use super::fa_admission::FaWorkerRefusal;
 use super::utr::{UtrPassContext, run_utr_pass};
+use super::{FaDispatchPlan, FaWorkerAdmission};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AlignUtrDecision<'a> {
@@ -102,11 +106,62 @@ pub(crate) struct FaDispatchRuntime {
     pub pool: Arc<WorkerPool>,
     /// Cache used by FA group reuse and worker result persistence.
     pub cache: Arc<UtteranceCache>,
-    /// The FA engine the selected worker reported, which namespaces every FA
-    /// cache row and evidence envelope.
-    pub cache_namespace: FaCacheNamespace,
     /// Maximum number of file tasks to run concurrently for this job.
     pub num_workers: NumWorkers,
+}
+
+/// The job's route from a file's declared language to the FA services that
+/// align it: the GPU model plan that routes FA requests and their fallbacks,
+/// and the gate that admits the language and names the engine.
+///
+/// The two are used only together, at one step, so they are one value with
+/// one transition: [`Self::admit`] takes the file's language and yields an
+/// [`AdmittedFaEngine`], and only that can build [`FaServices`]. No stage of
+/// the pipeline can therefore run under a cache namespace read off a worker
+/// keyed by another language.
+#[derive(Clone, Copy)]
+struct FaEngineAdmission<'a> {
+    gpu: &'a GpuModelPlan,
+    gate: &'a FaWorkerAdmission,
+}
+
+/// A file language the gate admitted, carrying the namespace every FA cache
+/// row and evidence envelope for this file is read and written under.
+struct AdmittedFaEngine<'a> {
+    gpu: &'a GpuModelPlan,
+    cache_namespace: FaCacheNamespace,
+}
+
+impl<'a> FaEngineAdmission<'a> {
+    /// Admit the file's language. Probed once per language per job by the
+    /// gate; a refusal names the language and what the host could not supply.
+    async fn admit(
+        self,
+        lang: &LanguageCode3,
+    ) -> Result<AdmittedFaEngine<'a>, Arc<FaWorkerRefusal>> {
+        let cache_namespace = self.gate.admit(lang).await?;
+        Ok(AdmittedFaEngine {
+            gpu: self.gpu,
+            cache_namespace,
+        })
+    }
+}
+
+impl AdmittedFaEngine<'_> {
+    /// The FA services for this file: the shared pool and cache, under the
+    /// admitted namespace and the job's GPU plan.
+    fn services<'s>(
+        &'s self,
+        pipeline: PipelineServices<'s>,
+        attention_capture_dir: Option<&'s std::path::Path>,
+    ) -> FaServices<'s> {
+        FaServices {
+            pipeline,
+            cache_namespace: &self.cache_namespace,
+            gpu: self.gpu,
+            attention_capture_dir,
+        }
+    }
 }
 
 /// Shared per-file FA dependencies.
@@ -121,8 +176,12 @@ struct FaFileContext<'a> {
     host: DispatchHostContext,
     /// File/job lifecycle sink for runner-side status updates.
     sink: Arc<dyn RunnerEventSink>,
-    /// FA services; UTR uses only their shared pool and cache.
-    services: FaServices<'a>,
+    /// Worker pool and cache shared with every stage; UTR uses only these.
+    pipeline: PipelineServices<'a>,
+    /// The job's route from a file's declared language to the FA engine that
+    /// will align it; the FA services exist only after it admits the file's
+    /// language.
+    engine: FaEngineAdmission<'a>,
     /// Typed FA parameter bundle.
     fa_params: FaParams,
     /// Independently resolved policy for UTR ASR evidence.
@@ -135,13 +194,6 @@ struct FaFileContext<'a> {
     utr_engine: Option<&'a crate::options::UtrEngine>,
     /// Overlap strategy for `+<` utterances during UTR.
     utr_strategy: super::options::ResolvedUtrStrategy,
-    /// Fallback language from job submission, only present when the user
-    /// passed an explicit `--lang <iso3>`. The per-file language from
-    /// `@Languages:` takes priority; this is consulted only when the
-    /// file's header is absent. If `None` (the user passed `--lang auto`)
-    /// AND the file has no `@Languages:`, the per-file resolver surfaces
-    /// a typed error rather than silently inventing English.
-    lang_fallback: Option<&'a LanguageCode3>,
     /// Debug artifact writer for offline replay.
     dumper: DebugDumper,
     /// Custom media directory from `--media-dir`.
@@ -175,11 +227,121 @@ mod tests {
     }
 }
 
+/// The recording a file is aligned against, resolved and prepared once.
+///
+/// Built only by [`Self::resolve`], and held only by [`AlignAudioTask`]: the
+/// route that reads audio. The two routes that do not
+/// ([`AlignRoute::WithoutRecording`]) have no field of this type, so a
+/// complete-`%wor` refresh or a declared no-op cannot be refused for a
+/// recording nothing on its route would open. Media resolution used to run
+/// for every file before the route was known.
+pub(super) struct ResolvedMedia {
+    /// The recording as found: the path the Rust-owned UTR engines read.
+    original: PathBuf,
+    /// The recording as 16 kHz mono WAV, converted when the container needs
+    /// it: the path the Python workers read.
+    wav: PathBuf,
+    /// Content identity of the WAV for cache keying.
+    identity: crate::chat_ops::fa::AudioIdentity,
+    /// The probe's measurement of the WAV, taken once per file and handed to
+    /// both the UTR pass and FA so neither probes again. Optional because a
+    /// failed probe is logged and FA probes again for the recording it cannot
+    /// run without, reporting that failure as the file's error.
+    duration: Option<crate::media::probe::AudioDuration>,
+}
+
+/// Why a file's recording could not be made ready, naming the file.
+#[derive(Debug, thiserror::Error)]
+enum MediaUnavailable {
+    /// The six-rung search found no recording; its message names every place
+    /// it looked.
+    #[error("{}", .0.message)]
+    Unresolved(super::media_search::UnresolvedMedia),
+    /// The recording was found and could not be converted to WAV.
+    #[error("Media conversion failed for {filename}: {error}")]
+    Conversion {
+        /// The transcript whose recording it is.
+        filename: String,
+        /// The conversion's own account.
+        error: crate::ensure_wav::EnsureWavError,
+    },
+}
+
+impl ResolvedMedia {
+    /// Find, convert, identify and measure the recording for one transcript.
+    async fn resolve(
+        job: &RunnerJobSnapshot,
+        host: &DispatchHostContext,
+        filename: &str,
+        read_path: &std::path::Path,
+        document: &crate::chat_ops::ChatFile,
+        media_dir: Option<&crate::options::AbsoluteMediaRoot>,
+    ) -> Result<Self, MediaUnavailable> {
+        // The six-rung media search, shared with `speaker-identify` since
+        // 2026-09-02. It lives in `media_search` because it states where a
+        // corpus keeps its recordings, which is not an alignment fact.
+        let original = super::media_search::resolve_transcript_media(
+            job,
+            host,
+            filename,
+            read_path,
+            || crate::media::DeclaredMedia::from_document(document),
+            media_dir,
+        )
+        .await
+        .map_err(MediaUnavailable::Unresolved)?;
+
+        // Convert non-WAV media (e.g. mp4) to WAV via ffmpeg if needed.
+        // soundfile (Python) cannot read container formats like mp4 directly.
+        let wav = crate::ensure_wav::ensure_wav(&original, None)
+            .await
+            .map_err(|error| MediaUnavailable::Conversion {
+                filename: filename.to_owned(),
+                error,
+            })?;
+
+        // Compute audio identity for cache keying: path|mtime|size
+        let wav_str = wav.to_string_lossy();
+        let identity = compute_audio_identity(&wav_str).await.unwrap_or_else(|| {
+            // Fallback: use path with zeroed metadata
+            crate::chat_ops::fa::AudioIdentity::from_metadata(&wav_str, 0, 0)
+        });
+
+        // How long the audio runs, measured once for UTR and FA alike.
+        let duration = probe_audio_duration(&wav).await;
+        Ok(Self {
+            original,
+            wav,
+            identity,
+            duration,
+        })
+    }
+
+    /// The recording as FA and the worker-hosted UTR engines read it.
+    fn context(&self) -> AudioContext<'_> {
+        AudioContext {
+            audio_path: &self.wav,
+            audio_identity: &self.identity,
+            audio_duration: self.duration,
+        }
+    }
+
+    /// The path a UTR engine reads: a Rust-owned engine decodes the recording
+    /// as found, a worker-hosted one the prepared WAV.
+    fn utr_audio_path(&self, utr_engine: Option<&crate::options::UtrEngine>) -> &std::path::Path {
+        if utr_engine.is_some_and(|engine| engine.is_rust_owned()) {
+            self.original.as_path()
+        } else {
+            self.wav.as_path()
+        }
+    }
+}
+
+/// The file task for the route that reads the recording: alignment in full,
+/// in part, or incrementally against a declared prior.
 struct AlignAudioTask<'a> {
-    host: DispatchHostContext,
-    job_id: crate::api::JobId,
-    file_index: usize,
-    filename: String,
+    /// Where the output and its evidence go.
+    destination: FaOutputDestination<'a>,
     services: FaServices<'a>,
     /// The run's FA parameters and the languages they were admitted against.
     ///
@@ -190,39 +352,16 @@ struct AlignAudioTask<'a> {
     /// compared. The only way to obtain this value is to pass the check.
     admitted: AdmittedFaParams,
     utr_cache_policy: crate::params::UtrCachePolicies,
-    before: Option<crate::fa::RetainedFaPrior>,
-    audio_path: PathBuf,
-    audio_identity: crate::chat_ops::fa::AudioIdentity,
-    /// The probe's measurement of `audio_path`, taken once per file and handed
-    /// to both the UTR pass and FA so neither probes again.
-    audio_duration: Option<crate::media::probe::AudioDuration>,
-    /// The model FA runs on, with the anchors UTR observed on it.
-    model: crate::fa::FaWorkingDocument,
+    /// The recording, resolved for this route alone.
+    media: ResolvedMedia,
+    /// The model FA runs on, with the anchors UTR observed on it and the
+    /// prior it is aligned against when the run is incremental.
+    model: ActiveAlignment,
     /// This file's observed recovery outcomes and its single fallback permit.
     utr_recovery: UtrRecovery,
     utr_strategy: super::options::ResolvedUtrStrategy,
-    dumper: &'a DebugDumper,
-    debug_traces: bool,
-    output: AlignOutputPolicy,
-}
-
-/// How the aligned CHAT is finalized: the three facts that describe the
-/// DOCUMENT rather than the alignment.
-///
-/// Grouped when `merge_abbreviations` moved onto the task from the shell's
-/// argument list. `AlignAudioTask` is a declared refactor target with a field
-/// ceiling, and adding a 23rd field to a struct the audit already calls a bag
-/// would be exactly the accretion that ceiling exists to stop. These three
-/// belong together on their merits: all three are read only by
-/// `finalize_success`, and none of them affects a single timing.
-#[derive(Debug, Clone)]
-struct AlignOutputPolicy {
-    /// Language stamped into the provenance comment.
+    /// Language stamped into the provenance comment: the file's own.
     provenance_lang: LanguageCode3,
-    /// Whether this run had a `--before` baseline.
-    incremental_enabled: bool,
-    /// Whether to merge abbreviations before writing.
-    merge_abbreviations: MergeAbbreviations,
 }
 
 #[async_trait]
@@ -233,18 +372,14 @@ impl AudioFileTask for AlignAudioTask<'_> {
         &mut self,
         progress_tx: crate::runner::util::ProgressSender,
     ) -> Result<Self::AttemptOutput, crate::error::ServerError> {
-        let audio = AudioContext {
-            audio_path: &self.audio_path,
-            audio_identity: &self.audio_identity,
-            audio_duration: self.audio_duration,
-        };
+        let audio = self.media.context();
 
         // Both branches hand over the SAME document. The incremental one used
         // to serialize `chat_file` into a string that it then parsed back
         // twice, so this task paid a serialization and two parses to give the
         // callee a model it was already holding.
         let document = self.model.attempt();
-        if let Some(ref before) = self.before {
+        if let Some(before) = self.model.before() {
             crate::fa::process_fa_incremental(
                 before,
                 document,
@@ -272,78 +407,25 @@ impl AudioFileTask for AlignAudioTask<'_> {
         &mut self,
         fa_result: Self::AttemptOutput,
     ) -> Result<FileOutput, crate::error::ServerError> {
-        let retention = FaEvidenceRetention::requested(self.dumper.is_enabled(), self.debug_traces);
-        // The document leaves as the PROOF `FaAdmission` produced, never as a
-        // fresh serialization of the model beside it: that second
-        // serialization is what made the L2-gated bytes and the written bytes
-        // two different things.
-        // The shortfalls (untimed words make the file diagnosed) and the
-        // exclusions (notes left out on purpose, which do not) leave with the
-        // bytes, whichever way they leave.
-        let aligned = if retention.requires_timeline() {
-            let (aligned, timeline) = fa_result.into_document_and_timeline();
-            self.dumper
-                .dump_fa_evidence(&self.filename, &timeline)
-                .map_err(|error| {
-                    crate::error::ServerError::Persistence(format!(
-                        "could not retain requested forced-alignment evidence for {}: {error}",
-                        self.filename
-                    ))
-                })?;
-            if retention.stores_trace() {
-                let file_traces = crate::types::traces::FileTraces {
-                    filename: DisplayPath::from(self.filename.as_str()),
-                    dp_alignments: Vec::new(),
-                    asr_pipeline: None,
-                    fa_timeline: Some(timeline),
-                    retokenizations: Vec::new(),
-                };
-                self.host
-                    .trace_store()
-                    .upsert_file(&self.job_id, self.file_index, file_traces)
-                    .await;
-            }
-            aligned
-        } else {
-            fa_result.into_document()
-        };
-        let crate::fa::AlignedOutput {
-            document,
-            mut shortfalls,
-            exclusions,
-        } = aligned;
-        shortfalls.extend(self.utr_recovery.contribution().shortfalls());
-
-        // Asked BEFORE the bytes are, because asking is what materializes
-        // them: `PostValidated::as_str` serializes the judged model the first
-        // time anyone reads it, and a switched-off dumper would otherwise pay
-        // for a whole-document serialization it then discards. `dump_fa_output`
-        // already no-ops on the same condition, so this changes what is
-        // computed and not what is written.
-        if self.dumper.is_enabled() {
-            self.dumper
-                .dump_fa_output(&self.filename, document.as_str());
-        }
+        // `incremental=` is a fact about this route: a prior was aligned
+        // against. It used to be read off the request, which also said
+        // `incremental` on a refresh that used no prior.
         let provenance = crate::provenance::align_provenance(
-            &self.output.provenance_lang,
+            &self.provenance_lang,
             self.services.cache_namespace,
             self.utr_recovery.contribution(),
             false,
-            self.output.incremental_enabled,
+            self.model.before().is_some(),
             self.admitted.params().main_bullets,
+            AlignTiming::Aligned,
         );
-        // A named transition on the proof, re-gated at align's own admitted
-        // level. It used to be `inject_provenance_into_text` on a bare string
-        // after the proof had been thrown away, and it stamped a `@Comment`
-        // even onto the `NoAlign` documents the book promises are returned
-        // with zero modifications; a pass-through is now returned untouched.
-        let document = document.with_provenance_injected(&provenance)?;
-        Ok(FileOutput::Chat(ChatOutput {
-            document: document.into(),
-            shortfalls,
-            exclusions,
-            merge_abbreviations: self.output.merge_abbreviations,
-        }))
+        finalize_fa_output(
+            &self.destination,
+            fa_result,
+            self.utr_recovery.contribution().shortfalls(),
+            &provenance,
+        )
+        .await
     }
 
     async fn on_retryable_worker_failure(
@@ -351,31 +433,32 @@ impl AudioFileTask for AlignAudioTask<'_> {
         lifecycle: &FileRunTracker<'_>,
         _error: &crate::error::ServerError,
     ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
-        if let Some(active) = self.model.active_mut()
-            && let Some(pending) = self.utr_recovery.fallback()
-        {
+        if let Some(pending) = self.utr_recovery.fallback() {
             info!(
-                filename = %self.filename,
+                filename = %self.destination.filename,
                 "FA failed with untimed utterances; attempting fallback UTR"
             );
             lifecycle.stage(FileStage::RecoveringTimingFallback).await;
 
-            let recovered = active
+            let media = &self.media;
+            let recovered = self
+                .model
+                .active_mut()
                 .recover_timing(async |file| {
                     run_utr_pass(
                         file,
                         UtrPassContext {
-                            audio_path: self.audio_path.as_path(),
+                            audio_path: media.wav.as_path(),
                             lang: self.admitted.primary_language(),
                             services: self.services,
-                            audio_identity: &self.audio_identity,
+                            audio_identity: &media.identity,
                             cache_policy: self.utr_cache_policy,
-                            audio_duration: self.audio_duration,
+                            audio_duration: media.duration,
                             max_group_ms: Some(self.admitted.params().max_group_ms()),
-                            filename: &self.filename,
+                            filename: &self.destination.filename,
                             engine: pending.engine(),
                             strategy: &self.utr_strategy,
-                            dumper: self.dumper,
+                            dumper: self.destination.dumper,
                         },
                         None,
                     )
@@ -386,6 +469,151 @@ impl AudioFileTask for AlignAudioTask<'_> {
         }
         Ok(())
     }
+}
+
+/// The file task for the two routes that read no recording: a declared no-op
+/// returned byte for byte, or a complete-`%wor` file whose bullets are
+/// refreshed from it. It holds no [`ResolvedMedia`], by type, and makes no
+/// worker request, so there is nothing for the shell to retry.
+struct AlignWithoutRecording<'a> {
+    /// Where the output and its evidence go.
+    destination: FaOutputDestination<'a>,
+    /// The FA engine the file's worker reported, which names the result's
+    /// `fa=`; nothing else of the services is read on this route.
+    cache_namespace: &'a crate::engine_reports::FaCacheNamespace,
+    admitted: AdmittedFaParams,
+    route: NoRecordingRoute,
+    /// Language stamped into the provenance comment: the file's own.
+    provenance_lang: LanguageCode3,
+}
+
+#[async_trait]
+impl AudioFileTask for AlignWithoutRecording<'_> {
+    type AttemptOutput = AdmittedFaResult;
+
+    async fn run_attempt(
+        &mut self,
+        _progress_tx: crate::runner::util::ProgressSender,
+    ) -> Result<Self::AttemptOutput, crate::error::ServerError> {
+        self.route.run(self.admitted.params(), self.cache_namespace)
+    }
+
+    async fn finalize_success(
+        &mut self,
+        fa_result: Self::AttemptOutput,
+    ) -> Result<FileOutput, crate::error::ServerError> {
+        // No recovery ran and no prior was aligned against on this route, so
+        // the stamp names no `utr=` and no `incremental`; the route says where
+        // its timing came from.
+        let provenance = crate::provenance::align_provenance(
+            &self.provenance_lang,
+            self.cache_namespace,
+            UtrRecovery::not_run().contribution(),
+            false,
+            false,
+            self.admitted.params().main_bullets,
+            self.route.timing(),
+        );
+        finalize_fa_output(&self.destination, fa_result, Vec::new(), &provenance).await
+    }
+}
+
+/// Where one file's aligned output and its evidence go, for the finalization
+/// both align tasks share. Built once per file, held by whichever task the
+/// route selects.
+struct FaOutputDestination<'a> {
+    host: DispatchHostContext,
+    job_id: crate::api::JobId,
+    file_index: usize,
+    filename: String,
+    dumper: &'a DebugDumper,
+    debug_traces: bool,
+    /// Whether to merge abbreviations before writing: a property of the CHAT
+    /// this run produces, not of the alignment.
+    merge_abbreviations: MergeAbbreviations,
+}
+
+/// Turn an admitted FA result into the file output the writer takes: retain
+/// the evidence that was asked for, add the recovery's shortfalls, stamp the
+/// provenance. One function for both align tasks, so the two cannot drift in
+/// what they retain or how they stamp.
+async fn finalize_fa_output(
+    destination: &FaOutputDestination<'_>,
+    fa_result: AdmittedFaResult,
+    utr_shortfalls: Vec<crate::pipeline::post_validate::Shortfall>,
+    provenance: &crate::provenance::ProvenanceComment,
+) -> Result<FileOutput, crate::error::ServerError> {
+    let FaOutputDestination {
+        host,
+        job_id,
+        file_index,
+        filename,
+        dumper,
+        debug_traces,
+        merge_abbreviations,
+    } = destination;
+    let (file_index, debug_traces, merge_abbreviations) =
+        (*file_index, *debug_traces, *merge_abbreviations);
+    let retention = FaEvidenceRetention::requested(dumper.is_enabled(), debug_traces);
+    // The document leaves as the PROOF `FaAdmission` produced, never as a
+    // fresh serialization of the model beside it: that second
+    // serialization is what made the L2-gated bytes and the written bytes
+    // two different things.
+    // The shortfalls (untimed words make the file diagnosed) and the
+    // exclusions (notes left out on purpose, which do not) leave with the
+    // bytes, whichever way they leave.
+    let aligned =
+        if retention.requires_timeline() {
+            let (aligned, timeline) = fa_result.into_document_and_timeline();
+            dumper.dump_fa_evidence(filename, &timeline).map_err(|error| {
+            crate::error::ServerError::Persistence(format!(
+                "could not retain requested forced-alignment evidence for {filename}: {error}"
+            ))
+        })?;
+            if retention.stores_trace() {
+                let file_traces = crate::types::traces::FileTraces {
+                    filename: DisplayPath::from(filename.as_str()),
+                    dp_alignments: Vec::new(),
+                    asr_pipeline: None,
+                    fa_timeline: Some(timeline),
+                    retokenizations: Vec::new(),
+                };
+                host.trace_store()
+                    .upsert_file(job_id, file_index, file_traces)
+                    .await;
+            }
+            aligned
+        } else {
+            fa_result.into_document()
+        };
+    let crate::fa::AlignedOutput {
+        document,
+        mut shortfalls,
+        exclusions,
+    } = aligned;
+    shortfalls.extend(utr_shortfalls);
+
+    // Asked BEFORE the bytes are, because asking is what materializes
+    // them: `PostValidated::as_str` serializes the judged model the first
+    // time anyone reads it, and a switched-off dumper would otherwise pay
+    // for a whole-document serialization it then discards. `dump_fa_output`
+    // already no-ops on the same condition, so this changes what is
+    // computed and not what is written.
+    if dumper.is_enabled() {
+        dumper.dump_fa_output(filename, document.as_str());
+    }
+    // A named transition on the proof, re-gated at align's own admitted
+    // level. It used to be `inject_provenance_into_text` on a bare string
+    // after the proof had been thrown away, and it stamped a `@Comment`
+    // even onto the `NoAlign` documents the book promises are returned
+    // with zero modifications; a pass-through is now returned untouched.
+    let document = document.with_provenance_injected(provenance)?;
+    Ok(FileOutput::Chat(ChatOutput {
+        document: document.into(),
+        shortfalls,
+        exclusions,
+        merge_abbreviations,
+    }))
 }
 
 /// Dispatch FA (forced alignment) via the server-side infer path.
@@ -402,18 +630,22 @@ pub(crate) async fn dispatch_fa_infer(
     plan: FaDispatchPlan,
 ) {
     let job_id = &job.identity.job_id;
-    // The job-level lang field is NOT authoritative for align, each file
-    // declares its own language via @Languages. The per-file language is
-    // extracted inside process_one_fa_file after parsing. We propagate
-    // the *resolved* job lang as a fallback for files that genuinely
-    // lack a header; if the job's lang is Auto, the per-file resolver
-    // surfaces a typed error rather than silently inventing English.
-    let job_lang_fallback: Option<LanguageCode3> = job.dispatch.lang.as_resolved().cloned();
     let sink = host.sink().clone();
     // The job's GPU model plan, from the dispatch plan that owns its engines,
     // before the plan's fields are moved out; every file's FA and UTR
     // requests are routed by it.
     let gpu_models = Arc::new(plan.gpu_models());
+    // Align has no job-level language: each file declares its own in
+    // `@Languages:`, read inside `process_one_fa_file` after parsing, and the
+    // FA worker a file reaches is keyed by it. This gate probes that worker
+    // the first time the job reaches each language and hands every file of
+    // the language the FA engine it reported.
+    let admission = Arc::new(FaWorkerAdmission::new(
+        runtime.pool.clone(),
+        job.dispatch.options.clone(),
+        gpu_models.clone(),
+        runtime.num_workers,
+    ));
     let fa_params = plan.options.fa_params;
     let utr_cache_policy = plan.utr_cache_policy;
     let should_merge_abbrev = plan.options.merge_abbrev.should_merge();
@@ -446,14 +678,13 @@ pub(crate) async fn dispatch_fa_infer(
         let cache = runtime.cache.clone();
         let job = job.clone();
         let media_dir = media_dir.clone();
-        let cache_namespace = runtime.cache_namespace.clone();
+        let admission = admission.clone();
         let gpu_models = gpu_models.clone();
         let file = file.clone();
         let file_index = file.file_index;
         let before_path = job.filesystem.before_path(file_index);
         let utr_engine = utr_engine.clone();
         let utr_strategy = utr_strategy.clone();
-        let job_lang_fallback = job_lang_fallback.clone();
         let filename = file.filename.clone();
 
         tasks.push(spawn_supervised_file_task(
@@ -461,25 +692,22 @@ pub(crate) async fn dispatch_fa_infer(
             "align file task",
             async move {
                 let _permit = permit;
-                let services = FaServices {
-                    pipeline: PipelineServices::new(&pool, &cache),
-                    cache_namespace: &cache_namespace,
-                    gpu: &gpu_models,
-                    attention_capture_dir: job.dispatch.options.common().debug_dir.as_deref(),
-                };
                 let dumper = DebugDumper::new(job.dispatch.options.common().debug_dir.as_deref());
                 let context = FaFileContext {
                     job: &job,
                     host,
                     sink: sink.clone(),
-                    services,
+                    pipeline: PipelineServices::new(&pool, &cache),
+                    engine: FaEngineAdmission {
+                        gpu: &gpu_models,
+                        gate: &admission,
+                    },
                     fa_params,
                     utr_cache_policy,
                     should_merge_abbrev,
                     before_path: before_path.as_ref().map(|p| p.as_path()),
                     utr_engine: utr_engine.as_ref(),
                     utr_strategy,
-                    lang_fallback: job_lang_fallback.as_ref(),
                     dumper,
                     media_dir: media_dir.as_ref(),
                 };
@@ -508,14 +736,14 @@ async fn process_one_fa_file(
         job,
         host,
         sink,
-        services,
+        pipeline,
+        engine,
         fa_params,
         utr_cache_policy,
         should_merge_abbrev,
         before_path,
         utr_engine,
         utr_strategy: _,
-        lang_fallback,
         ref dumper,
         media_dir,
     } = context;
@@ -570,7 +798,7 @@ async fn process_one_fa_file(
     // Preserve one source parse and admit every reused prior tier before any
     // media preparation or timing-recovery inference. A declared no-op does
     // not consume the optional prior file.
-    let mut model = match crate::fa::read_fa_source_named(
+    let model = match crate::fa::read_fa_source_named(
         &chat_text,
         talkbank_model::model::TranscriptName::for_path(std::path::Path::new(filename)),
         fa_params.main_bullets,
@@ -586,97 +814,14 @@ async fn process_one_fa_file(
             return FileTaskOutcome::TerminalStateRecorded;
         }
     };
-    let before = if model.unchanged().is_some() {
-        None
-    } else if let Some(path) = before_path {
-        let prior_text = match tokio::fs::read_to_string(path).await {
-            Ok(text) => text,
-            Err(error) => {
-                lifecycle
-                    .fail(
-                        &format!("Failed to read declared before-file: {error}"),
-                        FailureCategory::InputMissing,
-                    )
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
-            }
-        };
-        match crate::fa::RetainedFaPrior::admit(&prior_text) {
-            Ok(prior) => Some(prior),
-            Err(error) => {
-                lifecycle
-                    .fail(
-                        &error.to_string(),
-                        crate::runner::util::classify_server_error(&error),
-                    )
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
-            }
-        }
-    } else {
-        None
-    };
-    lifecycle.stage(FileStage::ResolvingAudio).await;
-
-    // The six-rung media search, shared with `speaker-identify` since
-    // 2026-09-02. It lives in `media_search` because it states where a corpus
-    // keeps its recordings, which is not an alignment fact.
-    let original_audio_path = match super::media_search::resolve_transcript_media(
-        job,
-        &host,
-        filename,
-        read_path.as_path(),
-        || crate::media::DeclaredMedia::from_document(model.document()),
-        media_dir,
-    )
-    .await
-    {
-        Ok(path) => path,
-        Err(unresolved) => {
-            lifecycle
-                .fail(&unresolved.message, FailureCategory::Validation)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
-        }
-    };
-
-    // Convert non-WAV media (e.g. mp4) to WAV via ffmpeg if needed.
-    // soundfile (Python) cannot read container formats like mp4 directly.
-    let audio_path = match crate::ensure_wav::ensure_wav(&original_audio_path, None).await {
-        Ok(p) => p,
-        Err(e) => {
-            let err_msg = format!("Media conversion failed for {filename}: {e}");
-            lifecycle.fail(&err_msg, FailureCategory::Validation).await;
-            return FileTaskOutcome::TerminalStateRecorded;
-        }
-    };
-
-    // Compute audio identity for cache keying: path|mtime|size
-    let audio_path_str = audio_path.to_string_lossy();
-    let audio_identity = compute_audio_identity(&audio_path_str)
-        .await
-        .unwrap_or_else(|| {
-            // Fallback: use path with zeroed metadata
-            crate::chat_ops::fa::AudioIdentity::from_metadata(&audio_path_str, 0, 0)
-        });
-
-    // How long the audio runs, measured once for UTR and FA alike. Optional
-    // here because a failure is logged and FA probes again for the recording
-    // it cannot run without, reporting that failure as the file's error.
-    let audio_duration = probe_audio_duration(&audio_path).await;
-    let utr_audio_path = if utr_engine.as_ref().is_some_and(|e| e.is_rust_owned()) {
-        original_audio_path.as_path()
-    } else {
-        audio_path.as_path()
-    };
-
-    // Resolve the WHOLE `@Languages:` header against the job's `--lang` in one
-    // step. The resolution lives on `DeclaredLanguages` rather than here
-    // because doing it here is what made header ORDER decide admission: the
-    // primary was resolved locally (falling back to `--lang` for an
-    // unreadable first entry) and the secondaries were then taken as
-    // `skip(1)`, so the unreadable entry disappeared from the declaration
-    // that admission was checked against.
+    // Read the WHOLE `@Languages:` header in one step. The reading lives on
+    // `DeclaredLanguages` rather than here because doing it here is what made
+    // header ORDER decide admission: the primary was resolved locally (falling
+    // back to the job's then `--lang` for an unreadable first entry) and the
+    // secondaries were then taken as `skip(1)`, so the unreadable entry
+    // disappeared from the declaration that admission was checked against.
+    // There is no fallback now: align has no `--lang`, so the file's header
+    // is the only place its language can come from.
     //
     // The whole header, not `first()`: a secondary language reaches words
     // through `[- deu]` precodes and `word@s:deu` markers, and those words
@@ -698,26 +843,24 @@ async fn process_one_fa_file(
             .into_iter()
             .flat_map(|languages| languages.iter())
             .map(|code| code.as_str()),
-        lang_fallback,
     ) {
         Ok(declared) => declared,
         Err(HeaderLanguageError::UnreadablePrimary { raw }) => {
             let msg = format!(
-                "align: file '{}' declares `@Languages: {}` which is not a parseable \
-                 ISO 639-3 code, and the job was submitted with `--lang auto` so \
-                 there is no fallback. Fix the file's @Languages or pass \
-                 `--lang <iso3>`.",
-                filename, raw
+                "align: file '{filename}' declares `@Languages: {raw}`, which is not a \
+                 parseable ISO 639-3 code. Align reads each file's language from its own \
+                 header and has no `--lang` to stand in for it; fix the header and re-run."
             );
             lifecycle.fail(&msg, FailureCategory::Validation).await;
             return FileTaskOutcome::TerminalStateRecorded;
         }
         Err(HeaderLanguageError::NoHeader) => {
             let msg = format!(
-                "align: file '{}' has no `@Languages:` header and the job was \
-                 submitted with `--lang auto`. Add the header or pass \
-                 `--lang <iso3>` so we can stamp `@Languages:` honestly.",
-                filename
+                "align: file '{filename}' has no `@Languages:` header. Align reads each \
+                 file's language from its own header and has no `--lang` to stand in for \
+                 it; add the header (for example `@Languages:\teng`) so the aligner, the \
+                 timing-recovery engine and the provenance stamp all name the language \
+                 the file actually declares."
             );
             lifecycle.fail(&msg, FailureCategory::Validation).await;
             return FileTaskOutcome::TerminalStateRecorded;
@@ -747,10 +890,124 @@ async fn process_one_fa_file(
     };
     let file_lang: LanguageCode3 = admitted.primary_language().clone();
 
+    // The worker this file's requests reach is keyed by its language, and the
+    // FA engine that worker reports is the namespace its cache rows are read
+    // and written under. Probed once per language per job; a refusal names the
+    // language and the fact the host could not supply.
+    let engine = match engine.admit(&file_lang).await {
+        Ok(engine) => engine,
+        Err(refusal) => {
+            lifecycle
+                .fail(&refusal.to_string(), refusal.category())
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+    let services = engine.services(pipeline, job.dispatch.options.common().debug_dir.as_deref());
+
+    // Provenance comments embed the language for auditability. Use the
+    // per-file language we just resolved above (`file_lang`), not the
+    // job-level placeholder. This matches what gets stamped into
+    // `@Languages:` and avoids the silent eng substitution that the
+    // 2026-05-03 incident punished.
+    let provenance_lang = file_lang.clone();
+    let destination = FaOutputDestination {
+        host: host.clone(),
+        job_id: job_id.clone(),
+        file_index,
+        filename: filename.to_string(),
+        dumper,
+        debug_traces: job.dispatch.debug_traces,
+        merge_abbreviations: MergeAbbreviations::from_option(should_merge_abbrev),
+    };
+    let reporting = AudioTaskReporting {
+        work_unit_kind: WorkUnitKind::FileForcedAlignment,
+        running_stage: FileStage::Aligning,
+        command_label: "Alignment",
+    };
+
+    // Where this file's alignment goes is decided once, here, from the
+    // admitted document and the request. Only the route that reads audio
+    // resolves the recording; a complete-`%wor` refresh and a declared no-op
+    // finish without it.
+    let mut alignment =
+        match AlignRoute::decide(model, RealignmentRequest::from(fa_params.cache_policy)) {
+            AlignRoute::WithoutRecording(route) => {
+                let mut task = AlignWithoutRecording {
+                    destination,
+                    cache_namespace: &engine.cache_namespace,
+                    admitted,
+                    route,
+                    provenance_lang,
+                };
+                return run_audio_file_task(
+                    job,
+                    sink.clone(),
+                    file,
+                    &lifecycle,
+                    reporting,
+                    &mut task,
+                )
+                .await;
+            }
+            AlignRoute::NeedsAudio(alignment) => alignment,
+        };
+
+    // A declared `--before` prior is read here, on the one route that aligns
+    // against it; the no-recording routes never parse one they would drop.
+    if let Some(path) = before_path {
+        let prior_text = match tokio::fs::read_to_string(path).await {
+            Ok(text) => text,
+            Err(error) => {
+                lifecycle
+                    .fail(
+                        &format!("Failed to read declared before-file: {error}"),
+                        FailureCategory::InputMissing,
+                    )
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        };
+        match crate::fa::RetainedFaPrior::admit(&prior_text) {
+            Ok(prior) => alignment = alignment.with_prior(prior),
+            Err(error) => {
+                lifecycle
+                    .fail(
+                        &error.to_string(),
+                        crate::runner::util::classify_server_error(&error),
+                    )
+                    .await;
+                return FileTaskOutcome::TerminalStateRecorded;
+            }
+        }
+    }
+
+    lifecycle.stage(FileStage::ResolvingAudio).await;
+    let media = match ResolvedMedia::resolve(
+        job,
+        &host,
+        filename,
+        read_path.as_path(),
+        alignment.document(),
+        media_dir,
+    )
+    .await
+    {
+        Ok(media) => media,
+        Err(unavailable) => {
+            lifecycle
+                .fail(&unavailable.to_string(), FailureCategory::Validation)
+                .await;
+            return FileTaskOutcome::TerminalStateRecorded;
+        }
+    };
+    let utr_audio_path = media.utr_audio_path(utr_engine);
+
     // UTR pre-pass: if untimed utterances exist and a UTR engine is configured,
     // run ASR to recover utterance-level timing before FA grouping. The model
     // and the anchors the pass observes on it travel together from here.
-    let utr_recovery = if let Some(active) = model.active_mut() {
+    let utr_recovery = {
+        let active = alignment.active_mut();
         let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(active.document());
 
         match plan_align_utr_stage(untimed, &file_lang, utr_engine) {
@@ -777,9 +1034,9 @@ async fn process_one_fa_file(
                             audio_path: utr_audio_path,
                             lang: &file_lang,
                             services,
-                            audio_identity: &audio_identity,
+                            audio_identity: &media.identity,
                             cache_policy: utr_cache_policy,
-                            audio_duration,
+                            audio_duration: media.duration,
                             max_group_ms: Some(admitted.params().max_group_ms()),
                             filename,
                             engine: utr_engine,
@@ -823,53 +1080,21 @@ async fn process_one_fa_file(
                 return FileTaskOutcome::TerminalStateRecorded;
             }
         }
-    } else {
-        UtrRecovery::not_run()
     };
 
-    // Provenance comments embed the language for auditability. Use the
-    // per-file language we just resolved above (`file_lang`), not the
-    // job-level placeholder. This matches what gets stamped into
-    // `@Languages:` and avoids the silent eng substitution that the
-    // 2026-05-03 incident punished.
-    let provenance_lang = file_lang.clone();
     let mut task = AlignAudioTask {
-        host,
-        job_id: job_id.clone(),
-        file_index,
-        filename: filename.to_string(),
+        destination,
         services,
         admitted,
         utr_cache_policy,
-        before,
-        audio_path,
-        audio_identity,
-        audio_duration,
-        model,
+        media,
+        model: alignment,
         utr_recovery,
         utr_strategy: context.utr_strategy.clone(),
-        dumper,
-        debug_traces: job.dispatch.debug_traces,
-        output: AlignOutputPolicy {
-            provenance_lang,
-            incremental_enabled: job.filesystem.before_path(file_index).is_some(),
-            merge_abbreviations: MergeAbbreviations::from_option(should_merge_abbrev),
-        },
+        provenance_lang,
     };
 
-    run_audio_file_task(
-        job,
-        sink.clone(),
-        file,
-        &lifecycle,
-        AudioTaskReporting {
-            work_unit_kind: WorkUnitKind::FileForcedAlignment,
-            running_stage: FileStage::Aligning,
-            command_label: "Alignment",
-        },
-        &mut task,
-    )
-    .await
+    run_audio_file_task(job, sink.clone(), file, &lifecycle, reporting, &mut task).await
 }
 
 #[cfg(test)]

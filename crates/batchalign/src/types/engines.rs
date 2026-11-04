@@ -1639,6 +1639,20 @@ pub enum SpeakerEngineName {
     Nemo,
 }
 
+impl SpeakerEngineName {
+    /// The worker-protocol backend this engine runs as. The one lowering, so
+    /// the standalone `diarize` plan and the transcribe speaker plan cannot
+    /// name different backends for one engine.
+    pub(crate) fn worker_backend(self) -> crate::types::worker_v2::SpeakerBackendV2 {
+        use crate::types::worker_v2::SpeakerBackendV2;
+        match self {
+            Self::PyannoteAi => SpeakerBackendV2::PyannoteAi,
+            Self::Pyannote => SpeakerBackendV2::Pyannote,
+            Self::Nemo => SpeakerBackendV2::Nemo,
+        }
+    }
+}
+
 impl EngineBackend for SpeakerEngineName {
     fn wire_name(&self) -> &'static str {
         match self {

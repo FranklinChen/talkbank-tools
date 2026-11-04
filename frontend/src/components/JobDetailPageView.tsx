@@ -365,7 +365,7 @@ export function JobDetailPageView({
             </div>
           )}
 
-          {(host || (detail.lang && !isDefaultLang(detail.lang))) && (
+          {(host || !isDefaultLang(detail.lang)) && (
             <div className="flex items-center gap-3 mt-3 text-xs text-zinc-400">
               {host && (
                 <span>
@@ -373,7 +373,7 @@ export function JobDetailPageView({
                   <span className="font-mono">{host}</span>
                 </span>
               )}
-              {detail.lang && !isDefaultLang(detail.lang) && (
+              {!isDefaultLang(detail.lang) && (
                 <span className="font-mono uppercase">{displayLang(detail.lang)}</span>
               )}
             </div>

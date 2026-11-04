@@ -19,7 +19,7 @@
 //! `book/src/batchalign/reference/languages/italian.md`
 //! (§"Reconciler hacks").
 
-use super::mor_word::map_ud_mor_word;
+use super::mor_word::{Lexical, map_ud_mor_word};
 use crate::morphosyntax::UdId;
 use crate::morphosyntax::alignment::{AlignedUd, WalkedUdToken};
 use crate::morphosyntax::{
@@ -259,7 +259,10 @@ fn apply_mis_split_override(
         over.pos,
         over.feats,
     );
-    Ok(MappedItem::word(map_ud_mor_word(&synthetic, ctx)?, main))
+    Ok(MappedItem::word(
+        map_ud_mor_word(Lexical::curated(&synthetic), ctx)?,
+        main,
+    ))
 }
 
 /// Handle Italian Range-token reconciler cases if the parent token is in one of
@@ -622,7 +625,7 @@ fn apply_compound_imperative_override(
         UniversalPos::Verb,
         over.verb_feats,
     );
-    let item = MappedItem::word(map_ud_mor_word(&main_ud, ctx)?, main);
+    let item = MappedItem::word(map_ud_mor_word(Lexical::curated(&main_ud), ctx)?, main);
     over.clitics.iter().try_fold(item, |item, clitic| {
         let clitic_ud =
             UdWord::curated_reading(row, clitic.text, clitic.lemma, clitic.upos, clitic.feats);
@@ -630,7 +633,7 @@ fn apply_compound_imperative_override(
             format!("synthesized clitic {:?} in {:?}", clitic.text, over.surface)
         })?;
         Ok(item.with_post_clitic(
-            map_ud_mor_word(&clitic_ud, ctx)?,
+            map_ud_mor_word(Lexical::curated(&clitic_ud), ctx)?,
             ChunkProvenance::synthetic_post_clitic(deprel),
         ))
     })

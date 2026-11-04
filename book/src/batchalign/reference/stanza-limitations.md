@@ -72,8 +72,9 @@
 > - **Cantonese:** `唔` is now ADV (correct); `佢` is PUNCT rather than
 >   PROPN. BA3 still takes Cantonese POS from PyCantonese.
 > - **Italian `Verbform`:** Stanza spells the feature name `Verbform`
->   (1.14.0 and 1.15.0); the worker respells it, so `da` of `dammela` reads
->   `Fin`, not the convention's invented `Inf` (`dare-Inf-Ind-Imp-S2`). The
+>   (1.14.0 and 1.15.0); the worker respells it and reports the respelling
+>   (`feature_name_alias`, counted in `ud_repairs=`), so `da` of `dammela`
+>   reads `Fin`, not the convention's invented `Inf` (`dare-Inf-Ind-Imp-S2`). The
 >   invented `Inf` itself stays until it is retired together with the CLAN
 >   DSS rules that match it (see "POS Mapping" in the morphosyntax
 >   reference).

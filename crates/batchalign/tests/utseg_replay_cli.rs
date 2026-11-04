@@ -29,7 +29,7 @@ const WORDS: [&str; 5] = ["hello", "there", "how", "are", "you"];
 /// Evidence for `INPUT` recording `assignments`, in the shape a run writes.
 fn evidence_json(assignments: &[usize]) -> String {
     serde_json::json!({
-        "schema_version": 4,
+        "schema_version": 5,
         "phase": "post_chat",
         "language": "eng",
         "items": [{
@@ -51,7 +51,10 @@ fn retained_output(assignments: Vec<usize>) -> String {
     let (mut chat, errors) = parse_lenient(&parser, INPUT);
     assert!(errors.is_empty(), "fixture must parse cleanly");
     let mut map = HashMap::new();
-    map.insert(0, assignments);
+    map.insert(
+        0,
+        batchalign_types::segmentation::UtteranceSegmentation::unstated(assignments),
+    );
     apply_utseg_results(&mut chat, &map).expect("admitted replay partition");
     to_chat_string(&chat)
 }

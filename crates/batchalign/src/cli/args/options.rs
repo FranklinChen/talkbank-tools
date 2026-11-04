@@ -419,6 +419,21 @@ pub fn extract_before(cmd: &Commands) -> Option<&std::path::Path> {
     }
 }
 
+/// The `--overwrite` authority, from the commands that carry the flag.
+///
+/// Every command that flattens [`OverwriteFlag`] must be named here, or its
+/// flag would parse and change nothing; `overwrite_flag_reaches_dispatch` in
+/// the tests holds the two lists together.
+pub fn extract_overwrite(cmd: &Commands) -> Option<crate::cli::output::Overwrite> {
+    match cmd {
+        Commands::Transcribe(a) => a.overwrite.authority(),
+        Commands::Benchmark(a) => a.overwrite.authority(),
+        Commands::Diarize(a) => a.overwrite.authority(),
+        Commands::Compare(a) => a.overwrite.authority(),
+        _ => None,
+    }
+}
+
 /// Extract --bank from a processing command, if applicable.
 pub fn extract_bank(cmd: &Commands) -> Option<&str> {
     match cmd {
